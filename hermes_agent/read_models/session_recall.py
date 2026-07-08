@@ -28,6 +28,12 @@ class SessionRecallUnavailable:
     reason: str
 
 
+@dataclass(frozen=True)
+class _SearchToken:
+    value: str
+    operator: str
+
+
 class SessionRecallReadModel:
     """SQLite-backed read model used by the session recall tool."""
 
@@ -282,9 +288,20 @@ class SessionRecallReadModel:
         order_by = "m.timestamp DESC, m.id DESC" if sort_norm == "newest" else "m.timestamp ASC, m.id ASC" if sort_norm == "oldest" else "m.timestamp DESC, m.id DESC"
         query_text = str(query or "").strip()
         fts_query = _sanitize_fts5_query(query_text)
+        if _contains_cjk(query_text):
+            return self._search_messages_cjk_like(
+                query_text,
+                source_filter=source_filter,
+                exclude_sources=exclude_sources,
+                role_filter=role_filter,
+                limit=bounded_limit,
+                offset=bounded_offset,
+                order_by=order_by,
+                include_inactive=include_inactive,
+            )
         if self._table_exists("messages_fts") and fts_query:
             try:
-                return self._search_messages_fts(
+                fts_results = self._search_messages_fts(
                     fts_query,
                     source_filter=source_filter,
                     exclude_sources=exclude_sources,
@@ -294,6 +311,7 @@ class SessionRecallReadModel:
                     order_by=order_by,
                     include_inactive=include_inactive,
                 )
+                return fts_results
             except sqlite3.OperationalError:
                 logger.debug("session recall FTS search failed; falling back to LIKE", exc_info=True)
         return self._search_messages_like(
@@ -488,6 +506,50 @@ class SessionRecallReadModel:
         """
         with self._lock:
             rows = self._conn.execute(sql, [query] + params + [limit, offset]).fetchall()
+        return [self._search_row(row) for row in rows]
+
+    def _search_messages_cjk_like(
+        self,
+        query: str,
+        *,
+        source_filter: list[str] | None,
+        exclude_sources: list[str] | None,
+        role_filter: list[str],
+        limit: int,
+        offset: int,
+        order_by: str,
+        include_inactive: bool,
+    ) -> list[dict[str, Any]]:
+        tokens = _cjk_like_tokens(query)
+        if not tokens:
+            return []
+        where = [_cjk_like_predicate(tokens)]
+        params: list[Any] = []
+        for token in tokens:
+            if token.operator == "NOT":
+                continue
+            escaped = _escape_like(token.value)
+            params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
+        for token in tokens:
+            if token.operator != "NOT":
+                continue
+            escaped = _escape_like(token.value)
+            params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
+        self._append_message_filters(where, params, source_filter, exclude_sources, role_filter, include_inactive)
+        sql = f"""
+            SELECT m.id, m.session_id, m.role,
+                   substr(m.content, max(1, instr(m.content, ?) - 40), 120) AS snippet,
+                   m.content, m.timestamp, m.tool_name,
+                   s.source, s.model, s.started_at AS session_started
+              FROM messages m
+              JOIN sessions s ON s.id = m.session_id
+             WHERE {' AND '.join(where)}
+             ORDER BY {order_by}
+             LIMIT ? OFFSET ?
+        """
+        snippet_token = next((token.value for token in tokens if token.operator != "NOT"), tokens[0].value)
+        with self._lock:
+            rows = self._conn.execute(sql, [snippet_token] + params + [limit, offset]).fetchall()
         return [self._search_row(row) for row in rows]
 
     def _append_message_filters(
@@ -691,6 +753,60 @@ def _to_int(value: Any, default: int) -> int:
 
 def _escape_like(value: str) -> str:
     return str(value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _contains_cjk(text: str) -> bool:
+    return any(
+        0x4E00 <= ord(ch) <= 0x9FFF
+        or 0x3400 <= ord(ch) <= 0x4DBF
+        or 0x20000 <= ord(ch) <= 0x2A6DF
+        or 0x3000 <= ord(ch) <= 0x303F
+        or 0x3040 <= ord(ch) <= 0x309F
+        or 0x30A0 <= ord(ch) <= 0x30FF
+        or 0xAC00 <= ord(ch) <= 0xD7AF
+        for ch in str(text or "")
+    )
+
+
+def _cjk_like_tokens(query: str) -> list[_SearchToken]:
+    raw_tokens = [token for token in str(query or "").strip().split() if token]
+    if not raw_tokens:
+        return []
+    tokens: list[_SearchToken] = []
+    pending_operator = "AND"
+    for raw in raw_tokens:
+        upper = raw.upper()
+        if upper in {"AND", "OR", "NOT"}:
+            pending_operator = upper
+            continue
+        tokens.append(_SearchToken(raw.strip('"'), pending_operator))
+        pending_operator = "AND"
+    if tokens:
+        return [token for token in tokens if token.value]
+    value = str(query or "").strip().strip('"')
+    return [_SearchToken(value, "AND")] if value else []
+
+
+def _cjk_like_clause() -> str:
+    return (
+        "(m.content LIKE ? ESCAPE '\\' "
+        "OR m.tool_name LIKE ? ESCAPE '\\' "
+        "OR m.tool_calls LIKE ? ESCAPE '\\')"
+    )
+
+
+def _cjk_like_predicate(tokens: list[_SearchToken]) -> str:
+    positive = [token for token in tokens if token.operator != "NOT"]
+    negative = [token for token in tokens if token.operator == "NOT"]
+    if positive:
+        joiner = " OR " if any(token.operator == "OR" for token in positive) else " AND "
+        positive_sql = "(" + joiner.join(_cjk_like_clause() for _ in positive) + ")"
+    else:
+        positive_sql = "1 = 1"
+    if not negative:
+        return positive_sql
+    negative_sql = " AND ".join(f"NOT {_cjk_like_clause()}" for _ in negative)
+    return f"{positive_sql} AND {negative_sql}"
 
 
 def _sanitize_fts5_query(query: str) -> str:

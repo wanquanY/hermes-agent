@@ -31,8 +31,11 @@ from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.domain.session_index_reconciler import SessionIndexReconciler
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.session_recall import (
+    _contains_cjk as _recall_contains_cjk,
     _sanitize_fts5_query as _recall_sanitize_fts5_query,
 )
+from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
+from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.message_repo import MessageRepoImpl, MessageRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl
@@ -182,6 +185,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
     _WRITE_RETRY_MAX_S = 0.150   # 150ms
     # Attempt a TRUNCATE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
+    _contains_cjk = staticmethod(_recall_contains_cjk)
     _sanitize_fts5_query = staticmethod(_recall_sanitize_fts5_query)
 
     def __init__(self, db_path: Path = None):
@@ -1840,253 +1844,19 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         page_cursor: Optional[Dict[str, Any]] = None,
         id_query: str = None,
     ) -> List[Dict[str, Any]]:
-        """List sessions with preview (first user message) and last active timestamp.
-
-        Returns dicts with keys: id, source, model, title, started_at, ended_at,
-        message_count, preview (first 60 chars of first user message),
-        last_active (timestamp of last message).
-
-        Reads denormalized list fields maintained on the ``sessions`` row;
-        transcript bodies are loaded only by detail/history APIs.
-
-        By default, child sessions (subagent runs, compression continuations)
-        are excluded.  Pass ``include_children=True`` to include them.
-
-        With ``project_compression_tips=True`` (default), sessions that are
-        roots of compression chains are projected forward to their latest
-        continuation — one logical conversation = one list entry, showing the
-        live continuation's id/message_count/title/last_active. This prevents
-        compressed continuations from being invisible to users while keeping
-        delegate subagents and branches hidden. Pass ``False`` to return the
-        raw root rows (useful for admin/debug UIs).
-
-        Pass ``order_by_last_active=True`` to sort by most-recent activity
-        instead of original conversation start time. For compression chains,
-        the "most-recent activity" is taken from the live tip (not the root),
-        so an old conversation that was compressed and continued recently
-        surfaces in the correct slot. Ordering is computed at SQL level via
-        a recursive CTE that walks compression-continuation edges, so LIMIT
-        and OFFSET still apply efficiently.
-
-        ``page_cursor`` is a keyset cursor emitted on each returned row as
-        ``_page_cursor``. It keeps pagination stable while conversations are
-        sorted by ``effective_last_active DESC, started_at DESC, id DESC``.
-        """
-        where_clauses = []
-        params = []
-
-        if not include_children:
-            # Show root sessions and explicit user branches, while still
-            # hiding sub-agent runs and compression continuations. Modern
-            # non-destructive branches live in session_lineage and do not use
-            # sessions.parent_session_id for transcript replay. The legacy
-            # end_reason='branched' predicate is retained for old CLI rows.
-            where_clauses.append(
-                "(s.parent_session_id IS NULL"
-                " OR EXISTS (SELECT 1 FROM session_lineage l"
-                "            WHERE l.session_id = s.id"
-                "            AND l.branch_origin = 'user_message_action')"
-                " OR EXISTS (SELECT 1 FROM sessions p"
-                "            WHERE p.id = s.parent_session_id"
-                "            AND p.end_reason = 'branched'"
-                "            AND s.started_at >= p.ended_at))"
+        return SessionListReadModel(self._conn).list(
+            SessionListQuery(
+                source=source,
+                exclude_sources=tuple(exclude_sources or ()),
+                limit=limit,
+                offset=offset,
+                include_children=include_children,
+                project_compression_tips=project_compression_tips,
+                order_by_last_active=order_by_last_active,
+                page_cursor=page_cursor,
+                id_query=id_query,
             )
-
-        if source:
-            where_clauses.append("s.source = ?")
-            params.append(source)
-        if exclude_sources:
-            placeholders = ",".join("?" for _ in exclude_sources)
-            where_clauses.append(f"s.source NOT IN ({placeholders})")
-            params.extend(exclude_sources)
-
-        id_needle = (id_query or "").strip().lower()
-        id_like_pattern = (
-            "%"
-            + id_needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            + "%"
-            if id_needle
-            else ""
         )
-
-        def _cursor_number(key: str) -> float:
-            if not page_cursor:
-                return 0.0
-            try:
-                return float(page_cursor.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        def _cursor_id() -> str:
-            if not page_cursor:
-                return ""
-            value = page_cursor.get("id")
-            return str(value) if value is not None else ""
-
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        if order_by_last_active:
-            outer_where_clauses = list(where_clauses)
-            outer_params = list(params)
-            cursor_id = _cursor_id()
-            if cursor_id:
-                effective_last_active_expr = "COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at))"
-                cursor_effective_last_active = _cursor_number("effective_last_active")
-                cursor_started_at = _cursor_number("started_at")
-                outer_where_clauses.append(
-                    f"""(
-                        {effective_last_active_expr} < ?
-                        OR ({effective_last_active_expr} = ? AND s.started_at < ?)
-                        OR ({effective_last_active_expr} = ? AND s.started_at = ? AND s.id < ?)
-                    )"""
-                )
-                outer_params.extend(
-                    [
-                        cursor_effective_last_active,
-                        cursor_effective_last_active,
-                        cursor_started_at,
-                        cursor_effective_last_active,
-                        cursor_started_at,
-                        cursor_id,
-                    ]
-                )
-            if id_needle:
-                outer_where_clauses.append(
-                    "EXISTS (SELECT 1 FROM chain cq "
-                    "WHERE cq.root_id = s.id "
-                    "AND LOWER(cq.cur_id) LIKE ? ESCAPE '\\')"
-                )
-                outer_params.append(id_like_pattern)
-            outer_where_sql = (
-                f"WHERE {' AND '.join(outer_where_clauses)}"
-                if outer_where_clauses
-                else ""
-            )
-            # Compute effective_last_active by walking each surfaced session's
-            # compression-continuation chain forward in SQL and taking the MAX
-            # denormalized session activity timestamp across the chain. This
-            # keeps ORDER BY + LIMIT in SQL without aggregating transcript rows,
-            # while still surfacing old compression roots whose live tip is fresh.
-            #
-            # The CTE seeds from rows the outer WHERE admits (roots + branch
-            # children), then recursively joins forward through
-            # compression-continuation edges using the same criteria as
-            # get_compression_tip (parent.end_reason='compression' AND
-            # child.started_at >= parent.ended_at).
-            query = f"""
-                WITH RECURSIVE chain(root_id, cur_id) AS (
-                    SELECT s.id, s.id FROM sessions s {where_sql}
-                    UNION ALL
-                    SELECT c.root_id, child.id
-                    FROM chain c
-                    JOIN sessions parent ON parent.id = c.cur_id
-                    JOIN sessions child ON child.parent_session_id = c.cur_id
-                    WHERE parent.end_reason = 'compression'
-                      AND child.started_at >= parent.ended_at
-                ),
-                chain_max AS (
-                    SELECT
-                        root_id,
-                        MAX(COALESCE(ss.last_active, ss.started_at)) AS effective_last_active
-                    FROM chain c
-                    JOIN sessions ss ON ss.id = c.cur_id
-                    GROUP BY root_id
-                )
-                SELECT s.*,
-                    COALESCE(s.preview, '') AS _preview_summary,
-                    COALESCE(s.last_active, s.started_at) AS _last_active_summary,
-                    COALESCE(cm.effective_last_active, COALESCE(s.last_active, s.started_at)) AS _effective_last_active
-                FROM sessions s
-                LEFT JOIN chain_max cm ON cm.root_id = s.id
-                {outer_where_sql}
-                ORDER BY _effective_last_active DESC, s.started_at DESC, s.id DESC
-                LIMIT ? OFFSET ?
-            """
-            # WHERE params apply twice (CTE seed + outer select).
-            params = params + outer_params + [limit, offset]
-        else:
-            outer_where_clauses = list(where_clauses)
-            outer_params = list(params)
-            cursor_id = _cursor_id()
-            if cursor_id:
-                cursor_started_at = _cursor_number("started_at")
-                outer_where_clauses.append(
-                    "(s.started_at < ? OR (s.started_at = ? AND s.id < ?))"
-                )
-                outer_params.extend([cursor_started_at, cursor_started_at, cursor_id])
-            if id_needle:
-                outer_where_clauses.append("LOWER(s.id) LIKE ? ESCAPE '\\'")
-                outer_params.append(id_like_pattern)
-            outer_where_sql = (
-                f"WHERE {' AND '.join(outer_where_clauses)}"
-                if outer_where_clauses
-                else ""
-            )
-            query = f"""
-                SELECT s.*,
-                    COALESCE(s.preview, '') AS _preview_summary,
-                    COALESCE(s.last_active, s.started_at) AS _last_active_summary
-                FROM sessions s
-                {outer_where_sql}
-                ORDER BY s.started_at DESC, s.id DESC
-                LIMIT ? OFFSET ?
-            """
-            params = outer_params + [limit, offset]
-        with self._lock:
-            cursor = self._conn.execute(query, params)
-            rows = cursor.fetchall()
-        sessions = []
-        for row in rows:
-            s = dict(row)
-            s["preview"] = str(s.pop("_preview_summary", s.get("preview") or "") or "")
-            last_active = s.pop("_last_active_summary", None)
-            if last_active is not None:
-                s["last_active"] = last_active
-            effective_last_active = s.pop("_effective_last_active", None)
-            if effective_last_active is None:
-                effective_last_active = s.get("last_active") or s.get("started_at") or 0
-            s["_page_cursor"] = {
-                "effective_last_active": effective_last_active,
-                "started_at": s.get("started_at") or 0,
-                "id": s.get("id") or "",
-            }
-            sessions.append(s)
-
-        # Project compression roots forward to their tips. Each row whose
-        # end_reason is 'compression' has a continuation child; replace the
-        # surfaced fields (id, message_count, title, last_active, ended_at,
-        # end_reason, preview) with the tip's values so the list entry acts
-        # as the live conversation. Keep the root's started_at to preserve
-        # chronological ordering by original conversation start.
-        if project_compression_tips and not include_children:
-            projected = []
-            for s in sessions:
-                if s.get("end_reason") != "compression":
-                    projected.append(s)
-                    continue
-                tip_id = self.get_compression_tip(s["id"])
-                if tip_id == s["id"]:
-                    projected.append(s)
-                    continue
-                tip_row = self._get_session_rich_row(tip_id)
-                if not tip_row:
-                    projected.append(s)
-                    continue
-                # Preserve the root's started_at for stable sort order, but
-                # surface the tip's identity and activity data.
-                merged = dict(s)
-                for key in (
-                    "id", "ended_at", "end_reason", "message_count",
-                    "tool_call_count", "title", "display_title",
-                    "display_title_source", "last_active", "preview", "model",
-                    "system_prompt",
-                ):
-                    if key in tip_row:
-                        merged[key] = tip_row[key]
-                merged["_lineage_root_id"] = s["id"]
-                projected.append(merged)
-            sessions = projected
-
-        return sessions
 
     # ------------------------------------------------------------------
     # Control-plane session_index (write-time projection; single-query read)
@@ -2258,185 +2028,6 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         include_transient: bool = False,
         conversation_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Single indexed read for the sidebar: keyset-paginated, newest first.
-
-        No recursive CTE, no live merge, no per-session approval lookup, no
-        per-profile fan-out — the status fields are already projected at write
-        time. Ordering: updated_at DESC, started_at DESC, session_id DESC.
-        """
-        capped = max(1, min(int(limit or 200), 200))
-        where = []
-        params: List[Any] = []
-        if not include_transient:
-            where.append("si.transient = 0")
-        normalized_conversation_kind = str(conversation_kind or "").strip().lower()
-        if normalized_conversation_kind in {"direct", "team"}:
-            where.append("si.conversation_kind = ?")
-            params.append(normalized_conversation_kind)
-        if isinstance(cursor, dict) and cursor.get("session_id"):
-            cu = float(cursor.get("updated_at") or 0)
-            cs = float(cursor.get("started_at") or 0)
-            ci = str(cursor.get("session_id") or "")
-            where.append(
-                "(si.updated_at < ? OR (si.updated_at = ? AND si.started_at < ?) "
-                "OR (si.updated_at = ? AND si.started_at = ? AND si.session_id < ?))"
-            )
-            params.extend([cu, cu, cs, cu, cs, ci])
-        # Conversation-architecture refactor (P2): pull team display context
-        # (team name / avatar / leader profile / conversation objective) in the
-        # same query so the sidebar can render team rows from this single read,
-        # without the supplementary loadTeamConversationSidebarSessions stream
-        # and the mergeSidebarSessionsById heuristic. LEFT JOINs so plain chat
-        # rows (no team_id) are unaffected.
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-        waiting_expr = (
-            "(COALESCE(si.waiting_approval, 0) != 0 "
-            "OR COALESCE(si.pending_approval_count, 0) > 0 "
-            "OR COALESCE(team_pending_approvals.pending_approval_count, 0) > 0 "
-            "OR LOWER(COALESCE(am.mission_runtime_status, '')) = 'waiting_approval')"
-        )
-        terminal_expr = (
-            "LOWER(COALESCE(NULLIF(am.mission_runtime_status, ''), NULLIF(si.status, ''), ''))"
-        )
-        sql = (
-            "WITH active_missions_ranked AS ("
-            "    SELECT cm.conversation_id, cm.mission_id, cm.status AS link_status, "
-            "           tm.team_id, tm.status AS mission_runtime_status, "
-            "           ROW_NUMBER() OVER ("
-            "               PARTITION BY cm.conversation_id "
-            "               ORDER BY cm.updated_at DESC, cm.added_at DESC, cm.mission_id DESC"
-            "           ) AS rn "
-            "      FROM conversation_missions cm "
-            "      LEFT JOIN team_missions tm ON tm.mission_id = cm.mission_id "
-            "     WHERE cm.status = 'active'"
-            "), active_missions AS ("
-            "    SELECT conversation_id, mission_id, link_status, team_id, mission_runtime_status "
-            "      FROM active_missions_ranked "
-            "     WHERE rn = 1"
-            "), team_pending_approvals AS ("
-            "    SELECT tm.conversation_id AS conversation_id, COUNT(*) AS pending_approval_count "
-            "      FROM team_mission_nodes n "
-            "      JOIN team_missions tm ON tm.mission_id = n.mission_id "
-            "     WHERE LOWER(COALESCE(n.kind, '')) = 'approval_gate' "
-            "       AND LOWER(COALESCE(n.status, '')) = 'waiting_approval' "
-            "       AND LOWER(COALESCE(tm.status, '')) NOT IN "
-            "           ('completed','failed','cancelled','canceled','interrupted','draft','idle') "
-            "     GROUP BY tm.conversation_id"
-            ") "
-            "SELECT si.*, "
-            "       at.name AS team_name, "
-            "       at.avatar_json AS team_avatar_json, "
-            "       at.lead_agent_profile_id AS team_lead_profile_id, "
-            "       ap.name AS team_lead_profile_name, "
-            "       ap.avatar AS team_lead_profile_avatar, "
-            "       COALESCE(team_members.team_member_count, 0) AS team_member_count, "
-            "       team_members.leader_member_json AS team_leader_member_json, "
-            "       team_members.display_members_json AS team_display_members_json, "
-            "       tmc.objective AS team_conversation_objective, "
-            "       tmc.title AS team_conversation_title, "
-            "       tmc.workspace_id AS team_conversation_workspace_id, "
-            "       tmc.workspace_path AS team_conversation_workspace_path, "
-            "       '' AS team_conversation_active_mission_id, "
-            "       COUNT(CASE WHEN act.status IN ('pending','running') THEN 1 END) AS active_activity_count, "
-            "       COUNT(CASE WHEN act.status IN ('completed','failed') AND act.read_at IS NULL THEN 1 END) AS unread_completion_count, "
-            "       COALESCE(am.mission_id, '') AS active_mission_id, "
-            "       am.link_status AS mission_status, "
-            "       CASE WHEN COALESCE(am.mission_id, '') != '' THEN 1 ELSE 0 END AS conversation_has_active_mission, "
-            "       COALESCE(NULLIF(si.team_id, ''), tmc.team_id, am.team_id, '') AS team_context_team_id, "
-            "       COALESCE(NULLIF(si.conversation_id, ''), tmc.conversation_id, am.conversation_id, '') AS team_context_conversation_id, "
-            "       COALESCE(NULLIF(si.mission_id, ''), am.mission_id, '') AS team_context_mission_id, "
-            "       COALESCE(member_participant.member_id, '') AS team_context_member_id, "
-            f"       CASE WHEN {waiting_expr} THEN 0 "
-            "            WHEN si.conversation_kind = 'team' THEN "
-            "                CASE WHEN COALESCE(am.mission_id, '') != '' "
-            "                       AND LOWER(COALESCE(am.mission_runtime_status, '')) NOT IN "
-            "                           ('completed','failed','cancelled','canceled','interrupted','draft','idle') "
-            "                     THEN 1 ELSE 0 END "
-            "            WHEN COALESCE(si.running, 0) != 0 THEN 1 "
-            "            ELSE 0 END AS derived_running, "
-            f"       CASE WHEN {waiting_expr} THEN 1 ELSE 0 END AS derived_waiting_approval, "
-            f"       CASE WHEN {terminal_expr} IN ('completed','failed','cancelled','canceled','interrupted') "
-            f"            THEN {terminal_expr} ELSE NULL END AS derived_terminal_status "
-            "  FROM session_index si "
-            "  LEFT JOIN agent_teams at ON at.id = si.team_id "
-            "  LEFT JOIN agent_profiles ap ON ap.id = at.lead_agent_profile_id "
-            "  LEFT JOIN ("
-            "       SELECT "
-            "           ranked.team_id AS team_id, "
-            "           COUNT(*) AS team_member_count, "
-            "           MAX(CASE WHEN ranked.leader_rank = 1 THEN ranked.member_json END) AS leader_member_json, "
-            "           json_group_array(json(ranked.member_json)) "
-            "             FILTER (WHERE ranked.display_rank <= 2) AS display_members_json "
-            "       FROM ("
-            "           SELECT "
-            "               m.team_id AS team_id, "
-            "               ROW_NUMBER() OVER ("
-            "                   PARTITION BY m.team_id "
-            "                   ORDER BY "
-            "                       CASE WHEN lower(COALESCE(m.role, '')) IN ('lead', 'leader') THEN 0 ELSE 1 END, "
-            "                       m.created_at ASC, "
-            "                       m.id ASC"
-            "               ) AS display_rank, "
-            "               ROW_NUMBER() OVER ("
-            "                   PARTITION BY m.team_id "
-            "                   ORDER BY "
-            "                       CASE WHEN lower(COALESCE(m.role, '')) IN ('lead', 'leader') THEN 0 ELSE 1 END, "
-            "                       m.created_at ASC, "
-            "                       m.id ASC"
-            "               ) AS leader_rank, "
-            "               json_object("
-            "                   'id', m.id, "
-            "                   'member_id', m.id, "
-            "                   'team_id', m.team_id, "
-            "                   'teamId', m.team_id, "
-            "                   'agent_profile_id', m.agent_profile_id, "
-            "                   'agentProfileId', m.agent_profile_id, "
-            "                   'agent_profile_version_id', COALESCE(m.agent_profile_version_id, ''), "
-            "                   'agentProfileVersionId', COALESCE(m.agent_profile_version_id, ''), "
-            "                   'name', COALESCE(NULLIF(m.profile_name, ''), p.name, ''), "
-            "                   'profile_name', COALESCE(NULLIF(m.profile_name, ''), p.name, ''), "
-            "                   'profileName', COALESCE(NULLIF(m.profile_name, ''), p.name, ''), "
-            "                   'agent_profile_name', COALESCE(NULLIF(m.profile_name, ''), p.name, ''), "
-            "                   'agentProfileName', COALESCE(NULLIF(m.profile_name, ''), p.name, ''), "
-            "                   'avatar', COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, ''), "
-            "                   'profile_avatar', COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, ''), "
-            "                   'profileAvatar', COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, ''), "
-            "                   'agent_profile_avatar', COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, ''), "
-            "                   'agentProfileAvatar', COALESCE(NULLIF(m.profile_avatar, ''), p.avatar, ''), "
-            "                   'role', COALESCE(NULLIF(m.role, ''), 'member'), "
-            "                   'status', COALESCE(NULLIF(m.status, ''), 'active'), "
-            "                   'auto_assignable', COALESCE(m.auto_assignable, 1), "
-            "                   'autoAssignable', COALESCE(m.auto_assignable, 1), "
-            "                   'max_concurrent_nodes', COALESCE(m.max_concurrent_nodes, 1), "
-            "                   'maxConcurrentNodes', COALESCE(m.max_concurrent_nodes, 1), "
-            "                   'permission_mode', COALESCE(NULLIF(m.permission_mode, ''), 'inherit_profile'), "
-            "                   'permissionMode', COALESCE(NULLIF(m.permission_mode, ''), 'inherit_profile'), "
-            "                   'created_at', COALESCE(m.created_at, 0), "
-            "                   'updated_at', COALESCE(m.updated_at, 0)"
-            "               ) AS member_json "
-            "           FROM agent_team_members m "
-            "           LEFT JOIN agent_profiles p "
-            "             ON p.id = m.agent_profile_id "
-            "           WHERE COALESCE(m.status, '') != 'disabled'"
-            "       ) ranked "
-            "       GROUP BY ranked.team_id"
-            "  ) team_members ON team_members.team_id = si.team_id "
-            "  LEFT JOIN team_mission_conversations tmc ON tmc.conversation_id = si.conversation_id "
-            "  LEFT JOIN active_missions am ON am.conversation_id = si.conversation_id "
-            "  LEFT JOIN team_pending_approvals "
-            "    ON team_pending_approvals.conversation_id = si.conversation_id "
-            "  LEFT JOIN conversation_participants member_participant "
-            "    ON member_participant.conversation_session_id = COALESCE(NULLIF(tmc.conversation_session_id, ''), NULLIF(si.conversation_id, ''), si.session_id) "
-            "   AND member_participant.runtime_scope_key = si.runtime_scope_key "
-            "   AND member_participant.member_id != '' "
-            "   AND LOWER(COALESCE(member_participant.role, '')) = 'member' "
-            "  LEFT JOIN activities act "
-            "    ON act.conversation_id = COALESCE(NULLIF(si.conversation_id, ''), si.session_id)"
-            + where_sql +
-            " GROUP BY si.session_id "
-            " ORDER BY si.updated_at DESC, si.started_at DESC, si.session_id DESC LIMIT ?"
-        )
-        params.append(capped + 1)
         with self._lock:
             self._repair_session_index_terminal_active_runs_locked(self._conn)
             repair_team_runtime_scope = getattr(
@@ -2446,15 +2037,14 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
             )
             if callable(repair_team_runtime_scope):
                 repair_team_runtime_scope(self._conn)
-            rows = self._conn.execute(sql, tuple(params)).fetchall()
-        has_more = len(rows) > capped
-        page = rows[:capped]
-        items = [self._session_index_row_to_item(r) for r in page]
-        next_cursor = items[-1]["_page_cursor"] if (has_more and items) else None
-        return {
-            "sessions": items,
-            "pageInfo": {"hasMore": has_more, "nextCursor": next_cursor},
-        }
+            return SessionIndexReadModel(self._conn).list(
+                SessionIndexQuery(
+                    limit=limit,
+                    cursor=cursor,
+                    include_transient=include_transient,
+                    conversation_kind=conversation_kind,
+                )
+            )
 
     def reconcile_session_index(
         self,
