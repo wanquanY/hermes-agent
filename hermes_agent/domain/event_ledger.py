@@ -82,6 +82,7 @@ class EventLedger:
         event_type: str,
         payload: dict[str, Any],
         turn_id: str = "",
+        activity_id: str = "",
         now: float | None = None,
         preassigned_seq: int | None = None,
     ) -> LedgerAppendOutcome:
@@ -134,6 +135,7 @@ class EventLedger:
                 ts,
                 payload_json,
                 event_json,
+                activity_id,
             )
             return LedgerAppendOutcome(
                 result=AppendResult.APPLIED,
@@ -161,6 +163,7 @@ class EventLedger:
                 ts,
                 payload_json,
                 event_json,
+                activity_id,
             )
             if owns_tx:
                 self._conn.execute("COMMIT")
@@ -867,14 +870,26 @@ class EventLedger:
         ts: float,
         payload_json: str,
         event_json: str,
+        activity_id: str = "",
     ) -> None:
         self._conn.execute(
             """
             INSERT OR IGNORE INTO run_events (
-                session_id, run_id, seq, event_type, turn_id, timestamp, payload_json, event_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                session_id, run_id, seq, event_type, turn_id, timestamp,
+                payload_json, event_json, activity_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, run_id, seq, event_type, turn_id, ts, payload_json, event_json),
+            (
+                session_id,
+                run_id,
+                seq,
+                event_type,
+                turn_id,
+                ts,
+                payload_json,
+                event_json,
+                str(activity_id or "") or None,
+            ),
         )
 
 

@@ -43,10 +43,10 @@ from hermes_state_participants import (
     member_participant_id,
     user_participant_id,
 )
-from hermes_state_run_event_codec import decode_run_event_row
-from hermes_state_run_event_codec import update_run_event_frame_columns
-from hermes_state_run_event_index import project_run_event_search_index
-from hermes_state_run_event_index import runtime_source_seq_from_event
+from hermes_agent.domain.run_event_codec import decode_run_event_row
+from hermes_agent.domain.run_event_codec import update_run_event_frame_columns
+from hermes_agent.domain.run_event_index import project_run_event_search_index
+from hermes_agent.domain.run_event_index import runtime_source_seq_from_event
 from hermes_state_runtime import session_info_record
 from hermes_state_runs import SessionDBRunMixin
 from hermes_state_tool_events import backfill_tool_events_from_run_events

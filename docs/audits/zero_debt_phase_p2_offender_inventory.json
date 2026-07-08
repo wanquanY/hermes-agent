@@ -1072,35 +1072,35 @@
         {
           "first_lines": [
             {
-              "line": 187,
+              "line": 190,
               "text": "runtime_session_id: str,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 216,
+              "line": 219,
               "text": "session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 230,
+              "line": 233,
               "text": "str(runtime_session_id or \"\"),",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 382,
+              "line": 385,
               "text": "runtime_session_id: str,",
               "tokens": [
                 "runtime_session_id"
               ]
             },
             {
-              "line": 410,
+              "line": 413,
               "text": "runtime_session_id = ?,",
               "tokens": [
                 "runtime_session_id"
@@ -2042,6 +2042,33 @@
         {
           "first_lines": [
             {
+              "line": 77,
+              "text": "event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\", \"\"))",
+              "tokens": [
+                "stored_session_id"
+              ]
+            },
+            {
+              "line": 78,
+              "text": "event.setdefault(\"session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 79,
+              "text": "event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            }
+          ],
+          "offenders": 3,
+          "path": "hermes_agent/domain/run_event_codec.py"
+        },
+        {
+          "first_lines": [
+            {
               "line": 85,
               "text": "active_runtime_session_id: str | None = None",
               "tokens": [
@@ -2119,33 +2146,6 @@
           ],
           "offenders": 3,
           "path": "hermes_conversation_message_identity.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 77,
-              "text": "event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\", \"\"))",
-              "tokens": [
-                "stored_session_id"
-              ]
-            },
-            {
-              "line": 78,
-              "text": "event.setdefault(\"session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 79,
-              "text": "event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\", \"\"))",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "hermes_state_run_event_codec.py"
         },
         {
           "first_lines": [
@@ -2333,6 +2333,26 @@
         {
           "first_lines": [
             {
+              "line": 101,
+              "text": "\"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),",
+              "tokens": [
+                "runtime_session_id"
+              ]
+            },
+            {
+              "line": 169,
+              "text": "session_id=str(_row_value(row, \"session_id\", \"\") or event.get(\"stored_session_id\") or \"\"),",
+              "tokens": [
+                "stored_session_id"
+              ]
+            }
+          ],
+          "offenders": 2,
+          "path": "hermes_agent/domain/run_event_index.py"
+        },
+        {
+          "first_lines": [
+            {
               "line": 29,
               "text": "\"runtime_session_id\": run.runtime_session_id,",
               "tokens": [
@@ -2369,26 +2389,6 @@
           ],
           "offenders": 2,
           "path": "hermes_agent/gateway/methods/session_methods.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 101,
-              "text": "\"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),",
-              "tokens": [
-                "runtime_session_id"
-              ]
-            },
-            {
-              "line": 169,
-              "text": "session_id=str(_row_value(row, \"session_id\", \"\") or event.get(\"stored_session_id\") or \"\"),",
-              "tokens": [
-                "stored_session_id"
-              ]
-            }
-          ],
-          "offenders": 2,
-          "path": "hermes_state_run_event_index.py"
         },
         {
           "first_lines": [
@@ -2624,7 +2624,7 @@
       "total_offenders": 1188
     },
     "p2:no_sessiondb_production": {
-      "file_count": 17,
+      "file_count": 13,
       "files": [
         {
           "first_lines": [
@@ -2667,7 +2667,7 @@
               ]
             }
           ],
-          "offenders": 30,
+          "offenders": 26,
           "path": "hermes_state.py"
         },
         {
@@ -2715,20 +2715,6 @@
         {
           "first_lines": [
             {
-              "line": 26,
-              "text": "from hermes_state_run_event_codec import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 32,
-              "text": "from hermes_state_run_event_index import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
               "line": 37,
               "text": "from hermes_state_run_event_reference import (",
               "tokens": [
@@ -2748,57 +2734,17 @@
               "tokens": [
                 "from hermes_state"
               ]
-            }
-          ],
-          "offenders": 6,
-          "path": "hermes_state_runs.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 11,
-              "text": "from hermes_state_run_event_codec import decode_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
             },
             {
-              "line": 12,
-              "text": "from hermes_state_run_event_codec import encode_run_event_frame",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 13,
-              "text": "from hermes_state_run_event_index import (",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 3,
-          "path": "hermes_state_run_event_reference.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 9,
-              "text": "from hermes_state_run_event_codec import decode_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            },
-            {
-              "line": 655,
-              "text": "Mirrors the decode path used by ``SessionDB.list_run_events`` minus the",
+              "line": 595,
+              "text": "class SessionDBRunMixin:",
               "tokens": [
                 "SessionDB"
               ]
             }
           ],
-          "offenders": 2,
-          "path": "hermes_state_tool_events.py"
+          "offenders": 4,
+          "path": "hermes_state_runs.py"
         },
         {
           "first_lines": [
@@ -2902,19 +2848,6 @@
         {
           "first_lines": [
             {
-              "line": 8,
-              "text": "from hermes_state_run_event_codec import decode_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_state_run_event_index.py"
-        },
-        {
-          "first_lines": [
-            {
               "line": 25,
               "text": "class SessionDBTeamCapabilityMixin:",
               "tokens": [
@@ -2941,31 +2874,18 @@
         {
           "first_lines": [
             {
-              "line": 7,
-              "text": "from hermes_state_run_event_codec import decode_run_event_row",
+              "line": 655,
+              "text": "Mirrors the decode path used by ``SessionDB.list_run_events`` minus the",
               "tokens": [
-                "from hermes_state"
+                "SessionDB"
               ]
             }
           ],
           "offenders": 1,
-          "path": "hermes_team_mission/runtime/history.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 8,
-              "text": "from hermes_state_run_event_codec import decode_run_event_row",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "hermes_team_mission/state/memory.py"
+          "path": "hermes_state_tool_events.py"
         }
       ],
-      "total_offenders": 61
+      "total_offenders": 48
     }
   },
   "phase": "P2",

@@ -85,6 +85,7 @@ def terminate_run(
     target_status: str,
     cause: TerminateCause | str,
     turn_id: str = "",
+    activity_id: str = "",
     message: str = "",
     payload_extra: dict | None = None,
     now: float | None = None,
@@ -108,6 +109,7 @@ def terminate_run(
     resolved_cause = cause if isinstance(cause, TerminateCause) else TerminateCause(str(cause))
     ts = float(now if now is not None else time.time())
     turn = str(turn_id or "").strip()
+    normalized_activity = str(activity_id or "").strip()
 
     event_type, payload_status = _TERMINAL_EVENT_BY_STATUS[normalized_target]
     payload: dict = {
@@ -211,6 +213,7 @@ def terminate_run(
             event_type=event_type,
             payload=payload,
             turn_id=turn,
+            activity_id=normalized_activity,
             now=ts,
             preassigned_seq=terminal_seq,
         )

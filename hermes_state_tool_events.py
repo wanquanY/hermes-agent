@@ -6,7 +6,7 @@ import json
 import sqlite3
 from typing import Any
 
-from hermes_state_run_event_codec import decode_run_event_row
+from hermes_agent.domain.run_event_codec import decode_run_event_row
 
 
 TOOL_EVENT_TYPES = frozenset(

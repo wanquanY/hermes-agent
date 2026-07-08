@@ -6,7 +6,7 @@ import time
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
 from hermes_state import SessionDB
-from hermes_state_run_event_codec import decode_run_event_row
+from hermes_agent.domain.run_event_codec import decode_run_event_row
 
 
 def _message_delta(seq: int, text: str = "hello") -> dict:

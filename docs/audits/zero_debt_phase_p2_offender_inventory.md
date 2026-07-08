@@ -8,18 +8,16 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 61 | 17 |
+| `p2:no_sessiondb_production` | 48 | 13 |
 | `p2:no_legacy_identity_alias_internal` | 1188 | 80 |
 
 ## p2:no_sessiondb_production
 
 | Offenders | File | First evidence |
 |---:|---|---|
-| 30 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
+| 26 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
-| 6 | `hermes_state_runs.py` | `26` from hermes_state_run_event_codec import ( |
-| 3 | `hermes_state_run_event_reference.py` | `11` from hermes_state_run_event_codec import decode_run_event_row |
-| 2 | `hermes_state_tool_events.py` | `9` from hermes_state_run_event_codec import decode_run_event_row |
+| 4 | `hermes_state_runs.py` | `37` from hermes_state_run_event_reference import ( |
 | 2 | `tui_gateway/methods/session.py` | `1761` # Context compression ends the current SessionDB session and forks a |
 | 1 | `hermes_agent/storage/migrations/0001_declarative_baseline.py` | `22` from hermes_state import SCHEMA_SQL |
 | 1 | `hermes_state/migrations/merge_profile_dbs.py` | `4` the normal SessionDB lifecycle starts and must not import hermes_state.SessionDB. |
@@ -27,11 +25,9 @@ Status: `preflight_only`
 | 1 | `hermes_state_branch.py` | `11` class SessionDBBranchMixin: |
 | 1 | `hermes_state_member_chat.py` | `199` class SessionDBMemberChatMixin: |
 | 1 | `hermes_state_participants.py` | `527` SessionDBParticipantMixin = ParticipantsMixin |
-| 1 | `hermes_state_run_event_index.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
 | 1 | `hermes_state_team_capabilities.py` | `25` class SessionDBTeamCapabilityMixin: |
 | 1 | `hermes_state_team_registry.py` | `56` class SessionDBTeamRegistryMixin: |
-| 1 | `hermes_team_mission/runtime/history.py` | `7` from hermes_state_run_event_codec import decode_run_event_row |
-| 1 | `hermes_team_mission/state/memory.py` | `8` from hermes_state_run_event_codec import decode_run_event_row |
+| 1 | `hermes_state_tool_events.py` | `655` Mirrors the decode path used by ``SessionDB.list_run_events`` minus the |
 
 ## p2:no_legacy_identity_alias_internal
 
@@ -63,7 +59,7 @@ Status: `preflight_only`
 | 14 | `tui_gateway/methods/conversation_render_snapshot.py` | `183` or params.get("stable_session_id") |
 | 13 | `tui_gateway/run_worker.py` | `11` {"op":"run.start", "run_id", "turn_id", "stored_session_id", |
 | 12 | `hermes_agent/repositories/run_repo.py` | `30` runtime_session_id: str = "" |
-| 11 | `hermes_agent/domain/event_ledger.py` | `187` runtime_session_id: str, |
+| 11 | `hermes_agent/domain/event_ledger.py` | `190` runtime_session_id: str, |
 | 11 | `tui_gateway/services/agent_runner.py` | `105` def _worker_db_for_stable_session(stable_session_id: str): |
 | 11 | `tui_gateway/services/profile_context.py` | `265` # profile was by stable_session_id, before the profile |
 | 10 | `hermes_team_mission/runtime/history.py` | `114` _text(binding.get("runtime_session_id")), |
@@ -88,10 +84,10 @@ Status: `preflight_only`
 | 4 | `tui_gateway/core/session_config.py` | `151` # that _emit will derive runtime_scope_key / stored_session_id |
 | 3 | `channels/platforms/api_server_responses.py` | `714` stored_session_id = None |
 | 3 | `channels/platforms/api_server_runs.py` | `146` stored_session_id = None |
+| 3 | `hermes_agent/domain/run_event_codec.py` | `77` event.setdefault("stored_session_id", _row_value(row, "session_id", "")) |
 | 3 | `hermes_agent/repositories/session_repo.py` | `85` active_runtime_session_id: str \| None = None |
 | 3 | `hermes_cli/kanban_runtime_events.py` | `102` "stored_session_id": self.session_id, |
 | 3 | `hermes_conversation_message_identity.py` | `33` stable_session_id = _text(session_id) |
-| 3 | `hermes_state_run_event_codec.py` | `77` event.setdefault("stored_session_id", _row_value(row, "session_id", "")) |
 | 3 | `hermes_team_mission/state/conversation_missions.py` | `30` SELECT stable_session_id |
 | 3 | `hermes_team_mission/state/session_events.py` | `272` "session_id": str(frame.get("session_id") or binding["runtime_session_id"] or ""), |
 | 3 | `run_agent.py` | `1932` runtime_session_id = str(getattr(self, "session_id", "") or "").strip() |
@@ -99,9 +95,9 @@ Status: `preflight_only`
 | 3 | `tui_gateway/methods/prompt_respond.py` | `86` params.get("stored_session_id") |
 | 3 | `tui_gateway/methods/session_history.py` | `507` "stored_session_id": session_key, |
 | 2 | `dovie_extension/manifest.py` | `78` "team_mission.conversation.runtime_session_ids", |
+| 2 | `hermes_agent/domain/run_event_index.py` | `101` "runtime_session_id": event.get("runtime_session_id") or event.get("session_id"), |
 | 2 | `hermes_agent/gateway/methods/run_methods.py` | `29` "runtime_session_id": run.runtime_session_id, |
 | 2 | `hermes_agent/gateway/methods/session_methods.py` | `205` "active_runtime_session_id", |
-| 2 | `hermes_state_run_event_index.py` | `101` "runtime_session_id": event.get("runtime_session_id") or event.get("session_id"), |
 | 2 | `hermes_team_leader_runtime_context.py` | `67` or params.get("stable_session_id") |
 | 2 | `hermes_team_mission/gateway/leader_report_runtime.py` | `283` runtime_session_id="", |
 | 2 | `hermes_team_mission/runtime/conversation_mirror.py` | `299` conversation.get("stable_session_id") |

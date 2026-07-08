@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from hermes_state_run_event_codec import decode_run_event_row
+from hermes_agent.domain.run_event_codec import decode_run_event_row
 from hermes_team_mission.runtime.team_transcript_writer import is_node_transcript_message
 
 

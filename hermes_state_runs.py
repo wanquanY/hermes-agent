@@ -23,13 +23,13 @@ from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.seq_allocator import ensure_session_counter
 from hermes_agent.repositories.run_repo import RunRepoImpl
-from hermes_state_run_event_codec import (
+from hermes_agent.domain.run_event_codec import (
     decode_run_event_row,
     encode_run_event_frame,
     payload_from_run_event_row,
     update_run_event_frame_columns,
 )
-from hermes_state_run_event_index import (
+from hermes_agent.domain.run_event_index import (
     project_run_event_search_index,
     project_run_event_search_index_from_row,
     runtime_source_seq_from_event,

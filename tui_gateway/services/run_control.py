@@ -2257,7 +2257,12 @@ def terminate_run(
                     target_status=terminal_status,
                     cause=resolved_cause,
                     turn_id=str(turn_id or "").strip(),
+                    activity_id=str(activity_id or "").strip(),
                     message=message,
+                    payload_extra={
+                        "activity_id": str(activity_id or "").strip(),
+                        "activityId": str(activity_id or "").strip(),
+                    } if str(activity_id or "").strip() else None,
                 )
             except ValueError:
                 logger.exception(

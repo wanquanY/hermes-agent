@@ -5,7 +5,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List
 
-from hermes_state_run_event_codec import decode_run_event_row
+from hermes_agent.domain.run_event_codec import decode_run_event_row
 from hermes_team_mission.domain.utils import MEMORY_COMMITTED_STATUS
 from hermes_team_mission.domain.utils import MEMORY_TERMINAL_STATUSES
 from hermes_team_mission.domain.utils import MEMORY_VISIBLE_TO_WORKER

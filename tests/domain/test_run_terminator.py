@@ -51,6 +51,7 @@ def _make_conn() -> sqlite3.Connection:
             seq INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             turn_id TEXT,
+            activity_id TEXT,
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,
@@ -166,6 +167,25 @@ def test_terminate_run_error_status_maps_to_error_event():
     assert payload["status"] == "failed"
     assert payload["message"] == "oom-killed"
     assert payload["error_code"] == "runtime_error"
+
+
+def test_terminate_run_stamps_activity_id_on_terminal_event():
+    conn = _make_conn()
+
+    terminate_run(
+        conn,
+        run_id="run-1",
+        session_id="sess-1",
+        target_status="failed",
+        cause=TerminateCause.WORKER_CRASHED,
+        activity_id="mission:mission-1",
+        payload_extra={"activity_id": "mission:mission-1"},
+    )
+
+    row = conn.execute("SELECT activity_id, payload_json FROM run_events").fetchone()
+    assert row["activity_id"] == "mission:mission-1"
+    payload = json.loads(row["payload_json"])
+    assert payload["activity_id"] == "mission:mission-1"
 
 
 def test_terminate_run_rejects_non_terminal_target():
