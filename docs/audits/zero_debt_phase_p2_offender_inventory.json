@@ -2714,7 +2714,7 @@
         {
           "first_lines": [
             {
-              "line": 1755,
+              "line": 1757,
               "text": "from hermes_state import SessionDB",
               "tokens": [
                 "from hermes_state",
@@ -2722,35 +2722,35 @@
               ]
             },
             {
-              "line": 1756,
+              "line": 1758,
               "text": "self._session_db = SessionDB()",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 2150,
+              "line": 2152,
               "text": "# Only honor a real True from the SessionDB. Any other value",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 6132,
+              "line": 6134,
               "text": "logger.debug(\"SessionDB close error: %s\", _e)",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 6134,
+              "line": 6136,
               "text": "\"Shutdown phase: SessionDB close done at +%.2fs\",",
               "tokens": [
                 "SessionDB"
               ]
             }
           ],
-          "offenders": 16,
+          "offenders": 12,
           "path": "gateway/run.py"
         },
         {
@@ -3327,7 +3327,7 @@
           "path": "plugins/memory/holographic/store.py"
         }
       ],
-      "total_offenders": 120
+      "total_offenders": 116
     }
   },
   "phase": "P2",

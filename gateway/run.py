@@ -53,6 +53,8 @@ from typing import Dict, Optional, Any, List, Union
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
+from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_cli.config import cfg_get
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -9425,9 +9427,8 @@ class GatewayRunner:
         _title_arg = event.get_command_args().strip()
         _title_note = ""
         if _title_arg and self._session_db and new_entry:
-            from hermes_state import SessionDB
             try:
-                sanitized = SessionDB.sanitize_title(_title_arg)
+                sanitized = sanitize_session_title(_title_arg)
             except ValueError as e:
                 sanitized = None
                 _title_note = t("gateway.reset.title_rejected", error=str(e))
@@ -12927,18 +12928,18 @@ class GatewayRunner:
                     i += 1
 
         try:
-            from hermes_state import SessionDB
             from agent.insights import InsightsEngine
 
             loop = asyncio.get_running_loop()
 
             def _run_insights():
-                db = SessionDB()
-                engine = InsightsEngine(db)
-                report = engine.generate(days=days, source=source)
-                result = engine.format_gateway(report)
-                db.close()
-                return result
+                db = open_cli_session_store()
+                try:
+                    engine = InsightsEngine(db)
+                    report = engine.generate(days=days, source=source)
+                    return engine.format_gateway(report)
+                finally:
+                    db.close()
 
             return await loop.run_in_executor(None, _run_insights)
         except Exception as e:
