@@ -26,7 +26,7 @@ from channels.platforms.base import (
     ProcessingOutcome,
     SendResult,
 )
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------

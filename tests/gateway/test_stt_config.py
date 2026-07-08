@@ -8,7 +8,7 @@ import yaml
 
 from hermes_gateway.config import GatewayConfig, Platform, load_gateway_config
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def test_gateway_config_stt_disabled_from_dict_nested():

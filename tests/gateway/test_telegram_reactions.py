@@ -7,7 +7,7 @@ import pytest
 
 from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_adapter(**extra_env):

@@ -4,7 +4,7 @@ import pytest
 
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text: str, platform: Platform) -> MessageEvent:

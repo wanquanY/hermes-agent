@@ -7,7 +7,7 @@ within a single conversation:
 - Phone form: ``15551234567@s.whatsapp.net``
 
 Both the authorisation path (:mod:`gateway.run`) and the session-key path
-(:mod:`gateway.session`) need to collapse these aliases to a single stable
+(:mod:`hermes_gateway.session`) need to collapse these aliases to a single stable
 identity. This module is the single source of truth for that resolution so
 the two paths can never drift apart.
 
@@ -131,7 +131,7 @@ def canonical_whatsapp_identifier(identifier: str) -> str:
     This helper reads the bridge's ``whatsapp/session/lid-mapping-*.json``
     files, walks the mapping transitively, and picks the shortest
     (numeric-preferred) alias as the canonical identity.
-    :func:`gateway.session.build_session_key` uses this for both WhatsApp
+    :func:`hermes_gateway.session.build_session_key` uses this for both WhatsApp
     DM chat_ids and WhatsApp group participant_ids, so callers get the
     same session-key identity Hermes itself uses.
 

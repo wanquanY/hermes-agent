@@ -1,6 +1,6 @@
 """Tests for PII redaction in gateway session context prompts."""
 
-from gateway.session import (
+from hermes_gateway.session import (
     SessionContext,
     SessionSource,
     build_session_context_prompt,

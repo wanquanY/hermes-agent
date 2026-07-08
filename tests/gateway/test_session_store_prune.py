@@ -22,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, SessionResetPolicy
-from gateway.session import SessionEntry, SessionStore
+from hermes_gateway.session import SessionEntry, SessionStore
 
 
 def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
@@ -31,7 +31,7 @@ def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
         default_reset_policy=SessionResetPolicy(mode="none"),
         session_store_max_age_days=max_age_days,
     )
-    with patch("gateway.session.SessionStore._ensure_loaded"):
+    with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(
             sessions_dir=tmp_path,
             config=config,

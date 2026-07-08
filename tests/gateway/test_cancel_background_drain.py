@@ -15,7 +15,7 @@ import pytest
 
 from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class _StubAdapter(BasePlatformAdapter):

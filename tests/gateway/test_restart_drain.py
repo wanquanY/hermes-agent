@@ -10,7 +10,7 @@ import gateway.run as gateway_run
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-from gateway.session import SessionEntry, build_session_key
+from hermes_gateway.session import SessionEntry, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
 

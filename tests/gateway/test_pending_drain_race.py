@@ -32,7 +32,7 @@ from channels.platforms.base import (
     MessageEvent,
     MessageType,
 )
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class _StubAdapter(BasePlatformAdapter):

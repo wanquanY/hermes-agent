@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.session import Platform, SessionSource
+from hermes_gateway.session import Platform, SessionSource
 
 
 @pytest.fixture(autouse=True)

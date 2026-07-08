@@ -20,7 +20,7 @@ import pytest
 from agent.model_metadata import estimate_messages_tokens_rough
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.session import SessionEntry, SessionSource
+from hermes_gateway.session import SessionEntry, SessionSource
 
 
 # ---------------------------------------------------------------------------

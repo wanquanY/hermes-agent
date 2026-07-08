@@ -281,7 +281,7 @@ class TestSignalAttachmentFetch:
 
 class TestSignalSessionSource:
     def test_session_source_alt_fields(self):
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
         source = SessionSource(
             platform=Platform.SIGNAL,
             chat_id="+15551234567",
@@ -294,7 +294,7 @@ class TestSignalSessionSource:
         assert "chat_id_alt" not in d  # None fields excluded
 
     def test_session_source_roundtrip(self):
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
         source = SessionSource(
             platform=Platform.SIGNAL,
             chat_id="group:xyz",

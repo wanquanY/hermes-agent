@@ -16,7 +16,7 @@ import pytest
 
 import gateway.run as gateway_run
 from hermes_gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 class _CapturingAgent:

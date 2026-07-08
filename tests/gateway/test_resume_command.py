@@ -10,7 +10,7 @@ import pytest
 
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _make_event(text="/resume", platform=Platform.TELEGRAM,

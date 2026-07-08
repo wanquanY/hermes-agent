@@ -18,7 +18,7 @@ from hermes_gateway.config import (
     PlatformConfig,
     SessionResetPolicy,
 )
-from gateway.session import SessionEntry, SessionSource, SessionStore
+from hermes_gateway.session import SessionEntry, SessionSource, SessionStore
 
 
 # ---------------------------------------------------------------------------

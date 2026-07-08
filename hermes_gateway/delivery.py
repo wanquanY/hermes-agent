@@ -22,7 +22,7 @@ MAX_PLATFORM_OUTPUT = 4000
 TRUNCATED_VISIBLE = 3800
 
 from hermes_gateway.config import Platform, GatewayConfig
-from .session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 @dataclass
@@ -252,6 +252,5 @@ class DeliveryRouter:
         if target.thread_id and "thread_id" not in send_metadata:
             send_metadata["thread_id"] = target.thread_id
         return await adapter.send(target.chat_id, content, metadata=send_metadata or None)
-
 
 

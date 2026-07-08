@@ -41,7 +41,7 @@ from hermes_gateway.freshness import (
     last_transcript_timestamp,
 )
 from gateway.run import _should_clear_resume_pending_after_turn
-from gateway.session import SessionEntry, SessionSource, SessionStore
+from hermes_gateway.session import SessionEntry, SessionSource, SessionStore
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
     make_restart_source,

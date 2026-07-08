@@ -10,13 +10,13 @@ to various messaging platforms (Telegram, Discord, WhatsApp, Weixin, and more) w
 """
 
 from hermes_gateway.config import GatewayConfig, PlatformConfig, HomeChannel, load_gateway_config
-from .session import (
+from hermes_gateway.session import (
     SessionContext,
     SessionStore,
     SessionResetPolicy,
     build_session_context_prompt,
 )
-from .delivery import DeliveryRouter, DeliveryTarget
+from hermes_gateway.delivery import DeliveryRouter, DeliveryTarget
 from channels import session_context
 
 __all__ = [

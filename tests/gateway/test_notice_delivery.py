@@ -5,7 +5,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import SendResult
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_source() -> SessionSource:

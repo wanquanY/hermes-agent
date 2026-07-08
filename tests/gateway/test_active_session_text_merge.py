@@ -45,7 +45,7 @@ from channels.platforms.base import (
     MessageEvent,
     MessageType,
 )
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _make_event(text: str, chat_id: str = "12345") -> MessageEvent:

@@ -1589,7 +1589,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from hermes_gateway.config import PlatformConfig
         from channels.platforms.base import MessageEvent, MessageType
         from channels.platforms.feishu import FeishuAdapter
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         adapter = FeishuAdapter(PlatformConfig())
         adapter.handle_message = AsyncMock()
@@ -1635,7 +1635,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from hermes_gateway.config import PlatformConfig
         from channels.platforms.base import MessageEvent, MessageType
         from channels.platforms.feishu import FeishuAdapter
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         adapter = FeishuAdapter(PlatformConfig())
         adapter.handle_message = AsyncMock()
@@ -1679,7 +1679,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from hermes_gateway.config import PlatformConfig
         from channels.platforms.base import MessageEvent, MessageType
         from channels.platforms.feishu import FeishuAdapter
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         adapter = FeishuAdapter(PlatformConfig())
         adapter.handle_message = AsyncMock()

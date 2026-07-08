@@ -24,7 +24,7 @@ import pytest
 import gateway.run as gateway_run
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource
+from hermes_gateway.session import SessionEntry, SessionSource
 
 
 def _bootstrap(monkeypatch, tmp_path):

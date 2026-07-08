@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
 from channels.platforms.base import MessageType
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_adapter(

@@ -6,7 +6,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/debug", platform=Platform.TELEGRAM,

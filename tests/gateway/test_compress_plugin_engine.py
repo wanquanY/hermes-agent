@@ -23,7 +23,7 @@ import pytest
 from agent.context_engine import ContextEngine
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 class _FakePluginEngine(ContextEngine):

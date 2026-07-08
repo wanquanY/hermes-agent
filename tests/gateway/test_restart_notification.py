@@ -10,7 +10,7 @@ import pytest
 import gateway.run as gateway_run
 from hermes_gateway.config import HomeChannel, Platform
 from channels.platforms.base import MessageEvent, MessageType, SendResult
-from gateway.session import build_session_key
+from hermes_gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
     make_restart_source,

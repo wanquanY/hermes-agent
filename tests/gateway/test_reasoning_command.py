@@ -12,7 +12,7 @@ import yaml
 import gateway.run as gateway_run
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/reasoning", platform=Platform.TELEGRAM, user_id="12345", chat_id="67890"):

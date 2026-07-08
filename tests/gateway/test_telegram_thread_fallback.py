@@ -22,7 +22,7 @@ from channels.platforms.base import (
     _reply_anchor_for_event,
     _thread_metadata_for_source,
 )
-from gateway.session import build_session_key
+from hermes_gateway.session import build_session_key
 
 
 # ── Fake telegram.error hierarchy ──────────────────────────────────────

@@ -21,7 +21,7 @@ import pytest
 
 from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, SendResult
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 # ---------------------------------------------------------------------------

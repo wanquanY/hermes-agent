@@ -12,7 +12,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/title", platform=Platform.TELEGRAM,
@@ -223,7 +223,7 @@ class TestResetCommandWithTitle:
         from datetime import datetime
 
         from gateway.run import GatewayRunner
-        from gateway.session import SessionEntry, SessionSource, build_session_key
+        from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
         runner = object.__new__(GatewayRunner)
         runner.config = GatewayConfig(
@@ -283,7 +283,7 @@ class TestResetCommandWithTitle:
         from datetime import datetime
 
         from gateway.run import GatewayRunner
-        from gateway.session import SessionEntry, SessionSource, build_session_key
+        from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
         runner = object.__new__(GatewayRunner)
         runner.config = GatewayConfig(

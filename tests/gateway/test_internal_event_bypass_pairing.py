@@ -16,7 +16,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ async def test_notify_on_complete_preserves_user_identity(monkeypatch, tmp_path)
 @pytest.mark.asyncio
 async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monkeypatch, tmp_path):
     import tools.process_registry as pr_module
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     sessions = [
         SimpleNamespace(

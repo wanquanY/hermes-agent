@@ -22,7 +22,7 @@ from channels.slash_commands.confirmation import (
     counter_id_factory,
     maybe_confirm_destructive_slash,
 )
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:

@@ -18,7 +18,7 @@ import pytest
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(thread_id=None):

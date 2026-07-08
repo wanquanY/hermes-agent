@@ -10,7 +10,7 @@ import pytest
 from hermes_gateway.config import Platform, StreamingConfig
 from channels.platforms.base import resolve_proxy_url
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner(proxy_url=None):

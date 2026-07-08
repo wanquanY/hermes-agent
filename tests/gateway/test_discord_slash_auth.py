@@ -311,7 +311,7 @@ async def test_ignored_channel_wildcard_blocks_all(adapter, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unauthorized_attempt_notifies_telegram(adapter):
-    from gateway.session import Platform
+    from hermes_gateway.session import Platform
 
     telegram_adapter = SimpleNamespace(send=AsyncMock())
     home = SimpleNamespace(chat_id="987654321")
@@ -346,7 +346,7 @@ async def test_notify_silently_no_ops_without_runner(adapter):
 
 @pytest.mark.asyncio
 async def test_notify_falls_back_to_slack_if_no_telegram(adapter):
-    from gateway.session import Platform
+    from hermes_gateway.session import Platform
 
     slack_adapter = SimpleNamespace(send=AsyncMock())
     home_slack = SimpleNamespace(chat_id="C12345")
@@ -507,7 +507,7 @@ async def test_notify_falls_back_to_slack_on_telegram_soft_fail(adapter):
     """adapter.send returning SendResult(success=False) must NOT short-
     circuit the fallback chain. Treating a soft failure as delivered
     means a Telegram outage swallows alerts silently."""
-    from gateway.session import Platform
+    from hermes_gateway.session import Platform
 
     soft_fail = SimpleNamespace(success=False, error="rate limited")
     telegram_adapter = SimpleNamespace(send=AsyncMock(return_value=soft_fail))
@@ -535,7 +535,7 @@ async def test_notify_returns_on_telegram_truthy_success(adapter):
     """adapter.send returning SendResult(success=True) -- or any object
     without a falsy success attribute -- should still short-circuit at
     Telegram. (This guards against the soft-fail patch over-correcting.)"""
-    from gateway.session import Platform
+    from hermes_gateway.session import Platform
 
     ok = SimpleNamespace(success=True, message_id="m1")
     telegram_adapter = SimpleNamespace(send=AsyncMock(return_value=ok))

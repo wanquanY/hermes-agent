@@ -28,7 +28,7 @@ a context-note prepend into the agent's prompt — both wrong for an explicit
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform
-from gateway.session import SessionEntry, SessionSource, SessionStore
+from hermes_gateway.session import SessionEntry, SessionSource, SessionStore
 
 
 def _make_store(tmp_path):

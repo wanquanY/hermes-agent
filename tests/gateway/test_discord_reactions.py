@@ -9,7 +9,7 @@ import pytest
 
 from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome, SendResult
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _ensure_discord_mock():

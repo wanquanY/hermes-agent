@@ -12,7 +12,7 @@ import cron.scheduler as cron_scheduler
 import gateway.run as gateway_run
 import run_agent
 from hermes_gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _patch_agent_bootstrap(monkeypatch):

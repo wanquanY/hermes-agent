@@ -31,7 +31,7 @@ def _ensure_discord_mock():
 import gateway.run as gateway_run
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 class _CapturingAgent:

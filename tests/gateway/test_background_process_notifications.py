@@ -250,7 +250,7 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_inject_watch_notification_routes_from_session_store_origin(monkeypatch, tmp_path):
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
@@ -356,7 +356,7 @@ async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
@@ -419,7 +419,7 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
 def test_build_process_event_source_uses_cached_live_source_before_session_key_parse(
     monkeypatch, tmp_path
 ):
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     runner._cache_session_source(
@@ -453,7 +453,7 @@ def test_build_process_event_source_uses_cached_live_source_before_session_key_p
 @pytest.mark.asyncio
 async def test_inject_watch_notification_ignores_foreground_event_source(monkeypatch, tmp_path):
     """Negative test: watch notification must NOT route to the foreground thread."""
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]

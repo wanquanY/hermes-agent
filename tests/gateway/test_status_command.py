@@ -9,7 +9,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
@@ -494,7 +494,7 @@ async def test_status_command_bypasses_active_session_guard():
     base.handle_message — not queued or treated as an interrupt (#5046)."""
     import asyncio
     from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
-    from gateway.session import build_session_key
+    from hermes_gateway.session import build_session_key
     from hermes_gateway.config import Platform, PlatformConfig, GatewayConfig
 
     source = _make_source()

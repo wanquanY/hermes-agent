@@ -6,7 +6,7 @@ from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 class RestartTestAdapter(BasePlatformAdapter):

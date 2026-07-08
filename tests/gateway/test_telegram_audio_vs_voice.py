@@ -18,7 +18,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner(stt_enabled: bool = True) -> "GatewayRunner":  # type: ignore[name-defined]

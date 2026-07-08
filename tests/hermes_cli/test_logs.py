@@ -223,7 +223,7 @@ class TestReadTail:
         lines = [
             "2026-01-01 00:00:00 INFO gateway.run: gw msg\n",
             "2026-01-01 00:00:01 INFO tools.file: tool msg\n",
-            "2026-01-01 00:00:02 INFO gateway.session: session msg\n",
+            "2026-01-01 00:00:02 INFO hermes_gateway.session: session msg\n",
             "2026-01-01 00:00:03 INFO agent.compressor: agent msg\n",
         ]
         log_file.write_text("".join(lines))

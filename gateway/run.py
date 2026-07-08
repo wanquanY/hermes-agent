@@ -485,7 +485,7 @@ from hermes_gateway.config import (
     PlatformConfig,
     load_gateway_config,
 )
-from gateway.session import (
+from hermes_gateway.session import (
     SessionStore,
     SessionSource,
     SessionContext,
@@ -494,7 +494,7 @@ from gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
 )
-from gateway.delivery import DeliveryRouter
+from hermes_gateway.delivery import DeliveryRouter
 from channels.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -3916,7 +3916,7 @@ class GatewayRunner:
     async def _process_handoff(self, row: Dict[str, Any]) -> None:
         """Execute one handoff row. Raises on failure (caller marks failed)."""
         from hermes_gateway.config import Platform
-        from gateway.session import SessionSource, build_session_key
+        from hermes_gateway.session import SessionSource, build_session_key
         from channels.platforms.base import MessageEvent
 
         cli_session_id = row["id"]
@@ -13765,7 +13765,7 @@ class GatewayRunner:
         Falling back to the currently active foreground event is what causes
         cross-topic bleed, so don't do that.
         """
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         session_key = str(evt.get("session_key") or "").strip()
         derived_platform = ""

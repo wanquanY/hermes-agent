@@ -2579,7 +2579,7 @@ class TestAuthorizationEmailMatch:
         """
         from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
         cfg = GatewayConfig()
@@ -2600,7 +2600,7 @@ class TestAuthorizationEmailMatch:
     def test_allowlist_denies_wrong_email(self, monkeypatch):
         from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
         cfg = GatewayConfig()
@@ -2626,7 +2626,7 @@ class TestAuthorizationEmailMatch:
         """
         from hermes_gateway.config import GatewayConfig
         from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "users/77777")
         cfg = GatewayConfig()

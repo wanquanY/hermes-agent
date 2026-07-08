@@ -7,7 +7,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
-from gateway.session import SessionStore
+from hermes_gateway.session import SessionStore
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 

@@ -33,7 +33,7 @@ from channels.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 
 
 class _NoDeleteAdapter(BasePlatformAdapter):

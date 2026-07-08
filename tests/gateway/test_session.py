@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 from hermes_gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from channels.platforms.base import MessageEvent
-from gateway.session import (
+from hermes_gateway.session import (
     SessionSource,
     SessionStore,
     build_session_context,
@@ -586,7 +586,7 @@ class TestSessionStoreSwitchSession:
         config = GatewayConfig()
         conn = connect_session_repository_db(tmp_path / "state.db")
         repo = SessionRepoImpl(conn)
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(
                 sessions_dir=tmp_path / "sessions",
                 config=config,
@@ -635,7 +635,7 @@ class TestWhatsAppSessionKeyConsistency:
     @pytest.fixture()
     def store(self, tmp_path):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = None
         s._loaded = True
@@ -997,7 +997,7 @@ class TestSessionStoreEntriesAttribute:
 
     def test_entries_attribute_exists(self):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=Path("/tmp"), config=config)
         store._loaded = True
         assert hasattr(store, "_entries")
@@ -1012,7 +1012,7 @@ class TestHasAnySessions:
         """SessionStore with a mocked session repository."""
         config = GatewayConfig()
         repo = MagicMock()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         s._loaded = True
         s._entries = {}
@@ -1043,7 +1043,7 @@ class TestHasAnySessions:
         config = GatewayConfig()
         repo = MagicMock()
         repo.list.side_effect = RuntimeError("unavailable")
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         store._loaded = True
         store._entries = {"key1": MagicMock(), "key2": MagicMock()}
@@ -1060,7 +1060,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_default(self):
         """New sessions should have last_prompt_tokens=0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1072,7 +1072,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_roundtrip(self):
         """last_prompt_tokens should survive serialization/deserialization."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1088,7 +1088,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_from_old_data(self):
         """Old session data without last_prompt_tokens should default to 0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         data = {
             "session_key": "test",
             "session_id": "s1",
@@ -1105,13 +1105,13 @@ class TestLastPromptTokens:
     def test_update_session_sets_last_prompt_tokens(self, tmp_path):
         """update_session should store the actual prompt token count."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1127,13 +1127,13 @@ class TestLastPromptTokens:
     def test_update_session_none_does_not_change(self, tmp_path):
         """update_session with default (None) should not change last_prompt_tokens."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1150,13 +1150,13 @@ class TestLastPromptTokens:
     def test_update_session_zero_resets(self, tmp_path):
         """update_session with last_prompt_tokens=0 should reset the field."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",

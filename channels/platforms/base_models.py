@@ -306,6 +306,16 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
+def _merge_caption(existing_text: Optional[str], new_text: str) -> str:
+    """Merge a new caption into existing text, avoiding duplicates."""
+    if not existing_text:
+        return new_text
+    existing_captions = [caption.strip() for caption in existing_text.split("\n\n")]
+    if new_text.strip() not in existing_captions:
+        return f"{existing_text}\n\n{new_text}".strip()
+    return existing_text
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
@@ -335,7 +345,7 @@ def merge_pending_message_event(
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
-                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+                existing.text = _merge_caption(existing.text, event.text)
             return
 
         if existing_has_media or incoming_has_media:
@@ -344,7 +354,7 @@ def merge_pending_message_event(
                 existing.media_types.extend(event.media_types)
             if event.text:
                 if existing.text:
-                    existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+                    existing.text = _merge_caption(existing.text, event.text)
                 else:
                     existing.text = event.text
             if existing_is_photo or incoming_is_photo:

@@ -7,7 +7,7 @@ import pytest
 import gateway.run as gateway_run
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.session import SessionSource
 from tools.approval import disable_session_yolo, is_session_yolo_enabled
 
 

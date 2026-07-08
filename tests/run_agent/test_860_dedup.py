@@ -914,7 +914,7 @@ class TestAppendToTranscriptSkipDb:
     def test_skip_db_prevents_sqlite_write(self, tmp_path):
         """With skip_db=True and a real DB, message does NOT appear in SQLite."""
         from hermes_gateway.config import GatewayConfig
-        from gateway.session import SessionStore
+        from hermes_gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
         from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
@@ -922,7 +922,7 @@ class TestAppendToTranscriptSkipDb:
         session_repo = SessionRepoImpl(conn)
 
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(
                 sessions_dir=tmp_path,
                 config=config,
@@ -944,7 +944,7 @@ class TestAppendToTranscriptSkipDb:
     def test_default_writes_to_sqlite(self, tmp_path):
         """Without skip_db, message appears in SQLite."""
         from hermes_gateway.config import GatewayConfig
-        from gateway.session import SessionStore
+        from hermes_gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
         from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
@@ -952,7 +952,7 @@ class TestAppendToTranscriptSkipDb:
         session_repo = SessionRepoImpl(conn)
 
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(
                 sessions_dir=tmp_path,
                 config=config,
