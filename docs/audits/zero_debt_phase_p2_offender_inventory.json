@@ -2577,7 +2577,7 @@
       "total_offenders": 1181
     },
     "p2:no_sessiondb_production": {
-      "file_count": 5,
+      "file_count": 4,
       "files": [
         {
           "first_lines": [
@@ -2701,22 +2701,9 @@
           ],
           "offenders": 1,
           "path": "hermes_agent/storage/migrations/0001_declarative_baseline.py"
-        },
-        {
-          "first_lines": [
-            {
-              "line": 1846,
-              "text": "from hermes_state_member_chat import project_messages_for_viewer",
-              "tokens": [
-                "from hermes_state"
-              ]
-            }
-          ],
-          "offenders": 1,
-          "path": "tui_gateway/methods/session.py"
         }
       ],
-      "total_offenders": 38
+      "total_offenders": 37
     }
   },
   "phase": "P2",

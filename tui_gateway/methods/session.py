@@ -1843,7 +1843,7 @@ def _(rid, params: dict) -> dict:
             params=params,
         )
         if viewer_participant_id:
-            from hermes_state_member_chat import project_messages_for_viewer
+            from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
             history = project_messages_for_viewer(history, viewer_participant_id)
         display_history = _display_history_conversation(db, target)
         display_history_prefix = display_history[

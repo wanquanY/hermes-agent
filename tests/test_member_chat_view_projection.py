@@ -14,7 +14,7 @@ def test_project_messages_for_viewer_leader_perspective():
     """Leader hydrating a multi-participant conversation: its own past
     assistant turns stay assistant; members' replies become observed
     user-side speech with a speaker prefix."""
-    from hermes_state_member_chat import project_messages_for_viewer
+    from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
 
     msgs = [
         {"id": "1", "role": "user", "content": "用户的问题"},
@@ -44,7 +44,7 @@ def test_project_messages_for_viewer_member_perspective():
     """Same conversation, from Bob's perspective: HIS own past replies are
     assistant, leader and others are observed user-side speech, his own
     in-flight request is suppressed (worker will handle via run.submit)."""
-    from hermes_state_member_chat import project_messages_for_viewer
+    from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
 
     msgs = [
         {"id": "1", "role": "user", "content": "用户的问题"},
@@ -159,7 +159,7 @@ def test_viewer_projection_preserves_own_tool_calls_and_tool_responses():
     saw ``clarify({...})`` printed instead of an actual tool invocation).
     Pin the correct behavior: the viewer's own assistant turn (empty
     content + tool_calls) and the paired tool response BOTH survive."""
-    from hermes_state_member_chat import project_messages_for_viewer, LEADER_PARTICIPANT_ID
+    from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer, LEADER_PARTICIPANT_ID
 
     messages = [
         {"role": "user", "content": "请调用 clarify 工具"},
@@ -186,7 +186,7 @@ def test_viewer_projection_drops_other_speakers_tool_messages():
     leader never invoked those calls; surfacing the responses would
     confuse the model. The member's user-facing reply IS reflected as
     ``[<speaker> 在群聊里说] ...``."""
-    from hermes_state_member_chat import project_messages_for_viewer, LEADER_PARTICIPANT_ID
+    from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer, LEADER_PARTICIPANT_ID
 
     messages = [
         {"role": "user", "content": "@Bob 帮我跑工具"},
@@ -216,7 +216,7 @@ def test_viewer_projection_is_noop_on_already_materialized_view_rows():
     read time - re-projection would prefix-wrap already-prefixed user
     speech (``[X 说] [X 说] foo``) or drop the worker's own assistant
     turns. Pin the read-time no-op."""
-    from hermes_state_member_chat import project_messages_for_viewer
+    from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
 
     materialized = [
         {"role": "user", "content": "@Bob 跑一下", "metadata": {"member_chat_view": {"source_message_id": "1"}}},
