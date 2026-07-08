@@ -8,7 +8,7 @@ Status: `preflight_only`
 
 | Gate | Total offenders | Files |
 |---|---:|---:|
-| `p2:no_sessiondb_production` | 109 | 32 |
+| `p2:no_sessiondb_production` | 104 | 32 |
 | `p2:no_legacy_identity_alias_internal` | 1199 | 80 |
 
 ## p2:no_sessiondb_production
@@ -17,7 +17,7 @@ Status: `preflight_only`
 |---:|---|---|
 | 31 | `hermes_state.py` | `35` from hermes_state_activities import ActivitiesMixin |
 | 17 | `hermes_team_mission/state/session_mixin.py` | `3` from .conversation_missions import SessionDBConversationMissionMixin |
-| 12 | `gateway/run.py` | `1757` from hermes_state import SessionDB |
+| 7 | `gateway/run.py` | `1759` from hermes_state import SessionDB |
 | 6 | `hermes_state_runs.py` | `24` from hermes_state_run_event_codec import ( |
 | 6 | `hermes_team_mission/runtime/profile_scope.py` | `317` from hermes_state import SessionDB |
 | 5 | `hermes_team_mission/state/session_graph.py` | `4` from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS |

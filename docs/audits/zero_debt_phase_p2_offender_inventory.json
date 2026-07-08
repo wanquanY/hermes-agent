@@ -2714,7 +2714,7 @@
         {
           "first_lines": [
             {
-              "line": 1757,
+              "line": 1759,
               "text": "from hermes_state import SessionDB",
               "tokens": [
                 "from hermes_state",
@@ -2722,35 +2722,35 @@
               ]
             },
             {
-              "line": 1758,
+              "line": 1760,
               "text": "self._session_db = SessionDB()",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 2152,
+              "line": 2161,
               "text": "# Only honor a real True from the SessionDB. Any other value",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 6134,
+              "line": 6143,
               "text": "logger.debug(\"SessionDB close error: %s\", _e)",
               "tokens": [
                 "SessionDB"
               ]
             },
             {
-              "line": 6136,
+              "line": 6145,
               "text": "\"Shutdown phase: SessionDB close done at +%.2fs\",",
               "tokens": [
                 "SessionDB"
               ]
             }
           ],
-          "offenders": 12,
+          "offenders": 7,
           "path": "gateway/run.py"
         },
         {
@@ -3261,7 +3261,7 @@
           "path": "hermes_team_mission/state/session_views.py"
         }
       ],
-      "total_offenders": 109
+      "total_offenders": 104
     }
   },
   "phase": "P2",
