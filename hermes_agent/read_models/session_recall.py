@@ -217,9 +217,11 @@ class SessionRecallReadModel:
             current = str(row["id"] or "")
         return current
 
-    def resolve_resume_session_id(self, session_id: str) -> str:
+    def resolve_resume_session_id(self, session_id: str | None) -> str | None:
         """Resolve a user-facing session id to the transcript branch with messages."""
 
+        if session_id is None:
+            return None
         stable = str(session_id or "").strip()
         if not stable:
             return stable

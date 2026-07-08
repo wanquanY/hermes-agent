@@ -2673,87 +2673,7 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         )
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        """Redirect a resume target to the descendant session that holds the messages.
-
-        Context compression ends the current session and forks a new child session
-        (linked via ``parent_session_id``). The flush cursor is reset, so the
-        child is where new messages actually land — the parent ends up with
-        ``message_count = 0`` rows unless messages had already been flushed to
-        it before compression. See #15000.
-
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
-
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
-        """
-        if not session_id:
-            return session_id
-
-        # Follow the compression-continuation chain forward to the live tip
-        # FIRST. Auto-compression ends the current session and forks a
-        # continuation child, but a long-lived parent keeps its own flushed
-        # message rows — so the empty-head walk below never redirects it, and
-        # resuming the parent id reloads the pre-compression transcript while
-        # the turns generated *after* compression (and their responses) sit in
-        # the continuation. ``get_compression_tip`` is lineage-aware: it only
-        # follows children whose parent ended with ``end_reason='compression'``
-        # (created after the parent was ended), so delegation / branch children
-        # never hijack the resume. This is the fix for the desktop "I came back
-        # and the reply isn't there" report on large sessions.
-        try:
-            tip = self.get_compression_tip(session_id)
-        except Exception:
-            tip = session_id
-        if tip and tip != session_id:
-            session_id = tip
-
-        with self._lock:
-            # If this session already has messages, nothing to redirect.
-            try:
-                row = self._conn.execute(
-                    "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
-                    (session_id,),
-                ).fetchone()
-            except Exception:
-                return session_id
-            if row is not None:
-                return session_id
-
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
-            current = session_id
-            seen = {current}
-            for _ in range(32):
-                try:
-                    child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
-                        "WHERE parent_session_id = ? "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
-                        (current,),
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if child_row is None:
-                    return session_id
-                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
-                if not child_id or child_id in seen:
-                    return session_id
-                seen.add(child_id)
-                try:
-                    msg_row = self._conn.execute(
-                        "SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT 1",
-                        (child_id,),
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if msg_row is not None:
-                    return child_id
-                current = child_id
-        return session_id
+        return SessionRecallReadModel(self._conn).resolve_resume_session_id(session_id)
 
     def _message_row_as_conversation(
         self,
@@ -3194,52 +3114,11 @@ class HermesStateStore(AgentProfileStateMixin, TeamRegistryStateMixin, TeamCapab
         limit: int = 20,
         include_inactive: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Return recent user messages newest-first for undo/rewind selection."""
-        try:
-            bounded_limit = max(1, min(int(limit), 500))
-        except (TypeError, ValueError):
-            bounded_limit = 20
-        active_clause = "" if include_inactive else " AND active = 1"
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, timestamp, content FROM messages "
-                "WHERE session_id = ? AND role = 'user'"
-                f"{active_clause} "
-                "ORDER BY id DESC LIMIT ?",
-                (session_id, bounded_limit),
-            ).fetchall()
-
-        result: List[Dict[str, Any]] = []
-        for row in rows:
-            decoded = self._decode_content(row["content"])
-            if isinstance(decoded, list):
-                text_parts = [
-                    part.get("text", "")
-                    for part in decoded
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                preview = " ".join(part for part in text_parts if part).strip()
-                if not preview:
-                    preview = "[multimodal content]"
-            elif isinstance(decoded, str):
-                preview = decoded
-            else:
-                preview = ""
-            preview = " ".join(preview.split())
-            if len(preview) > 80:
-                preview = preview[:77] + "..."
-            result.append(
-                {
-                    "id": row["id"],
-                    "timestamp": row["timestamp"],
-                    "preview": preview,
-                }
-            )
-        return result
-
-    # =========================================================================
-    # Search
-    # =========================================================================
+        return MessageHistoryReadModel(self._conn).list_recent_user_messages(
+            session_id,
+            limit=limit,
+            include_inactive=include_inactive,
+        )
 
     def search_messages(
         self,

@@ -180,6 +180,35 @@ class MessageHistoryReadModel:
             messages.append(message)
         return messages
 
+    def list_recent_user_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        bounded_limit = _bounded_limit(limit)
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, timestamp, content FROM messages "
+                "WHERE session_id = ? AND role = 'user'"
+                f"{active_clause} "
+                "ORDER BY id DESC LIMIT ?",
+                (stable, bounded_limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "preview": _message_preview(row["content"], 80),
+            }
+            for row in rows
+        ]
+
     def _lineage_root_to_tip(self, session_id: str) -> list[str]:
         if not _table_exists(self._conn, "sessions"):
             return [session_id]
@@ -377,6 +406,25 @@ def _is_duplicate_replayed_user_message(messages: list[dict[str, Any]], message:
 
 def _decode_content(value: Any) -> Any:
     return _decode_stored_content(value)
+
+
+def _message_preview(value: Any, limit: int) -> str:
+    decoded = _decode_content(value)
+    if isinstance(decoded, list):
+        parts = [
+            str(part.get("text") or "")
+            for part in decoded
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        preview = " ".join(part for part in parts if part).strip() or "[multimodal content]"
+    elif isinstance(decoded, str):
+        preview = decoded
+    else:
+        preview = ""
+    preview = " ".join(preview.split())
+    if len(preview) > limit:
+        return preview[: max(0, limit - 3)] + "..."
+    return preview
 
 
 def _json_or(value: Any, default: Any) -> Any:
