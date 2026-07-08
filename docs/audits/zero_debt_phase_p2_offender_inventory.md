@@ -10,6 +10,11 @@ Status: `preflight_only`
 |---|---:|---:|
 | `p2:no_sessiondb_production` | 0 | 0 |
 | `p2:no_legacy_identity_alias_internal` | 0 | 0 |
+| `p2:no_hermes_state_store_production_instantiation` | 1 | 1 |
+| `p2:state_store_decomposed` | 13238 | 9 |
+| `p2:hermes_state_store_no_methods` | 144 | 1 |
+| `p2:aggregate_table_single_owner` | 26 | 9 |
+| `p2:no_silent_swallow_in_v3` | 30 | 8 |
 
 ## p2:no_sessiondb_production
 
@@ -20,3 +25,56 @@ Status: `preflight_only`
 
 | Offenders | File | First evidence |
 |---:|---|---|
+
+## p2:no_hermes_state_store_production_instantiation
+
+| Offenders | File | First evidence |
+|---:|---|---|
+| 1 | `hermes_agent/storage/cli_session_store.py` | `` hermes_agent/storage/cli_session_store.py:33: return HermesStateStore(Path(db_path) if db_path is not None else None) |
+
+## p2:state_store_decomposed
+
+| Offenders | File | First evidence |
+|---:|---|---|
+| 6787 | `hermes_agent/storage/state_store.py` | `` hermes_agent/storage/state_store.py: 6787 |
+| 623 | `hermes_agent/storage/state_mixins/activities.py` | `` hermes_agent/storage/state_mixins/activities.py: 623 |
+| 748 | `hermes_agent/storage/state_mixins/agent_profiles.py` | `` hermes_agent/storage/state_mixins/agent_profiles.py: 748 |
+| 459 | `hermes_agent/storage/state_mixins/branch.py` | `` hermes_agent/storage/state_mixins/branch.py: 459 |
+| 149 | `hermes_agent/storage/state_mixins/member_chat.py` | `` hermes_agent/storage/state_mixins/member_chat.py: 149 |
+| 525 | `hermes_agent/storage/state_mixins/participants.py` | `` hermes_agent/storage/state_mixins/participants.py: 525 |
+| 3075 | `hermes_agent/storage/state_mixins/runs.py` | `` hermes_agent/storage/state_mixins/runs.py: 3075 |
+| 312 | `hermes_agent/storage/state_mixins/team_capabilities.py` | `` hermes_agent/storage/state_mixins/team_capabilities.py: 312 |
+| 560 | `hermes_agent/storage/state_mixins/team_registry.py` | `` hermes_agent/storage/state_mixins/team_registry.py: 560 |
+
+## p2:hermes_state_store_no_methods
+
+| Offenders | File | First evidence |
+|---:|---|---|
+| 144 | `hermes_agent/storage/state_store.py` | `` HermesStateStore methods: 144 |
+
+## p2:aggregate_table_single_owner
+
+| Offenders | File | First evidence |
+|---:|---|---|
+| 2 | `hermes_agent/repositories/message_repo.py` | `` UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NU |
+| 8 | `hermes_agent/storage/state_store.py` | `` UPDATE sessions             SET                 message_count = (                     SELE |
+| 5 | `hermes_agent/storage/cli_session_store.py` | `` UPDATE sessions SET ended_at = ?, end_reason = ?, updated_at = ? WHERE id = ? AND ended_at |
+| 1 | `hermes_agent/domain/session_deletion.py` | `` DELETE FROM messages WHERE session_id = ? |
+| 1 | `hermes_agent/storage/state_mixins/activities.py` | `` INSERT INTO activities (                 activity_id, conversation_id, parent_activity_id, |
+| 4 | `hermes_agent/storage/state_mixins/branch.py` | `` INSERT INTO sessions (                     id, source, user_id, model, model_config, syste |
+| 1 | `hermes_agent/storage/state_mixins/agent_profiles.py` | `` INSERT INTO agent_profiles (                     id, slug, name, avatar, description, cate |
+| 3 | `hermes_agent/storage/state_mixins/runs.py` | `` INSERT OR IGNORE INTO sessions (id, source, started_at)                 VALUES (?, 'runtim |
+| 1 | `hermes_agent/storage/state_mixins/member_chat.py` | `` UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1   AND (instr(metadata_j |
+
+## p2:no_silent_swallow_in_v3
+
+| Offenders | File | First evidence |
+|---:|---|---|
+| 1 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py:716: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 16 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:610: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 4 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:875: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 2 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:48: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 1 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py:995: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 3 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py:125: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 1 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/run_event_payload.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/run_event_payload.py:56: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |
+| 2 | `/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py` | `` /Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py:34: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability |

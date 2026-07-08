@@ -1,5 +1,258 @@
 {
   "gates": {
+    "p2:aggregate_table_single_owner": {
+      "file_count": 9,
+      "files": [
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "UPDATE sessions SET message_count = 0, tool_call_count = 0, preview = '', last_active = NU",
+              "tokens": [
+                "sessions"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_index                    SET title = (                            SELECT CO",
+              "tokens": [
+                "session_index"
+              ]
+            }
+          ],
+          "offenders": 2,
+          "path": "hermes_agent/repositories/message_repo.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "UPDATE sessions             SET                 message_count = (                     SELE",
+              "tokens": [
+                "sessions"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_index                    SET conversation_kind = CASE                      ",
+              "tokens": [
+                "session_index"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id = ?",
+              "tokens": [
+                "session_lineage"
+              ]
+            },
+            {
+              "line": "",
+              "text": "DELETE FROM session_branch_requests WHERE source_session_id = ? OR result_session_id = ?",
+              "tokens": [
+                "session_branch_requests"
+              ]
+            },
+            {
+              "line": "",
+              "text": "INSERT INTO messages (session_id, role, content, participant_id, tool_call_id,            ",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 8,
+          "path": "hermes_agent/storage/state_store.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "UPDATE sessions SET ended_at = ?, end_reason = ?, updated_at = ? WHERE id = ? AND ended_at",
+              "tokens": [
+                "sessions"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_index SET status = 'closed', running = 0, updated_at = ? WHERE session_id =",
+              "tokens": [
+                "session_index"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id = ?",
+              "tokens": [
+                "session_lineage"
+              ]
+            },
+            {
+              "line": "",
+              "text": "DELETE FROM session_branch_requests WHERE source_session_id = ? OR result_session_id = ?",
+              "tokens": [
+                "session_branch_requests"
+              ]
+            },
+            {
+              "line": "",
+              "text": "INSERT INTO messages (                     session_id, role, content, participant_id, tool",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 5,
+          "path": "hermes_agent/storage/cli_session_store.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "DELETE FROM messages WHERE session_id = ?",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/domain/session_deletion.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "INSERT INTO activities (                 activity_id, conversation_id, parent_activity_id,",
+              "tokens": [
+                "activities"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/storage/state_mixins/activities.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "INSERT INTO sessions (                     id, source, user_id, model, model_config, syste",
+              "tokens": [
+                "sessions"
+              ]
+            },
+            {
+              "line": "",
+              "text": "INSERT INTO session_lineage (                     session_id, parent_session_id, root_sess",
+              "tokens": [
+                "session_lineage"
+              ]
+            },
+            {
+              "line": "",
+              "text": "INSERT INTO session_branch_requests (idempotency_key, source_session_id, branch_fingerprin",
+              "tokens": [
+                "session_branch_requests"
+              ]
+            },
+            {
+              "line": "",
+              "text": ") AND id <= ?                     ORDER BY id                 )                 INSERT INT",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 4,
+          "path": "hermes_agent/storage/state_mixins/branch.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "INSERT INTO agent_profiles (                     id, slug, name, avatar, description, cate",
+              "tokens": [
+                "agent_profiles"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/storage/state_mixins/agent_profiles.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "INSERT OR IGNORE INTO sessions (id, source, started_at)                 VALUES (?, 'runtim",
+              "tokens": [
+                "sessions"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE session_index                            SET running = 1, status = 'running',      ",
+              "tokens": [
+                "session_index"
+              ]
+            },
+            {
+              "line": "",
+              "text": "UPDATE messages SET metadata_json = ? WHERE id = ?",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 3,
+          "path": "hermes_agent/storage/state_mixins/runs.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1   AND (instr(metadata_j",
+              "tokens": [
+                "messages"
+              ]
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/storage/state_mixins/member_chat.py"
+        }
+      ],
+      "total_offenders": 26
+    },
+    "p2:hermes_state_store_no_methods": {
+      "file_count": 1,
+      "files": [
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "HermesStateStore methods: 144"
+            }
+          ],
+          "offenders": 144,
+          "path": "hermes_agent/storage/state_store.py"
+        }
+      ],
+      "total_offenders": 144
+    },
+    "p2:no_hermes_state_store_production_instantiation": {
+      "file_count": 1,
+      "files": [
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/cli_session_store.py:33: return HermesStateStore(Path(db_path) if db_path is not None else None)"
+            }
+          ],
+          "offenders": 1,
+          "path": "hermes_agent/storage/cli_session_store.py"
+        }
+      ],
+      "total_offenders": 1
+    },
     "p2:no_legacy_identity_alias_internal": {
       "file_count": 0,
       "files": [],
@@ -9,6 +262,232 @@
       "file_count": 0,
       "files": [],
       "total_offenders": 0
+    },
+    "p2:no_silent_swallow_in_v3": {
+      "file_count": 8,
+      "files": [
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py:716: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 1,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/repositories/message_repo.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:610: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:870: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:891: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:1349: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py:5925: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 16,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_store.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:875: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:864: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:951: sqlite3.Error: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py:870: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 4,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/cli_session_store.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:48: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py:56: ValueError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 2,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/agent_profiles.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py:995: sqlite3.OperationalError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 1,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/storage/state_mixins/runs.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py:125: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py:117: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py:123: OSError: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 3,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/session_deletion.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/run_event_payload.py:56: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 1,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/domain/run_event_payload.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py:34: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            },
+            {
+              "line": "",
+              "text": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py:96: Exception: silent swallow — reclassify as RecoverableError / FatalError or add a log line via hermes_agent.observability"
+            }
+          ],
+          "offenders": 2,
+          "path": "/Users/yangwanquan/syngents/code/hermes-agent/hermes_agent/gateway/runtime_config.py"
+        }
+      ],
+      "total_offenders": 30
+    },
+    "p2:state_store_decomposed": {
+      "file_count": 9,
+      "files": [
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_store.py: 6787"
+            }
+          ],
+          "offenders": 6787,
+          "path": "hermes_agent/storage/state_store.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/activities.py: 623"
+            }
+          ],
+          "offenders": 623,
+          "path": "hermes_agent/storage/state_mixins/activities.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/agent_profiles.py: 748"
+            }
+          ],
+          "offenders": 748,
+          "path": "hermes_agent/storage/state_mixins/agent_profiles.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/branch.py: 459"
+            }
+          ],
+          "offenders": 459,
+          "path": "hermes_agent/storage/state_mixins/branch.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/member_chat.py: 149"
+            }
+          ],
+          "offenders": 149,
+          "path": "hermes_agent/storage/state_mixins/member_chat.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/participants.py: 525"
+            }
+          ],
+          "offenders": 525,
+          "path": "hermes_agent/storage/state_mixins/participants.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/runs.py: 3075"
+            }
+          ],
+          "offenders": 3075,
+          "path": "hermes_agent/storage/state_mixins/runs.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/team_capabilities.py: 312"
+            }
+          ],
+          "offenders": 312,
+          "path": "hermes_agent/storage/state_mixins/team_capabilities.py"
+        },
+        {
+          "first_lines": [
+            {
+              "line": "",
+              "text": "hermes_agent/storage/state_mixins/team_registry.py: 560"
+            }
+          ],
+          "offenders": 560,
+          "path": "hermes_agent/storage/state_mixins/team_registry.py"
+        }
+      ],
+      "total_offenders": 13238
     }
   },
   "phase": "P2",

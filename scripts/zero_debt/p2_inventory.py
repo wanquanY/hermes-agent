@@ -14,12 +14,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from aggregate_table_owners import find_shadow_table_writers
 from verdict import (
     REPO_ROOT,
     _P2_IDENTITY_ALIAS_ALLOWLIST,
     _P2_IDENTITY_ALIAS_TOKENS,
     _P2_SESSIONDB_ALLOWLIST,
     _P2_SESSIONDB_TOKENS,
+    _P2_STATE_STORE_PATHS,
+    _class_method_count,
+    _p2_hermes_state_store_instantiations,
+    _p2_silent_swallow_offenders,
+    _python_line_count,
     _production_python_files,
 )
 
@@ -61,12 +67,58 @@ def build_inventory() -> dict[str, Any]:
         tokens=_P2_IDENTITY_ALIAS_TOKENS,
         allowlist=_P2_IDENTITY_ALIAS_ALLOWLIST,
     )
+    state_store_lines, state_store_line_details = _python_line_count(
+        _P2_STATE_STORE_PATHS
+    )
+    state_store_methods = _class_method_count(
+        "hermes_agent/storage/state_store.py",
+        "HermesStateStore",
+    )
     return {
         "phase": "P2",
         "status": "preflight_only",
         "gates": {
             "p2:no_sessiondb_production": _gate_summary(sessiondb),
             "p2:no_legacy_identity_alias_internal": _gate_summary(identity_alias),
+            "p2:no_hermes_state_store_production_instantiation": _list_summary(
+                _p2_hermes_state_store_instantiations()
+            ),
+            "p2:state_store_decomposed": {
+                "total_offenders": state_store_lines,
+                "file_count": len(state_store_line_details),
+                "files": [
+                    {
+                        "path": detail.split(": ", 1)[0],
+                        "offenders": int(detail.split(": ", 1)[1]),
+                        "first_lines": [{"line": "", "text": detail}],
+                    }
+                    for detail in state_store_line_details
+                ],
+            },
+            "p2:hermes_state_store_no_methods": {
+                "total_offenders": state_store_methods,
+                "file_count": 1 if state_store_methods else 0,
+                "files": [
+                    {
+                        "path": "hermes_agent/storage/state_store.py",
+                        "offenders": state_store_methods,
+                        "first_lines": [
+                            {
+                                "line": "",
+                                "text": f"HermesStateStore methods: {state_store_methods}",
+                            }
+                        ],
+                    }
+                ]
+                if state_store_methods
+                else [],
+            },
+            "p2:aggregate_table_single_owner": _shadow_writer_summary(
+                find_shadow_table_writers()
+            ),
+            "p2:no_silent_swallow_in_v3": _list_summary(
+                _p2_silent_swallow_offenders()
+            ),
         },
     }
 
@@ -84,6 +136,32 @@ def _gate_summary(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             for path, items in grouped.items()
         ],
     }
+
+
+def _list_summary(items: list[str]) -> dict[str, Any]:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for item in items:
+        path = item.split(":", 1)[0]
+        grouped[path].append(item)
+    return {
+        "total_offenders": len(items),
+        "file_count": len(grouped),
+        "files": [
+            {
+                "path": path,
+                "offenders": len(path_items),
+                "first_lines": [{"line": "", "text": text} for text in path_items[:5]],
+            }
+            for path, path_items in grouped.items()
+        ],
+    }
+
+
+def _shadow_writer_summary(items: list[tuple[str, str, str]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for path, table, snippet in items:
+        grouped[path].append({"line": "", "tokens": [table], "text": snippet})
+    return _gate_summary(dict(grouped))
 
 
 def _render_markdown(inventory: dict[str, Any]) -> str:

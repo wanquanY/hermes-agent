@@ -8,12 +8,15 @@ state. Later phases can promote current warnings into blocking failures.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from aggregate_table_owners import find_shadow_table_writers, format_shadow_table_writers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -173,6 +176,21 @@ _P2_RUNS_UPDATE_ALLOWLIST = {
 _P2_SESSIONDB_ALLOWLIST = {
     "scripts/zero_debt/verdict.py",
 }
+
+_P2_STATE_STORE_PATHS = [
+    "hermes_agent/storage/state_store.py",
+    "hermes_agent/storage/state_mixins/activities.py",
+    "hermes_agent/storage/state_mixins/agent_profiles.py",
+    "hermes_agent/storage/state_mixins/branch.py",
+    "hermes_agent/storage/state_mixins/member_chat.py",
+    "hermes_agent/storage/state_mixins/participants.py",
+    "hermes_agent/storage/state_mixins/runs.py",
+    "hermes_agent/storage/state_mixins/team_capabilities.py",
+    "hermes_agent/storage/state_mixins/team_registry.py",
+]
+
+_P2_STATE_STORE_MAX_TOTAL_LINES = 100
+_P2_HERMES_STATE_STORE_MAX_METHODS = 0
 
 
 @dataclass(frozen=True)
@@ -423,6 +441,67 @@ def _scan_lines_for_tokens(
     return offenders
 
 
+def _python_line_count(rel_paths: list[str]) -> tuple[int, list[str]]:
+    total = 0
+    details: list[str] = []
+    for rel in rel_paths:
+        path = REPO_ROOT / rel
+        if not path.exists():
+            continue
+        line_count = len(path.read_text(encoding="utf-8").splitlines())
+        total += line_count
+        details.append(f"{rel}: {line_count}")
+    return total, details
+
+
+def _class_method_count(rel_path: str, class_name: str) -> int:
+    path = REPO_ROOT / rel_path
+    if not path.exists():
+        return 0
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return sum(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for child in node.body
+            )
+    return 0
+
+
+def _p2_hermes_state_store_instantiations() -> list[str]:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _P2_SESSIONDB_ALLOWLIST:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        lines = text.splitlines()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "HermesStateStore":
+                source = lines[node.lineno - 1].strip() if node.lineno else ""
+                offenders.append(f"{rel}:{node.lineno}: {source}")
+    return offenders
+
+
+def _p2_silent_swallow_offenders() -> list[str]:
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from hermes_agent.observability.silent_swallow_lint import scan_paths
+
+    findings = scan_paths([REPO_ROOT / "hermes_agent"])
+    return [
+        f"{finding.file}:{finding.line}: {finding.exception_type}: {finding.reason}"
+        for finding in findings
+    ]
+
+
 def _p2_data_plane_checks() -> list[Check]:
     sessiondb_offenders = _scan_lines_for_tokens(
         tokens=_P2_SESSIONDB_TOKENS,
@@ -440,6 +519,16 @@ def _p2_data_plane_checks() -> list[Check]:
         tokens=("UPDATE runs",),
         allowlist=_P2_RUNS_UPDATE_ALLOWLIST,
     )
+    state_store_lines, state_store_line_details = _python_line_count(
+        _P2_STATE_STORE_PATHS
+    )
+    state_store_method_count = _class_method_count(
+        "hermes_agent/storage/state_store.py",
+        "HermesStateStore",
+    )
+    hermes_state_store_instantiations = _p2_hermes_state_store_instantiations()
+    shadow_writers = find_shadow_table_writers()
+    silent_swallow_offenders = _p2_silent_swallow_offenders()
     return [
         Check(
             id="p2:no_sessiondb_production",
@@ -475,6 +564,57 @@ def _p2_data_plane_checks() -> list[Check]:
                 "runs UPDATE is owned by RunTerminator/RunRepo only"
                 if not runs_update_offenders
                 else "\n".join(runs_update_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p2:no_hermes_state_store_production_instantiation",
+            ok=not hermes_state_store_instantiations,
+            message=(
+                "production code does not instantiate HermesStateStore"
+                if not hermes_state_store_instantiations
+                else "\n".join(hermes_state_store_instantiations[:30])
+            ),
+        ),
+        Check(
+            id="p2:state_store_decomposed",
+            ok=state_store_lines <= _P2_STATE_STORE_MAX_TOTAL_LINES,
+            message=(
+                f"state_store/state_mixins total lines {state_store_lines} <= "
+                f"{_P2_STATE_STORE_MAX_TOTAL_LINES}"
+                if state_store_lines <= _P2_STATE_STORE_MAX_TOTAL_LINES
+                else "state_store/state_mixins still own data-plane bulk: "
+                + f"{state_store_lines} lines; "
+                + "; ".join(state_store_line_details)
+            ),
+        ),
+        Check(
+            id="p2:hermes_state_store_no_methods",
+            ok=state_store_method_count <= _P2_HERMES_STATE_STORE_MAX_METHODS,
+            message=(
+                "HermesStateStore class has no remaining methods"
+                if state_store_method_count <= _P2_HERMES_STATE_STORE_MAX_METHODS
+                else f"HermesStateStore still has {state_store_method_count} methods"
+            ),
+        ),
+        Check(
+            id="p2:aggregate_table_single_owner",
+            ok=not shadow_writers,
+            message=(
+                "all aggregate table writes are owned by their aggregate repositories"
+                if not shadow_writers
+                else (
+                    f"{len(shadow_writers)} shadow writer sites:\n"
+                    + format_shadow_table_writers(shadow_writers, limit=60)
+                )
+            ),
+        ),
+        Check(
+            id="p2:no_silent_swallow_in_v3",
+            ok=not silent_swallow_offenders,
+            message=(
+                "hermes_agent has no silent swallow handlers"
+                if not silent_swallow_offenders
+                else "\n".join(silent_swallow_offenders[:30])
             ),
         ),
     ]
@@ -519,6 +659,7 @@ def build_p2_verdict() -> dict[str, Any]:
         "warnings": [*_working_state_warnings()],
         "required_test_commands": [
             ".venv/bin/pytest tests/observability/test_zero_debt_gates.py -q",
+            ".venv/bin/pytest tests/repositories/test_aggregate_table_single_owner.py tests/repositories/test_j4_6_cross_aggregate_isolation.py -q",
             ".venv/bin/pytest tests/gateway tests/storage tests/tui_gateway -q",
         ],
         "next_required_human_signoff": "docs/audits/zero_debt_phase_p2_human_signoff.md",

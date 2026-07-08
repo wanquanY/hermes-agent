@@ -96,6 +96,11 @@ These are final-state gates. P0 records them; later phases tighten from warning 
 | `no_legacy_gateway_imports` | `^from gateway|^import gateway` | None after P5. |
 | `event_ledger_single_writer` | `INSERT INTO run_events` | `hermes_agent/domain/event_ledger.py` only after P2. |
 | `run_state_single_writer` | `UPDATE runs` | `hermes_agent/domain/run_terminator.py`, `hermes_agent/repositories/run_repo.py` only after P2. |
+| `no_hermes_state_store_production_instantiation` | `HermesStateStore(` | None after P2. Renaming `SessionDB` to `HermesStateStore` does not satisfy P2. |
+| `state_store_decomposed` | `hermes_agent/storage/state_store.py` + `state_mixins/*` | Combined implementation must collapse to <=100 lines after P2. Data-plane ownership belongs in aggregate repositories. |
+| `hermes_state_store_no_methods` | `class HermesStateStore` method count | 0 after P2. The class may not remain as a renamed god-object. |
+| `aggregate_table_single_owner` | raw `INSERT/UPDATE/DELETE` to aggregate tables | Physical writes must be owned by the declared aggregate repository/domain owner only after P2. |
+| `no_silent_swallow_in_v3` | `except ...: pass` / equivalent silent swallow | 0 findings under `hermes_agent/` after P2. |
 
 Production scan excludes: `tests/`, `docs/`, `.venv/`, `__pycache__/`, `.import_linter_cache/`, build outputs.
 

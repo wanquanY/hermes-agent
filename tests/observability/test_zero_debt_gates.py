@@ -57,6 +57,11 @@ def test_manifest_defines_required_allowlists_and_gates() -> None:
         "`no_legacy_identity_alias_internal`",
         "`event_ledger_single_writer`",
         "`run_state_single_writer`",
+        "`no_hermes_state_store_production_instantiation`",
+        "`state_store_decomposed`",
+        "`hermes_state_store_no_methods`",
+        "`aggregate_table_single_owner`",
+        "`no_silent_swallow_in_v3`",
     ):
         assert token in text
 
@@ -143,20 +148,30 @@ def test_p2_verdict_reports_current_data_plane_debt() -> None:
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0
+    assert result.returncode == 1
     verdict = json.loads(result.stdout)
     assert verdict["phase"] == "P2"
-    assert verdict["status"] == "pass"
+    assert verdict["status"] == "fail"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p2:no_sessiondb_production",
         "p2:no_legacy_identity_alias_internal",
         "p2:event_ledger_single_writer",
         "p2:run_state_single_writer",
+        "p2:no_hermes_state_store_production_instantiation",
+        "p2:state_store_decomposed",
+        "p2:hermes_state_store_no_methods",
+        "p2:aggregate_table_single_owner",
+        "p2:no_silent_swallow_in_v3",
     ):
         assert gate_id in checks
     assert checks["p2:no_sessiondb_production"]["ok"]
     assert checks["p2:no_legacy_identity_alias_internal"]["ok"]
+    assert not checks["p2:no_hermes_state_store_production_instantiation"]["ok"]
+    assert not checks["p2:state_store_decomposed"]["ok"]
+    assert not checks["p2:hermes_state_store_no_methods"]["ok"]
+    assert not checks["p2:aggregate_table_single_owner"]["ok"]
+    assert not checks["p2:no_silent_swallow_in_v3"]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p2_human_signoff.md"
     )
@@ -196,8 +211,9 @@ def test_zero_debt_status_separates_verdict_from_closure() -> None:
     assert rows["P1"]["machine_verdict"] == "pass"
     assert rows["P1"]["closure"] == "pass"
     assert rows["P1"]["closure_failed_checks"] == []
-    assert rows["P2"]["machine_verdict"] == "pass"
+    assert rows["P2"]["machine_verdict"] == "fail"
     assert rows["P2"]["closure"] == "fail"
-    assert rows["P2"]["machine_failed_checks"] == []
+    assert "p2:state_store_decomposed" in rows["P2"]["machine_failed_checks"]
+    assert "p2:aggregate_table_single_owner" in rows["P2"]["machine_failed_checks"]
     assert "p2:no_sessiondb_production" not in rows["P2"]["machine_failed_checks"]
     assert "p2:no_legacy_identity_alias_internal" not in rows["P2"]["machine_failed_checks"]
