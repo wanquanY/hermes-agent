@@ -34,7 +34,7 @@ def _seed_team(db, tmp_path):
 
 def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch, tmp_path):
     import tools.team_mission_leader_tools  # noqa: F401
-    from gateway import session_context
+    from channels import session_context
     from hermes_state import SessionDB
     from tools.registry import registry
     from tui_gateway import server

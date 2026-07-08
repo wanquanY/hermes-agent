@@ -6,11 +6,11 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from hermes_state import SessionDB
 from hermes_team_mission.context.worker_context import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission.runtime.profile_scope import compact_team_profile_snapshot
 from hermes_team_mission.runtime.profile_scope import gateway_call
 from hermes_team_mission.runtime.profile_scope import metadata as _metadata
+from hermes_team_mission.runtime.profile_scope import team_mission_control_db
 from hermes_team_mission.runtime.profile_scope import text as _text
 from hermes_team_mission.runtime.profile_scope import unwrap_response
 from tools.registry import registry, tool_error, tool_result
@@ -22,15 +22,7 @@ _LEADER_NODE_KINDS = {"root"}
 
 
 def _get_db(parent_agent=None):
-    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
-    if db is not None:
-        return db
-    try:
-        from tui_gateway import server
-
-        return server._get_db()
-    except Exception:
-        return SessionDB()
+    return team_mission_control_db(parent_agent)
 
 
 def _session_context() -> dict[str, Any]:

@@ -13,7 +13,6 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from hermes_state import SessionDB
 from hermes_team_mission.domain.modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission.domain.modes import MODE_SUPERVISED_MISSION
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
@@ -66,10 +65,7 @@ def _text(value: Any) -> str:
 
 
 def _get_db(parent_agent=None):
-    try:
-        return _team_mission_control_db(parent_agent)
-    except Exception:
-        return SessionDB()
+    return _team_mission_control_db(parent_agent)
 
 
 def _session_context() -> dict[str, Any]:

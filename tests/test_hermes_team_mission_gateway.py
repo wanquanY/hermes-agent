@@ -2664,7 +2664,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
         }
 
     monkeypatch.setitem(server._methods, "run.submit", fake_run_submit)
-    from gateway import session_context
+    from channels import session_context
 
     context_tokens = session_context.set_session_vars(
         dovie_product_context=json.dumps({
