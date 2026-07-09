@@ -73,7 +73,7 @@ from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
 from hermes_gateway.conversation_editing_commands import GatewayConversationEditingCommandMixin
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
-from hermes_gateway.debug_command import GatewayDebugCommandMixin
+from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
 from hermes_gateway.media_delivery import media_delivery_for
@@ -92,13 +92,13 @@ from hermes_gateway.personality_command import GatewayPersonalityCommandMixin
 from hermes_gateway.platform_command import GatewayPlatformCommandMixin
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.proxy_mode import proxy_mode_for
-from hermes_gateway.title_command import GatewayTitleCommandMixin
+from hermes_gateway.title_command import title_command_for
 from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
-from hermes_gateway.usage_command import GatewayUsageCommandMixin
+from hermes_gateway.usage_command import usage_command_for
 from hermes_gateway.verbose_command import GatewayVerboseCommandMixin
 from hermes_gateway.voice_runtime import voice_runtime_for
-from hermes_gateway.yolo_command import GatewayYoloCommandMixin
+from hermes_gateway.yolo_command import yolo_command_for
 from hermes_gateway.reset_command import GatewayResetCommandMixin
 from hermes_gateway.response_normalization import (
     is_dovie_runtime_auth_failure as _is_dovie_runtime_auth_failure,
@@ -122,7 +122,7 @@ from hermes_gateway.skill_hint import (
     skill_slug_from_frontmatter as _skill_slug_from_frontmatter,
 )
 from hermes_gateway.fast_command import GatewayFastCommandMixin
-from hermes_gateway.footer_command import GatewayFooterCommandMixin
+from hermes_gateway.footer_command import footer_command_for
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.freshness import (
     auto_continue_freshness_window as _auto_continue_freshness_window,
@@ -511,9 +511,7 @@ class GatewayRunner(
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
     GatewayConversationEditingCommandMixin,
-    GatewayDebugCommandMixin,
     GatewayFastCommandMixin,
-    GatewayFooterCommandMixin,
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
@@ -530,11 +528,8 @@ class GatewayRunner(
     GatewayRollbackCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewayShutdownRuntimeMixin,
-    GatewayTitleCommandMixin,
     GatewayUpdateRestartMixin,
-    GatewayUsageCommandMixin,
     GatewayVerboseCommandMixin,
-    GatewayYoloCommandMixin,
 ):
     """
     Main gateway controller.
@@ -1728,11 +1723,11 @@ class GatewayRunner(
             # below — users should wait and set them between turns.
             if _cmd_def_inner and _cmd_def_inner.name in {"yolo", "verbose"}:
                 if _cmd_def_inner.name == "yolo":
-                    return await self._handle_yolo_command(event)
+                    return await yolo_command_for(self).handle_yolo_command(event)
                 if _cmd_def_inner.name == "verbose":
                     return await self._handle_verbose_command(event)
                 if _cmd_def_inner.name == "footer":
-                    return await self._handle_footer_command(event)
+                    return await footer_command_for(self).handle_footer_command(event)
 
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
@@ -2019,10 +2014,10 @@ class GatewayRunner(
             return await self._handle_verbose_command(event)
 
         if canonical == "footer":
-            return await self._handle_footer_command(event)
+            return await footer_command_for(self).handle_footer_command(event)
 
         if canonical == "yolo":
-            return await self._handle_yolo_command(event)
+            return await yolo_command_for(self).handle_yolo_command(event)
 
         if canonical == "model":
             return await self._handle_model_command(event)
@@ -2069,7 +2064,7 @@ class GatewayRunner(
             return await self._handle_compress_command(event)
 
         if canonical == "usage":
-            return await self._handle_usage_command(event)
+            return await usage_command_for(self).handle_usage_command(event)
 
         if canonical == "insights":
             return await self._handle_insights_command(event)
@@ -2093,10 +2088,10 @@ class GatewayRunner(
             return await update_lifecycle_for(self).handle_update_command(event)
 
         if canonical == "debug":
-            return await self._handle_debug_command(event)
+            return await debug_command_for(self).handle_debug_command(event)
 
         if canonical == "title":
-            return await self._handle_title_command(event)
+            return await title_command_for(self).handle_title_command(event)
 
         if canonical == "resume":
             return await session_navigation_for(self).handle_resume_command(event)

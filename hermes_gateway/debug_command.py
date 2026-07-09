@@ -8,8 +8,11 @@ from agent.i18n import t
 from channels.platforms.base import MessageEvent
 
 
-class GatewayDebugCommandMixin:
-    async def _handle_debug_command(self, event: MessageEvent) -> str:
+class GatewayDebugCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_debug_command(self, event: MessageEvent) -> str:
         """Handle /debug — upload debug report (summary only) and return paste URLs.
 
         Gateway uploads ONLY the summary report (system info + log tails),
@@ -52,3 +55,12 @@ class GatewayDebugCommandMixin:
             return "\n".join(lines)
 
         return await loop.run_in_executor(None, _collect_and_upload)
+
+
+def debug_command_for(runner) -> GatewayDebugCommandService:
+    service = getattr(runner, "debug_command", None)
+    if isinstance(service, GatewayDebugCommandService):
+        return service
+    service = GatewayDebugCommandService(runner)
+    runner.debug_command = service
+    return service

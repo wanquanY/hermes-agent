@@ -113,12 +113,17 @@ def _make_runner():
 @pytest.mark.asyncio
 async def test_yolo_dispatches_mid_run(monkeypatch):
     """/yolo mid-run must dispatch to its handler, not hit the catch-all."""
+    import gateway.run as gateway_run
+
     runner = _make_runner()
-    runner._handle_yolo_command = AsyncMock(return_value="⚡ YOLO mode **ON** for this session")
+    yolo_service = SimpleNamespace(
+        handle_yolo_command=AsyncMock(return_value="⚡ YOLO mode **ON** for this session")
+    )
+    monkeypatch.setattr(gateway_run, "yolo_command_for", lambda _runner: yolo_service)
 
     result = await runner._handle_message(_make_event("/yolo"))
 
-    runner._handle_yolo_command.assert_awaited_once()
+    yolo_service.handle_yolo_command.assert_awaited_once()
     assert result == "⚡ YOLO mode **ON** for this session"
     assert "can't run mid-turn" not in (result or "")
 

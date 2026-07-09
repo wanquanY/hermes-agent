@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.title_command import title_command_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionSource
 
@@ -63,7 +64,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title My Research Project")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "My Research Project" in result
         assert "✏️" in result
 
@@ -81,7 +82,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "Existing Title" in result
         assert "📌" in result
         db.close()
@@ -95,7 +96,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "No title set" in result
         assert "/title" in result
         db.close()
@@ -111,7 +112,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title Taken Title")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "already in use" in result
         assert "⚠️" in result
         db.close()
@@ -121,7 +122,7 @@ class TestHandleTitleCommand:
         """Returns error when session database is not available."""
         runner = _make_runner(session_db=None)
         event = _make_event(text="/title My Title")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "not available" in result
 
     @pytest.mark.asyncio
@@ -134,7 +135,7 @@ class TestHandleTitleCommand:
         runner = _make_runner(session_db=db)
         long_title = "A" * 150
         event = _make_event(text=f"/title {long_title}")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "too long" in result
         assert "⚠️" in result
         db.close()
@@ -148,7 +149,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title hello\x00world")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "helloworld" in result
         assert db.get_session_title("test_session_123") == "helloworld"
         db.close()
@@ -162,7 +163,7 @@ class TestHandleTitleCommand:
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title \x00\x01\x02")
-        result = await runner._handle_title_command(event)
+        result = await title_command_for(runner).handle_title_command(event)
         assert "empty after cleanup" in result
         db.close()
 
@@ -176,7 +177,7 @@ class TestHandleTitleCommand:
 
             runner = _make_runner(session_db=db)
             event = _make_event(text="/title Cross-Platform Test", platform=platform)
-            result = await runner._handle_title_command(event)
+            result = await title_command_for(runner).handle_title_command(event)
             assert "Cross-Platform Test" in result
             assert db.get_session_title("test_session_123") == "Cross-Platform Test"
             db.close()

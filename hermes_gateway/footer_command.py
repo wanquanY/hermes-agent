@@ -35,8 +35,11 @@ def _platform_config_key(platform: Platform) -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
-class GatewayFooterCommandMixin:
-    async def _handle_footer_command(self, event: MessageEvent) -> str:
+class GatewayFooterCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_footer_command(self, event: MessageEvent) -> str:
         """Handle /footer command by toggling the global runtime footer flag."""
 
         config_path = gateway_home() / "config.yaml"
@@ -97,3 +100,12 @@ class GatewayFooterCommandMixin:
             if preview:
                 example = t("gateway.footer.example_line", preview=preview)
         return t("gateway.footer.saved", state=state, example=example)
+
+
+def footer_command_for(runner) -> GatewayFooterCommandService:
+    service = getattr(runner, "footer_command", None)
+    if isinstance(service, GatewayFooterCommandService):
+        return service
+    service = GatewayFooterCommandService(runner)
+    runner.footer_command = service
+    return service

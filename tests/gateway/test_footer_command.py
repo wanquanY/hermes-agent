@@ -57,7 +57,7 @@ async def test_footer_status_reports_effective_platform_config(tmp_path, monkeyp
     )
     monkeypatch.setattr(footer_command, "GATEWAY_HOME", hermes_home)
 
-    result = await _make_runner()._handle_footer_command(_make_event("/footer status"))
+    result = await footer_command.footer_command_for(_make_runner()).handle_footer_command(_make_event("/footer status"))
 
     assert "ON" in result
     assert "cwd" in result
@@ -73,7 +73,7 @@ async def test_footer_on_persists_global_runtime_footer_flag(tmp_path, monkeypat
     monkeypatch.setattr(footer_command, "GATEWAY_HOME", hermes_home)
     monkeypatch.setattr(footer_command, "resolve_gateway_model", lambda config=None: "openai/gpt-5.4")
 
-    result = await _make_runner()._handle_footer_command(_make_event("/footer on"))
+    result = await footer_command.footer_command_for(_make_runner()).handle_footer_command(_make_event("/footer on"))
 
     assert "ON" in result
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -88,7 +88,7 @@ async def test_footer_toggle_creates_display_config_when_missing(tmp_path, monke
     config_path.write_text("agent:\n  model: openai/gpt-5.4\n", encoding="utf-8")
     monkeypatch.setattr(footer_command, "GATEWAY_HOME", hermes_home)
 
-    result = await _make_runner()._handle_footer_command(_make_event("/footer"))
+    result = await footer_command.footer_command_for(_make_runner()).handle_footer_command(_make_event("/footer"))
 
     assert "ON" in result
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -102,6 +102,6 @@ async def test_footer_rejects_unknown_argument(tmp_path, monkeypatch):
     (hermes_home / "config.yaml").write_text("display: {}\n", encoding="utf-8")
     monkeypatch.setattr(footer_command, "GATEWAY_HOME", hermes_home)
 
-    result = await _make_runner()._handle_footer_command(_make_event("/footer maybe"))
+    result = await footer_command.footer_command_for(_make_runner()).handle_footer_command(_make_event("/footer maybe"))
 
     assert "/footer" in result

@@ -82,7 +82,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=0.1234, status="estimated")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
         assert "35,000" in result  # input tokens
@@ -105,7 +105,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "80,000" in result   # running agent's total
         assert "API calls: 10" in result
@@ -123,7 +123,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
         assert "Session Token Usage" in result
@@ -143,7 +143,7 @@ class TestUsageCachedAgent:
         ]
 
         with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=500):
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Session Info" in result
         assert "Messages: 2" in result
@@ -159,7 +159,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Cache read" not in result
         assert "Cache write" not in result
@@ -174,7 +174,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="included")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Cost: included" in result
 
@@ -207,7 +207,7 @@ class TestUsageAccountSection:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="included")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "📊 **Session Token Usage**" in result
         assert "📈 **Account limits**" in result
@@ -251,7 +251,7 @@ class TestUsageAccountSection:
         )
 
         event = MagicMock()
-        result = await runner._handle_usage_command(event)
+        result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert calls["args"] == ("openai-codex",)
         assert calls["kwargs"]["base_url"] == "https://chatgpt.com/backend-api/codex"

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_account_usage(*args, **kwargs):
@@ -21,17 +24,20 @@ def render_account_usage_lines(*args, **kwargs):
     return _render_account_usage_lines(*args, **kwargs)
 
 
-class GatewayUsageCommandMixin:
-    async def _handle_usage_command(self, event: MessageEvent) -> str:
+class GatewayUsageCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_usage_command(self, event: MessageEvent) -> str:
         """Show usage for the current session from running/cached agents or history."""
 
         source = event.source
-        session_key = self._session_key_for_source(source)
+        session_key = self._runner._session_key_for_source(source)
 
-        agent = self._running_agents.get(session_key)
+        agent = self._runner._running_agents.get(session_key)
         if not agent or agent is AGENT_PENDING_SENTINEL:
-            cache_lock = getattr(self, "_agent_cache_lock", None)
-            cache = getattr(self, "_agent_cache", None)
+            cache_lock = getattr(self._runner, "_agent_cache_lock", None)
+            cache = getattr(self._runner, "_agent_cache", None)
             if cache_lock and cache is not None:
                 with cache_lock:
                     cached = cache.get(session_key)
@@ -41,10 +47,11 @@ class GatewayUsageCommandMixin:
         provider = getattr(agent, "provider", None) if agent and agent is not AGENT_PENDING_SENTINEL else None
         base_url = getattr(agent, "base_url", None) if agent and agent is not AGENT_PENDING_SENTINEL else None
         api_key = getattr(agent, "api_key", None) if agent and agent is not AGENT_PENDING_SENTINEL else None
-        if not provider and getattr(self, "_session_db", None) is not None:
+        session_db = getattr(self._runner, "_session_db", None)
+        if not provider and session_db is not None:
             try:
-                entry_for_billing = self.session_store.get_or_create_session(source)
-                persisted = self._session_db.get_session(entry_for_billing.session_id) or {}
+                entry_for_billing = self._runner.session_store.get_or_create_session(source)
+                persisted = session_db.get_session(entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
@@ -107,8 +114,8 @@ class GatewayUsageCommandMixin:
                     lines.append(t("gateway.usage.label_cost", prefix=prefix, amount=f"{float(cost_result.amount_usd):.4f}"))
                 elif cost_result.status == "included":
                     lines.append(t("gateway.usage.label_cost_included"))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not estimate usage cost for /usage: %s", exc)
 
             ctx = agent.context_compressor
             if ctx.last_prompt_tokens:
@@ -123,8 +130,8 @@ class GatewayUsageCommandMixin:
 
             return "\n".join(lines)
 
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_entry = self._runner.session_store.get_or_create_session(source)
+        history = self._runner.session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
             msgs = [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]
@@ -142,3 +149,12 @@ class GatewayUsageCommandMixin:
         if account_lines:
             return "\n".join(account_lines)
         return t("gateway.usage.no_data")
+
+
+def usage_command_for(runner) -> GatewayUsageCommandService:
+    service = getattr(runner, "usage_command", None)
+    if isinstance(service, GatewayUsageCommandService):
+        return service
+    service = GatewayUsageCommandService(runner)
+    runner.usage_command = service
+    return service
