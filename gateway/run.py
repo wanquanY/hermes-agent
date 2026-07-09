@@ -94,6 +94,7 @@ from hermes_gateway.process_watcher import GatewayProcessWatcherMixin
 from hermes_gateway.proxy_mode import GatewayProxyModeMixin
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
 from hermes_gateway.voice_runtime import GatewayVoiceMixin
+from hermes_gateway.yolo_command import GatewayYoloCommandMixin
 from hermes_gateway.response_normalization import (
     is_dovie_runtime_auth_failure as _is_dovie_runtime_auth_failure,
     normalize_empty_agent_response as _normalize_empty_agent_response,
@@ -499,6 +500,7 @@ class GatewayRunner(
     GatewayReasoningCommandMixin,
     GatewayUpdateRestartMixin,
     GatewayVoiceMixin,
+    GatewayYoloCommandMixin,
 ):
     """
     Main gateway controller.
@@ -9499,22 +9501,6 @@ class GatewayRunner(
 
 
 
-    async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
-        """Handle /yolo — toggle dangerous command approval bypass for this session only."""
-        from tools.approval import (
-            disable_session_yolo,
-            enable_session_yolo,
-            is_session_yolo_enabled,
-        )
-
-        session_key = self._session_key_for_source(event.source)
-        current = is_session_yolo_enabled(session_key)
-        if current:
-            disable_session_yolo(session_key)
-            return EphemeralReply(t("gateway.yolo.disabled"))
-        else:
-            enable_session_yolo(session_key)
-            return EphemeralReply(t("gateway.yolo.enabled"))
 
     async def _handle_verbose_command(self, event: MessageEvent) -> str:
         """Handle /verbose command — cycle tool progress display mode.
