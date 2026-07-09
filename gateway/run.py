@@ -35,7 +35,6 @@ import shlex
 import sys
 import signal
 import tempfile
-import threading
 import time
 import sqlite3
 from collections import OrderedDict
@@ -54,6 +53,7 @@ from hermes_gateway.approval_commands import GatewayApprovalCommandMixin
 from hermes_gateway.agent_turn_runtime import agent_turn_runtime_for
 from hermes_gateway.agent_run_supervision import agent_run_supervisor_for
 from hermes_gateway.agent_streaming_runtime import agent_streaming_for
+from hermes_gateway.agent_interaction_callbacks import agent_interaction_callbacks_for
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -1901,133 +1901,17 @@ class GatewayRunner(
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
-
-            _bg_review_release = threading.Event()
-            _bg_review_pending: list[str] = []
-            _bg_review_pending_lock = threading.Lock()
-
-            def _deliver_bg_review_message(message: str) -> None:
-                if not _status_adapter or not _run_still_current():
-                    return
-                safe_schedule_threadsafe(
-                    _status_adapter.send(
-                        _status_chat_id,
-                        message,
-                        metadata=_status_thread_metadata,
-                    ),
-                    _loop_for_step,
-                    logger=logger,
-                    log_message="background_review_callback scheduling error",
-                )
-
-            def _release_bg_review_messages() -> None:
-                _bg_review_release.set()
-                with _bg_review_pending_lock:
-                    pending = list(_bg_review_pending)
-                    _bg_review_pending.clear()
-                for queued in pending:
-                    _deliver_bg_review_message(queued)
-
-            # Background review delivery — send "💾 Memory updated" etc. to user
-            def _bg_review_send(message: str) -> None:
-                if not _status_adapter or not _run_still_current():
-                    return
-                if not _bg_review_release.is_set():
-                    with _bg_review_pending_lock:
-                        if not _bg_review_release.is_set():
-                            _bg_review_pending.append(message)
-                            return
-                _deliver_bg_review_message(message)
-
-            agent.background_review_callback = _bg_review_send
-            # Register the release hook on the adapter so base.py's finally
-            # block can fire it after delivering the main response.
-            if _status_adapter and session_key:
-                if getattr(type(_status_adapter), "register_post_delivery_callback", None) is not None:
-                    _status_adapter.register_post_delivery_callback(
-                        session_key,
-                        _release_bg_review_messages,
-                        generation=run_generation,
-                    )
-                else:
-                    _pdc = getattr(_status_adapter, "_post_delivery_callbacks", None)
-                    if _pdc is not None:
-                        _pdc[session_key] = _release_bg_review_messages
-
-            # ------------------------------------------------------------------
-            # Clarify callback: present a clarify prompt and block on a response.
-            #
-            # Runs on the agent's worker thread (see clarify_tool's synchronous
-            # callback contract).  Bridges sync→async by scheduling the
-            # adapter's send_clarify on the gateway event loop, then blocks on
-            # the clarify primitive's threading.Event with a configurable
-            # timeout.  Returns the user's response string, or a sentinel
-            # explaining that no response arrived (so the agent can adapt
-            # rather than hang forever).
-            # ------------------------------------------------------------------
-            def _clarify_callback_sync(question: str, choices) -> str:
-                from tools import clarify_gateway as _clarify_mod
-                import uuid as _uuid
-
-                if not _status_adapter:
-                    return ""
-
-                clarify_id = _uuid.uuid4().hex[:10]
-                _clarify_mod.register(
-                    clarify_id=clarify_id,
-                    session_key=session_key or "",
-                    question=question,
-                    choices=list(choices) if choices else None,
-                )
-
-                # Pause typing — like approval, we don't want a "thinking..."
-                # status to obscure the prompt or block the user from typing
-                # an "Other" response on platforms that disable input while
-                # typing is active (Slack Assistant API).
-                try:
-                    _status_adapter.pause_typing_for_chat(_status_chat_id)
-                except Exception:
-                    pass
-
-                send_ok = False
-                fut = safe_schedule_threadsafe(
-                    _status_adapter.send_clarify(
-                        chat_id=_status_chat_id,
-                        question=question,
-                        choices=list(choices) if choices else None,
-                        clarify_id=clarify_id,
-                        session_key=session_key or "",
-                        metadata=_status_thread_metadata,
-                    ),
-                    _loop_for_step,
-                    logger=logger,
-                    log_message="Clarify send failed to schedule",
-                )
-                if fut is None:
-                    send_ok = False
-                else:
-                    try:
-                        result = fut.result(timeout=15)
-                        send_ok = bool(getattr(result, "success", False))
-                    except Exception as exc:
-                        logger.warning("Clarify send failed: %s", exc)
-                        send_ok = False
-
-                if not send_ok:
-                    # Couldn't deliver the prompt — clean up and return
-                    # sentinel so the agent can fall back to a sensible
-                    # default rather than hanging.
-                    _clarify_mod.clear_session(session_key or "")
-                    return "[clarify prompt could not be delivered]"
-
-                timeout = _clarify_mod.get_clarify_timeout()
-                response = _clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
-                if response is None or response == "":
-                    # Timeout or session-boundary cancellation
-                    return f"[user did not respond within {int(timeout / 60)}m]"
-                return response
-
-            agent.clarify_callback = _clarify_callback_sync
+            interaction_callbacks = agent_interaction_callbacks_for(
+                status_adapter=_status_adapter,
+                status_chat_id=_status_chat_id,
+                status_thread_metadata=_status_thread_metadata,
+                session_key=session_key,
+                run_generation=run_generation,
+                loop=_loop_for_step,
+                run_still_current=_run_still_current,
+                redact_approval_command=_redact_approval_command,
+            )
+            interaction_callbacks.install_on(agent)
 
             # Store agent reference for interrupt support
             agent_holder[0] = agent
@@ -2087,93 +1971,6 @@ class GatewayRunner(
             # even if the message list shrinks, we know which paths are old.
             _history_media_paths: set = _collect_history_media_paths(agent_history)
             
-            # Register per-session gateway approval callback so dangerous
-            # command approval blocks the agent thread (mirrors CLI input()).
-            # The callback bridges sync→async to send the approval request
-            # to the user immediately.
-            from tools.approval import (
-                register_gateway_notify,
-                reset_current_session_key,
-                set_current_session_key,
-                unregister_gateway_notify,
-            )
-
-            def _approval_notify_sync(approval_data: dict) -> None:
-                """Send the approval request to the user from the agent thread.
-
-                If the adapter supports interactive button-based approvals
-                (e.g. Discord's ``send_exec_approval``), use that for a richer
-                UX.  Otherwise fall back to a plain text message with
-                ``/approve`` instructions.
-                """
-                # Pause the typing indicator while the agent waits for
-                # user approval.  Critical for Slack's Assistant API where
-                # assistant_threads_setStatus disables the compose box — the
-                # user literally cannot type /approve while "is thinking..."
-                # is active.  The approval message send auto-clears the Slack
-                # status; pausing prevents _keep_typing from re-setting it.
-                # Typing resumes in _handle_approve_command/_handle_deny_command.
-                _status_adapter.pause_typing_for_chat(_status_chat_id)
-
-                cmd = _redact_approval_command(approval_data.get("command", ""))
-                desc = approval_data.get("description", "dangerous command")
-
-                # Prefer button-based approval when the adapter supports it.
-                # Check the *class* for the method, not the instance — avoids
-                # false positives from MagicMock auto-attribute creation in tests.
-                if getattr(type(_status_adapter), "send_exec_approval", None) is not None:
-                    try:
-                        _approval_fut = safe_schedule_threadsafe(
-                            _status_adapter.send_exec_approval(
-                                chat_id=_status_chat_id,
-                                command=cmd,
-                                session_key=_approval_session_key,
-                                description=desc,
-                                metadata=_status_thread_metadata,
-                            ),
-                            _loop_for_step,
-                            logger=logger,
-                            log_message="send_exec_approval scheduling error",
-                        )
-                        if _approval_fut is None:
-                            raise RuntimeError("send_exec_approval: loop unavailable")
-                        _approval_result = _approval_fut.result(timeout=15)
-                        if _approval_result.success:
-                            return
-                        logger.warning(
-                            "Button-based approval failed (send returned error), falling back to text: %s",
-                            _approval_result.error,
-                        )
-                    except Exception as _e:
-                        logger.warning(
-                            "Button-based approval failed, falling back to text: %s", _e
-                        )
-
-                # Fallback: plain text approval prompt
-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
-                )
-                try:
-                    _approval_send_fut = safe_schedule_threadsafe(
-                        _status_adapter.send(
-                            _status_chat_id,
-                            msg,
-                            metadata=_status_thread_metadata,
-                        ),
-                        _loop_for_step,
-                        logger=logger,
-                        log_message="Approval text-send scheduling error",
-                    )
-                    if _approval_send_fut is not None:
-                        _approval_send_fut.result(timeout=15)
-                except Exception as _e:
-                    logger.error("Failed to send approval request: %s", _e)
-
             # Prepend pending model switch note so the model knows about the switch
             _pending_notes = getattr(self, '_pending_model_notes', {})
             _msn = _pending_notes.pop(session_key, None) if session_key else None
@@ -2263,9 +2060,7 @@ class GatewayRunner(
                 if _srn:
                     message = _srn + "\n\n" + message
 
-            _approval_session_key = session_key or ""
-            _approval_session_token = set_current_session_key(_approval_session_key)
-            register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            _approval_session_token = interaction_callbacks.activate_approval()
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
@@ -2300,16 +2095,7 @@ class GatewayRunner(
 
                 result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
             finally:
-                unregister_gateway_notify(_approval_session_key)
-                # Cancel any pending clarify entries so blocked agent
-                # threads don't hang past the end of the run (interrupt,
-                # completion, gateway shutdown).  Idempotent.
-                try:
-                    from tools.clarify_gateway import clear_session as _clear_clarify_session
-                    _clear_clarify_session(_approval_session_key)
-                except Exception:
-                    pass
-                reset_current_session_key(_approval_session_token)
+                interaction_callbacks.deactivate_approval(_approval_session_token)
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
