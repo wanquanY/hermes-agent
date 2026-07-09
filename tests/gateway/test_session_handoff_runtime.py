@@ -6,6 +6,7 @@ import pytest
 
 from channels.platforms.base import SendResult
 from hermes_gateway.config import HomeChannel, Platform
+from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner
 
@@ -34,7 +35,7 @@ async def test_process_handoff_switches_cli_session_and_dispatches_synthetic_tur
     runner.session_store.get_or_create_session = MagicMock()
     runner.session_store.switch_session = MagicMock(return_value=object())
 
-    await runner._process_handoff({
+    await session_handoff_runtime_for(runner).process_handoff({
         "id": "cli-session-1",
         "handoff_platform": "telegram",
         "title": "CLI Work",
@@ -67,7 +68,7 @@ async def test_process_handoff_requires_active_platform():
     runner.adapters = {}
 
     with pytest.raises(RuntimeError, match="not active"):
-        await runner._process_handoff({
+        await session_handoff_runtime_for(runner).process_handoff({
             "id": "cli-session-1",
             "handoff_platform": "telegram",
         })

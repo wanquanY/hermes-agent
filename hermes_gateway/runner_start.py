@@ -13,6 +13,7 @@ from hermes_gateway.config import Platform
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
+from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 
 logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
@@ -550,7 +551,7 @@ async def start_gateway_runner(runner) -> bool:
     # handoff_state='pending' in state.db and re-binds them to the
     # destination platform's home channel, then forges a synthetic user
     # turn so the agent kicks off the new chat.
-    asyncio.create_task(self._handoff_watcher())
+    asyncio.create_task(session_handoff_runtime_for(self).handoff_watcher())
 
     # Start background async-delegation watcher — drains completion events
     # from delegate_task(background=true) subagents and injects each

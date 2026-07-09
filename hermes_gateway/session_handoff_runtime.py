@@ -13,39 +13,44 @@ from hermes_gateway.session import SessionSource, build_session_key
 logger = logging.getLogger(__name__)
 
 
-class GatewaySessionHandoffRuntimeMixin:
-    async def _handoff_watcher(self, interval: float = 2.0) -> None:
+class GatewaySessionHandoffRuntimeService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handoff_watcher(self, interval: float = 2.0) -> None:
         """Background task that processes pending CLI to gateway session handoffs."""
         await asyncio.sleep(5)
-        while self._running:
+        runner = self._runner
+        while runner._running:
             try:
-                if self._session_db is None:
+                if runner._session_db is None:
                     await asyncio.sleep(interval)
                     continue
-                pending = self._session_db.list_pending_handoffs()
+                pending = runner._session_db.list_pending_handoffs()
                 for row in pending:
                     session_id = row.get("id")
                     if not session_id:
                         continue
-                    if not self._session_db.claim_handoff(session_id):
+                    if not runner._session_db.claim_handoff(session_id):
                         continue
                     try:
-                        await self._process_handoff(row)
-                        self._session_db.complete_handoff(session_id)
+                        await self.process_handoff(row)
+                        runner._session_db.complete_handoff(session_id)
                     except Exception as exc:
                         logger.warning(
                             "Handoff for session %s failed: %s",
                             session_id, exc, exc_info=True,
                         )
-                        self._session_db.fail_handoff(session_id, str(exc))
+                        runner._session_db.fail_handoff(session_id, str(exc))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.debug("Handoff watcher tick error: %s", exc, exc_info=True)
             await asyncio.sleep(interval)
 
-    async def _process_handoff(self, row: Dict[str, Any]) -> None:
+    async def process_handoff(self, row: Dict[str, Any]) -> None:
         """Execute one handoff row. Raises on failure so the watcher can mark it failed."""
+        runner = self._runner
         cli_session_id = row["id"]
         platform_name = (row.get("handoff_platform") or "").strip().lower()
         if not platform_name:
@@ -56,11 +61,11 @@ class GatewaySessionHandoffRuntimeMixin:
         except (ValueError, KeyError):
             raise RuntimeError(f"unknown platform '{platform_name}'")
 
-        adapter = self.adapters.get(platform)
+        adapter = runner.adapters.get(platform)
         if not adapter:
             raise RuntimeError(f"platform '{platform_name}' is not active in this gateway")
 
-        home = self.config.get_home_channel(platform)
+        home = runner.config.get_home_channel(platform)
         if not home or not home.chat_id:
             raise RuntimeError(
                 f"no home channel configured for {platform_name}; "
@@ -90,7 +95,7 @@ class GatewaySessionHandoffRuntimeMixin:
             thread_id=effective_thread_id,
         )
 
-        platform_cfg = self.config.platforms.get(platform)
+        platform_cfg = runner.config.platforms.get(platform)
         extra = platform_cfg.extra if platform_cfg else {}
         session_key = build_session_key(
             dest_source,
@@ -98,13 +103,13 @@ class GatewaySessionHandoffRuntimeMixin:
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
         )
 
-        self.session_store.get_or_create_session(dest_source)
-        switched = self.session_store.switch_session(session_key, cli_session_id)
+        runner.session_store.get_or_create_session(dest_source)
+        switched = runner.session_store.switch_session(session_key, cli_session_id)
         if switched is None:
             raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
 
-        self._evict_cached_agent(session_key)
-        self._release_running_agent_state(session_key)
+        runner._evict_cached_agent(session_key)
+        runner._release_running_agent_state(session_key)
 
         synthetic_text = (
             f"[Session was just handed off from CLI (\"{cli_title}\") to this "
@@ -128,7 +133,7 @@ class GatewaySessionHandoffRuntimeMixin:
             session_key,
         )
 
-        response_text = await self._handle_message(synthetic_event)
+        response_text = await runner._handle_message(synthetic_event)
         if not response_text:
             return
 
@@ -147,3 +152,12 @@ class GatewaySessionHandoffRuntimeMixin:
         if not getattr(result, "success", True):
             err = getattr(result, "error", "send returned success=False")
             raise RuntimeError(f"adapter.send failed: {err}")
+
+
+def session_handoff_runtime_for(runner) -> GatewaySessionHandoffRuntimeService:
+    service = getattr(runner, "session_handoff_runtime", None)
+    if isinstance(service, GatewaySessionHandoffRuntimeService):
+        return service
+    service = GatewaySessionHandoffRuntimeService(runner)
+    runner.session_handoff_runtime = service
+    return service
