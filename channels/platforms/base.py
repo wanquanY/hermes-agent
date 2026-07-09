@@ -1800,6 +1800,10 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
+
+    def peek_pending_message(self, session_key: str) -> Optional[MessageEvent]:
+        """Return a pending message without consuming it."""
+        return self._pending_messages.get(session_key)
     
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
