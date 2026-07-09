@@ -12,9 +12,12 @@ from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 logger = logging.getLogger(__name__)
 
 
-class GatewayGoalCommandMixin:
+class GatewayGoalCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
     @staticmethod
-    def _is_goal_continuation_event(event_or_text: Any) -> bool:
+    def is_goal_continuation_event(event_or_text: Any) -> bool:
         """Return True for synthetic /goal continuation turns.
 
         Goal continuations are normal queued user-role events, so pause/clear
@@ -24,7 +27,7 @@ class GatewayGoalCommandMixin:
         text = getattr(event_or_text, "text", event_or_text) or ""
         return str(text).startswith("[Continuing toward your standing goal]\nGoal:")
 
-    def _clear_goal_pending_continuations(self, session_key: str, adapter: Any) -> int:
+    def clear_goal_pending_continuations(self, session_key: str, adapter: Any) -> int:
         """Remove queued synthetic /goal continuations for one session.
 
         User-issued /goal pause/clear can race with a continuation already
@@ -35,17 +38,17 @@ class GatewayGoalCommandMixin:
         pending_slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
         if isinstance(pending_slot, dict):
             pending_event = pending_slot.get(session_key)
-            if self._is_goal_continuation_event(pending_event):
+            if self.is_goal_continuation_event(pending_event):
                 pending_slot.pop(session_key, None)
                 removed += 1
 
-        queued_events = getattr(self, "_queued_events", None)
+        queued_events = getattr(self._runner, "_queued_events", None)
         if isinstance(queued_events, dict):
             overflow = queued_events.get(session_key) or []
             if overflow:
                 kept = []
                 for queued_event in overflow:
-                    if self._is_goal_continuation_event(queued_event):
+                    if self.is_goal_continuation_event(queued_event):
                         removed += 1
                     else:
                         kept.append(queued_event)
@@ -55,7 +58,7 @@ class GatewayGoalCommandMixin:
                     queued_events.pop(session_key, None)
         return removed
 
-    def _goal_still_active_for_session(self, session_id: str) -> bool:
+    def goal_still_active_for_session(self, session_id: str) -> bool:
         """Best-effort fresh DB check before running a queued continuation."""
         if not session_id:
             return False
@@ -66,7 +69,7 @@ class GatewayGoalCommandMixin:
             logger.debug("goal continuation: active-state recheck failed: %s", exc)
             return False
 
-    def _goal_max_turns_from_config(self) -> int:
+    def goal_max_turns_from_config(self) -> int:
         """Resolve the configured /goal turn budget for gateway sessions.
 
         GatewayRunner.config is a GatewayConfig dataclass, not the full
@@ -74,10 +77,11 @@ class GatewayGoalCommandMixin:
         therefore only available through hermes_cli.config.load_config().
         """
         try:
+            runner = self._runner
             goals_cfg = (
-                (self.config or {}).get("goals", {})
-                if isinstance(self.config, dict)
-                else getattr(self.config, "goals", {}) or {}
+                (runner.config or {}).get("goals", {})
+                if isinstance(runner.config, dict)
+                else getattr(runner.config, "goals", {}) or {}
             )
             if not goals_cfg:
                 from hermes_cli.config import load_config
@@ -87,7 +91,7 @@ class GatewayGoalCommandMixin:
         except Exception:
             return 20
 
-    def _get_goal_manager_for_event(self, event: "MessageEvent"):
+    def get_goal_manager_for_event(self, event: "MessageEvent"):
         """Return a GoalManager bound to the session for this gateway event.
 
         Returns ``(manager, session_entry)`` or ``(None, None)`` if the
@@ -99,17 +103,17 @@ class GatewayGoalCommandMixin:
             logger.debug("goal manager unavailable: %s", exc)
             return None, None
         try:
-            session_entry = self.session_store.get_or_create_session(event.source)
+            session_entry = self._runner.session_store.get_or_create_session(event.source)
         except Exception as exc:
             logger.debug("goal manager: session lookup failed: %s", exc)
             return None, None
         sid = getattr(session_entry, "session_id", None) or ""
         if not sid:
             return None, None
-        max_turns = self._goal_max_turns_from_config()
+        max_turns = self.goal_max_turns_from_config()
         return GoalManager(session_id=sid, default_max_turns=max_turns), session_entry
 
-    async def _handle_goal_command(self, event: "MessageEvent") -> str:
+    async def handle_goal_command(self, event: "MessageEvent") -> str:
         """Handle /goal for gateway platforms.
 
         Subcommands: ``/goal`` / ``/goal status`` / ``/goal pause`` /
@@ -123,7 +127,8 @@ class GatewayGoalCommandMixin:
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
 
-        mgr, session_entry = self._get_goal_manager_for_event(event)
+        runner = self._runner
+        mgr, session_entry = self.get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
 
@@ -135,10 +140,10 @@ class GatewayGoalCommandMixin:
             if state is None:
                 return t("gateway.goal.no_goal_set")
             try:
-                adapter = self.adapters.get(event.source.platform) if event.source else None
-                _quick_key = self._session_key_for_source(event.source) if event.source else None
+                adapter = runner.adapters.get(event.source.platform) if event.source else None
+                _quick_key = runner._session_key_for_source(event.source) if event.source else None
                 if adapter and _quick_key:
-                    self._clear_goal_pending_continuations(_quick_key, adapter)
+                    self.clear_goal_pending_continuations(_quick_key, adapter)
             except Exception as exc:
                 logger.debug("goal pause: pending continuation cleanup failed: %s", exc)
             return t("gateway.goal.paused", goal=state.goal)
@@ -153,10 +158,10 @@ class GatewayGoalCommandMixin:
             had = mgr.has_goal()
             mgr.clear()
             try:
-                adapter = self.adapters.get(event.source.platform) if event.source else None
-                _quick_key = self._session_key_for_source(event.source) if event.source else None
+                adapter = runner.adapters.get(event.source.platform) if event.source else None
+                _quick_key = runner._session_key_for_source(event.source) if event.source else None
                 if adapter and _quick_key:
-                    self._clear_goal_pending_continuations(_quick_key, adapter)
+                    self.clear_goal_pending_continuations(_quick_key, adapter)
             except Exception as exc:
                 logger.debug("goal clear: pending continuation cleanup failed: %s", exc)
             return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
@@ -169,8 +174,8 @@ class GatewayGoalCommandMixin:
 
         # Queue the goal text as an immediate first turn so the agent
         # starts making progress. The post-turn hook takes over after.
-        adapter = self.adapters.get(event.source.platform) if event.source else None
-        _quick_key = self._session_key_for_source(event.source) if event.source else None
+        adapter = runner.adapters.get(event.source.platform) if event.source else None
+        _quick_key = runner._session_key_for_source(event.source) if event.source else None
         if adapter and _quick_key:
             try:
                 kickoff_event = MessageEvent(
@@ -180,13 +185,13 @@ class GatewayGoalCommandMixin:
                     message_id=event.message_id,
                     channel_prompt=event.channel_prompt,
                 )
-                busy_session_runtime_for(self).enqueue_fifo(_quick_key, kickoff_event, adapter)
+                busy_session_runtime_for(runner).enqueue_fifo(_quick_key, kickoff_event, adapter)
             except Exception as exc:
                 logger.debug("goal kickoff enqueue failed: %s", exc)
 
         return t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
 
-    async def _handle_subgoal_command(self, event: "MessageEvent") -> str:
+    async def handle_subgoal_command(self, event: "MessageEvent") -> str:
         """Handle /subgoal for gateway platforms (mirror of CLI handler).
 
         Subgoals are extra criteria appended to the active goal mid-loop.
@@ -194,7 +199,7 @@ class GatewayGoalCommandMixin:
         to invoke while the agent is running.
         """
         args = (event.get_command_args() or "").strip()
-        mgr, _session_entry = self._get_goal_manager_for_event(event)
+        mgr, _session_entry = self.get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
         if not mgr.has_goal():
@@ -237,15 +242,16 @@ class GatewayGoalCommandMixin:
         idx = len(mgr.state.subgoals) if mgr.state else 0
         return f"✓ Added subgoal {idx}: {text}"
 
-    async def _send_goal_status_notice(self, source: Any, message: str) -> None:
+    async def send_goal_status_notice(self, source: Any, message: str) -> None:
         """Send a /goal judge status line back to the originating chat/thread."""
-        adapter = self.adapters.get(source.platform)
+        runner = self._runner
+        adapter = runner.adapters.get(source.platform)
         if not adapter:
             logger.debug("goal continuation: no adapter for %s", getattr(source, "platform", None))
             return
 
         try:
-            metadata = self._thread_metadata_for_source(source)
+            metadata = runner._thread_metadata_for_source(source)
         except Exception:
             metadata = None
 
@@ -256,7 +262,7 @@ class GatewayGoalCommandMixin:
                 getattr(result, "error", "unknown error"),
             )
 
-    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
+    async def defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
         """Send a /goal status line after the main response is delivered.
 
         The gateway message handler returns the agent response to the platform
@@ -266,19 +272,20 @@ class GatewayGoalCommandMixin:
         exactly this boundary; when unavailable, fall back to direct awaited
         delivery rather than silently dropping the notice.
         """
-        adapter = self.adapters.get(source.platform)
+        runner = self._runner
+        adapter = runner.adapters.get(source.platform)
         if not adapter:
             logger.debug("goal continuation: no adapter for %s", getattr(source, "platform", None))
             return
 
         async def _deliver() -> None:
             try:
-                await self._send_goal_status_notice(source, message)
+                await self.send_goal_status_notice(source, message)
             except Exception as exc:
                 logger.warning("goal continuation: status send failed: %s", exc, exc_info=True)
 
         try:
-            session_key = self._session_key_for_source(source)
+            session_key = runner._session_key_for_source(source)
         except Exception:
             session_key = None
 
@@ -299,7 +306,7 @@ class GatewayGoalCommandMixin:
 
         await _deliver()
 
-    async def _post_turn_goal_continuation(
+    async def post_turn_goal_continuation(
         self,
         *,
         session_entry: Any,
@@ -326,7 +333,8 @@ class GatewayGoalCommandMixin:
         if not sid:
             return
 
-        max_turns = self._goal_max_turns_from_config()
+        runner = self._runner
+        max_turns = self.goal_max_turns_from_config()
 
         mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
         if not mgr.is_active():
@@ -342,7 +350,7 @@ class GatewayGoalCommandMixin:
         # an awaited post-delivery callback preserves delivery reliability
         # without reversing the user-visible ordering.
         if msg and source is not None:
-            await self._defer_goal_status_notice_after_delivery(source, msg)
+            await self.defer_goal_status_notice_after_delivery(source, msg)
 
         if not decision.get("should_continue"):
             return
@@ -354,8 +362,8 @@ class GatewayGoalCommandMixin:
         # Enqueue via the adapter's FIFO so a user message already in
         # flight preempts the continuation naturally.
         try:
-            adapter = self.adapters.get(source.platform)
-            _quick_key = self._session_key_for_source(source)
+            adapter = runner.adapters.get(source.platform)
+            _quick_key = runner._session_key_for_source(source)
             if adapter and _quick_key:
                 cont_event = MessageEvent(
                     text=prompt,
@@ -364,6 +372,15 @@ class GatewayGoalCommandMixin:
                     message_id=None,
                     channel_prompt=None,
                 )
-                busy_session_runtime_for(self).enqueue_fifo(_quick_key, cont_event, adapter)
+                busy_session_runtime_for(runner).enqueue_fifo(_quick_key, cont_event, adapter)
         except Exception as exc:
             logger.debug("goal continuation: enqueue failed: %s", exc)
+
+
+def goal_command_for(runner) -> GatewayGoalCommandService:
+    service = getattr(runner, "goal_command", None)
+    if isinstance(service, GatewayGoalCommandService):
+        return service
+    service = GatewayGoalCommandService(runner)
+    runner.goal_command = service
+    return service

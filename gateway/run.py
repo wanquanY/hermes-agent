@@ -121,7 +121,7 @@ from hermes_gateway.skill_hint import (
 )
 from hermes_gateway.fast_command import GatewayFastCommandMixin
 from hermes_gateway.footer_command import GatewayFooterCommandMixin
-from hermes_gateway.goal_commands import GatewayGoalCommandMixin
+from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.freshness import (
     auto_continue_freshness_window as _auto_continue_freshness_window,
     coerce_gateway_timestamp as _coerce_gateway_timestamp,
@@ -512,7 +512,6 @@ class GatewayRunner(
     GatewayDebugCommandMixin,
     GatewayFastCommandMixin,
     GatewayFooterCommandMixin,
-    GatewayGoalCommandMixin,
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
@@ -1710,14 +1709,14 @@ class GatewayRunner(
             if _cmd_def_inner and _cmd_def_inner.name == "goal":
                 _goal_arg = (event.get_command_args() or "").strip().lower()
                 if not _goal_arg or _goal_arg in {"status", "pause", "resume", "clear", "stop", "done"}:
-                    return await self._handle_goal_command(event)
+                    return await goal_command_for(self).handle_goal_command(event)
                 return "Agent is running — use /goal status / pause / clear mid-run, or /stop before setting a new goal."
 
             # /subgoal is safe mid-run — it only modifies the goal's
             # subgoals list, which the judge reads at the next turn
             # boundary. No race with the running turn.
             if _cmd_def_inner and _cmd_def_inner.name == "subgoal":
-                return await self._handle_subgoal_command(event)
+                return await goal_command_for(self).handle_subgoal_command(event)
 
             # Session-level toggles that are safe to run mid-agent —
             # /yolo can unblock a pending approval prompt, /verbose cycles
@@ -2127,10 +2126,10 @@ class GatewayRunner(
             # to the agent as a regular user turn.
 
         if canonical == "goal":
-            return await self._handle_goal_command(event)
+            return await goal_command_for(self).handle_goal_command(event)
 
         if canonical == "subgoal":
-            return await self._handle_subgoal_command(event)
+            return await goal_command_for(self).handle_subgoal_command(event)
 
         if canonical == "voice":
             return await self._handle_voice_command(event)
@@ -2345,7 +2344,7 @@ class GatewayRunner(
                     except Exception:
                         session_entry = None
                     if session_entry is not None:
-                        await self._post_turn_goal_continuation(
+                        await goal_command_for(self).post_turn_goal_continuation(
                             session_entry=session_entry,
                             source=source,
                             final_response=_final_text,
@@ -5764,7 +5763,10 @@ class GatewayRunner(
                 next_channel_prompt = None
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
-                    if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
+                    if (
+                        goal_command_for(self).is_goal_continuation_event(pending_event)
+                        and not goal_command_for(self).goal_still_active_for_session(session_id)
+                    ):
                         logger.info(
                             "Discarding stale goal continuation for session %s — goal is no longer active",
                             session_key or "?",

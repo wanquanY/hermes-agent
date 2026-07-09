@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_gateway.config import Platform
+from hermes_gateway.goal_commands import goal_command_for
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from hermes_gateway.session import SessionSource
@@ -58,7 +59,7 @@ async def test_goal_status_notice_uses_adapter_send_with_thread_metadata():
         thread_id="thread-123",
     )
 
-    await runner._send_goal_status_notice(source, "✓ Goal achieved: done")
+    await goal_command_for(runner).send_goal_status_notice(source, "✓ Goal achieved: done")
 
     assert adapter.calls == [
         {
@@ -74,7 +75,7 @@ async def test_goal_status_notice_uses_adapter_send_with_thread_metadata():
 async def test_goal_status_notice_defers_until_post_delivery_callback():
     """Regression: goal status must appear after the agent's visible reply.
 
-    _post_turn_goal_continuation runs before BasePlatformAdapter sends the
+    The goal continuation hook runs before BasePlatformAdapter sends the
     returned final response. It should therefore register a post-delivery
     callback, not send the judge status immediately.
     """
@@ -90,7 +91,10 @@ async def test_goal_status_notice_defers_until_post_delivery_callback():
         user_id="user-1",
     )
 
-    await runner._defer_goal_status_notice_after_delivery(source, "✓ Goal achieved: done")
+    await goal_command_for(runner).defer_goal_status_notice_after_delivery(
+        source,
+        "✓ Goal achieved: done",
+    )
 
     assert adapter.calls == []
     assert len(adapter.callbacks) == 1
@@ -110,7 +114,7 @@ async def test_goal_status_notice_defers_until_post_delivery_callback():
     ]
 
 
-def test_clear_goal_pending_continuations_removes_slot_and_overflow_only():
+def test_goal_service_clear_pending_continuations_removes_slot_and_overflow_only():
     """Regression: /goal pause/clear must cancel queued self-continuations.
 
     A user-issued /goal pause can arrive after the judge queued the next
@@ -140,7 +144,10 @@ def test_clear_goal_pending_continuations_removes_slot_and_overflow_only():
         _goal_continuation_event(source, goal="second continuation"),
     ]
 
-    removed = runner._clear_goal_pending_continuations(session_key, adapter)
+    removed = goal_command_for(runner).clear_goal_pending_continuations(
+        session_key,
+        adapter,
+    )
 
     assert removed == 2
     assert adapter._pending_messages.get(session_key) is None
