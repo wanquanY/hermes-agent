@@ -7,6 +7,7 @@ import logging
 import time
 
 from channels.platforms.base import BasePlatformAdapter
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,7 @@ class GatewayPlatformRuntimeService:
                     adapter.set_message_handler(runner._handle_message)
                     adapter.set_fatal_error_handler(self.handle_adapter_fatal_error)
                     adapter.set_session_store(runner.session_store)
-                    adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
+                    adapter.set_busy_session_handler(busy_session_runtime_for(runner).handle_active_session_busy_message)
 
                     success = await runner._connect_adapter_with_timeout(adapter, platform)
                     if success:

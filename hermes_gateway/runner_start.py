@@ -9,6 +9,7 @@ import time
 
 from hermes_constants import get_hermes_home
 from hermes_gateway.bootstrap import restart_notification_pending as _restart_notification_pending_for_home
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import Platform
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.process_watcher import process_watcher_for
@@ -302,7 +303,7 @@ async def start_gateway_runner(runner) -> bool:
         adapter.set_message_handler(self._handle_message)
         adapter.set_fatal_error_handler(platform_runtime_for(self).handle_adapter_fatal_error)
         adapter.set_session_store(self.session_store)
-        adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+        adapter.set_busy_session_handler(busy_session_runtime_for(self).handle_active_session_busy_message)
 
         # Try to connect
         logger.info("Connecting to %s...", platform.value)

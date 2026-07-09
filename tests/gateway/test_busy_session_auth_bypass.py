@@ -10,6 +10,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 import sys
 import types
@@ -127,8 +128,8 @@ class TestBusySessionAuthBypass:
             thread_id="thread-abc",  # same thread → same session_key
         )
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, intruder_event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            intruder_event, sk
         )
 
         # Must return True (handled = dropped)
@@ -158,8 +159,8 @@ class TestBusySessionAuthBypass:
         runner._running_agents_ts[sk] = time.time()
         runner.adapters[event.source.platform] = adapter
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            event, sk
         )
 
         # Should return True (handled) but message is queued/processed
@@ -174,7 +175,7 @@ class TestBusySessionAuthBypass:
 
         runner, sentinel = _make_runner(authorized_users={"user1"})
         runner._draining = True
-        runner._queue_during_drain_enabled = lambda: True
+        busy_session_runtime_for(runner).queue_during_drain_enabled = lambda: True
         adapter = _make_adapter()
         runner.adapters[MagicMock(value="slack")] = adapter
 
@@ -186,8 +187,8 @@ class TestBusySessionAuthBypass:
         runner.adapters = MagicMock()
         runner.adapters.get = MagicMock(return_value=adapter)
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, intruder_event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            intruder_event, sk
         )
 
         # Auth check fires before drain logic — dropped
@@ -212,8 +213,8 @@ class TestBusySessionAuthBypass:
         runner._running_agents[sk] = running_agent
         runner.adapters[event.source.platform] = adapter
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            event, sk
         )
 
         assert result is True

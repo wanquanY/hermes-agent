@@ -8,6 +8,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 # ---------------------------------------------------------------------------
 # Minimal stubs so we can import gateway code without heavy deps
@@ -142,7 +143,7 @@ class TestBusySessionAck:
         runner._running_agents_ts[sk] = time.time() - 600  # 10 min ago
         runner.adapters[event.source.platform] = adapter
 
-        result = await runner._handle_active_session_busy_message(event, sk)
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         assert result is True  # handled
         # Verify ack was sent
@@ -173,7 +174,7 @@ class TestBusySessionAck:
         runner._running_agents[sk] = agent
 
         with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event"):
-            await runner._handle_active_session_busy_message(event, sk)
+            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         # VERIFY: Agent was NOT interrupted
         agent.interrupt.assert_not_called()
@@ -202,7 +203,7 @@ class TestBusySessionAck:
         runner._running_agents[sk] = agent
 
         with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event") as mock_merge:
-            await runner._handle_active_session_busy_message(event, sk)
+            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         # VERIFY: Agent was steered, NOT interrupted
         agent.steer.assert_called_once_with("also check the tests")
@@ -234,7 +235,7 @@ class TestBusySessionAck:
         runner._running_agents[sk] = agent
 
         with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event") as mock_merge:
-            await runner._handle_active_session_busy_message(event, sk)
+            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         agent.steer.assert_called_once()
         agent.interrupt.assert_not_called()
@@ -262,7 +263,7 @@ class TestBusySessionAck:
         runner._running_agents[sk] = sentinel
 
         with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event") as mock_merge:
-            await runner._handle_active_session_busy_message(event, sk)
+            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         # Event was queued instead of steered
         mock_merge.assert_called_once()
@@ -302,12 +303,12 @@ class TestBusySessionAck:
         runner.adapters[event1.source.platform] = adapter
 
         # First message — should get ack
-        result1 = await runner._handle_active_session_busy_message(event1, sk)
+        result1 = await busy_session_runtime_for(runner).handle_active_session_busy_message(event1, sk)
         assert result1 is True
         assert adapter._send_with_retry.call_count == 1
 
         # Second message within cooldown — should be queued but no ack
-        result2 = await runner._handle_active_session_busy_message(event2, sk)
+        result2 = await busy_session_runtime_for(runner).handle_active_session_busy_message(event2, sk)
         assert result2 is True
         assert adapter._send_with_retry.call_count == 1  # still 1, no new ack
 
@@ -338,14 +339,14 @@ class TestBusySessionAck:
         runner.adapters[event.source.platform] = adapter
 
         # First ack
-        await runner._handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert adapter._send_with_retry.call_count == 1
 
         # Fake that cooldown expired
         runner._busy_ack_ts[sk] = time.time() - 31
 
         # Second ack should go through
-        await runner._handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert adapter._send_with_retry.call_count == 2
 
     @pytest.mark.asyncio
@@ -371,7 +372,7 @@ class TestBusySessionAck:
         runner._running_agents_ts[sk] = time.time() - 600  # 10 min
         runner.adapters[event.source.platform] = adapter
 
-        await runner._handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content", "")
@@ -392,10 +393,10 @@ class TestBusySessionAck:
         runner.adapters[event.source.platform] = adapter
 
         # Mock the drain-specific methods
-        runner._queue_during_drain_enabled = lambda: False
+        busy_session_runtime_for(runner).queue_during_drain_enabled = lambda: False
         runner._status_action_gerund = lambda: "restarting"
 
-        result = await runner._handle_active_session_busy_message(event, sk)
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert result is True
 
         call_kwargs = adapter._send_with_retry.call_args
@@ -416,7 +417,7 @@ class TestBusySessionAck:
         runner._running_agents_ts[sk] = time.time()
         runner.adapters[event.source.platform] = adapter
 
-        result = await runner._handle_active_session_busy_message(event, sk)
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert result is True
         # Should still send ack
         adapter._send_with_retry.assert_called_once()
@@ -432,7 +433,7 @@ class TestBusySessionAck:
         # No adapter registered
         runner._running_agents[sk] = MagicMock()
 
-        result = await runner._handle_active_session_busy_message(event, sk)
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert result is False  # not handled, let default path try
 
 
@@ -466,7 +467,7 @@ class TestBusySessionOnboardingHint:
         runner._running_agents_ts[sk] = time.time() - 5
         runner.adapters[event.source.platform] = adapter
 
-        await runner._handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content", "")
@@ -515,7 +516,7 @@ class TestBusySessionOnboardingHint:
         runner._running_agents_ts[sk] = time.time() - 5
         runner.adapters[event.source.platform] = adapter
 
-        await runner._handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content", "")
@@ -544,7 +545,7 @@ class TestBusySessionOnboardingHint:
         runner._running_agents[sk] = agent
 
         with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event"):
-            await runner._handle_active_session_busy_message(event, sk)
+            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
         assert "Queued for the next turn" in content

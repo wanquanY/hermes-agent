@@ -22,34 +22,39 @@ def _load_gateway_config() -> dict:
     return load_gateway_runtime_config(_hermes_home)
 
 
-class GatewayBusySessionRuntimeMixin:
-    def _queue_during_drain_enabled(self) -> bool:
-        return self._restart_requested and self._busy_input_mode in {"queue", "steer"}
+class GatewayBusySessionRuntimeService:
+    def __init__(self, runner):
+        self._runner = runner
 
-    def _enqueue_fifo(self, session_key: str, queued_event: MessageEvent, adapter: Any) -> None:
+    def queue_during_drain_enabled(self) -> bool:
+        runner = self._runner
+        return runner._restart_requested and runner._busy_input_mode in {"queue", "steer"}
+
+    def enqueue_fifo(self, session_key: str, queued_event: MessageEvent, adapter: Any) -> None:
         """Append a /queue event to the FIFO chain for a session."""
         if adapter is None:
             return
         pending_slot = getattr(adapter, "_pending_messages", None)
         if pending_slot is None:
             return
-        queued_events = getattr(self, "_queued_events", None)
+        runner = self._runner
+        queued_events = getattr(runner, "_queued_events", None)
         if queued_events is None:
             queued_events = {}
-            self._queued_events = queued_events
+            runner._queued_events = queued_events
         if session_key in pending_slot:
             queued_events.setdefault(session_key, []).append(queued_event)
         else:
             pending_slot[session_key] = queued_event
 
-    def _promote_queued_event(
+    def promote_queued_event(
         self,
         session_key: str,
         adapter: Any,
         pending_event: Optional[MessageEvent],
     ) -> Optional[MessageEvent]:
         """Promote the next overflow item after the slot was drained."""
-        queued_events = getattr(self, "_queued_events", None)
+        queued_events = getattr(self._runner, "_queued_events", None)
         if not queued_events:
             return pending_event
         overflow = queued_events.get(session_key)
@@ -66,22 +71,23 @@ class GatewayBusySessionRuntimeMixin:
             queued_events.setdefault(session_key, []).insert(0, next_queued)
         return pending_event
 
-    def _queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
+    def queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
         """Total pending /queue items for a session: slot plus overflow."""
-        queued_events = getattr(self, "_queued_events", None) or {}
+        queued_events = getattr(self._runner, "_queued_events", None) or {}
         depth = len(queued_events.get(session_key, []))
         if adapter is not None and session_key in getattr(adapter, "_pending_messages", {}):
             depth += 1
         return depth
 
-    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
-        adapter = self.adapters.get(event.source.platform)
+    def queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
+        adapter = self._runner.adapters.get(event.source.platform)
         if not adapter:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
-    async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        if not self._is_user_authorized(event.source):
+    async def handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        runner = self._runner
+        if not runner._is_user_authorized(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
                 "user=%s (%s), platform=%s, session=%s",
@@ -92,15 +98,15 @@ class GatewayBusySessionRuntimeMixin:
             )
             return True
 
-        if self._draining:
-            return await self._handle_draining_busy_message(event, session_key)
+        if runner._draining:
+            return await self.handle_draining_busy_message(event, session_key)
 
-        adapter = self.adapters.get(event.source.platform)
+        adapter = runner.adapters.get(event.source.platform)
         if not adapter:
             return False
 
-        running_agent = self._running_agents.get(session_key)
-        effective_mode = self._busy_input_mode
+        running_agent = runner._running_agents.get(session_key)
+        effective_mode = runner._busy_input_mode
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
@@ -138,13 +144,13 @@ class GatewayBusySessionRuntimeMixin:
 
         busy_ack_cooldown = 30
         now = time.time()
-        last_ack = self._busy_ack_ts.get(session_key, 0)
+        last_ack = runner._busy_ack_ts.get(session_key, 0)
         if now - last_ack < busy_ack_cooldown:
             return True
 
-        self._busy_ack_ts[session_key] = now
+        runner._busy_ack_ts[session_key] = now
 
-        status_detail = self._busy_status_detail(session_key, running_agent, now)
+        status_detail = self.busy_status_detail(session_key, running_agent, now)
         if is_steer_mode:
             message = (
                 f"⏩ Steered into current run{status_detail}. "
@@ -161,36 +167,37 @@ class GatewayBusySessionRuntimeMixin:
                 f"I'll respond to your message shortly."
             )
 
-        message = self._append_busy_onboarding_hint(
+        message = self.append_busy_onboarding_hint(
             message,
             is_steer_mode=is_steer_mode,
             is_queue_mode=is_queue_mode,
         )
-        await self._send_busy_ack(event, adapter, message)
+        await self.send_busy_ack(event, adapter, message)
         return True
 
-    async def _handle_draining_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        adapter = self.adapters.get(event.source.platform)
+    async def handle_draining_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        runner = self._runner
+        adapter = runner.adapters.get(event.source.platform)
         if not adapter:
             return True
 
-        reply_anchor = self._reply_anchor_for_event(event)
-        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-        if self._queue_during_drain_enabled():
-            self._queue_or_replace_pending_event(session_key, event)
-            message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+        reply_anchor = runner._reply_anchor_for_event(event)
+        thread_meta = runner._thread_metadata_for_source(event.source, reply_anchor)
+        if self.queue_during_drain_enabled():
+            self.queue_or_replace_pending_event(session_key, event)
+            message = f"⏳ Gateway {runner._status_action_gerund()} — queued for the next turn after it comes back."
         else:
-            message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+            message = f"⏳ Gateway is {runner._status_action_gerund()} and is not accepting another turn right now."
 
         await adapter._send_with_retry(
             chat_id=event.source.chat_id,
             content=message,
-            reply_to=self._busy_reply_to(event, reply_anchor),
+            reply_to=self.busy_reply_to(event, reply_anchor),
             metadata=thread_meta,
         )
         return True
 
-    def _busy_status_detail(self, session_key: str, running_agent: Any, now: float) -> str:
+    def busy_status_detail(self, session_key: str, running_agent: Any, now: float) -> str:
         status_parts = []
         if running_agent and running_agent is not AGENT_PENDING_SENTINEL:
             try:
@@ -198,7 +205,7 @@ class GatewayBusySessionRuntimeMixin:
                 iteration = summary.get("api_call_count", 0)
                 max_iter = summary.get("max_iterations", 0)
                 current_tool = summary.get("current_tool")
-                start_ts = self._running_agents_ts.get(session_key, 0)
+                start_ts = self._runner._running_agents_ts.get(session_key, 0)
                 if start_ts:
                     elapsed_min = int((now - start_ts) / 60)
                     if elapsed_min > 0:
@@ -207,11 +214,11 @@ class GatewayBusySessionRuntimeMixin:
                     status_parts.append(f"iteration {iteration}/{max_iter}")
                 if current_tool:
                     status_parts.append(f"running: {current_tool}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to summarize busy status for %s: %s", session_key, exc)
         return f" ({', '.join(status_parts)})" if status_parts else ""
 
-    def _append_busy_onboarding_hint(
+    def append_busy_onboarding_hint(
         self,
         message: str,
         *,
@@ -241,21 +248,22 @@ class GatewayBusySessionRuntimeMixin:
             logger.debug("Failed to apply busy-input onboarding hint: %s", exc)
             return message
 
-    async def _send_busy_ack(self, event: MessageEvent, adapter: Any, message: str) -> None:
-        reply_anchor = self._reply_anchor_for_event(event)
-        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+    async def send_busy_ack(self, event: MessageEvent, adapter: Any, message: str) -> None:
+        runner = self._runner
+        reply_anchor = runner._reply_anchor_for_event(event)
+        thread_meta = runner._thread_metadata_for_source(event.source, reply_anchor)
         try:
             await adapter._send_with_retry(
                 chat_id=event.source.chat_id,
                 content=message,
-                reply_to=self._busy_reply_to(event, reply_anchor),
+                reply_to=self.busy_reply_to(event, reply_anchor),
                 metadata=thread_meta,
             )
         except Exception as exc:
             logger.debug("Failed to send busy-ack: %s", exc)
 
     @staticmethod
-    def _busy_reply_to(event: MessageEvent, reply_anchor):
+    def busy_reply_to(event: MessageEvent, reply_anchor):
         if (
             event.source.platform == Platform.TELEGRAM
             and event.source.chat_type == "dm"
@@ -265,3 +273,12 @@ class GatewayBusySessionRuntimeMixin:
         if event.source.platform == Platform.TELEGRAM and event.source.thread_id:
             return None
         return event.message_id
+
+
+def busy_session_runtime_for(runner) -> GatewayBusySessionRuntimeService:
+    service = getattr(runner, "busy_session_runtime", None)
+    if isinstance(service, GatewayBusySessionRuntimeService):
+        return service
+    service = GatewayBusySessionRuntimeService(runner)
+    runner.busy_session_runtime = service
+    return service

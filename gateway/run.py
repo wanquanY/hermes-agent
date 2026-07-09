@@ -68,7 +68,7 @@ from hermes_gateway.bootstrap import (
     restart_notification_pending as _restart_notification_pending_for_home,
 )
 from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
-from hermes_gateway.busy_session_runtime import GatewayBusySessionRuntimeMixin
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
 from hermes_gateway.conversation_editing_commands import GatewayConversationEditingCommandMixin
@@ -505,7 +505,6 @@ class GatewayRunner(
     GatewayApprovalCommandMixin,
     GatewayBackgroundTaskMixin,
     GatewayBundlesCommandMixin,
-    GatewayBusySessionRuntimeMixin,
     GatewayCodexRuntimeCommandMixin,
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
@@ -1608,8 +1607,8 @@ class GatewayRunner(
                         message_id=event.message_id,
                         channel_prompt=event.channel_prompt,
                     )
-                    self._enqueue_fifo(_quick_key, queued_event, adapter)
-                depth = self._queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
+                    busy_session_runtime_for(self).enqueue_fifo(_quick_key, queued_event, adapter)
+                depth = busy_session_runtime_for(self).queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
                 if depth <= 1:
                     return "Queued for the next turn."
                 return f"Queued for the next turn. ({depth} queued)"
@@ -1817,16 +1816,16 @@ class GatewayRunner(
                     )
                 return None
             if self._draining:
-                if self._queue_during_drain_enabled():
-                    self._queue_or_replace_pending_event(_quick_key, event)
+                if busy_session_runtime_for(self).queue_during_drain_enabled():
+                    busy_session_runtime_for(self).queue_or_replace_pending_event(_quick_key, event)
                 return (
                     f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-                    if self._queue_during_drain_enabled()
+                    if busy_session_runtime_for(self).queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
             if self._busy_input_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
-                self._queue_or_replace_pending_event(_quick_key, event)
+                busy_session_runtime_for(self).queue_or_replace_pending_event(_quick_key, event)
                 return None
             if self._busy_input_mode == "steer":
                 # Steer mode: inject text into the running agent mid-run via
@@ -1844,7 +1843,7 @@ class GatewayRunner(
                     logger.debug("PRIORITY steer for session %s", _quick_key)
                     return None
                 logger.debug("PRIORITY steer-fallback-to-queue for session %s", _quick_key)
-                self._queue_or_replace_pending_event(_quick_key, event)
+                busy_session_runtime_for(self).queue_or_replace_pending_event(_quick_key, event)
                 return None
             logger.debug("PRIORITY interrupt for session %s", _quick_key)
             running_agent.interrupt(event.text)
@@ -5608,7 +5607,7 @@ class GatewayRunner(
                 # occupied for the full FIFO chain, which (a) preserves
                 # order, and (b) causes any mid-chain /queue to correctly
                 # route to overflow rather than jumping the queue.
-                pending_event = self._promote_queued_event(session_key, adapter, pending_event)
+                pending_event = busy_session_runtime_for(self).promote_queued_event(session_key, adapter, pending_event)
                 if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):

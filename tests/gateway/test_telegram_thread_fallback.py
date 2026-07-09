@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import PlatformConfig, Platform
 from channels.platforms.base import (
     MessageEvent,
@@ -560,7 +561,7 @@ async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegra
     runner._busy_input_mode = "interrupt"
     runner._is_user_authorized = lambda _source: True
 
-    assert await runner._handle_active_session_busy_message(event, session_key) is True
+    assert await busy_session_runtime_for(runner).handle_active_session_busy_message(event, session_key) is True
 
     assert adapter.calls
     assert adapter.calls[0]["reply_to"] == "463"

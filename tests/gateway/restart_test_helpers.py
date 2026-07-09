@@ -2,6 +2,7 @@ import asyncio
 from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock
 
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
@@ -78,14 +79,8 @@ def make_restart_runner(
     runner._session_sources = OrderedDict()
     runner._session_sources_max = 512
     runner._shutdown_all_gateway_honcho = lambda: None
-    runner._queue_or_replace_pending_event = GatewayRunner._queue_or_replace_pending_event.__get__(
-        runner, GatewayRunner
-    )
     runner._session_key_for_source = GatewayRunner._session_key_for_source.__get__(
         runner, GatewayRunner
-    )
-    runner._handle_active_session_busy_message = (
-        GatewayRunner._handle_active_session_busy_message.__get__(runner, GatewayRunner)
     )
     runner._handle_restart_command = GatewayRunner._handle_restart_command.__get__(
         runner, GatewayRunner
@@ -103,9 +98,6 @@ def make_restart_runner(
         runner, GatewayRunner
     )
     runner._status_action_gerund = GatewayRunner._status_action_gerund.__get__(
-        runner, GatewayRunner
-    )
-    runner._queue_during_drain_enabled = GatewayRunner._queue_during_drain_enabled.__get__(
         runner, GatewayRunner
     )
     runner._running_agent_count = GatewayRunner._running_agent_count.__get__(
@@ -137,6 +129,8 @@ def make_restart_runner(
 
     platform_adapter = adapter or RestartTestAdapter()
     platform_adapter.set_message_handler(AsyncMock(return_value=None))
-    platform_adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
+    platform_adapter.set_busy_session_handler(
+        busy_session_runtime_for(runner).handle_active_session_busy_message
+    )
     runner.adapters = {Platform.TELEGRAM: platform_adapter}
     return runner, platform_adapter

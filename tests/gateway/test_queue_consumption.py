@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.pending_events import dequeue_pending_event
 from channels.platforms.base import (
     BasePlatformAdapter,
@@ -193,12 +194,12 @@ class TestQueueConsumptionAfterCompletion:
         ]
 
         for ev in events:
-            runner._enqueue_fifo(session_key, ev, adapter)
+            busy_session_runtime_for(runner).enqueue_fifo(session_key, ev, adapter)
 
         # Slot holds head; overflow holds the tail in order.
         assert adapter._pending_messages[session_key].text == "first"
         assert [e.text for e in runner._queued_events[session_key]] == ["second", "third"]
-        assert runner._queue_depth(session_key, adapter=adapter) == 3
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 3
 
     def test_promote_advances_queue_fifo(self):
         """After the slot drains, the next overflow item is promoted."""
@@ -210,7 +211,7 @@ class TestQueueConsumptionAfterCompletion:
         session_key = "telegram:user:123"
 
         for text in ("A", "B", "C"):
-            runner._enqueue_fifo(
+            busy_session_runtime_for(runner).enqueue_fifo(
                 session_key,
                 MessageEvent(
                     text=text,
@@ -223,28 +224,28 @@ class TestQueueConsumptionAfterCompletion:
 
         # Simulate turn 1 drain: consume slot, promote next.
         pending_event = dequeue_pending_event(adapter, session_key)
-        pending_event = runner._promote_queued_event(session_key, adapter, pending_event)
+        pending_event = busy_session_runtime_for(runner).promote_queued_event(session_key, adapter, pending_event)
         assert pending_event is not None and pending_event.text == "A"
         assert adapter._pending_messages[session_key].text == "B"
-        assert runner._queue_depth(session_key, adapter=adapter) == 2
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 2
 
         # Simulate turn 2 drain.
         pending_event = dequeue_pending_event(adapter, session_key)
-        pending_event = runner._promote_queued_event(session_key, adapter, pending_event)
+        pending_event = busy_session_runtime_for(runner).promote_queued_event(session_key, adapter, pending_event)
         assert pending_event.text == "B"
         assert adapter._pending_messages[session_key].text == "C"
         assert session_key not in runner._queued_events  # overflow emptied
 
         # Simulate turn 3 drain.
         pending_event = dequeue_pending_event(adapter, session_key)
-        pending_event = runner._promote_queued_event(session_key, adapter, pending_event)
+        pending_event = busy_session_runtime_for(runner).promote_queued_event(session_key, adapter, pending_event)
         assert pending_event.text == "C"
         assert session_key not in adapter._pending_messages
-        assert runner._queue_depth(session_key, adapter=adapter) == 0
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 0
 
         # Turn 4: nothing pending.
         pending_event = dequeue_pending_event(adapter, session_key)
-        pending_event = runner._promote_queued_event(session_key, adapter, pending_event)
+        pending_event = busy_session_runtime_for(runner).promote_queued_event(session_key, adapter, pending_event)
         assert pending_event is None
 
     def test_promote_stages_overflow_when_slot_already_populated(self):
@@ -259,7 +260,7 @@ class TestQueueConsumptionAfterCompletion:
 
         # /queue once — lands in slot. Second /queue — overflow.
         for text in ("Q1", "Q2"):
-            runner._enqueue_fifo(
+            busy_session_runtime_for(runner).enqueue_fifo(
                 session_key,
                 MessageEvent(
                     text=text,
@@ -289,7 +290,7 @@ class TestQueueConsumptionAfterCompletion:
         # follow-up's turn runs — so here, the slot keeps the interrupt
         # and Q2 stays queued.  Verify we return the interrupt event and
         # Q2 is positioned to run next.
-        returned = runner._promote_queued_event(session_key, adapter, interrupt_follow_up)
+        returned = busy_session_runtime_for(runner).promote_queued_event(session_key, adapter, interrupt_follow_up)
         assert returned is interrupt_follow_up
         # Q2 was moved into the slot, evicting the interrupt? No —
         # current implementation puts Q2 in the slot unconditionally,
@@ -299,7 +300,7 @@ class TestQueueConsumptionAfterCompletion:
         # gets the next-in-line item.
         assert adapter._pending_messages[session_key].text == "Q2"
 
-    def test_queue_depth_counts_slot_plus_overflow(self):
+    def test_busy_service_depth_counts_slot_plus_overflow(self):
         from gateway.run import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
@@ -307,9 +308,9 @@ class TestQueueConsumptionAfterCompletion:
         adapter = _StubAdapter()
         session_key = "telegram:user:depth"
 
-        assert runner._queue_depth(session_key, adapter=adapter) == 0
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 0
 
-        runner._enqueue_fifo(
+        busy_session_runtime_for(runner).enqueue_fifo(
             session_key,
             MessageEvent(
                 text="one",
@@ -319,10 +320,10 @@ class TestQueueConsumptionAfterCompletion:
             ),
             adapter,
         )
-        assert runner._queue_depth(session_key, adapter=adapter) == 1
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 1
 
         for text in ("two", "three"):
-            runner._enqueue_fifo(
+            busy_session_runtime_for(runner).enqueue_fifo(
                 session_key,
                 MessageEvent(
                     text=text,
@@ -332,7 +333,7 @@ class TestQueueConsumptionAfterCompletion:
                 ),
                 adapter,
             )
-        assert runner._queue_depth(session_key, adapter=adapter) == 3
+        assert busy_session_runtime_for(runner).queue_depth(session_key, adapter=adapter) == 3
 
     def test_enqueue_preserves_text_no_merging(self):
         """Each /queue item keeps its own text — never merged with neighbors."""
@@ -345,7 +346,7 @@ class TestQueueConsumptionAfterCompletion:
 
         texts = ["deploy the branch", "then run tests", "finally push"]
         for text in texts:
-            runner._enqueue_fifo(
+            busy_session_runtime_for(runner).enqueue_fifo(
                 session_key,
                 MessageEvent(
                     text=text,

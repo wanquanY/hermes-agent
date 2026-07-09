@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource
@@ -43,7 +44,9 @@ def _bootstrap(monkeypatch, tmp_path):
     runner._pending_approvals = {}
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._handle_active_session_busy_message = AsyncMock(return_value=False)
+    busy_session_runtime_for(runner).handle_active_session_busy_message = AsyncMock(
+        return_value=False
+    )
     runner._session_db = MagicMock()
     runner._recover_telegram_topic_thread_id = lambda _source: None
     runner._cache_session_source = lambda _key, _source: None

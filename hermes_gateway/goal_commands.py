@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ class GatewayGoalCommandMixin:
                     message_id=event.message_id,
                     channel_prompt=event.channel_prompt,
                 )
-                self._enqueue_fifo(_quick_key, kickoff_event, adapter)
+                busy_session_runtime_for(self).enqueue_fifo(_quick_key, kickoff_event, adapter)
             except Exception as exc:
                 logger.debug("goal kickoff enqueue failed: %s", exc)
 
@@ -363,6 +364,6 @@ class GatewayGoalCommandMixin:
                     message_id=None,
                     channel_prompt=None,
                 )
-                self._enqueue_fifo(_quick_key, cont_event, adapter)
+                busy_session_runtime_for(self).enqueue_fifo(_quick_key, cont_event, adapter)
         except Exception as exc:
             logger.debug("goal continuation: enqueue failed: %s", exc)

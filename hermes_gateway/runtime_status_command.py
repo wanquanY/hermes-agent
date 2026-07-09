@@ -9,6 +9,7 @@ from typing import Union
 from agent.i18n import t
 from channels.platforms.base import EphemeralReply, MessageEvent
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 logger = logging.getLogger(__name__)
 _INTERRUPT_REASON_STOP = "Stop requested"
@@ -24,7 +25,7 @@ class GatewayRuntimeStatusCommandMixin:
         session_key = session_entry.session_key
         is_running = session_key in self._running_agents
         adapter = self.adapters.get(source.platform) if source else None
-        queue_depth = self._queue_depth(session_key, adapter=adapter)
+        queue_depth = busy_session_runtime_for(self).queue_depth(session_key, adapter=adapter)
 
         title = None
         db_total_tokens = 0
