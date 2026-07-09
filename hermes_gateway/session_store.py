@@ -385,6 +385,14 @@ class SessionStore:
                 return True
         return False
 
+    def get_entry(self, session_key: str) -> Optional[SessionEntry]:
+        """Return the current SessionEntry for a session key without mutating it."""
+        if not session_key:
+            return None
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
+
     def clear_resume_pending(self, session_key: str) -> bool:
         """Clear the resume-pending flag after a successful resumed turn.
 
@@ -649,5 +657,4 @@ class SessionStore:
         except Exception as e:
             logger.debug("Could not load messages from repository: %s", e)
             return []
-
 

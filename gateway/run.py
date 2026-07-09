@@ -54,6 +54,7 @@ from hermes_gateway.agent_turn_runtime import agent_turn_runtime_for
 from hermes_gateway.agent_run_supervision import agent_run_supervisor_for
 from hermes_gateway.agent_streaming_runtime import agent_streaming_for
 from hermes_gateway.agent_interaction_callbacks import agent_interaction_callbacks_for
+from hermes_gateway.agent_input_preparation import agent_input_preparation_for
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -1917,183 +1918,27 @@ class GatewayRunner(
             agent_holder[0] = agent
             # Capture the full tool definitions for transcript logging
             tools_holder[0] = agent.tools if hasattr(agent, 'tools') else None
-            
-            # Convert history to agent format.
-            # Two cases:
-            #   1. Normal path (from transcript): simple {role, content, timestamp} dicts
-            #      - Strip timestamps, keep role+content
-            #   2. Interrupt path (from agent result["messages"]): full agent messages
-            #      that may include tool_calls, tool_call_id, reasoning, etc.
-            #      - These must be passed through intact so the API sees valid
-            #        assistant→tool sequences (dropping tool_calls causes 500 errors)
-            agent_history = []
-            for msg in history:
-                role = msg.get("role")
-                if not role:
-                    continue
-                
-                # Skip metadata entries (tool definitions, session info)
-                # -- these are for transcript logging, not for the LLM
-                if role in {"session_meta",}:
-                    continue
-                
-                # Skip system messages -- the agent rebuilds its own system prompt
-                if role == "system":
-                    continue
-                
-                # Rich agent messages (tool_calls, tool results) must be passed
-                # through intact so the API sees valid assistant→tool sequences
-                has_tool_calls = "tool_calls" in msg
-                has_tool_call_id = "tool_call_id" in msg
-                is_tool_message = role == "tool"
-                
-                if has_tool_calls or has_tool_call_id or is_tool_message:
-                    clean_msg = {k: v for k, v in msg.items() if k != "timestamp"}
-                    agent_history.append(clean_msg)
-                else:
-                    # Simple text message - just need role and content
-                    content = msg.get("content")
-                    if content:
-                        # Tag cross-platform mirror messages so the agent knows their origin
-                        if msg.get("mirror"):
-                            mirror_src = msg.get("mirror_source", "another session")
-                            content = f"[Delivered from {mirror_src}] {content}"
-                        # Preserve assistant reasoning + Codex replay fields so
-                        # multi-turn reasoning context, prefix-cache hits, and
-                        # provider-specific echo requirements survive session
-                        # reload.  See ``_ASSISTANT_REPLAY_FIELDS`` for the full
-                        # whitelist and rationale.
-                        entry = _build_replay_entry(role, content, msg)
-                        agent_history.append(entry)
-            
-            # Collect MEDIA paths already in history so we can exclude them
-            # from the current turn's extraction. This is compression-safe:
-            # even if the message list shrinks, we know which paths are old.
-            _history_media_paths: set = _collect_history_media_paths(agent_history)
-            
-            # Prepend pending model switch note so the model knows about the switch
-            _pending_notes = getattr(self, '_pending_model_notes', {})
-            _msn = _pending_notes.pop(session_key, None) if session_key else None
-            if _msn:
-                message = _msn + "\n\n" + message
-
-            # Auto-continue: if the loaded history ends with a tool result,
-            # the previous agent turn was interrupted mid-work (gateway
-            # restart, crash, SIGTERM).  Prepend a system note so the model
-            # finishes processing the pending tool results before addressing
-            # the user's new message.  (#4493)
-            #
-            # Session-level resume_pending (set on drain-timeout shutdown)
-            # escalates the wording — the transcript's last role may be
-            # anything (tool, assistant with unfinished work, etc.), so we
-            # give a stronger, reason-aware instruction that subsumes the
-            # tool-tail case.
-            #
-            # Freshness gate (#16802): both branches are gated on the age
-            # of the last persisted transcript row.  That is the correct
-            # "when did we last do anything here" signal for both the
-            # resume_pending path (restart watchdog) and the tool-tail
-            # path (in-flight tool loop killed).  We read ``history[-1]``
-            # here because ``agent_history`` has already stripped the
-            # ``timestamp`` field off tool/tool_call rows for API purity
-            # (see the `k != "timestamp"` filter above).  Rows without a
-            # timestamp (legacy transcripts) are treated as fresh so the
-            # historical auto-continue behaviour is preserved.
-            _freshness_window = _auto_continue_freshness_window()
-            _interruption_is_fresh = _is_fresh_gateway_interruption(
-                _last_transcript_timestamp(history),
-                window_secs=_freshness_window,
-            )
-
-            _resume_entry = None
-            if session_key:
-                try:
-                    _resume_entry = self.session_store._entries.get(session_key)
-                except Exception:
-                    _resume_entry = None
-            _is_resume_pending = bool(
-                _resume_entry is not None
-                and getattr(_resume_entry, "resume_pending", False)
-                and _interruption_is_fresh
-            )
-            _has_fresh_tool_tail = bool(
-                agent_history
-                and agent_history[-1].get("role") == "tool"
-                and _interruption_is_fresh
-            )
-
-            if _is_resume_pending:
-                _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
-                _reason_phrase = (
-                    "a gateway restart"
-                    if _reason == "restart_timeout"
-                    else "a gateway shutdown"
-                    if _reason == "shutdown_timeout"
-                    else "a gateway interruption"
-                )
-                message = (
-                    f"[System note: Your previous turn in this session was interrupted "
-                    f"by {_reason_phrase}. The conversation history below is intact. "
-                    f"If it contains unfinished tool result(s), process them first and "
-                    f"summarize what was accomplished, then address the user's new "
-                    f"message below.]\n\n"
-                    + message
-                )
-            elif _has_fresh_tool_tail:
-                message = (
-                    "[System note: Your previous turn was interrupted before you could "
-                    "process the last tool result(s). The conversation history contains "
-                    "tool outputs you haven't responded to yet. Please finish processing "
-                    "those results and summarize what was accomplished, then address the "
-                    "user's new message below.]\n\n"
-                    + message
-                )
-
-            # Consume one-shot /reload-skills note (if the user ran
-            # /reload-skills since their last turn in this session). Same
-            # queue pattern as CLI: prepend to the NEXT user message, then
-            # clear. Nothing was written to the transcript out-of-band, so
-            # message alternation stays intact.
-            _pending_notes = getattr(self, "_pending_skills_reload_notes", None)
-            if _pending_notes and session_key and session_key in _pending_notes:
-                _srn = _pending_notes.pop(session_key, None)
-                if _srn:
-                    message = _srn + "\n\n" + message
+            prepared_input = agent_input_preparation_for(
+                runner=self,
+                session_key=session_key,
+                history=history,
+                build_replay_entry=_build_replay_entry,
+                collect_history_media_paths=_collect_history_media_paths,
+                last_transcript_timestamp=_last_transcript_timestamp,
+                is_fresh_gateway_interruption=_is_fresh_gateway_interruption,
+                auto_continue_freshness_window=_auto_continue_freshness_window,
+                consume_native_image_paths=self._consume_pending_native_image_paths,
+            ).prepare(message)
+            agent_history = prepared_input.agent_history
+            _history_media_paths = prepared_input.history_media_paths
 
             _approval_session_token = interaction_callbacks.activate_approval()
             try:
-                # If _prepare_inbound_message_text buffered image paths for native
-                # attachment, wrap the user turn as an OpenAI-style multimodal
-                # content list. Consume-and-clear so subsequent turns on the same
-                # runner instance don't re-attach stale images.
-                _native_imgs = self._consume_pending_native_image_paths(session_key)
-                if _native_imgs:
-                    try:
-                        from agent.image_routing import build_native_content_parts
-                        _parts, _skipped = build_native_content_parts(
-                            message,
-                            _native_imgs,
-                        )
-                        if _skipped:
-                            logger.warning(
-                                "Native image attachment: skipped %d unreadable path(s): %s",
-                                len(_skipped), _skipped,
-                            )
-                        if any(p.get("type") == "image_url" for p in _parts):
-                            _run_message: Any = _parts
-                        else:
-                            # All images failed to read — fall back to plain text.
-                            _run_message = message
-                    except Exception as _img_exc:
-                        logger.warning(
-                            "Native image attachment failed, falling back to text: %s",
-                            _img_exc,
-                        )
-                        _run_message = message
-                else:
-                    _run_message = message
-
-                result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(
+                    prepared_input.message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                )
             finally:
                 interaction_callbacks.deactivate_approval(_approval_session_token)
             result_holder[0] = result
