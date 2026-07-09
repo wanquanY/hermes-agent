@@ -70,6 +70,7 @@ from hermes_gateway.bootstrap import (
     restart_notification_pending as _restart_notification_pending_for_home,
 )
 from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
+from hermes_gateway.busy_session_runtime import GatewayBusySessionRuntimeMixin
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
 from hermes_gateway.conversation_editing_commands import GatewayConversationEditingCommandMixin
@@ -506,6 +507,7 @@ class GatewayRunner(
     GatewayApprovalCommandMixin,
     GatewayBackgroundTaskMixin,
     GatewayBundlesCommandMixin,
+    GatewayBusySessionRuntimeMixin,
     GatewayCodexRuntimeCommandMixin,
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
@@ -1271,11 +1273,6 @@ class GatewayRunner(
     def _status_action_gerund(self) -> str:
         return "restarting" if self._restart_requested else "shutting down"
 
-    def _queue_during_drain_enabled(self) -> bool:
-        # Both "queue" and "steer" modes imply the user doesn't want messages
-        # to be lost during restart — queue them for the newly-spawned gateway
-        # process to pick up.  "interrupt" mode drops them (current behaviour).
-        return self._restart_requested and self._busy_input_mode in {"queue", "steer"}
 
     # -------- /queue FIFO helpers --------------------------------------
     # /queue must produce one full agent turn per invocation, in FIFO
@@ -1288,64 +1285,8 @@ class GatewayRunner(
     # it up.  Clearing happens on /new and /reset via
     # _handle_reset_command.
 
-    def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
-        """Append a /queue event to the FIFO chain for a session."""
-        if adapter is None:
-            return
-        pending_slot = getattr(adapter, "_pending_messages", None)
-        if pending_slot is None:
-            return
-        queued_events = getattr(self, "_queued_events", None)
-        if queued_events is None:
-            queued_events = {}
-            self._queued_events = queued_events
-        if session_key in pending_slot:
-            queued_events.setdefault(session_key, []).append(queued_event)
-        else:
-            pending_slot[session_key] = queued_event
 
-    def _promote_queued_event(
-        self,
-        session_key: str,
-        adapter: Any,
-        pending_event: Optional["MessageEvent"],
-    ) -> Optional["MessageEvent"]:
-        """Promote the next overflow item after the slot was drained.
 
-        Called at the drain site after _dequeue_pending_event consumed
-        (or failed to consume) the slot.  If there's an overflow item:
-          - When pending_event is None (slot was empty), return the
-            overflow head as the new pending_event.
-          - When pending_event already exists (slot was populated by an
-            interrupt follow-up or similar), stage the overflow head in
-            the slot so the NEXT recursion picks it up.
-        Returns the (possibly updated) pending_event for drain to use.
-        """
-        queued_events = getattr(self, "_queued_events", None)
-        if not queued_events:
-            return pending_event
-        overflow = queued_events.get(session_key)
-        if not overflow:
-            return pending_event
-        next_queued = overflow.pop(0)
-        if not overflow:
-            queued_events.pop(session_key, None)
-        if pending_event is None:
-            return next_queued
-        if adapter is not None and hasattr(adapter, "_pending_messages"):
-            adapter._pending_messages[session_key] = next_queued
-        else:
-            # No adapter — push back so we don't silently drop the item.
-            queued_events.setdefault(session_key, []).insert(0, next_queued)
-        return pending_event
-
-    def _queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
-        """Total pending /queue items for a session — slot + overflow."""
-        queued_events = getattr(self, "_queued_events", None) or {}
-        depth = len(queued_events.get(session_key, []))
-        if adapter is not None and session_key in getattr(adapter, "_pending_messages", {}):
-            depth += 1
-        return depth
 
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
         try:
@@ -1635,208 +1576,7 @@ class GatewayRunner(
             if agent is not _AGENT_PENDING_SENTINEL
         }
 
-    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
-        adapter = self.adapters.get(event.source.platform)
-        if not adapter:
-            return
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
 
-    async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
-        # --- Authorization gate (#17775) ---
-        # The cold path (_handle_message) checks _is_user_authorized before
-        # creating a session.  The busy path must enforce the same check;
-        # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
-        # can inject messages into an active session they don't own.
-        if not self._is_user_authorized(event.source):
-            logger.warning(
-                "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s",
-                event.source.user_id,
-                event.source.user_name,
-                event.source.platform.value if event.source.platform else "unknown",
-                session_key,
-            )
-            return True  # handled (silently dropped); do not fall through
-
-        # --- Draining case (gateway restarting/stopping) ---
-        if self._draining:
-            adapter = self.adapters.get(event.source.platform)
-            if not adapter:
-                return True
-
-            reply_anchor = self._reply_anchor_for_event(event)
-            thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-            if self._queue_during_drain_enabled():
-                self._queue_or_replace_pending_event(session_key, event)
-                message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-            else:
-                message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
-
-            await adapter._send_with_retry(
-                chat_id=event.source.chat_id,
-                content=message,
-                reply_to=(
-                    reply_anchor
-                    if event.source.platform == Platform.TELEGRAM
-                    and event.source.chat_type == "dm"
-                    and event.source.thread_id
-                    else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
-                ),
-                metadata=thread_meta,
-            )
-            return True
-
-        # Normal busy case (agent actively running a task)
-        adapter = self.adapters.get(event.source.platform)
-        if not adapter:
-            return False  # let default path handle it
-
-        running_agent = self._running_agents.get(session_key)
-
-        # Steer mode: inject mid-run via running_agent.steer() instead of
-        # queueing + interrupting.  If the agent isn't running yet
-        # (sentinel) or lacks steer(), or the payload is empty, fall back
-        # to queue semantics so nothing is lost.
-        effective_mode = self._busy_input_mode
-        steered = False
-        if effective_mode == "steer":
-            steer_text = (event.text or "").strip()
-            can_steer = (
-                steer_text
-                and running_agent is not None
-                and running_agent is not _AGENT_PENDING_SENTINEL
-                and hasattr(running_agent, "steer")
-            )
-            if can_steer:
-                try:
-                    steered = bool(running_agent.steer(steer_text))
-                except Exception as exc:
-                    logger.warning("Gateway steer failed for session %s: %s", session_key, exc)
-                    steered = False
-            if not steered:
-                # Fall back to queue (merge into pending messages, no interrupt)
-                effective_mode = "queue"
-
-        # Store the message so it's processed as the next turn after the
-        # current run finishes (or is interrupted).  Skip this for a
-        # successful steer — the text already landed inside the run and
-        # must NOT also be replayed as a next-turn user message.
-        if not steered:
-            merge_pending_message_event(adapter._pending_messages, session_key, event)
-
-        is_queue_mode = effective_mode == "queue"
-        is_steer_mode = effective_mode == "steer"
-
-        # If not in queue/steer mode, interrupt the running agent immediately.
-        # This aborts in-flight tool calls and causes the agent loop to exit
-        # at the next check point.
-        if effective_mode == "interrupt" and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
-            try:
-                running_agent.interrupt(event.text)
-            except Exception:
-                pass  # don't let interrupt failure block the ack
-
-        # Check if busy ack is disabled — skip sending but still process the input.
-        # Placed before debounce so we don't stamp a "last ack" timestamp that was
-        # never actually delivered.
-        busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
-        if not busy_ack_enabled:
-            logger.debug("Busy ack suppressed for session %s", session_key)
-            return True  # input still processed, just no ack sent
-
-        # Debounce: only send an acknowledgment once every 30 seconds per session
-        # to avoid spamming the user when they send multiple messages quickly
-        _BUSY_ACK_COOLDOWN = 30
-        now = time.time()
-        last_ack = self._busy_ack_ts.get(session_key, 0)
-        if now - last_ack < _BUSY_ACK_COOLDOWN:
-            return True  # interrupt sent (if not queue), ack already delivered recently
-
-        self._busy_ack_ts[session_key] = now
-
-        # Build a status-rich acknowledgment
-        status_parts = []
-        if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
-            try:
-                summary = running_agent.get_activity_summary()
-                iteration = summary.get("api_call_count", 0)
-                max_iter = summary.get("max_iterations", 0)
-                current_tool = summary.get("current_tool")
-                start_ts = self._running_agents_ts.get(session_key, 0)
-                if start_ts:
-                    elapsed_min = int((now - start_ts) / 60)
-                    if elapsed_min > 0:
-                        status_parts.append(f"{elapsed_min} min elapsed")
-                if max_iter:
-                    status_parts.append(f"iteration {iteration}/{max_iter}")
-                if current_tool:
-                    status_parts.append(f"running: {current_tool}")
-            except Exception:
-                pass
-
-        status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
-        if is_steer_mode:
-            message = (
-                f"⏩ Steered into current run{status_detail}. "
-                f"Your message arrives after the next tool call."
-            )
-        elif is_queue_mode:
-            message = (
-                f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
-            )
-        else:
-            message = (
-                f"⚡ Interrupting current task{status_detail}. "
-                f"I'll respond to your message shortly."
-            )
-
-        # First-touch onboarding: the very first time a user sends a message
-        # while the agent is busy, append a one-time hint explaining the
-        # queue/interrupt knob.  Flag is persisted to config.yaml so it never
-        # fires again on this install.
-        try:
-            from agent.onboarding import (
-                BUSY_INPUT_FLAG,
-                busy_input_hint_gateway,
-                is_seen,
-                mark_seen,
-            )
-            _user_cfg = _load_gateway_config()
-            if not is_seen(_user_cfg, BUSY_INPUT_FLAG):
-                if is_steer_mode:
-                    _hint_mode = "steer"
-                elif is_queue_mode:
-                    _hint_mode = "queue"
-                else:
-                    _hint_mode = "interrupt"
-                message = (
-                    f"{message}\n\n"
-                    f"{busy_input_hint_gateway(_hint_mode)}"
-                )
-                mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
-        except Exception as _onb_err:
-            logger.debug("Failed to apply busy-input onboarding hint: %s", _onb_err)
-
-        reply_anchor = self._reply_anchor_for_event(event)
-        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-        try:
-            await adapter._send_with_retry(
-                chat_id=event.source.chat_id,
-                content=message,
-                reply_to=(
-                    reply_anchor
-                    if event.source.platform == Platform.TELEGRAM
-                    and event.source.chat_type == "dm"
-                    and event.source.thread_id
-                    else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
-                ),
-                metadata=thread_meta,
-            )
-        except Exception as e:
-            logger.debug("Failed to send busy-ack: %s", e)
-
-        return True
 
 
     def _interrupt_running_agents(self, reason: str) -> None:
