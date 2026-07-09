@@ -9,6 +9,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 class StubAdapter(BasePlatformAdapter):
@@ -639,10 +640,17 @@ class TestPauseResume:
 class TestPlatformSlashCommand:
     """Test the /platform list|pause|resume slash command handler."""
 
-    def _make_event(self, content: str):
-        ev = MagicMock()
-        ev.content = content
-        return ev
+    def _make_event(self, text: str):
+        return MessageEvent(
+            text=text,
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                user_id="u1",
+                chat_id="c1",
+                user_name="tester",
+                chat_type="dm",
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_list_shows_connected_and_paused(self):
@@ -713,4 +721,3 @@ class TestPlatformSlashCommand:
         runner = _make_runner()
         out = await runner._handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out
-
