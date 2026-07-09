@@ -6,7 +6,10 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import dotenv_values
+try:
+    from dotenv import dotenv_values
+except ImportError:
+    dotenv_values = None
 from utils import atomic_replace
 
 
@@ -87,10 +90,13 @@ def _sanitize_loaded_credentials() -> None:
 
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
-    try:
-        values = dotenv_values(dotenv_path=path, encoding="utf-8")
-    except UnicodeDecodeError:
-        values = dotenv_values(dotenv_path=path, encoding="latin-1")
+    if dotenv_values is None:
+        values = _read_simple_dotenv(path)
+    else:
+        try:
+            values = dotenv_values(dotenv_path=path, encoding="utf-8")
+        except UnicodeDecodeError:
+            values = dotenv_values(dotenv_path=path, encoding="latin-1")
 
     for key, value in values.items():
         if not key or value is None:
@@ -109,6 +115,21 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     # typically come from copy-pasting keys from PDFs or rich-text editors
     # that substitute Unicode lookalike glyphs (e.g. ʋ U+028B for v).
     _sanitize_loaded_credentials()
+
+
+def _read_simple_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip().strip('"').strip("'")
+        values[key] = value
+    return values
 
 
 def _sanitize_env_file_if_needed(path: Path) -> None:

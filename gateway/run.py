@@ -45,7 +45,6 @@ from typing import Dict, Optional, Any, List, Union
 from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
 from hermes_agent.repositories.session_repo import sanitize_session_title
-from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 from hermes_cli.config import cfg_get
 from hermes_gateway.approval_commands import GatewayApprovalCommandMixin
@@ -97,6 +96,7 @@ from hermes_gateway.model_command import model_command_for
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.inbound_message_preparation import GatewayInboundMessagePreparationMixin
 from hermes_gateway.insights_command import GatewayInsightsCommandMixin
+from hermes_gateway.runner_initialization import initialize_gateway_runner_state
 from hermes_gateway.profile_home_commands import GatewayProfileHomeCommandMixin
 from hermes_gateway.process_notifications import (
     drain_gateway_watch_events as _drain_gateway_watch_events,
@@ -160,7 +160,6 @@ from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
 from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.platform_runtime import platform_runtime_for
-from hermes_gateway.reasoning_command import reasoning_command_for
 from hermes_gateway.reload_mcp_command import reload_mcp_command_for
 from hermes_gateway.reload_skills_command import reload_skills_command_for
 from hermes_gateway.rollback_command import rollback_command_for
@@ -414,7 +413,6 @@ from hermes_gateway.config import (
     load_gateway_config,
 )
 from hermes_gateway.session import (
-    SessionStore,
     SessionSource,
     SessionContext,
     build_session_context,
@@ -422,7 +420,6 @@ from hermes_gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
 )
-from hermes_gateway.delivery import DeliveryRouter
 from channels.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -512,7 +509,6 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
 # Module-level alias kept for gateway.run-internal tests while P5 retires this
 # module. Production callers must import hermes_gateway.runner_ref directly.
 from hermes_gateway.runner_ref import gateway_runner_ref as _gateway_runner_ref
-from hermes_gateway.runner_ref import set_gateway_runner
 
 
 class GatewayRunner(
@@ -556,196 +552,7 @@ class GatewayRunner(
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
-        self.config = config or load_gateway_config()
-        self.adapters: Dict[Platform, BasePlatformAdapter] = {}
-        self._warn_if_docker_media_delivery_is_risky()
-        set_gateway_runner(self)
-
-        # Load ephemeral config from config.yaml / env vars.
-        # Both are injected at API-call time only and never persisted.
-        self._prefill_messages = runtime_config_for(self).load_prefill_messages()
-        self._ephemeral_system_prompt = runtime_config_for(self).load_ephemeral_system_prompt()
-        self._reasoning_config = runtime_config_for(self).load_reasoning_config()
-        self._service_tier = fast_command_for(self).load_service_tier()
-        self._show_reasoning = reasoning_command_for(self).load_show_reasoning()
-        self._busy_input_mode = runtime_config_for(self).load_busy_input_mode()
-        self._restart_drain_timeout = runtime_config_for(self).load_restart_drain_timeout()
-        self._provider_routing = runtime_config_for(self).load_provider_routing()
-        self._fallback_model = runtime_config_for(self).load_fallback_model()
-
-        # Wire process registry into session store for reset protection
-        from tools.process_registry import process_registry
-        self.session_store = SessionStore(
-            self.config.sessions_dir, self.config,
-            has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
-        )
-        self.delivery_router = DeliveryRouter(self.config)
-        self._running = False
-        self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._shutdown_event = asyncio.Event()
-        self._exit_cleanly = False
-        self._exit_with_failure = False
-        self._exit_reason: Optional[str] = None
-        self._exit_code: Optional[int] = None
-        self._draining = False
-        self._restart_requested = False
-        self._restart_task_started = False
-        self._restart_detached = False
-        self._restart_via_service = False
-        self._stop_task: Optional[asyncio.Task] = None
-        
-        # Track running agents per session for interrupt support
-        # Key: session_key, Value: AIAgent instance
-        self._running_agents: Dict[str, Any] = {}
-        self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
-        self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
-        # Overflow buffer for explicit /queue commands.  The adapter-level
-        # _pending_messages dict is a single slot per session (designed for
-        # "next-turn" follow-ups where repeated sends collapse into one
-        # event).  /queue has different semantics: each invocation must
-        # produce its own full agent turn, in FIFO order, with no merging.
-        # When the slot is occupied, additional /queue items land here and
-        # are promoted one-at-a-time after each run's drain.  Cleared on
-        # /new and /reset.  /model and other mid-session operations
-        # preserve the queue.
-        self._queued_events: Dict[str, List[MessageEvent]] = {}
-        self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
-        self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
-        self._session_run_generation: Dict[str, int] = {}
-        # LRU cache of live SessionSources keyed by session_key. Used by
-        # fallback routing paths (shutdown notifications, synthetic
-        # background-process events) when the persisted origin is missing
-        # and _parse_session_key can't recover thread_id. Capped so it
-        # cannot grow unbounded over a long-running gateway lifetime.
-        self._session_sources: "OrderedDict[str, SessionSource]" = OrderedDict()
-        self._session_sources_max = 512
-
-        # Cache AIAgent instances per session to preserve prompt caching.
-        # Without this, a new AIAgent is created per message, rebuilding the
-        # system prompt (including memory) every turn — breaking prefix cache
-        # and costing ~10x more on providers with prompt caching (Anthropic).
-        # Key: session_key, Value: (AIAgent, config_signature_str)
-        #
-        # OrderedDict so the agent cache service can pop the least-recently-
-        # used entry (move_to_end() on cache hits, popitem(last=False) for
-        # eviction).  Hard cap via _AGENT_CACHE_MAX_SIZE, idle TTL enforced
-        # from _session_expiry_watcher().
-        import threading as _threading
-        self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
-        self._agent_cache_lock = _threading.Lock()
-
-        # Per-session model overrides from /model command.
-        # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
-        self._session_model_overrides: Dict[str, Dict[str, str]] = {}
-        # Per-session reasoning effort overrides from /reasoning.
-        # Key: session_key, Value: parsed reasoning config dict.
-        self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
-        self._kanban_notifier_profile = self._active_profile_name()
-        # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
-        self._teams_pipeline_runtime = None
-        self._teams_pipeline_runtime_error: Optional[str] = None
-        # Track pending exec approvals per session
-        # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
-        self._pending_approvals: Dict[str, Dict[str, Any]] = {}
-
-        # Track platforms that failed to connect for background reconnection.
-        # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
-        self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
-
-        # Track pending /update prompt responses per session.
-        # Key: session_key, Value: True when a prompt is waiting for user input.
-        self._update_prompt_pending: Dict[str, bool] = {}
-
-        # Slash-confirm state lives in tools.slash_confirm (module-level),
-        # so platform adapters can resolve callbacks without a backref to
-        # this runner.  Keep a local counter for confirm_id generation so
-        # IDs stay compact (button callback_data has a 64-byte cap on
-        # some platforms).
-        import itertools as _itertools
-        self._slash_confirm_counter = _itertools.count(1)
-
-        # Persistent Honcho managers keyed by gateway session key.
-        # This preserves write_frequency="session" semantics across short-lived
-        # per-message AIAgent instances.
-
-
-
-        # Ensure tirith security scanner is available (downloads if needed)
-        try:
-            from tools.tirith_security import ensure_installed
-            ensure_installed(log_failures=False)
-        except Exception:
-            pass  # Non-fatal — fail-open at scan time if unavailable
-        
-        # Initialize session database for session_search tool support
-        self._session_db = None
-        self._session_db_error: Optional[str] = None
-        try:
-            self._session_db = open_cli_session_store()
-        except Exception as e:
-            # WARNING (not DEBUG) so the failure appears in errors.log — matches
-            # cli.py's handling of the same init path.  Users hitting NFS-mounted
-            # HERMES_HOME silently lost /resume, /title, /history, /branch, and
-            # session search without this.  The underlying cause (usually
-            # "locking protocol" from NFS) is captured on the runner for
-            # slash-command error strings.
-            self._session_db_error = f"{type(e).__name__}: {e}"
-            logger.warning("SQLite session store not available: %s", e)
-
-        # Opportunistic state.db maintenance: prune ended sessions older
-        # than sessions.retention_days + optional VACUUM. Tracks last-run
-        # in state_meta so it only actually executes once per
-        # sessions.min_interval_hours.  Gateway is long-lived so blocking
-        # a few seconds once per day is acceptable; failures are logged
-        # but never raised.
-        if self._session_db is not None:
-            try:
-                from hermes_cli.config import load_config as _load_full_config
-                _sess_cfg = (_load_full_config().get("sessions") or {})
-                if _sess_cfg.get("auto_prune", False):
-                    self._session_db.maybe_auto_prune_and_vacuum(
-                        retention_days=int(_sess_cfg.get("retention_days", 90)),
-                        min_interval_hours=int(_sess_cfg.get("min_interval_hours", 24)),
-                        vacuum=bool(_sess_cfg.get("vacuum_after_prune", True)),
-                        sessions_dir=self.config.sessions_dir,
-                    )
-            except Exception as exc:
-                logger.debug("state.db auto-maintenance skipped: %s", exc)
-
-        # Opportunistic shadow-repo cleanup — deletes orphan/stale
-        # checkpoint repos under ~/.hermes/checkpoints/.  Opt-in via
-        # checkpoints.auto_prune, idempotent via .last_prune marker.
-        try:
-            from hermes_cli.config import load_config as _load_full_config
-            _ckpt_cfg = (_load_full_config().get("checkpoints") or {})
-            if _ckpt_cfg.get("auto_prune", False):
-                from tools.checkpoint_manager import maybe_auto_prune_checkpoints
-                maybe_auto_prune_checkpoints(
-                    retention_days=int(_ckpt_cfg.get("retention_days", 7)),
-                    min_interval_hours=int(_ckpt_cfg.get("min_interval_hours", 24)),
-                    delete_orphans=bool(_ckpt_cfg.get("delete_orphans", True)),
-                    max_total_size_mb=int(_ckpt_cfg.get("max_total_size_mb", 500)),
-                )
-        except Exception as exc:
-            logger.debug("checkpoint auto-maintenance skipped: %s", exc)
-
-        # DM pairing store for code-based user authorization
-        from hermes_gateway.pairing import PairingStore
-        self.pairing_store = PairingStore()
-        
-        # Event hook system
-        from hermes_gateway.hooks import HookRegistry
-        self.hooks = HookRegistry()
-
-        # Per-chat voice reply mode: "off" | "voice_only" | "all"
-        self._voice_mode: Dict[str, str] = voice_runtime_for(self).load_voice_modes()
-        # Recent voice transcripts per (guild,user) for duplicate suppression.
-        # Protects against the same utterance being emitted twice by the voice
-        # capture / STT pipeline, which otherwise produces a second delayed reply.
-        self._recent_voice_transcripts: Dict[tuple[int, int], List[tuple[float, str]]] = {}
-
-        # Track background tasks to prevent garbage collection mid-execution
-        self._background_tasks: set = set()
+        initialize_gateway_runner_state(self, config)
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
