@@ -112,7 +112,7 @@ from hermes_gateway.resume_pending import (
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
 from hermes_gateway.session_navigation_commands import GatewaySessionNavigationCommandMixin
-from hermes_gateway.session_expiry_runtime import GatewaySessionExpiryRuntimeMixin
+from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session_recovery_runtime import GatewaySessionRecoveryRuntimeMixin
 from hermes_gateway.session_runtime_state import GatewaySessionRuntimeStateMixin
@@ -535,7 +535,6 @@ class GatewayRunner(
     GatewayRollbackCommandMixin,
     GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
-    GatewaySessionExpiryRuntimeMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewaySessionRuntimeStateMixin,
     GatewayShutdownRuntimeMixin,

@@ -13,6 +13,7 @@ from hermes_gateway.config import Platform
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
+from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 
 logger = logging.getLogger(__name__)
@@ -525,7 +526,7 @@ async def start_gateway_runner(runner) -> bool:
         logger.error("Recovered watcher setup error: %s", e)
 
     # Start background session expiry watcher to finalize expired sessions
-    asyncio.create_task(self._session_expiry_watcher())
+    asyncio.create_task(session_expiry_runtime_for(self).session_expiry_watcher())
 
     # Start background kanban notifier — delivers `completed`, `blocked`,
     # `spawn_auto_blocked`, and `crashed` events to gateway subscribers

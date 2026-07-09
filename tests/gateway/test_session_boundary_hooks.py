@@ -182,6 +182,7 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
     from datetime import datetime, timedelta
 
     from gateway.run import GatewayRunner
+    from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -229,8 +230,8 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
 
     mock_invoke_hook.side_effect = _hook_and_stop
 
-    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
-        await runner._session_expiry_watcher(interval=0)
+    with patch("hermes_gateway.session_expiry_runtime.asyncio.sleep", side_effect=_fast_sleep):
+        await session_expiry_runtime_for(runner).session_expiry_watcher(interval=0)
 
     # Look for the finalize call targeting the expired session.
     finalize_calls = [
