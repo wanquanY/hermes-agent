@@ -25,7 +25,7 @@ class GatewayMessageIngressService:
     def __init__(self, runner):
         self._runner = runner
 
-    async def preprocess(self, event) -> MessageIngressResult:
+    async def preprocess(self, event, *, hermes_home=None) -> MessageIngressResult:
         runner = self._runner
         source = event.source
 
@@ -78,7 +78,12 @@ class GatewayMessageIngressService:
 
         session_key = runner._session_key_for_source(source)
 
-        update_response = self._consume_update_prompt_response(event, source, session_key)
+        update_response = self._consume_update_prompt_response(
+            event,
+            source,
+            session_key,
+            hermes_home=hermes_home,
+        )
         if update_response is not None:
             return MessageIngressResult(
                 action="respond",
@@ -164,7 +169,14 @@ class GatewayMessageIngressService:
                 runner.pairing_store._record_rate_limit(platform_name, source.user_id)
         return MessageIngressResult("respond", event, source, "", None)
 
-    def _consume_update_prompt_response(self, event, source, session_key: str) -> Optional[str]:
+    def _consume_update_prompt_response(
+        self,
+        event,
+        source,
+        session_key: str,
+        *,
+        hermes_home=None,
+    ) -> Optional[str]:
         runner = self._runner
         update_prompts = getattr(runner, "_update_prompt_pending", {})
         if not update_prompts.get(session_key):
@@ -191,8 +203,9 @@ class GatewayMessageIngressService:
                         recognized_cmd = None
             response_text = "" if recognized_cmd else raw
 
-        response_path = get_hermes_home() / ".update_response"
-        prompt_path = get_hermes_home() / ".update_prompt.json"
+        home = hermes_home or get_hermes_home()
+        response_path = home / ".update_response"
+        prompt_path = home / ".update_prompt.json"
         if response_text:
             try:
                 tmp = response_path.with_suffix(".tmp")

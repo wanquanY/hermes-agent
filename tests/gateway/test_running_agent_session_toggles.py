@@ -113,13 +113,13 @@ def _make_runner():
 @pytest.mark.asyncio
 async def test_yolo_dispatches_mid_run(monkeypatch):
     """/yolo mid-run must dispatch to its handler, not hit the catch-all."""
-    import gateway.run as gateway_run
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
 
     runner = _make_runner()
     yolo_service = SimpleNamespace(
         handle_yolo_command=AsyncMock(return_value="⚡ YOLO mode **ON** for this session")
     )
-    monkeypatch.setattr(gateway_run, "yolo_command_for", lambda _runner: yolo_service)
+    monkeypatch.setattr(busy_message_runtime, "yolo_command_for", lambda _runner: yolo_service)
 
     result = await runner._handle_message(_make_event("/yolo"))
 
@@ -131,18 +131,36 @@ async def test_yolo_dispatches_mid_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_verbose_dispatches_mid_run(monkeypatch):
     """/verbose mid-run must dispatch to its handler, not hit the catch-all."""
-    import gateway.run as gateway_run
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
 
     runner = _make_runner()
     verbose_service = SimpleNamespace(
         handle_verbose_command=AsyncMock(return_value="tool progress: new")
     )
-    monkeypatch.setattr(gateway_run, "verbose_command_for", lambda _runner: verbose_service)
+    monkeypatch.setattr(busy_message_runtime, "verbose_command_for", lambda _runner: verbose_service)
 
     result = await runner._handle_message(_make_event("/verbose"))
 
     verbose_service.handle_verbose_command.assert_awaited_once()
     assert result == "tool progress: new"
+    assert "can't run mid-turn" not in (result or "")
+
+
+@pytest.mark.asyncio
+async def test_footer_dispatches_mid_run(monkeypatch):
+    """/footer mid-run must dispatch to its session-level handler."""
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
+
+    runner = _make_runner()
+    footer_service = SimpleNamespace(
+        handle_footer_command=AsyncMock(return_value="footer: off")
+    )
+    monkeypatch.setattr(busy_message_runtime, "footer_command_for", lambda _runner: footer_service)
+
+    result = await runner._handle_message(_make_event("/footer"))
+
+    footer_service.handle_footer_command.assert_awaited_once()
+    assert result == "footer: off"
     assert "can't run mid-turn" not in (result or "")
 
 
