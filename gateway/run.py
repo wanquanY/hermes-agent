@@ -127,6 +127,7 @@ from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session_recovery_runtime import GatewaySessionRecoveryRuntimeMixin
+from hermes_gateway.session_env_runtime import session_env_runtime_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.shutdown_runtime import GatewayShutdownRuntimeMixin
 from hermes_gateway.skill_hint import (
@@ -1153,41 +1154,10 @@ class GatewayRunner(
 
 
     def _set_session_env(self, context: SessionContext) -> list:
-        """Set session context variables for the current async task.
-
-        Uses ``contextvars`` instead of ``os.environ`` so that concurrent
-        gateway messages cannot overwrite each other's session state.
-
-        Returns a list of reset tokens; pass them to ``_clear_session_env``
-        in a ``finally`` block.
-        """
-        from channels.session_context import set_session_vars
-        # Propagate the adapter's async-delivery capability so async tools
-        # (terminal notify_on_complete / watch_patterns, delegate_task
-        # background=True) know whether this channel can wake a later turn.
-        # Default True keeps CLI / unknown paths working; stateless adapters
-        # (api_server) declare supports_async_delivery=False. Use getattr so
-        # bare runners built via object.__new__ (tests) without self.adapters
-        # don't blow up — they simply default to supported.
-        _adapters = getattr(self, "adapters", None) or {}
-        _adapter = _adapters.get(context.source.platform)
-        _async_delivery = getattr(_adapter, "supports_async_delivery", True)
-        return set_session_vars(
-            platform=context.source.platform.value,
-            chat_id=context.source.chat_id,
-            chat_name=context.source.chat_name or "",
-            thread_id=str(context.source.thread_id) if context.source.thread_id else "",
-            user_id=str(context.source.user_id) if context.source.user_id else "",
-            user_name=str(context.source.user_name) if context.source.user_name else "",
-            session_key=context.session_key,
-            message_id=str(context.source.message_id) if context.source.message_id else "",
-            async_delivery=_async_delivery,
-        )
+        return session_env_runtime_for(self).set_session_env(context)
 
     def _clear_session_env(self, tokens: list) -> None:
-        """Restore session context variables to their pre-handler values."""
-        from channels.session_context import clear_session_vars
-        clear_session_vars(tokens)
+        session_env_runtime_for(self).clear_session_env(tokens)
 
     async def _run_in_executor_with_context(self, func, *args):
         """Run blocking work in the thread pool while preserving session contextvars."""
