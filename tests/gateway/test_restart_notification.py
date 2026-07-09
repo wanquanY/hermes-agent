@@ -12,6 +12,7 @@ import hermes_gateway.lifecycle_home as lifecycle_home
 import hermes_gateway.restart_lifecycle as restart_lifecycle
 from hermes_gateway.bootstrap import restart_notification_pending
 from hermes_gateway.config import HomeChannel, Platform
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from channels.platforms.base import MessageEvent, MessageType, SendResult
 from hermes_gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import (
@@ -52,7 +53,7 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
         message_id="m1",
     )
 
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
     assert result
 
     notify_path = tmp_path / ".restart_notify.json"
@@ -80,7 +81,7 @@ async def test_restart_command_uses_service_restart_under_systemd(tmp_path, monk
         message_id="m1",
     )
 
-    await runner._handle_restart_command(event)
+    await restart_lifecycle_for(runner).handle_restart_command(event)
     runner.request_restart.assert_called_once_with(detached=False, via_service=True)
 
 
@@ -101,7 +102,7 @@ async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypat
         message_id="m1",
     )
 
-    await runner._handle_restart_command(event)
+    await restart_lifecycle_for(runner).handle_restart_command(event)
     runner.request_restart.assert_called_once_with(detached=True, via_service=False)
 
 
@@ -123,7 +124,7 @@ async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
         message_id="m2",
     )
 
-    await runner._handle_restart_command(event)
+    await restart_lifecycle_for(runner).handle_restart_command(event)
 
     data = json.loads((tmp_path / ".restart_notify.json").read_text())
     assert data["thread_id"] == "topic_7"
@@ -151,7 +152,7 @@ async def test_restart_command_uses_atomic_json_writes_for_marker_files(tmp_path
         message_id="m1",
     )
 
-    await runner._handle_restart_command(event)
+    await restart_lifecycle_for(runner).handle_restart_command(event)
 
     names = [name for name, _payload, _kwargs in calls]
     assert names == [".restart_notify.json", ".restart_last_processed.json"]
@@ -239,7 +240,7 @@ async def test_send_home_channel_startup_notification_to_configured_home(tmp_pat
     )
     adapter.send = AsyncMock()
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications()
 
     assert delivered == {("telegram", "home-42", None)}
     adapter.send.assert_called_once_with(
@@ -263,7 +264,7 @@ async def test_send_home_channel_startup_notification_preserves_thread_metadata(
     )
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="home"))
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications()
 
     assert delivered == {("telegram", "parent-42", "topic-7")}
     adapter.send.assert_called_once_with(
@@ -287,7 +288,7 @@ async def test_send_home_channel_startup_notification_skips_restart_target(
     )
     adapter.send = AsyncMock()
 
-    delivered = await runner._send_home_channel_startup_notifications(
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications(
         skip_targets={("telegram", "42", None)}
     )
 
@@ -309,7 +310,7 @@ async def test_send_home_channel_startup_notification_does_not_skip_different_th
     )
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="home"))
 
-    delivered = await runner._send_home_channel_startup_notifications(
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications(
         skip_targets={("telegram", "42", "topic-7")}
     )
 
@@ -331,7 +332,7 @@ async def test_send_home_channel_startup_notification_ignores_false_send_result(
     )
     adapter.send = AsyncMock(return_value=SendResult(success=False, error="network down"))
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications()
 
     assert delivered == set()
     adapter.send.assert_called_once()
@@ -354,7 +355,7 @@ async def test_send_restart_notification_delivers_and_cleans_up(tmp_path, monkey
     runner, adapter = make_restart_runner()
     adapter.send = AsyncMock()
 
-    delivered_target = await runner._send_restart_notification()
+    delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     assert delivered_target == ("telegram", "42", None)
     adapter.send.assert_called_once()
@@ -380,7 +381,7 @@ async def test_send_restart_notification_with_thread(tmp_path, monkeypatch):
     runner, adapter = make_restart_runner()
     adapter.send = AsyncMock()
 
-    delivered_target = await runner._send_restart_notification()
+    delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     assert delivered_target == ("telegram", "99", "topic_7")
     call_args = adapter.send.call_args
@@ -396,7 +397,7 @@ async def test_send_restart_notification_noop_when_no_file(tmp_path, monkeypatch
     runner, adapter = make_restart_runner()
     adapter.send = AsyncMock()
 
-    await runner._send_restart_notification()
+    await restart_lifecycle_for(runner).send_restart_notification()
 
     adapter.send.assert_not_called()
 
@@ -414,7 +415,7 @@ async def test_send_restart_notification_skips_when_adapter_missing(tmp_path, mo
 
     runner, _adapter = make_restart_runner()
 
-    await runner._send_restart_notification()
+    await restart_lifecycle_for(runner).send_restart_notification()
 
     # File cleaned up even though we couldn't send
     assert not notify_path.exists()
@@ -436,7 +437,7 @@ async def test_send_restart_notification_cleans_up_on_send_failure(
     runner, adapter = make_restart_runner()
     adapter.send = AsyncMock(side_effect=RuntimeError("network down"))
 
-    delivered_target = await runner._send_restart_notification()
+    delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     # File cleaned up even though send raised.
     assert delivered_target is None
@@ -471,7 +472,7 @@ async def test_send_restart_notification_logs_warning_on_sendresult_failure(
     )
 
     with caplog.at_level("DEBUG", logger="hermes_gateway.restart_lifecycle"):
-        delivered_target = await runner._send_restart_notification()
+        delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     success_lines = [
         r for r in caplog.records
@@ -512,7 +513,7 @@ async def test_send_home_channel_startup_notification_skipped_when_flag_disabled
     runner.config.platforms[Platform.TELEGRAM].gateway_restart_notification = False
     adapter.send = AsyncMock()
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications()
 
     assert delivered == set()
     adapter.send.assert_not_called()
@@ -537,7 +538,7 @@ async def test_send_home_channel_startup_notification_default_flag_true(
     )
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="home"))
 
-    delivered = await runner._send_home_channel_startup_notifications()
+    delivered = await restart_lifecycle_for(runner).send_home_channel_startup_notifications()
 
     assert delivered == {("telegram", "home-42", None)}
     adapter.send.assert_called_once()
@@ -565,7 +566,7 @@ async def test_send_restart_notification_skipped_when_flag_disabled(
     runner.config.platforms[Platform.TELEGRAM].gateway_restart_notification = False
     adapter.send = AsyncMock()
 
-    delivered_target = await runner._send_restart_notification()
+    delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     assert delivered_target is None
     adapter.send.assert_not_called()
@@ -591,7 +592,7 @@ async def test_send_restart_notification_logs_info_on_sendresult_success(
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m-1"))
 
     with caplog.at_level("DEBUG", logger="hermes_gateway.restart_lifecycle"):
-        delivered_target = await runner._send_restart_notification()
+        delivered_target = await restart_lifecycle_for(runner).send_restart_notification()
 
     success_lines = [
         r for r in caplog.records

@@ -15,6 +15,7 @@ import pytest
 import gateway.run as gateway_run
 import hermes_gateway.lifecycle_home as lifecycle_home
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
 
@@ -38,7 +39,7 @@ async def test_restart_handler_writes_dedup_marker_with_update_id(tmp_path, monk
     runner.request_restart = MagicMock(return_value=True)
 
     event = _make_restart_event(update_id=12345)
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     marker_path = tmp_path / ".restart_last_processed.json"
@@ -67,7 +68,7 @@ async def test_redelivered_restart_with_same_update_id_is_ignored(tmp_path, monk
     runner.request_restart = MagicMock()
 
     event = _make_restart_event(update_id=12345)  # same update_id → redelivery
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result == ""  # silently ignored
     runner.request_restart.assert_not_called()
@@ -92,7 +93,7 @@ async def test_redelivered_restart_with_older_update_id_is_ignored(tmp_path, mon
     event = _make_restart_event(update_id=12344)  # older update — shouldn't happen,
                                                   # but if Telegram does re-deliver
                                                   # something older, treat as stale
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result == ""
     runner.request_restart.assert_not_called()
@@ -116,7 +117,7 @@ async def test_fresh_restart_with_higher_update_id_is_processed(tmp_path, monkey
     runner.request_restart = MagicMock(return_value=True)
 
     event = _make_restart_event(update_id=12346)  # strictly higher → fresh
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()
@@ -144,7 +145,7 @@ async def test_stale_marker_older_than_5min_does_not_block(tmp_path, monkeypatch
 
     # Same update_id as the stale marker, but the marker is too old to trust
     event = _make_restart_event(update_id=12345)
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()
@@ -160,7 +161,7 @@ async def test_no_marker_file_allows_restart(tmp_path, monkeypatch):
     runner.request_restart = MagicMock(return_value=True)
 
     event = _make_restart_event(update_id=100)
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()
@@ -179,7 +180,7 @@ async def test_corrupt_marker_file_is_treated_as_absent(tmp_path, monkeypatch):
     runner.request_restart = MagicMock(return_value=True)
 
     event = _make_restart_event(update_id=100)
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()
@@ -203,7 +204,7 @@ async def test_event_without_update_id_bypasses_dedup(tmp_path, monkeypatch):
 
     # No update_id — the dedup check should NOT kick in
     event = _make_restart_event(update_id=None)
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()
@@ -242,7 +243,7 @@ async def test_different_platform_bypasses_dedup(tmp_path, monkeypatch):
         message_id="m1",
         platform_update_id=12345,
     )
-    result = await runner._handle_restart_command(event)
+    result = await restart_lifecycle_for(runner).handle_restart_command(event)
 
     assert result
     runner.request_restart.assert_called_once()

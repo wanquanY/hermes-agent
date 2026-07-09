@@ -22,8 +22,11 @@ from utils import atomic_json_write
 logger = logging.getLogger(__name__)
 
 
-class GatewayRestartLifecycleMixin:
-    async def _launch_detached_restart_command(self) -> None:
+class GatewayRestartLifecycleService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def launch_detached_restart_command(self) -> None:
         import shutil
         import subprocess
 
@@ -121,7 +124,7 @@ class GatewayRestartLifecycleMixin:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-    async def _handle_restart_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+    async def handle_restart_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /restart command - drain active work, then restart the gateway."""
         # Defensive idempotency check: if the previous gateway process
         # recorded this same /restart (same platform + update_id) and the new
@@ -134,7 +137,7 @@ class GatewayRestartLifecycleMixin:
         # self-perpetuating restart loop where every fresh gateway
         # re-processes the same /restart command and immediately restarts
         # again.
-        if self._is_stale_restart_redelivery(event):
+        if self.is_stale_restart_redelivery(event):
             logger.info(
                 "Ignoring redelivered /restart (platform=%s, update_id=%s) — "
                 "already processed by a previous gateway instance.",
@@ -143,8 +146,8 @@ class GatewayRestartLifecycleMixin:
             )
             return ""
 
-        if self._restart_requested or self._draining:
-            count = self._running_agent_count()
+        if self._runner._restart_requested or self._runner._draining:
+            count = self._runner._running_agent_count()
             if count:
                 return t("gateway.draining", count=count)
             return EphemeralReply(t("hermes_gateway.restart.in_progress"))
@@ -186,7 +189,7 @@ class GatewayRestartLifecycleMixin:
         except Exception as e:
             logger.debug("Failed to write restart dedup marker: %s", e)
 
-        active_agents = self._running_agent_count()
+        active_agents = self._runner._running_agent_count()
         # When running under a service manager (systemd/launchd) or inside a
         # Docker/Podman container, use the service restart path: exit with
         # code 75 so the service manager / container restart policy restarts
@@ -196,13 +199,13 @@ class GatewayRestartLifecycleMixin:
         _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
         _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
         if _under_service or _in_container:
-            self.request_restart(detached=False, via_service=True)
+            self._runner.request_restart(detached=False, via_service=True)
         else:
-            self.request_restart(detached=True, via_service=False)
+            self._runner.request_restart(detached=True, via_service=False)
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("hermes_gateway.restart.restarting"))
-    def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
+    def is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """Return True if this /restart is a Telegram re-delivery we already handled.
 
         The previous gateway wrote ``.restart_last_processed.json`` with the
@@ -250,7 +253,7 @@ class GatewayRestartLifecycleMixin:
             if time.time() - requested_at > 300:
                 return False
         return event.platform_update_id <= recorded_uid
-    async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
+    async def send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
         """Notify the chat that initiated /restart that the gateway is back."""
         notify_path = gateway_home() / ".restart_notify.json"
         if not notify_path.exists():
@@ -266,7 +269,7 @@ class GatewayRestartLifecycleMixin:
                 return None
 
             platform = Platform(platform_str)
-            adapter = self.adapters.get(platform)
+            adapter = self._runner.adapters.get(platform)
             if not adapter:
                 logger.debug(
                     "Restart notification skipped: %s adapter not connected",
@@ -274,7 +277,7 @@ class GatewayRestartLifecycleMixin:
                 )
                 return None
 
-            platform_cfg = self.config.platforms.get(platform)
+            platform_cfg = self._runner.config.platforms.get(platform)
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
                     "Restart notification suppressed: %s has gateway_restart_notification=false",
@@ -312,7 +315,7 @@ class GatewayRestartLifecycleMixin:
             return None
         finally:
             notify_path.unlink(missing_ok=True)
-    async def _send_home_channel_startup_notifications(
+    async def send_home_channel_startup_notifications(
         self,
         *,
         skip_targets: Optional[set[tuple[str, str, Optional[str]]]] = None,
@@ -327,12 +330,12 @@ class GatewayRestartLifecycleMixin:
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
 
-        for platform, adapter in self.adapters.items():
-            home = self.config.get_home_channel(platform)
+        for platform, adapter in self._runner.adapters.items():
+            home = self._runner.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
 
-            platform_cfg = self.config.platforms.get(platform)
+            platform_cfg = self._runner.config.platforms.get(platform)
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
                     "Home-channel startup notification suppressed: %s has gateway_restart_notification=false",
@@ -374,3 +377,12 @@ class GatewayRestartLifecycleMixin:
                 )
 
         return delivered
+
+
+def restart_lifecycle_for(runner) -> GatewayRestartLifecycleService:
+    service = getattr(runner, "restart_lifecycle", None)
+    if isinstance(service, GatewayRestartLifecycleService):
+        return service
+    service = GatewayRestartLifecycleService(runner)
+    runner.restart_lifecycle = service
+    return service

@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from hermes_gateway.runtime_status_command import runtime_status_command_for
 from channels.platforms.base import MessageEvent
@@ -368,7 +369,7 @@ async def test_running_agent_fastpath_allows_admin_command():
     runner._running_agents[sk] = MagicMock()
     runner._running_agents_ts[sk] = 0
     # Mock the restart handler so it doesn't actually try to restart anything.
-    runner._handle_restart_command = AsyncMock(return_value="restart-handled")
+    restart_lifecycle_for(runner).handle_restart_command = AsyncMock(return_value="restart-handled")
 
     result = await runner._handle_message(_make_event("/restart", src))
     assert result == "restart-handled"

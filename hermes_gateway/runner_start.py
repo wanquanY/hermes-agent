@@ -497,7 +497,10 @@ async def start_gateway_runner(runner) -> bool:
 
     # Notify the chat that initiated /restart that the gateway is back.
     restart_notification_pending = _restart_notification_pending_for_home(_hermes_home)
-    delivered_restart_target = await self._send_restart_notification()
+    from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+
+    restart_lifecycle = restart_lifecycle_for(self)
+    delivered_restart_target = await restart_lifecycle.send_restart_notification()
 
     # Broadcast a lightweight "gateway is back" message to configured
     # home channels only when this startup is resuming from /restart. If a
@@ -508,7 +511,7 @@ async def start_gateway_runner(runner) -> bool:
         skip_home_targets = (
             {delivered_restart_target} if delivered_restart_target else None
         )
-        await self._send_home_channel_startup_notifications(
+        await restart_lifecycle.send_home_channel_startup_notifications(
             skip_targets=skip_home_targets,
         )
 

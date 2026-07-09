@@ -6,6 +6,7 @@ from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from gateway.run import GatewayRunner
 from hermes_gateway.session import SessionSource
 
@@ -82,17 +83,8 @@ def make_restart_runner(
     runner._session_key_for_source = GatewayRunner._session_key_for_source.__get__(
         runner, GatewayRunner
     )
-    runner._handle_restart_command = GatewayRunner._handle_restart_command.__get__(
-        runner, GatewayRunner
-    )
     runner._handle_set_home_command = GatewayRunner._handle_set_home_command.__get__(
         runner, GatewayRunner
-    )
-    runner._send_restart_notification = GatewayRunner._send_restart_notification.__get__(
-        runner, GatewayRunner
-    )
-    runner._send_home_channel_startup_notifications = (
-        GatewayRunner._send_home_channel_startup_notifications.__get__(runner, GatewayRunner)
     )
     runner._status_action_label = GatewayRunner._status_action_label.__get__(
         runner, GatewayRunner
@@ -113,9 +105,6 @@ def make_restart_runner(
         runner, GatewayRunner
     )
     runner._get_cached_session_source = GatewayRunner._get_cached_session_source.__get__(
-        runner, GatewayRunner
-    )
-    runner._launch_detached_restart_command = GatewayRunner._launch_detached_restart_command.__get__(
         runner, GatewayRunner
     )
     runner.request_restart = GatewayRunner.request_restart.__get__(runner, GatewayRunner)

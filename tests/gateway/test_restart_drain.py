@@ -13,6 +13,7 @@ import hermes_gateway.restart_lifecycle as restart_lifecycle
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.session import SessionEntry, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
@@ -177,7 +178,7 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    await runner._launch_detached_restart_command()
+    await restart_lifecycle_for(runner).launch_detached_restart_command()
 
     assert len(popen_calls) == 1
     cmd, kwargs = popen_calls[0]

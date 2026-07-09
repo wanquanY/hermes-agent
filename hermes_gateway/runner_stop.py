@@ -210,7 +210,9 @@ async def stop_gateway_runner(
 
         if self._restart_requested and self._restart_detached:
             try:
-                await self._launch_detached_restart_command()
+                from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+
+                await restart_lifecycle_for(self).launch_detached_restart_command()
             except Exception as e:
                 logger.error("Failed to launch detached gateway restart: %s", e)
 

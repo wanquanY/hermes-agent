@@ -103,6 +103,7 @@ from hermes_gateway.response_normalization import (
     is_dovie_runtime_auth_failure as _is_dovie_runtime_auth_failure,
     normalize_empty_agent_response as _normalize_empty_agent_response,
 )
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.runtime_status_command import runtime_status_command_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.resume_pending import (
@@ -1550,7 +1551,7 @@ class GatewayRunner(
                     return _denied
 
             if _cmd_def_inner and _cmd_def_inner.name == "restart":
-                return await self._handle_restart_command(event)
+                return await restart_lifecycle_for(self).handle_restart_command(event)
 
             # /stop must hard-kill the session when an agent is running.
             # A soft interrupt (agent.interrupt()) doesn't help when the agent
@@ -2002,7 +2003,7 @@ class GatewayRunner(
             return await self._handle_platform_command(event)
 
         if canonical == "restart":
-            return await self._handle_restart_command(event)
+            return await restart_lifecycle_for(self).handle_restart_command(event)
         
         if canonical == "stop":
             return await runtime_status_command_for(self).handle_stop_command(event)
