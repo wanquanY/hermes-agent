@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import gateway.run as gateway_run
+import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
 
@@ -85,7 +86,7 @@ def _explode_runtime_resolution():
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
+    monkeypatch.setattr(gateway_runtime_config, "resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CapturingAgent
@@ -129,7 +130,7 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
 @pytest.mark.asyncio
 async def test_background_task_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
+    monkeypatch.setattr(gateway_runtime_config, "resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CapturingAgent
@@ -186,7 +187,7 @@ fallback_providers:
     )
     import gateway.run as gateway_run
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
 
     def fake_resolve_runtime_provider(*, requested=None, explicit_base_url=None, explicit_api_key=None):
         if requested in {None, "", "openai-codex"}:
