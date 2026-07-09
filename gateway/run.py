@@ -93,6 +93,7 @@ from hermes_gateway.platform_command import GatewayPlatformCommandMixin
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.proxy_mode import proxy_mode_for
 from hermes_gateway.title_command import GatewayTitleCommandMixin
+from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
 from hermes_gateway.usage_command import GatewayUsageCommandMixin
 from hermes_gateway.verbose_command import GatewayVerboseCommandMixin
@@ -1743,7 +1744,7 @@ class GatewayRunner(
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
-                    return await self._handle_update_command(event)
+                    return await update_lifecycle_for(self).handle_update_command(event)
 
             # Catch-all: any other recognized slash command reached the
             # running-agent guard. Reject gracefully rather than falling
@@ -2089,7 +2090,7 @@ class GatewayRunner(
             return await self._handle_deny_command(event)
 
         if canonical == "update":
-            return await self._handle_update_command(event)
+            return await update_lifecycle_for(self).handle_update_command(event)
 
         if canonical == "debug":
             return await self._handle_debug_command(event)

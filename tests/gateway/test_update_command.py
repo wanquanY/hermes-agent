@@ -12,6 +12,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from hermes_gateway.config import Platform
+from hermes_gateway.update_lifecycle import update_lifecycle_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionSource
 
@@ -52,7 +53,7 @@ class TestHandleUpdateCommand:
         event = _make_event()
         monkeypatch.setenv("HERMES_MANAGED", "homebrew")
 
-        result = await runner._handle_update_command(event)
+        result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "managed by Homebrew" in result
         assert "brew upgrade hermes-agent" in result
@@ -94,7 +95,7 @@ class TestHandleUpdateCommand:
             (fake_root / "gateway" / "run.py").touch()
 
             with patch("hermes_gateway.update_lifecycle.__file__", fake_file):
-                result = await runner._handle_update_command(event)
+                result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Not a git repository" in result
 
@@ -116,7 +117,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=None):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Could not locate" in result
         assert "hermes update" in result
@@ -144,7 +145,7 @@ class TestHandleUpdateCommand:
              patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=fake_spec), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Starting Hermes update" in result
         call_args = mock_popen.call_args[0][0]
@@ -205,7 +206,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
              patch("subprocess.Popen"):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         pending_path = hermes_home / ".update_pending.json"
         assert pending_path.exists()
@@ -238,7 +239,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
              patch("subprocess.Popen"):
-            await runner._handle_update_command(event)
+            await update_lifecycle_for(runner).handle_update_command(event)
 
         data = json.loads((hermes_home / ".update_pending.json").read_text())
         assert data["thread_id"] == "777"
@@ -263,7 +264,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Verify setsid was used
         call_args = mock_popen.call_args[0][0]
@@ -300,7 +301,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=which_no_setsid), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Verify plain bash -c fallback (no nohup, no setsid)
         call_args = mock_popen.call_args[0][0]
@@ -331,7 +332,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", side_effect=OSError("spawn failed")):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Failed to start update" in result
         # Pending file should be cleaned up
@@ -357,7 +358,7 @@ class TestHandleUpdateCommand:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen"):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "stream progress" in result
 
@@ -379,7 +380,7 @@ class TestSendUpdateNotification:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             # Should not raise
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
     @pytest.mark.asyncio
     async def test_defers_notification_while_update_still_running(self, tmp_path):
@@ -398,7 +399,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            result = await runner._send_update_notification()
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is False
         mock_adapter.send.assert_not_called()
@@ -422,7 +423,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            result = await runner._send_update_notification()
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is True
         mock_adapter.send.assert_called_once()
@@ -454,7 +455,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         mock_adapter.send.assert_called_once()
         call_args = mock_adapter.send.call_args
@@ -482,7 +483,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         assert mock_adapter.send.call_args.kwargs["metadata"] == {"thread_id": "777"}
 
@@ -504,7 +505,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         assert "\x1b[" not in sent_text
@@ -526,7 +527,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         # Should start with truncation marker
@@ -550,7 +551,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            result = await runner._send_update_notification()
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is True
         sent_text = mock_adapter.send.call_args[0][1]
@@ -573,7 +574,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         assert "finished successfully" in sent_text
@@ -598,7 +599,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         assert not pending_path.exists()
         assert not output_path.exists()
@@ -626,7 +627,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         # Files should still be cleaned up (finally block)
         assert not pending_path.exists()
@@ -645,7 +646,7 @@ class TestSendUpdateNotification:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             # Should not raise
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         # File should be cleaned up
         assert not pending_path.exists()
@@ -670,7 +671,7 @@ class TestSendUpdateNotification:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         # send should not have been called (wrong platform)
         mock_adapter.send.assert_not_called()

@@ -17,6 +17,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from hermes_gateway.config import Platform
+from hermes_gateway.update_lifecycle import update_lifecycle_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionSource
 
@@ -230,7 +231,7 @@ class TestUpdateCommandGatewayFlag:
              patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Check the bash command string contains --gateway and PYTHONUNBUFFERED
         call_args = mock_popen.call_args[0][0]
@@ -276,7 +277,7 @@ class TestWatchUpdateProgress:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(write_exit_code())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -317,7 +318,7 @@ class TestWatchUpdateProgress:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(simulate_prompt_cycle())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=10.0,
@@ -372,7 +373,7 @@ class TestWatchUpdateProgress:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_prompt())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -403,7 +404,7 @@ class TestWatchUpdateProgress:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -430,7 +431,7 @@ class TestWatchUpdateProgress:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -457,7 +458,7 @@ class TestWatchUpdateProgress:
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -501,7 +502,7 @@ class TestWatchUpdateProgress:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_polls())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=10.0,
@@ -543,7 +544,7 @@ class TestWatchUpdateProgress:
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             watch1 = asyncio.create_task(
-                runner1._watch_update_progress(
+                update_lifecycle_for(runner1).watch_update_progress(
                     poll_interval=0.05,
                     stream_interval=0.1,
                     timeout=10.0,
@@ -572,7 +573,7 @@ class TestWatchUpdateProgress:
                 (hermes_home / ".update_exit_code").write_text("0")
 
             finisher = asyncio.create_task(respond_and_finish())
-            await runner2._watch_update_progress(
+            await update_lifecycle_for(runner2).watch_update_progress(
                 poll_interval=0.05,
                 stream_interval=0.1,
                 timeout=10.0,

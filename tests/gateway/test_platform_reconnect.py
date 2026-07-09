@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
@@ -95,7 +96,7 @@ class TestStartupPlatformIsolation:
         runner.hooks.emit = AsyncMock()
         runner._suspend_stuck_loop_sessions = MagicMock(return_value=0)
         voice_runtime_for(runner).sync_voice_mode_state_to_adapter = MagicMock()
-        runner._send_update_notification = AsyncMock(return_value=True)
+        update_lifecycle_for(runner).send_update_notification = AsyncMock(return_value=True)
         restart_lifecycle_for(runner).send_restart_notification = AsyncMock()
 
         adapters = {

@@ -335,7 +335,7 @@ async def test_command_messages_do_not_leave_sentinel():
     [
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
-        ("/update", "_handle_update_command", "Update text"),
+        ("/update", "update_service", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
     ],
 )
@@ -352,7 +352,14 @@ async def test_active_session_bypass_commands_dispatch_without_interrupt(
     fake_agent = MagicMock()
     fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
     runner._running_agents[session_key] = fake_agent
-    setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
+    if handler_attr == "update_service":
+        from hermes_gateway.update_lifecycle import update_lifecycle_for
+
+        update_lifecycle_for(runner).handle_update_command = AsyncMock(
+            return_value=handler_result
+        )
+    else:
+        setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
 
     result = await runner._handle_message(event)
 

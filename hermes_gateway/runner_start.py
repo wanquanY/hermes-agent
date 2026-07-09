@@ -479,7 +479,10 @@ async def start_gateway_runner(runner) -> bool:
 
     # Check if we're restarting after a /update command. If the update is
     # still running, keep watching so we notify once it actually finishes.
-    notified = await self._send_update_notification()
+    from hermes_gateway.update_lifecycle import update_lifecycle_for
+
+    update_lifecycle = update_lifecycle_for(self)
+    notified = await update_lifecycle.send_update_notification()
     if not notified and any(
         path.exists()
         for path in (
@@ -487,7 +490,7 @@ async def start_gateway_runner(runner) -> bool:
             _hermes_home / ".update_pending.claimed.json",
         )
     ):
-        self._schedule_update_notification_watch()
+        update_lifecycle.schedule_update_notification_watch()
 
     # Give freshly connected platform adapters a brief moment to settle
     # before sending restart/startup lifecycle messages. In practice this

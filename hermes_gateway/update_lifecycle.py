@@ -21,8 +21,11 @@ from hermes_gateway.lifecycle_home import gateway_home
 logger = logging.getLogger(__name__)
 
 
-class GatewayUpdateLifecycleMixin:
-    async def _handle_update_command(self, event: MessageEvent) -> str:
+class GatewayUpdateLifecycleService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_update_command(self, event: MessageEvent) -> str:
         """Handle /update command — update Hermes Agent to the latest version.
 
         Spawns ``hermes update`` in a detached session (via ``setsid``) so it
@@ -38,7 +41,7 @@ class GatewayUpdateLifecycleMixin:
 
         # Block non-messaging platforms (API server, webhooks, ACP)
         platform = event.source.platform
-        _allowed = self._UPDATE_ALLOWED_PLATFORMS
+        _allowed = getattr(self._runner, "_UPDATE_ALLOWED_PLATFORMS", frozenset())
         # Plugin platforms with allow_update_command=True are also allowed
         if platform not in _allowed:
             try:
@@ -65,7 +68,7 @@ class GatewayUpdateLifecycleMixin:
         pending_path = gateway_home() / ".update_pending.json"
         output_path = gateway_home() / ".update_output.txt"
         exit_code_path = gateway_home() / ".update_exit_code"
-        session_key = self._session_key_for_source(event.source)
+        session_key = self._runner._session_key_for_source(event.source)
         pending = {
             "platform": event.source.platform.value,
             "chat_id": event.source.chat_id,
@@ -169,21 +172,21 @@ class GatewayUpdateLifecycleMixin:
             exit_code_path.unlink(missing_ok=True)
             return t("gateway.update.start_failed", error=e)
 
-        self._schedule_update_notification_watch()
+        self.schedule_update_notification_watch()
         return t("gateway.update.starting")
-    def _schedule_update_notification_watch(self) -> None:
+    def schedule_update_notification_watch(self) -> None:
         """Ensure a background task is watching for update completion."""
         existing_task = getattr(self, "_update_notification_task", None)
         if existing_task and not existing_task.done():
             return
 
         try:
-            self._update_notification_task = asyncio.create_task(
-                self._watch_update_progress()
+            self._runner._update_notification_task = asyncio.create_task(
+                self.watch_update_progress()
             )
         except RuntimeError:
             logger.debug("Skipping update notification watcher: no running event loop")
-    async def _watch_update_progress(
+    async def watch_update_progress(
         self,
         poll_interval: float = 2.0,
         stream_interval: float = 4.0,
@@ -222,7 +225,7 @@ class GatewayUpdateLifecycleMixin:
                     metadata = {"thread_id": thread_id} if thread_id else None
                     if platform_str and chat_id:
                         platform = Platform(platform_str)
-                        adapter = self.adapters.get(platform)
+                        adapter = self._runner.adapters.get(platform)
                         # Fallback session key if not stored (old pending files)
                         if not session_key:
                             session_key = f"{platform_str}:{chat_id}"
@@ -235,12 +238,12 @@ class GatewayUpdateLifecycleMixin:
             # Fall back to old behavior: wait for exit code and send final notification
             while (pending_path.exists() or claimed_path.exists()) and loop.time() < deadline:
                 if exit_code_path.exists():
-                    await self._send_update_notification()
+                    await self.send_update_notification()
                     return
                 await asyncio.sleep(poll_interval)
             if (pending_path.exists() or claimed_path.exists()) and not exit_code_path.exists():
                 exit_code_path.write_text("124")
-                await self._send_update_notification()
+                await self.send_update_notification()
             return
 
         def _strip_ansi(text: str) -> str:
@@ -306,7 +309,7 @@ class GatewayUpdateLifecycleMixin:
                           exit_code_path, prompt_path):
                     p.unlink(missing_ok=True)
                 (gateway_home() / ".update_response").unlink(missing_ok=True)
-                self._update_prompt_pending.pop(session_key, None)
+                self._runner._update_prompt_pending.pop(session_key, None)
                 return
 
             # Check for new output
@@ -328,7 +331,7 @@ class GatewayUpdateLifecycleMixin:
             # watcher would re-read the same .update_prompt.json every poll
             # cycle and spam the user with duplicate prompt messages.
             if (prompt_path.exists() and session_key
-                    and not self._update_prompt_pending.get(session_key)):
+                    and not self._runner._update_prompt_pending.get(session_key)):
                 try:
                     prompt_data = json.loads(prompt_path.read_text())
                     prompt_text = prompt_data.get("prompt", "")
@@ -366,7 +369,7 @@ class GatewayUpdateLifecycleMixin:
                         # next watcher can recover by re-forwarding it from
                         # disk. Duplicate sends in the same process are
                         # still suppressed by _update_prompt_pending.
-                        self._update_prompt_pending[session_key] = True
+                        self._runner._update_prompt_pending[session_key] = True
                         # .update_response to continue — it doesn't re-check
                         logger.info("Forwarded update prompt to %s: %s", session_key, prompt_text[:80])
                 except (json.JSONDecodeError, OSError) as e:
@@ -391,8 +394,8 @@ class GatewayUpdateLifecycleMixin:
                       exit_code_path, prompt_path):
                 p.unlink(missing_ok=True)
             (gateway_home() / ".update_response").unlink(missing_ok=True)
-            self._update_prompt_pending.pop(session_key, None)
-    async def _send_update_notification(self) -> bool:
+            self._runner._update_prompt_pending.pop(session_key, None)
+    async def send_update_notification(self) -> bool:
         """If an update finished, notify the user.
 
         Returns False when the update is still running so a caller can retry
@@ -444,7 +447,7 @@ class GatewayUpdateLifecycleMixin:
 
             # Resolve adapter
             platform = Platform(platform_str)
-            adapter = self.adapters.get(platform)
+            adapter = self._runner.adapters.get(platform)
 
             if adapter and chat_id:
                 metadata = {"thread_id": thread_id} if thread_id else None
@@ -478,3 +481,12 @@ class GatewayUpdateLifecycleMixin:
                 exit_code_path.unlink(missing_ok=True)
 
         return True
+
+
+def update_lifecycle_for(runner) -> GatewayUpdateLifecycleService:
+    service = getattr(runner, "update_lifecycle", None)
+    if isinstance(service, GatewayUpdateLifecycleService):
+        return service
+    service = GatewayUpdateLifecycleService(runner)
+    runner.update_lifecycle = service
+    return service
