@@ -140,6 +140,7 @@ from hermes_gateway.output_policy import (
 )
 from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
+from hermes_gateway.platform_runtime import GatewayPlatformRuntimeMixin
 from hermes_gateway.reasoning_command import GatewayReasoningCommandMixin
 from hermes_gateway.reload_mcp_command import GatewayReloadMcpCommandMixin
 from hermes_gateway.reload_skills_command import GatewayReloadSkillsCommandMixin
@@ -513,6 +514,7 @@ class GatewayRunner(
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
+    GatewayPlatformRuntimeMixin,
     GatewayProfileHomeCommandMixin,
     GatewayProcessWatcherMixin,
     GatewayProxyModeMixin,
@@ -1245,72 +1247,6 @@ class GatewayRunner(
         route["request_overrides"] = overrides or {}
         return route
 
-    async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
-        """React to an adapter failure after startup.
-
-        If the error is retryable (e.g. network blip, DNS failure), queue the
-        platform for background reconnection instead of giving up permanently.
-        """
-        logger.error(
-            "Fatal %s adapter error (%s): %s",
-            adapter.platform.value,
-            adapter.fatal_error_code or "unknown",
-            adapter.fatal_error_message or "unknown error",
-        )
-        self._update_platform_runtime_status(
-            adapter.platform.value,
-            platform_state="retrying" if adapter.fatal_error_retryable else "fatal",
-            error_code=adapter.fatal_error_code,
-            error_message=adapter.fatal_error_message,
-        )
-
-        existing = self.adapters.get(adapter.platform)
-        if existing is adapter:
-            try:
-                await adapter.disconnect()
-            finally:
-                self.adapters.pop(adapter.platform, None)
-                self.delivery_router.adapters = self.adapters
-
-        # Queue retryable failures for background reconnection
-        if adapter.fatal_error_retryable:
-            platform_config = self.config.platforms.get(adapter.platform)
-            if platform_config and adapter.platform not in self._failed_platforms:
-                self._failed_platforms[adapter.platform] = {
-                    "config": platform_config,
-                    "attempts": 0,
-                    "next_retry": time.monotonic() + 30,
-                }
-                logger.info(
-                    "%s queued for background reconnection",
-                    adapter.platform.value,
-                )
-
-        if not self.adapters and not self._failed_platforms:
-            self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
-            if adapter.fatal_error_retryable:
-                self._exit_with_failure = True
-                logger.error("No connected messaging platforms remain. Shutting down gateway for service restart.")
-            else:
-                logger.error("No connected messaging platforms remain. Shutting down gateway cleanly.")
-            await self.stop()
-        elif not self.adapters and self._failed_platforms:
-            # All platforms are down and queued for background reconnection.
-            # Keep the gateway alive so:
-            #   • cron jobs still run
-            #   • the reconnect watcher can recover platforms when the
-            #     underlying problem clears (proxy comes back, user runs
-            #     `hermes whatsapp`, etc.)
-            # We used to exit-with-failure here to trigger systemd restart,
-            # but that converted a transient outage into a restart loop and
-            # killed in-process state every time. The reconnect watcher
-            # already handles long-running recovery — let it do its job.
-            logger.warning(
-                "No connected messaging platforms remain, but %d platform(s) "
-                "queued for reconnection — gateway staying alive, watcher will "
-                "retry in background.",
-                len(self._failed_platforms),
-            )
 
     def _request_clean_exit(self, reason: str) -> None:
         self._exit_cleanly = True
@@ -1460,67 +1396,7 @@ class GatewayRunner(
     # watcher when a retryable failure recurs past a threshold, and by the
     # /platform pause|resume slash command for manual control.
     # ------------------------------------------------------------------
-    def _pause_failed_platform(self, platform, *, reason: str = "") -> None:
-        """Mark a queued platform as paused — keep it in ``_failed_platforms``
-        but stop the reconnect watcher from hammering it.
 
-        Used by the circuit breaker after ``_PAUSE_AFTER_FAILURES`` consecutive
-        retryable failures, and by ``/platform pause <name>`` for manual
-        intervention.  Paused platforms are surfaced in ``/platform list``
-        and resumed with ``/platform resume <name>``.
-        """
-        info = getattr(self, "_failed_platforms", {}).get(platform)
-        if info is None:
-            return
-        if info.get("paused"):
-            return
-        info["paused"] = True
-        info["pause_reason"] = reason or "auto-paused after repeated failures"
-        # Push next_retry far enough out that even if "paused" is missed
-        # by a stale code path, the watcher won't fire on it.
-        info["next_retry"] = float("inf")
-        try:
-            self._update_platform_runtime_status(
-                platform.value,
-                platform_state="paused",
-                error_code=None,
-                error_message=info["pause_reason"],
-            )
-        except Exception:
-            pass
-        logger.warning(
-            "%s paused after %d consecutive failures (%s) — "
-            "fix the underlying issue then run `/platform resume %s` "
-            "to retry, or `hermes gateway restart` to restart the gateway.",
-            platform.value, info.get("attempts", 0),
-            info["pause_reason"], platform.value,
-        )
-
-    def _resume_paused_platform(self, platform) -> bool:
-        """Unpause a platform — reset its attempt counter and schedule an
-        immediate retry.  Returns True if the platform was paused and is
-        now queued; False if it wasn't paused (or wasn't in the queue).
-        """
-        info = getattr(self, "_failed_platforms", {}).get(platform)
-        if info is None:
-            return False
-        if not info.get("paused"):
-            return False
-        info["paused"] = False
-        info.pop("pause_reason", None)
-        info["attempts"] = 0
-        info["next_retry"] = time.monotonic()  # retry on next watcher tick
-        try:
-            self._update_platform_runtime_status(
-                platform.value,
-                platform_state="retrying",
-                error_code=None,
-                error_message=None,
-            )
-        except Exception:
-            pass
-        logger.info("%s resumed — retrying on next watcher tick", platform.value)
-        return True
 
     @staticmethod
     def _load_prefill_messages() -> List[Dict[str, Any]]:
@@ -3461,141 +3337,6 @@ class GatewayRunner(
 
 
 
-    async def _platform_reconnect_watcher(self) -> None:
-        """Background task that periodically retries connecting failed platforms.
-
-        Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap).
-        Retryable failures keep retrying at the backoff cap indefinitely
-        — but if a platform fails ``_PAUSE_AFTER_FAILURES`` times in a row
-        without ever succeeding, it is *paused*: kept in the retry queue
-        but no longer hammered.  The user surfaces it with ``/platform list``
-        and resumes it with ``/platform resume <name>``.  Non-retryable
-        failures (bad auth, etc.) still drop out of the queue immediately.
-        """
-        _BACKOFF_CAP = 300  # 5 minutes max between retries
-        _PAUSE_AFTER_FAILURES = 10  # circuit-breaker threshold
-
-        await asyncio.sleep(10)  # initial delay — let startup finish
-        while self._running:
-            if not self._failed_platforms:
-                # Nothing to reconnect — sleep and check again
-                for _ in range(30):
-                    if not self._running:
-                        return
-                    await asyncio.sleep(1)
-                continue
-
-            now = time.monotonic()
-            for platform in list(self._failed_platforms.keys()):
-                if not self._running:
-                    return
-                info = self._failed_platforms[platform]
-                # Skip paused platforms entirely — they need explicit
-                # /platform resume to come back.
-                if info.get("paused"):
-                    continue
-                if now < info["next_retry"]:
-                    continue  # not time yet
-
-                platform_config = info["config"]
-                attempt = info["attempts"] + 1
-                logger.info(
-                    "Reconnecting %s (attempt %d)...",
-                    platform.value, attempt,
-                )
-
-                try:
-                    adapter = self._create_adapter(platform, platform_config)
-                    if not adapter:
-                        logger.warning(
-                            "Reconnect %s: adapter creation returned None, removing from retry queue",
-                            platform.value,
-                        )
-                        del self._failed_platforms[platform]
-                        continue
-
-                    adapter.set_message_handler(self._handle_message)
-                    adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
-                    adapter.set_session_store(self.session_store)
-                    adapter.set_busy_session_handler(self._handle_active_session_busy_message)
-
-                    success = await self._connect_adapter_with_timeout(adapter, platform)
-                    if success:
-                        self.adapters[platform] = adapter
-                        self._sync_voice_mode_state_to_adapter(adapter)
-                        self.delivery_router.adapters = self.adapters
-                        del self._failed_platforms[platform]
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="connected",
-                            error_code=None,
-                            error_message=None,
-                        )
-                        logger.info("✓ %s reconnected successfully", platform.value)
-
-                        # Rebuild channel directory with the new adapter
-                        try:
-                            from hermes_gateway.channel_directory import build_channel_directory
-                            await build_channel_directory(self.adapters)
-                        except Exception:
-                            pass
-                    # Check if the failure is non-retryable
-                    elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="fatal",
-                            error_code=adapter.fatal_error_code,
-                            error_message=adapter.fatal_error_message,
-                        )
-                        logger.warning(
-                            "Reconnect %s: non-retryable error (%s), removing from retry queue",
-                            platform.value, adapter.fatal_error_message,
-                        )
-                        del self._failed_platforms[platform]
-                    else:
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="retrying",
-                            error_code=adapter.fatal_error_code,
-                            error_message=adapter.fatal_error_message or "failed to reconnect",
-                        )
-                        backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
-                        info["attempts"] = attempt
-                        info["next_retry"] = time.monotonic() + backoff
-                        logger.info(
-                            "Reconnect %s failed, next retry in %ds",
-                            platform.value, backoff,
-                        )
-                        if attempt >= _PAUSE_AFTER_FAILURES:
-                            self._pause_failed_platform(
-                                platform,
-                                reason=(
-                                    adapter.fatal_error_message
-                                    or "failed to reconnect"
-                                ),
-                            )
-                except Exception as e:
-                    self._update_platform_runtime_status(
-                        platform.value,
-                        platform_state="retrying",
-                        error_code=None,
-                        error_message=str(e),
-                    )
-                    backoff = min(30 * (2 ** (attempt - 1)), _BACKOFF_CAP)
-                    info["attempts"] = attempt
-                    info["next_retry"] = time.monotonic() + backoff
-                    logger.warning(
-                        "Reconnect %s error: %s, next retry in %ds",
-                        platform.value, e, backoff,
-                    )
-                    if attempt >= _PAUSE_AFTER_FAILURES:
-                        self._pause_failed_platform(platform, reason=str(e))
-
-            # Check every 10 seconds for platforms that need reconnection
-            for _ in range(10):
-                if not self._running:
-                    return
-                await asyncio.sleep(1)
 
     async def stop(
         self,
