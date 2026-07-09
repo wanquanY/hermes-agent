@@ -976,165 +976,19 @@ class GatewayRunner(
             prefix=t("gateway.shared.session_db_unavailable_prefix"),
         )
 
-    def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
-        """Return whether Telegram DM topic mode is active for this chat."""
-        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
-            return False
-        session_db = getattr(self, "_session_db", None)
-        if session_db is None:
-            return False
-        try:
-            raw = session_db.is_telegram_topic_mode_enabled(
-                chat_id=str(source.chat_id),
-                user_id=str(source.user_id),
-            )
-        except Exception:
-            logger.debug("Failed to read Telegram topic mode state", exc_info=True)
-            return False
-        # Only honor a real True from the session store. Any other value
-        # (including MagicMock instances from test fixtures that didn't
-        # opt into topic mode) means topic mode is off for this chat.
-        return raw is True
 
     # Telegram's General (pinned top) topic in forum-enabled private chats.
     # Bot API behavior varies: some clients omit message_thread_id for
     # General, others send "1". Treat both as "root" for lobby/lane purposes.
-    _TELEGRAM_GENERAL_TOPIC_IDS = frozenset({"", "1"})
 
-    def _is_telegram_topic_root_lobby(self, source: SessionSource) -> bool:
-        """True for the main Telegram DM (or General topic) when topic mode has made it a lobby."""
-        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
-            return False
-        if not self._telegram_topic_mode_enabled(source):
-            return False
-        tid = str(source.thread_id or "")
-        return tid in self._TELEGRAM_GENERAL_TOPIC_IDS
 
-    def _is_telegram_topic_lane(self, source: SessionSource) -> bool:
-        """True for a user-created Telegram private-chat topic lane."""
-        if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
-            return False
-        if not self._telegram_topic_mode_enabled(source):
-            return False
-        tid = str(source.thread_id or "")
-        if not tid or tid in self._TELEGRAM_GENERAL_TOPIC_IDS:
-            return False
-        return True
 
-    _TELEGRAM_LOBBY_REMINDER_COOLDOWN_S = 30.0
 
-    def _should_send_telegram_lobby_reminder(self, source: SessionSource) -> bool:
-        """Rate-limit root-DM lobby reminders to one message per cooldown window.
 
-        A user who forgets multi-session mode is enabled and types several
-        prompts in the root DM would otherwise get a reminder for every
-        message. Cap it so the first one lands and the rest stay quiet.
-        """
-        if not hasattr(self, "_telegram_lobby_reminder_ts"):
-            self._telegram_lobby_reminder_ts = {}
-        chat_id = str(source.chat_id or "")
-        if not chat_id:
-            return True
-        import time as _time
-        now = _time.monotonic()
-        last = self._telegram_lobby_reminder_ts.get(chat_id, 0.0)
-        if now - last < self._TELEGRAM_LOBBY_REMINDER_COOLDOWN_S:
-            return False
-        self._telegram_lobby_reminder_ts[chat_id] = now
-        return True
 
-    def _telegram_topic_root_lobby_message(self) -> str:
-        return (
-            "This main chat is reserved for system commands.\n\n"
-            "To start a new Hermes chat, open the All Messages topic at the top "
-            "of this bot interface and send any message there. Telegram will "
-            "create a new topic for that message; each topic works as an "
-            "independent Hermes session."
-        )
 
-    def _telegram_topic_root_new_message(self) -> str:
-        return (
-            "To start a new parallel Hermes chat, open the All Messages topic "
-            "at the top of this bot interface and send any message there. "
-            "Telegram will create a new topic for it.\n\n"
-            "Each topic is an independent Hermes session. Use /new inside an "
-            "existing topic only if you want to replace that topic's current session."
-        )
 
-    def _telegram_topic_new_header(self, source: SessionSource) -> Optional[str]:
-        if not self._is_telegram_topic_lane(source):
-            return None
-        return (
-            "Started a new Hermes session in this topic.\n\n"
-            "Tip: for parallel work, open All Messages and send a message there "
-            "to create a separate topic instead of using /new here. /new replaces "
-            "the session attached to the current topic."
-        )
 
-    def _record_telegram_topic_binding(
-        self,
-        source: SessionSource,
-        session_entry,
-    ) -> None:
-        """Persist the Telegram topic -> Hermes session binding for topic lanes."""
-        session_db = getattr(self, "_session_db", None)
-        if session_db is None or not source.chat_id or not source.thread_id:
-            return
-        session_db.bind_telegram_topic(
-            chat_id=str(source.chat_id),
-            thread_id=str(source.thread_id),
-            user_id=str(source.user_id or ""),
-            session_key=session_entry.session_key,
-            session_id=session_entry.session_id,
-        )
-
-    def _recover_telegram_topic_thread_id(
-        self,
-        source: SessionSource,
-    ) -> Optional[str]:
-        """Pin DM-topic routing to the user's last-active topic.
-
-        Telegram fragments topic-mode DMs two ways: a Reply on a message
-        in another topic delivers ``message_thread_id`` for *that* topic,
-        and ``_build_message_event`` strips the thread_id on plain replies
-        (#3206 — needed for non-topic users). Both route the user to the
-        wrong session. When topic mode is on, rewrite the thread_id to the
-        user's most-recent binding if the inbound id is missing/General or
-        not a known topic for this chat. Returns None to leave it alone.
-        """
-        if (
-            source.platform != Platform.TELEGRAM
-            or source.chat_type != "dm"
-            or not source.chat_id
-            or not source.user_id
-            or not self._telegram_topic_mode_enabled(source)
-        ):
-            return None
-        session_db = getattr(self, "_session_db", None)
-        if session_db is None:
-            return None
-        try:
-            bindings = session_db.list_telegram_topic_bindings_for_chat(
-                chat_id=str(source.chat_id),
-            )
-        except Exception:
-            logger.debug("topic-recover: read failed", exc_info=True)
-            return None
-        if not bindings:
-            return None
-        inbound = str(source.thread_id or "")
-        is_lobby = not inbound or inbound in self._TELEGRAM_GENERAL_TOPIC_IDS
-        known = {str(b.get("thread_id") or "") for b in bindings}
-        if not is_lobby and inbound in known:
-            return None
-        user_id = str(source.user_id)
-        for b in bindings:  # newest-first
-            if str(b.get("user_id") or "") == user_id:
-                recovered = str(b.get("thread_id") or "")
-                if recovered and recovered != inbound:
-                    return recovered
-                return None
-        return None
 
     def _resolve_session_agent_runtime(
         self,
