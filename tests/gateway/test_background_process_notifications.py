@@ -16,6 +16,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform
 from gateway.run import GatewayRunner
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
+from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.session_key import parse_session_key
 
 
@@ -189,7 +190,7 @@ async def test_run_process_watcher_respects_notification_mode(
     runner = _build_runner(monkeypatch, tmp_path, mode)
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict())
 
     assert adapter.send.await_count == expected_calls, (
         f"mode={mode}: expected {expected_calls} sends, got {adapter.send.await_count}"
@@ -214,7 +215,7 @@ async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict(thread_id="42"))
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict(thread_id="42"))
 
     assert adapter.send.await_count == 1
     _, kwargs = adapter.send.call_args
@@ -236,7 +237,7 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict())
 
     assert adapter.send.await_count == 1
     _, kwargs = adapter.send.call_args
@@ -265,7 +266,7 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
         "session_key": "agent:main:telegram:group:-100:42",
     }
 
-    await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: Background process matched]", evt)
 
     adapter.handle_message.assert_not_awaited()
     adapter.send.assert_awaited_once_with(
@@ -306,7 +307,7 @@ async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, t
         "message_id": "555",
         "notify_on_complete": True,
     }
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     adapter.handle_message.assert_awaited_once()
     synth_event = adapter.handle_message.await_args.args[0]
@@ -342,7 +343,7 @@ async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_pa
         "thread_id": "24296",
         "notify_on_complete": True,
     }
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     adapter.handle_message.assert_awaited_once()
     synth_event = adapter.handle_message.await_args.args[0]
@@ -372,7 +373,7 @@ async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeyp
         "message_id": "777",
     }
 
-    await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: Background process matched]", evt)
 
     adapter.handle_message.assert_not_awaited()
     adapter.send.assert_awaited_once_with(
@@ -400,7 +401,7 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
         "user_name": "Emiliyan",
     }
 
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
 
     assert source is not None
     assert source.platform == Platform.TELEGRAM
@@ -429,7 +430,7 @@ def test_build_process_event_source_uses_cached_live_source_before_session_key_p
         ),
     )
 
-    source = runner._build_process_event_source(
+    source = process_watcher_for(runner).build_process_event_source(
         {
             "session_id": "proc_watch",
             "session_key": "agent:main:telegram:group:-100:42",
@@ -471,7 +472,7 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
         "session_key": "agent:main:telegram:group:-100:42",
     }
 
-    await runner._inject_watch_notification("[SYSTEM: watch match]", evt)
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: watch match]", evt)
 
     adapter.handle_message.assert_not_awaited()
     # Must route to thread 42 (process origin), NOT some other thread.
@@ -486,7 +487,7 @@ def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_
     """Missing session_key and no platform metadata → None (drop notification)."""
     runner = _build_runner(monkeypatch, tmp_path, "all")
 
-    source = runner._build_process_event_source({"session_id": "proc_orphan"})
+    source = process_watcher_for(runner).build_process_event_source({"session_id": "proc_orphan"})
     assert source is None
 
 
@@ -500,7 +501,7 @@ def test_build_process_event_source_returns_none_for_invalid_platform(monkeypatc
         "chat_type": "dm",
         "chat_id": "123",
     }
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
     assert source is None
 
 
@@ -512,7 +513,7 @@ def test_build_process_event_source_returns_none_for_short_session_key(monkeypat
         "session_id": "proc_short",
         "session_key": "agent:main:telegram",  # Too few parts
     }
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
     assert source is None
 
 

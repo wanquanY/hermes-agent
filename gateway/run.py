@@ -92,7 +92,7 @@ from hermes_gateway.process_notifications import (
 )
 from hermes_gateway.personality_command import GatewayPersonalityCommandMixin
 from hermes_gateway.platform_command import GatewayPlatformCommandMixin
-from hermes_gateway.process_watcher import GatewayProcessWatcherMixin
+from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.proxy_mode import GatewayProxyModeMixin
 from hermes_gateway.title_command import GatewayTitleCommandMixin
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
@@ -523,7 +523,6 @@ class GatewayRunner(
     GatewayPlatformNoticeMixin,
     GatewayPlatformRuntimeMixin,
     GatewayProfileHomeCommandMixin,
-    GatewayProcessWatcherMixin,
     GatewayProxyModeMixin,
     GatewayInboundMediaMixin,
     GatewayInboundMessagePreparationMixin,
@@ -3168,7 +3167,7 @@ class GatewayRunner(
                 from tools.process_registry import process_registry
                 while process_registry.pending_watchers:
                     watcher = process_registry.pending_watchers.pop(0)
-                    asyncio.create_task(self._run_process_watcher(watcher))
+                    asyncio.create_task(process_watcher_for(self).run_process_watcher(watcher))
             except Exception as e:
                 logger.error("Process watcher setup error: %s", e)
 
@@ -3178,9 +3177,9 @@ class GatewayRunner(
             # above, so we only inject watch-type events here.
             #
             # Async-delegation completions ALSO ride this shared queue but are
-            # owned by the dedicated _async_delegation_watcher (started at
-            # boot), which covers both the idle and post-turn cases with a
-            # single consumer — so we leave them on the queue here.
+            # owned by GatewayProcessWatcherService.async_delegation_watcher,
+            # which covers both the idle and post-turn cases with a single
+            # consumer — so we leave them on the queue here.
             try:
                 from tools.process_registry import process_registry as _pr
                 _watch_events = _drain_gateway_watch_events(_pr.completion_queue)
@@ -3188,7 +3187,7 @@ class GatewayRunner(
                     synth_text = _format_gateway_process_notification(evt)
                     if synth_text:
                         try:
-                            await self._inject_watch_notification(synth_text, evt)
+                            await process_watcher_for(self).inject_watch_notification(synth_text, evt)
                         except Exception as e2:
                             logger.error("Watch notification injection error: %s", e2)
             except Exception as e:

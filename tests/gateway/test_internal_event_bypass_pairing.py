@@ -16,6 +16,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
+from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.session import SessionSource
 
 
@@ -91,7 +92,7 @@ async def test_notify_on_complete_sets_internal_flag(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path)
     adapter = runner.adapters[Platform.DISCORD]
 
-    await runner._run_process_watcher(_watcher_dict_with_notify())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict_with_notify())
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]
@@ -222,7 +223,7 @@ async def test_notify_on_complete_preserves_user_identity(monkeypatch, tmp_path)
     watcher["user_id"] = "user-42"
     watcher["user_name"] = "alice"
 
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]
@@ -270,7 +271,7 @@ async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monk
         "notify_on_complete": True,
     }
 
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]

@@ -16,11 +16,15 @@ from hermes_gateway.session_key import parse_session_key
 logger = logging.getLogger(__name__)
 
 
-class GatewayProcessWatcherMixin:
-    """Background process notification and async delegation watcher methods."""
+class GatewayProcessWatcherService:
+    """Background process notification and async delegation watcher service."""
 
-    def _build_process_event_source(self, evt: dict):
+    def __init__(self, runner):
+        self._runner = runner
+
+    def build_process_event_source(self, evt: dict):
         """Resolve the canonical source for a synthetic background-process event."""
+        runner = self._runner
         session_key = str(evt.get("session_key") or "").strip()
         derived_platform = ""
         derived_chat_type = ""
@@ -28,8 +32,8 @@ class GatewayProcessWatcherMixin:
 
         if session_key:
             try:
-                self.session_store._ensure_loaded()
-                entry = self.session_store._entries.get(session_key)
+                runner.session_store._ensure_loaded()
+                entry = runner.session_store._entries.get(session_key)
                 if entry and getattr(entry, "origin", None):
                     return entry.origin
             except Exception as exc:
@@ -39,7 +43,7 @@ class GatewayProcessWatcherMixin:
                     exc,
                 )
 
-            cached_source = self._get_cached_session_source(session_key)
+            cached_source = runner._get_cached_session_source(session_key)
             if cached_source is not None:
                 return cached_source
 
@@ -81,9 +85,10 @@ class GatewayProcessWatcherMixin:
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
 
-    async def _inject_watch_notification(self, synth_text: str, evt: dict) -> None:
+    async def inject_watch_notification(self, synth_text: str, evt: dict) -> None:
         """Deliver a watch-pattern notification as a status message."""
-        source = self._build_process_event_source(evt)
+        runner = self._runner
+        source = self.build_process_event_source(evt)
         if not source:
             logger.warning(
                 "Dropping watch notification with no routing metadata for process %s",
@@ -92,7 +97,7 @@ class GatewayProcessWatcherMixin:
             return
         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         adapter = None
-        for p, a in self.adapters.items():
+        for p, a in runner.adapters.items():
             if p.value == platform_name:
                 adapter = a
                 break
@@ -100,7 +105,7 @@ class GatewayProcessWatcherMixin:
             return
         try:
             message_id = str(evt.get("message_id") or "").strip() or None
-            metadata = self._thread_metadata_for_source(source, message_id)
+            metadata = runner._thread_metadata_for_source(source, message_id)
             logger.info(
                 "Watch pattern notification — sending for %s chat=%s thread=%s",
                 platform_name,
@@ -111,7 +116,7 @@ class GatewayProcessWatcherMixin:
         except Exception as e:
             logger.error("Watch notification delivery error: %s", e)
 
-    def _enrich_async_delegation_routing(self, evt: dict) -> None:
+    def enrich_async_delegation_routing(self, evt: dict) -> None:
         """Fill platform/chat_id/thread_id/chat_type on an async-delegation event."""
         if evt.get("platform"):
             return
@@ -124,12 +129,13 @@ class GatewayProcessWatcherMixin:
         if parsed.get("thread_id"):
             evt["thread_id"] = parsed["thread_id"]
 
-    async def _async_delegation_watcher(self, interval: float = 2.0) -> None:
+    async def async_delegation_watcher(self, interval: float = 2.0) -> None:
         """Drain async-delegation completions and inject them as new turns."""
         await asyncio.sleep(3)
         from tools.process_registry import process_registry as _pr
 
-        while self._running:
+        runner = self._runner
+        while runner._running:
             try:
                 requeue = []
                 async_events = []
@@ -145,22 +151,23 @@ class GatewayProcessWatcherMixin:
                 for evt in requeue:
                     _pr.completion_queue.put(evt)
                 for evt in async_events:
-                    self._enrich_async_delegation_routing(evt)
+                    self.enrich_async_delegation_routing(evt)
                     synth_text = format_gateway_process_notification(evt)
                     if not synth_text:
                         continue
                     try:
-                        await self._inject_watch_notification(synth_text, evt)
+                        await self.inject_watch_notification(synth_text, evt)
                     except Exception as e:
                         logger.error("Async delegation injection error: %s", e)
             except Exception as e:
                 logger.debug("Async delegation watcher error: %s", e)
             await asyncio.sleep(interval)
 
-    async def _run_process_watcher(self, watcher: dict) -> None:
+    async def run_process_watcher(self, watcher: dict) -> None:
         """Periodically check a background process and push updates to the user."""
         from tools.process_registry import process_registry
 
+        runner = self._runner
         session_id = watcher["session_id"]
         interval = watcher["check_interval"]
         session_key = watcher.get("session_key", "")
@@ -171,7 +178,7 @@ class GatewayProcessWatcherMixin:
         user_name = watcher.get("user_name", "")
         message_id = str(watcher.get("message_id") or "").strip() or None
         agent_notify = watcher.get("notify_on_complete", False)
-        notify_mode = runtime_config_for(self).load_background_notifications_mode()
+        notify_mode = runtime_config_for(runner).load_background_notifications_mode()
 
         logger.debug(
             "Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
@@ -223,7 +230,7 @@ class GatewayProcessWatcherMixin:
                         f"Command: {session.command}\n"
                         f"Output:\n{output}]"
                     )
-                    source = self._build_process_event_source(
+                    source = self.build_process_event_source(
                         {
                             "session_id": session_id,
                             "session_key": session_key,
@@ -242,7 +249,7 @@ class GatewayProcessWatcherMixin:
                         break
 
                     adapter = None
-                    for p, a in self.adapters.items():
+                    for p, a in runner.adapters.items():
                         if p == source.platform:
                             adapter = a
                             break
@@ -278,7 +285,7 @@ class GatewayProcessWatcherMixin:
                         f"Here's the final output:\n{new_output}]"
                     )
                     adapter = None
-                    for p, a in self.adapters.items():
+                    for p, a in runner.adapters.items():
                         if p.value == platform_name:
                             adapter = a
                             break
@@ -297,7 +304,7 @@ class GatewayProcessWatcherMixin:
                     f"New output:\n{new_output}]"
                 )
                 adapter = None
-                for p, a in self.adapters.items():
+                for p, a in runner.adapters.items():
                     if p.value == platform_name:
                         adapter = a
                         break
@@ -309,3 +316,12 @@ class GatewayProcessWatcherMixin:
                         logger.error("Watcher delivery error: %s", e)
 
         logger.debug("Process watcher ended: %s", session_id)
+
+
+def process_watcher_for(runner) -> GatewayProcessWatcherService:
+    service = getattr(runner, "process_watcher", None)
+    if isinstance(service, GatewayProcessWatcherService):
+        return service
+    service = GatewayProcessWatcherService(runner)
+    runner.process_watcher = service
+    return service

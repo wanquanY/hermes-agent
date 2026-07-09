@@ -10,6 +10,7 @@ import time
 from hermes_constants import get_hermes_home
 from hermes_gateway.bootstrap import restart_notification_pending as _restart_notification_pending_for_home
 from hermes_gateway.config import Platform
+from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
@@ -516,7 +517,7 @@ async def start_gateway_runner(runner) -> bool:
         from tools.process_registry import process_registry
         while process_registry.pending_watchers:
             watcher = process_registry.pending_watchers.pop(0)
-            asyncio.create_task(self._run_process_watcher(watcher))
+            asyncio.create_task(process_watcher_for(self).run_process_watcher(watcher))
             logger.info("Resumed watcher for recovered process %s", watcher.get("session_id"))
     except Exception as e:
         logger.error("Recovered watcher setup error: %s", e)
@@ -554,7 +555,7 @@ async def start_gateway_runner(runner) -> bool:
     # from delegate_task(background=true) subagents and injects each
     # result back into its originating session as a new turn, covering the
     # idle case where the subagent finishes with no agent turn running.
-    asyncio.create_task(self._async_delegation_watcher())
+    asyncio.create_task(process_watcher_for(self).async_delegation_watcher())
 
     logger.info("Press Ctrl+C to stop")
 
