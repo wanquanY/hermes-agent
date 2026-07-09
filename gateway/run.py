@@ -89,6 +89,7 @@ from hermes_gateway.conversation_editing_commands import conversation_editing_fo
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
+from hermes_gateway.gateway_media_warnings import media_warnings_for
 from hermes_gateway.media_delivery import media_delivery_for
 from hermes_gateway.message_runtime import message_runtime_for
 from hermes_gateway.model_command import model_command_for
@@ -199,9 +200,6 @@ from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
-
-_DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
-_DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
 
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
 # config.yaml is authoritative for terminal settings — overrides .env.
@@ -586,51 +584,7 @@ class GatewayRunner(
 
 
     def _warn_if_docker_media_delivery_is_risky(self) -> None:
-        """Warn when Docker-backed gateways lack an explicit export mount.
-
-        MEDIA delivery happens in the gateway process, so paths emitted by the model
-        must be readable from the host. A plain container-local path like
-        `/workspace/report.txt` or `/output/report.txt` often exists only inside
-        Docker, so users commonly need a dedicated export mount such as
-        `host-dir:/output`.
-        """
-        if os.getenv("TERMINAL_ENV", "").strip().lower() != "docker":
-            return
-
-        connected = self.config.get_connected_platforms()
-        messaging_platforms = [p for p in connected if p not in {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}]
-        if not messaging_platforms:
-            return
-
-        raw_volumes = os.getenv("TERMINAL_DOCKER_VOLUMES", "").strip()
-        volumes: List[str] = []
-        if raw_volumes:
-            try:
-                parsed = json.loads(raw_volumes)
-                if isinstance(parsed, list):
-                    volumes = [str(v) for v in parsed if isinstance(v, str)]
-            except Exception:
-                logger.debug("Could not parse TERMINAL_DOCKER_VOLUMES for gateway media warning", exc_info=True)
-
-        has_explicit_output_mount = False
-        for spec in volumes:
-            match = _DOCKER_VOLUME_SPEC_RE.match(spec)
-            if not match:
-                continue
-            container_path = match.group("container")
-            if container_path in _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS:
-                has_explicit_output_mount = True
-                break
-
-        if has_explicit_output_mount:
-            return
-
-        logger.warning(
-            "Docker backend is enabled for the messaging gateway but no explicit host-visible "
-            "output mount (for example '/home/user/.hermes/cache/documents:/output') is configured. "
-            "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
-            "for container-local paths like '/workspace/...' or '/output/...'."
-        )
+        media_warnings_for(self).warn_if_docker_media_delivery_is_risky()
 
 
 
