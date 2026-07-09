@@ -57,7 +57,7 @@ class TestVerboseCommand:
         monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         assert "not enabled" in result.lower()
         assert "tool_progress_command" in result
@@ -76,7 +76,7 @@ class TestVerboseCommand:
         monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         # all -> verbose
         assert "VERBOSE" in result
@@ -100,7 +100,7 @@ class TestVerboseCommand:
         monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         assert "not enabled" in result.lower()
         assert "tool_progress_command" in result
@@ -122,7 +122,7 @@ class TestVerboseCommand:
         # off -> new -> all -> verbose -> off
         expected = ["new", "all", "verbose", "off"]
         for mode in expected:
-            result = await runner._handle_verbose_command(_make_event())
+            result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
             saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             actual = saved["display"]["platforms"]["telegram"]["tool_progress"]
             assert actual == mode, \
@@ -142,7 +142,7 @@ class TestVerboseCommand:
         monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         # Telegram platform default is "new" → cycles to "all"
         assert "ALL" in result
@@ -169,11 +169,11 @@ class TestVerboseCommand:
         runner = _make_runner()
 
         # Cycle on Telegram
-        await runner._handle_verbose_command(
+        await verbose_command.verbose_command_for(runner).handle_verbose_command(
             _make_event(platform=Platform.TELEGRAM)
         )
         # Cycle on Slack
-        await runner._handle_verbose_command(
+        await verbose_command.verbose_command_for(runner).handle_verbose_command(
             _make_event(platform=Platform.SLACK)
         )
 
@@ -194,7 +194,7 @@ class TestVerboseCommand:
         monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
         assert "not enabled" in result.lower()
 
     def test_verbose_is_in_gateway_known_commands(self):

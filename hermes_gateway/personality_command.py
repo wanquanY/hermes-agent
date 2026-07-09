@@ -31,8 +31,11 @@ def _resolve_prompt(value):
     return str(value)
 
 
-class GatewayPersonalityCommandMixin:
-    async def _handle_personality_command(self, event: MessageEvent) -> str:
+class GatewayPersonalityCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_personality_command(self, event: MessageEvent) -> str:
         """List, set, or clear configured personality overlays."""
         from hermes_constants import display_hermes_home
 
@@ -69,7 +72,7 @@ class GatewayPersonalityCommandMixin:
                 atomic_yaml_write(config_path, config)
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
-            self._ephemeral_system_prompt = ""
+            self._runner._ephemeral_system_prompt = ""
             return t("gateway.personality.cleared")
         if args in personalities:
             new_prompt = _resolve_prompt(personalities[args])
@@ -82,8 +85,17 @@ class GatewayPersonalityCommandMixin:
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
 
-            self._ephemeral_system_prompt = new_prompt
+            self._runner._ephemeral_system_prompt = new_prompt
             return t("gateway.personality.set_to", name=args)
 
         available = "`none`, " + ", ".join(f"`{n}`" for n in personalities)
         return t("gateway.personality.unknown", name=args, available=available)
+
+
+def personality_command_for(runner) -> GatewayPersonalityCommandService:
+    service = getattr(runner, "personality_command", None)
+    if isinstance(service, GatewayPersonalityCommandService):
+        return service
+    service = GatewayPersonalityCommandService(runner)
+    runner.personality_command = service
+    return service

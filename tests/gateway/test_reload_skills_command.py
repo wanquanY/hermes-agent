@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.reload_skills_command import reload_skills_command_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
@@ -110,7 +111,7 @@ async def test_reload_skills_handler_queues_note_on_diff(monkeypatch):
 
     runner = _make_runner()
     event = _make_event("/reload-skills")
-    out = await runner._handle_reload_skills_command(event)
+    out = await reload_skills_command_for(runner).handle_reload_skills_command(event)
 
     assert out is not None
     assert "Skills Reloaded" in out
@@ -157,7 +158,7 @@ async def test_reload_skills_handler_reports_no_changes(monkeypatch):
     )
 
     runner = _make_runner()
-    out = await runner._handle_reload_skills_command(_make_event("/reload-skills"))
+    out = await reload_skills_command_for(runner).handle_reload_skills_command(_make_event("/reload-skills"))
 
     assert "No new skills detected" in out
     assert "1 skill(s) available" in out
@@ -174,13 +175,19 @@ async def test_dispatcher_routes_reload_skills(monkeypatch):
 
     runner = _make_runner()
     sentinel = "reload-skills handler reached"
-    runner._handle_reload_skills_command = AsyncMock(return_value=sentinel)  # type: ignore[attr-defined]
+    reload_service = SimpleNamespace(
+        handle_reload_skills_command=AsyncMock(return_value=sentinel)
+    )
 
     monkeypatch.setattr(
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
+    monkeypatch.setattr(
+        gateway_run, "reload_skills_command_for", lambda _runner: reload_service
+    )
 
     result = await runner._handle_message(_make_event("/reload-skills"))
+    reload_service.handle_reload_skills_command.assert_awaited_once()
     assert result == sentinel
 
 
@@ -190,12 +197,18 @@ async def test_underscored_alias_not_flagged_unknown(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._handle_reload_skills_command = AsyncMock(return_value="ok")  # type: ignore[attr-defined]
+    reload_service = SimpleNamespace(
+        handle_reload_skills_command=AsyncMock(return_value="ok")
+    )
 
     monkeypatch.setattr(
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
+    monkeypatch.setattr(
+        gateway_run, "reload_skills_command_for", lambda _runner: reload_service
+    )
 
     result = await runner._handle_message(_make_event("/reload_skills"))
+    reload_service.handle_reload_skills_command.assert_awaited_once()
     if result is not None:
         assert "Unknown command" not in result

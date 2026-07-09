@@ -6,6 +6,7 @@ background session) across gateway messenger platforms.
 
 import asyncio
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -280,7 +281,10 @@ class TestRunBackgroundTask:
             {"api_key": "test-key"},
         )
         runner.runtime_config.resolve_session_reasoning_config.return_value = None
-        runner._load_service_tier = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            "hermes_gateway.background_tasks.fast_command_for",
+            lambda _runner: SimpleNamespace(load_service_tier=lambda: None),
+        )
         runner.runtime_config.resolve_turn_agent_config.return_value = {
             "model": "test-model",
             "runtime": {"api_key": "test-key"},

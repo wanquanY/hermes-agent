@@ -88,15 +88,15 @@ from hermes_gateway.process_notifications import (
     drain_gateway_watch_events as _drain_gateway_watch_events,
     format_gateway_process_notification as _format_gateway_process_notification,
 )
-from hermes_gateway.personality_command import GatewayPersonalityCommandMixin
-from hermes_gateway.platform_command import GatewayPlatformCommandMixin
+from hermes_gateway.personality_command import personality_command_for
+from hermes_gateway.platform_command import platform_command_for
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.proxy_mode import proxy_mode_for
 from hermes_gateway.title_command import title_command_for
 from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
 from hermes_gateway.usage_command import usage_command_for
-from hermes_gateway.verbose_command import GatewayVerboseCommandMixin
+from hermes_gateway.verbose_command import verbose_command_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from hermes_gateway.yolo_command import yolo_command_for
 from hermes_gateway.reset_command import GatewayResetCommandMixin
@@ -121,7 +121,7 @@ from hermes_gateway.skill_hint import (
     check_unavailable_skill as _check_unavailable_skill_for_repo,
     skill_slug_from_frontmatter as _skill_slug_from_frontmatter,
 )
-from hermes_gateway.fast_command import GatewayFastCommandMixin
+from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.footer_command import footer_command_for
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.freshness import (
@@ -148,8 +148,8 @@ from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.reasoning_command import GatewayReasoningCommandMixin
 from hermes_gateway.reload_mcp_command import GatewayReloadMcpCommandMixin
-from hermes_gateway.reload_skills_command import GatewayReloadSkillsCommandMixin
-from hermes_gateway.rollback_command import GatewayRollbackCommandMixin
+from hermes_gateway.reload_skills_command import reload_skills_command_for
+from hermes_gateway.rollback_command import rollback_command_for
 from hermes_gateway.replay import (
     ASSISTANT_REPLAY_FIELDS as _ASSISTANT_REPLAY_FIELDS,
     build_replay_entry as _build_replay_entry,
@@ -511,9 +511,6 @@ class GatewayRunner(
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
     GatewayConversationEditingCommandMixin,
-    GatewayFastCommandMixin,
-    GatewayPersonalityCommandMixin,
-    GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
     GatewayProfileHomeCommandMixin,
     GatewayInboundMediaMixin,
@@ -523,13 +520,10 @@ class GatewayRunner(
     GatewayModelCommandMixin,
     GatewayReasoningCommandMixin,
     GatewayReloadMcpCommandMixin,
-    GatewayReloadSkillsCommandMixin,
     GatewayResetCommandMixin,
-    GatewayRollbackCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewayShutdownRuntimeMixin,
     GatewayUpdateRestartMixin,
-    GatewayVerboseCommandMixin,
 ):
     """
     Main gateway controller.
@@ -564,7 +558,7 @@ class GatewayRunner(
         self._prefill_messages = runtime_config_for(self).load_prefill_messages()
         self._ephemeral_system_prompt = runtime_config_for(self).load_ephemeral_system_prompt()
         self._reasoning_config = runtime_config_for(self).load_reasoning_config()
-        self._service_tier = self._load_service_tier()
+        self._service_tier = fast_command_for(self).load_service_tier()
         self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = runtime_config_for(self).load_busy_input_mode()
         self._restart_drain_timeout = runtime_config_for(self).load_restart_drain_timeout()
@@ -1725,7 +1719,7 @@ class GatewayRunner(
                 if _cmd_def_inner.name == "yolo":
                     return await yolo_command_for(self).handle_yolo_command(event)
                 if _cmd_def_inner.name == "verbose":
-                    return await self._handle_verbose_command(event)
+                    return await verbose_command_for(self).handle_verbose_command(event)
                 if _cmd_def_inner.name == "footer":
                     return await footer_command_for(self).handle_footer_command(event)
 
@@ -1996,7 +1990,7 @@ class GatewayRunner(
             return await runtime_status_command_for(self).handle_agents_command(event)
 
         if canonical == "platform":
-            return await self._handle_platform_command(event)
+            return await platform_command_for(self).handle_platform_command(event)
 
         if canonical == "restart":
             return await restart_lifecycle_for(self).handle_restart_command(event)
@@ -2008,10 +2002,10 @@ class GatewayRunner(
             return await self._handle_reasoning_command(event)
 
         if canonical == "fast":
-            return await self._handle_fast_command(event)
+            return await fast_command_for(self).handle_fast_command(event)
 
         if canonical == "verbose":
-            return await self._handle_verbose_command(event)
+            return await verbose_command_for(self).handle_verbose_command(event)
 
         if canonical == "footer":
             return await footer_command_for(self).handle_footer_command(event)
@@ -2026,7 +2020,7 @@ class GatewayRunner(
             return await self._handle_codex_runtime_command(event)
 
         if canonical == "personality":
-            return await self._handle_personality_command(event)
+            return await personality_command_for(self).handle_personality_command(event)
 
         if canonical == "kanban":
             from channels.slash_commands import handle_kanban_command
@@ -2073,7 +2067,7 @@ class GatewayRunner(
             return await self._handle_reload_mcp_command(event)
 
         if canonical == "reload-skills":
-            return await self._handle_reload_skills_command(event)
+            return await reload_skills_command_for(self).handle_reload_skills_command(event)
 
         if canonical == "bundles":
             return await self._handle_bundles_command(event)
@@ -2100,7 +2094,7 @@ class GatewayRunner(
             return await session_navigation_for(self).handle_branch_command(event)
 
         if canonical == "rollback":
-            return await self._handle_rollback_command(event)
+            return await rollback_command_for(self).handle_rollback_command(event)
 
         if canonical == "background":
             return await self._handle_background_command(event)
@@ -4481,7 +4475,7 @@ class GatewayRunner(
                 session_key=session_key,
             )
             self._reasoning_config = reasoning_config
-            self._service_tier = self._load_service_tier()
+            self._service_tier = fast_command_for(self).load_service_tier()
             # Set up stream consumer for token streaming or interim commentary.
             _stream_consumer = None
             _stream_delta_cb = None

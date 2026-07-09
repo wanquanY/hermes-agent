@@ -28,8 +28,11 @@ def _platform_config_key(platform: Platform) -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
-class GatewayVerboseCommandMixin:
-    async def _handle_verbose_command(self, event: MessageEvent) -> str:
+class GatewayVerboseCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_verbose_command(self, event: MessageEvent) -> str:
         """Handle /verbose command — cycle tool progress display mode.
 
         Gated by ``display.tool_progress_command`` in config.yaml (default off).
@@ -90,3 +93,12 @@ class GatewayVerboseCommandMixin:
         except Exception as e:
             logger.warning("Failed to save tool_progress mode: %s", e)
             return f"{descriptions[new_mode]}\n" + t("gateway.verbose.save_failed", error=e)
+
+
+def verbose_command_for(runner) -> GatewayVerboseCommandService:
+    service = getattr(runner, "verbose_command", None)
+    if isinstance(service, GatewayVerboseCommandService):
+        return service
+    service = GatewayVerboseCommandService(runner)
+    runner.verbose_command = service
+    return service

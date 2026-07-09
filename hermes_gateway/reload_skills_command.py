@@ -20,8 +20,11 @@ def _format_skill_item(item: dict) -> str:
     return t("gateway.reload_skills.item_no_desc", name=name)
 
 
-class GatewayReloadSkillsCommandMixin:
-    async def _handle_reload_skills_command(self, event: MessageEvent) -> str:
+class GatewayReloadSkillsCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_reload_skills_command(self, event: MessageEvent) -> str:
         """Rescan skills, refresh adapter state, and queue a next-turn note."""
 
         loop = asyncio.get_running_loop()
@@ -33,7 +36,7 @@ class GatewayReloadSkillsCommandMixin:
             removed = result.get("removed", [])
             total = result.get("total", 0)
 
-            for adapter in list(self.adapters.values()):
+            for adapter in list(self._runner.adapters.values()):
                 refresh = getattr(adapter, "refresh_skill_group", None)
                 if not callable(refresh):
                     continue
@@ -79,14 +82,23 @@ class GatewayReloadSkillsCommandMixin:
             sections.append("Use skills_list to see the updated catalog.]")
             note = "\n".join(sections)
 
-            session_key = self._session_key_for_source(event.source)
-            if not hasattr(self, "_pending_skills_reload_notes"):
-                self._pending_skills_reload_notes = {}
+            session_key = self._runner._session_key_for_source(event.source)
+            if not hasattr(self._runner, "_pending_skills_reload_notes"):
+                self._runner._pending_skills_reload_notes = {}
             if session_key:
-                self._pending_skills_reload_notes[session_key] = note
+                self._runner._pending_skills_reload_notes[session_key] = note
 
             return "\n".join(lines)
 
         except Exception as e:
             logger.warning("Skills reload failed: %s", e)
             return t("gateway.reload_skills.failed", error=e)
+
+
+def reload_skills_command_for(runner) -> GatewayReloadSkillsCommandService:
+    service = getattr(runner, "reload_skills_command", None)
+    if isinstance(service, GatewayReloadSkillsCommandService):
+        return service
+    service = GatewayReloadSkillsCommandService(runner)
+    runner.reload_skills_command = service
+    return service

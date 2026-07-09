@@ -16,8 +16,11 @@ def _resolve_platform(name: str):
     return None
 
 
-class GatewayPlatformCommandMixin:
-    async def _handle_platform_command(self, event: MessageEvent) -> str:
+class GatewayPlatformCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_platform_command(self, event: MessageEvent) -> str:
         """Surface and manually control failed or paused gateway adapters."""
 
         args = (event.get_command_args() or "").strip()
@@ -27,12 +30,12 @@ class GatewayPlatformCommandMixin:
 
         if action == "list":
             lines = ["**Gateway platforms**"]
-            connected = sorted(p.value for p in self.adapters.keys())
+            connected = sorted(p.value for p in self._runner.adapters.keys())
             if connected:
                 lines.append("Connected: " + ", ".join(connected))
             else:
                 lines.append("Connected: (none)")
-            failed = getattr(self, "_failed_platforms", {}) or {}
+            failed = getattr(self._runner, "_failed_platforms", {}) or {}
             if failed:
                 for platform, info in failed.items():
                     if info.get("paused"):
@@ -56,7 +59,7 @@ class GatewayPlatformCommandMixin:
             platform = _resolve_platform(target)
             if platform is None:
                 return f"Unknown platform: {target}"
-            failed = getattr(self, "_failed_platforms", {}) or {}
+            failed = getattr(self._runner, "_failed_platforms", {}) or {}
             if action == "pause":
                 if platform not in failed:
                     return (
@@ -65,7 +68,7 @@ class GatewayPlatformCommandMixin:
                     )
                 if failed[platform].get("paused"):
                     return f"{platform.value} is already paused."
-                platform_runtime_for(self).pause_failed_platform(
+                platform_runtime_for(self._runner).pause_failed_platform(
                     platform, reason="paused via /platform pause"
                 )
                 return (
@@ -83,7 +86,7 @@ class GatewayPlatformCommandMixin:
                     f"{platform.value} is already retrying — "
                     f"no resume needed."
                 )
-            platform_runtime_for(self).resume_paused_platform(platform)
+            platform_runtime_for(self._runner).resume_paused_platform(platform)
             return f"✓ {platform.value} resumed — retrying on next watcher tick."
 
         return (
@@ -92,3 +95,12 @@ class GatewayPlatformCommandMixin:
             "  /platform pause <name> — stop retrying a failing platform\n"
             "  /platform resume <name> — re-queue a paused platform"
         )
+
+
+def platform_command_for(runner) -> GatewayPlatformCommandService:
+    service = getattr(runner, "platform_command", None)
+    if isinstance(service, GatewayPlatformCommandService):
+        return service
+    service = GatewayPlatformCommandService(runner)
+    runner.platform_command = service
+    return service

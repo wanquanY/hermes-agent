@@ -102,7 +102,7 @@ class TestGatewayPersonalityNone:
 
         with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("none")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert runner._ephemeral_system_prompt == ""
         assert "cleared" in result.lower()
@@ -116,7 +116,7 @@ class TestGatewayPersonalityNone:
 
         with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("default")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert runner._ephemeral_system_prompt == ""
 
@@ -129,7 +129,7 @@ class TestGatewayPersonalityNone:
 
         with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert "none" in result.lower()
 
@@ -142,7 +142,7 @@ class TestGatewayPersonalityNone:
 
         with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("nonexistent")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert "none" in result.lower()
 
@@ -154,7 +154,7 @@ class TestGatewayPersonalityNone:
         with patch.object(personality_command, "GATEWAY_HOME", tmp_path), \
              patch("hermes_constants.display_hermes_home", return_value="~/.hermes/profiles/coder"):
             event = self._make_event("")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert result == "No personalities configured in `~/.hermes/profiles/coder/config.yaml`"
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from hermes_gateway.reload_skills_command import reload_skills_command_for
+
 
 def _make_adapter():
     """Construct a DiscordAdapter without going through __init__ / token checks."""
@@ -236,7 +238,7 @@ class TestHandleReloadSkillsCallsRefreshSkillGroup:
             runner._pending_skills_reload_notes = {}
 
             result = asyncio.get_event_loop().run_until_complete(
-                runner._handle_reload_skills_command(event)
+                reload_skills_command_for(runner).handle_reload_skills_command(event)
             )
 
         assert "Skills Reloaded" in result

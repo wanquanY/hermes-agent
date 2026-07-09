@@ -14,6 +14,7 @@ from channels.platforms.base import MessageEvent
 from hermes_constants import get_hermes_home
 from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 from hermes_gateway.config import Platform
+from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ class GatewayBackgroundTaskMixin:
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = runtime_config_for(self).resolve_session_reasoning_config(source=source)
             self._reasoning_config = reasoning_config
-            self._service_tier = self._load_service_tier()
+            self._service_tier = fast_command_for(self).load_service_tier()
             turn_route = runtime_config_for(self).resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
             # Enrich the prompt with image descriptions so the background

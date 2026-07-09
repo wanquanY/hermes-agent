@@ -12,6 +12,7 @@ from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
+from hermes_gateway.platform_command import platform_command_for
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.session import SessionSource
 
@@ -665,7 +666,7 @@ class TestPlatformSlashCommand:
             "paused": True,
             "pause_reason": "not paired",
         }
-        out = await runner._handle_platform_command(self._make_event("/platform list"))
+        out = await platform_command_for(runner).handle_platform_command(self._make_event("/platform list"))
         assert "discord" in out
         assert "whatsapp" in out
         assert "PAUSED" in out
@@ -679,7 +680,7 @@ class TestPlatformSlashCommand:
             "attempts": 2,
             "next_retry": time.monotonic() + 30,
         }
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause whatsapp")
         )
         assert "paused" in out.lower()
@@ -688,7 +689,7 @@ class TestPlatformSlashCommand:
     @pytest.mark.asyncio
     async def test_pause_rejects_unqueued_platform(self):
         runner = _make_runner()
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause whatsapp")
         )
         assert "not in the retry queue" in out
@@ -703,7 +704,7 @@ class TestPlatformSlashCommand:
             "paused": True,
             "pause_reason": "x",
         }
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform resume whatsapp")
         )
         assert "resumed" in out.lower()
@@ -712,7 +713,7 @@ class TestPlatformSlashCommand:
     @pytest.mark.asyncio
     async def test_unknown_platform_name(self):
         runner = _make_runner()
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause notarealplatform")
         )
         assert "Unknown platform" in out
@@ -721,5 +722,5 @@ class TestPlatformSlashCommand:
     async def test_bare_platform_shows_usage_with_list(self):
         # An empty /platform call defaults to "list".
         runner = _make_runner()
-        out = await runner._handle_platform_command(self._make_event("/platform"))
+        out = await platform_command_for(runner).handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out

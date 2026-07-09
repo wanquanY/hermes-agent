@@ -30,9 +30,12 @@ def resolve_gateway_model(config: dict | None = None) -> str:
     return _resolve_gateway_model(config)
 
 
-class GatewayFastCommandMixin:
+class GatewayFastCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
     @staticmethod
-    def _load_service_tier() -> str | None:
+    def load_service_tier() -> str | None:
         """Load Priority Processing setting from config.yaml.
 
         Reads agent.service_tier from config.yaml. Accepted values mirror the CLI:
@@ -47,8 +50,8 @@ class GatewayFastCommandMixin:
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
                 raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not load service_tier from gateway config: %s", exc)
 
         value = raw.lower()
         if not value or value in {"normal", "default", "standard", "off", "none"}:
@@ -58,14 +61,14 @@ class GatewayFastCommandMixin:
         logger.warning("Unknown service_tier '%s', ignoring", raw)
         return None
 
-    async def _handle_fast_command(self, event: MessageEvent) -> str:
+    async def handle_fast_command(self, event: MessageEvent) -> str:
         """Handle /fast — mirror the CLI Priority Processing toggle in gateway chats."""
         import yaml
         from hermes_cli.models import model_supports_fast_mode
 
         args = event.get_command_args().strip().lower()
         config_path = gateway_home() / "config.yaml"
-        self._service_tier = self._load_service_tier()
+        self._runner._service_tier = self.load_service_tier()
 
         user_config = load_gateway_config()
         model = resolve_gateway_model(user_config)
@@ -93,15 +96,15 @@ class GatewayFastCommandMixin:
                 return False
 
         if not args or args == "status":
-            status = t("gateway.fast.status_fast") if self._service_tier == "priority" else t("gateway.fast.status_normal")
+            status = t("gateway.fast.status_fast") if self._runner._service_tier == "priority" else t("gateway.fast.status_normal")
             return t("gateway.fast.status", mode=status)
 
         if args in {"fast", "on"}:
-            self._service_tier = "priority"
+            self._runner._service_tier = "priority"
             saved_value = "fast"
             label = t("gateway.fast.label_fast")
         elif args in {"normal", "off"}:
-            self._service_tier = None
+            self._runner._service_tier = None
             saved_value = "normal"
             label = t("gateway.fast.label_normal")
         else:
@@ -110,3 +113,12 @@ class GatewayFastCommandMixin:
         if _save_config_key("agent.service_tier", saved_value):
             return t("gateway.fast.saved", label=label)
         return t("gateway.fast.session_only", label=label)
+
+
+def fast_command_for(runner) -> GatewayFastCommandService:
+    service = getattr(runner, "fast_command", None)
+    if isinstance(service, GatewayFastCommandService):
+        return service
+    service = GatewayFastCommandService(runner)
+    runner.fast_command = service
+    return service

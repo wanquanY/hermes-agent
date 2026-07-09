@@ -131,12 +131,17 @@ async def test_yolo_dispatches_mid_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_verbose_dispatches_mid_run(monkeypatch):
     """/verbose mid-run must dispatch to its handler, not hit the catch-all."""
+    import gateway.run as gateway_run
+
     runner = _make_runner()
-    runner._handle_verbose_command = AsyncMock(return_value="tool progress: new")
+    verbose_service = SimpleNamespace(
+        handle_verbose_command=AsyncMock(return_value="tool progress: new")
+    )
+    monkeypatch.setattr(gateway_run, "verbose_command_for", lambda _runner: verbose_service)
 
     result = await runner._handle_message(_make_event("/verbose"))
 
-    runner._handle_verbose_command.assert_awaited_once()
+    verbose_service.handle_verbose_command.assert_awaited_once()
     assert result == "tool progress: new"
     assert "can't run mid-turn" not in (result or "")
 
@@ -144,14 +149,28 @@ async def test_verbose_dispatches_mid_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_fast_rejected_mid_run():
     """/fast mid-run must hit the busy catch-all — config-only, next message."""
+    import gateway.run as gateway_run
+
     runner = _make_runner()
-    runner._handle_fast_command = AsyncMock(
-        side_effect=AssertionError("/fast should not dispatch mid-run")
+    called = False
+
+    def _fail_fast_factory(_runner):
+        nonlocal called
+        called = True
+        raise AssertionError("/fast should not dispatch mid-run")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        gateway_run,
+        "fast_command_for",
+        _fail_fast_factory,
     )
+    try:
+        result = await runner._handle_message(_make_event("/fast"))
+    finally:
+        monkeypatch.undo()
 
-    result = await runner._handle_message(_make_event("/fast"))
-
-    runner._handle_fast_command.assert_not_awaited()
+    assert called is False
     assert result is not None
     assert "can't run mid-turn" in result
     assert "/fast" in result

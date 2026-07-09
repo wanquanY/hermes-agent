@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+
+logger = logging.getLogger(__name__)
 
 
 def _gateway_home() -> Path:
@@ -15,8 +18,11 @@ def _gateway_home() -> Path:
     return get_hermes_home()
 
 
-class GatewayRollbackCommandMixin:
-    async def _handle_rollback_command(self, event: MessageEvent) -> str:
+class GatewayRollbackCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
         from tools.checkpoint_manager import CheckpointManager, format_checkpoint_list
 
@@ -31,8 +37,8 @@ class GatewayRollbackCommandMixin:
                 cp_cfg = _data.get("checkpoints", {})
                 if isinstance(cp_cfg, bool):
                     cp_cfg = {"enabled": cp_cfg}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not load checkpoint config for /rollback: %s", exc)
 
         if not cp_cfg.get("enabled", False):
             return t("gateway.rollback.not_enabled")
@@ -74,3 +80,12 @@ class GatewayRollbackCommandMixin:
                 reason=result["reason"],
             )
         return t("gateway.rollback.restore_failed", error=result["error"])
+
+
+def rollback_command_for(runner) -> GatewayRollbackCommandService:
+    service = getattr(runner, "rollback_command", None)
+    if isinstance(service, GatewayRollbackCommandService):
+        return service
+    service = GatewayRollbackCommandService(runner)
+    runner.rollback_command = service
+    return service

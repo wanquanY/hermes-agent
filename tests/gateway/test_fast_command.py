@@ -131,7 +131,7 @@ async def test_handle_fast_command_persists_config(monkeypatch, tmp_path):
     monkeypatch.setattr(fast_command, "load_gateway_config", lambda: {})
     monkeypatch.setattr(fast_command, "resolve_gateway_model", lambda config=None: "gpt-5.4")
 
-    response = await runner._handle_fast_command(_make_event("/fast fast"))
+    response = await fast_command.fast_command_for(runner).handle_fast_command(_make_event("/fast fast"))
 
     assert "FAST" in response
     assert runner._service_tier == "priority"
