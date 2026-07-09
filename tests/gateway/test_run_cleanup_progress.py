@@ -160,6 +160,7 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *a, **k: None
+    fake_dotenv.dotenv_values = lambda *a, **k: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -168,7 +169,19 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
     import tools.terminal_tool  # noqa: F401 — register tool emoji
 
     gateway_run = importlib.import_module("gateway.run")
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    runtime = SimpleNamespace(
+        resolve_session_agent_runtime=lambda **_kwargs: (
+            "test-model",
+            {"api_key": "fake"},
+        ),
+        resolve_session_reasoning_config=lambda **_kwargs: None,
+        resolve_turn_agent_config=lambda _message, model, runtime_kwargs: {
+            "model": model,
+            "runtime": runtime_kwargs,
+            "request_overrides": {},
+        },
+    )
+    monkeypatch.setattr(gateway_run, "runtime_config_for", lambda _runner: runtime)
 
     # Wire the per-platform cleanup_progress flag via the config loader the
     # gateway actually reads (``_load_gateway_config`` returns user config).

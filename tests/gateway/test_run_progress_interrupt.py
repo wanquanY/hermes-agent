@@ -136,6 +136,7 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -146,11 +147,19 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(
-        gateway_run,
-        "_resolve_runtime_agent_kwargs",
-        lambda: {"api_key": "fake"},
+    runtime = SimpleNamespace(
+        resolve_session_agent_runtime=lambda **_kwargs: (
+            "test-model",
+            {"api_key": "fake"},
+        ),
+        resolve_session_reasoning_config=lambda **_kwargs: None,
+        resolve_turn_agent_config=lambda _message, model, runtime_kwargs: {
+            "model": model,
+            "runtime": runtime_kwargs,
+            "request_overrides": {},
+        },
     )
+    monkeypatch.setattr(gateway_run, "runtime_config_for", lambda _runner: runtime)
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
