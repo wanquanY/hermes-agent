@@ -144,7 +144,7 @@ from hermes_gateway.output_policy import (
 )
 from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
-from hermes_gateway.platform_notice import GatewayPlatformNoticeMixin
+from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.reasoning_command import GatewayReasoningCommandMixin
 from hermes_gateway.reload_mcp_command import GatewayReloadMcpCommandMixin
@@ -520,7 +520,6 @@ class GatewayRunner(
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
-    GatewayPlatformNoticeMixin,
     GatewayProfileHomeCommandMixin,
     GatewayProxyModeMixin,
     GatewayInboundMediaMixin,
@@ -2966,7 +2965,7 @@ class GatewayRunner(
                     f"Type {sethome_cmd} to make this chat your home channel, "
                     f"or ignore to skip."
                 )
-                await self._deliver_platform_notice(source, notice)
+                await platform_notice_for(self).deliver_platform_notice(source, notice)
         
         # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state

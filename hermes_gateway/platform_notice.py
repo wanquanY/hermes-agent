@@ -7,19 +7,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class GatewayPlatformNoticeMixin:
-    async def _deliver_platform_notice(self, source, content: str) -> None:
+class GatewayPlatformNoticeService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def deliver_platform_notice(self, source, content: str) -> None:
         """Deliver a setup/operational notice using platform-specific privacy rules."""
-        adapter = self.adapters.get(source.platform)
+        runner = self._runner
+        adapter = runner.adapters.get(source.platform)
         if not adapter:
             return
 
-        config = getattr(self, "config", None)
+        config = getattr(runner, "config", None)
         notice_delivery = "public"
         if config and hasattr(config, "get_notice_delivery"):
             notice_delivery = config.get_notice_delivery(source.platform)
 
-        metadata = self._thread_metadata_for_source(source)
+        metadata = runner._thread_metadata_for_source(source)
         if notice_delivery == "private" and getattr(source, "user_id", None):
             try:
                 result = await adapter.send_private_notice(
@@ -38,3 +42,12 @@ class GatewayPlatformNoticeMixin:
                 )
 
         await adapter.send(source.chat_id, content, metadata=metadata)
+
+
+def platform_notice_for(runner) -> GatewayPlatformNoticeService:
+    service = getattr(runner, "platform_notice", None)
+    if isinstance(service, GatewayPlatformNoticeService):
+        return service
+    service = GatewayPlatformNoticeService(runner)
+    runner.platform_notice = service
+    return service
