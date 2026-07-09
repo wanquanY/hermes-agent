@@ -7,13 +7,61 @@ import dataclasses
 import logging
 import math
 import os
+import sys
 import time
 
-from hermes_gateway.agent_turn_hygiene import agent_turn_hygiene_for
+from hermes_agent.gateway.runtime_config import (
+    load_gateway_runtime_config,
+    resolve_gateway_model,
+    resolve_runtime_agent_kwargs,
+)
+from hermes_constants import get_hermes_home
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.agent_turn_context import agent_turn_context_for
+from hermes_gateway.agent_turn_hygiene import agent_turn_hygiene_for
+from hermes_gateway.bootstrap import home_target_env_var
+from hermes_gateway.config import Platform
+from hermes_gateway.gateway_runtime_config import runtime_config_for
+from hermes_gateway.media_delivery import media_delivery_for
+from hermes_gateway.output_policy import sanitize_gateway_final_response
+from hermes_gateway.platform_notice import platform_notice_for
+from hermes_gateway.process_notifications import (
+    drain_gateway_watch_events,
+    format_gateway_process_notification,
+)
+from hermes_gateway.process_watcher import process_watcher_for
+from hermes_gateway.response_normalization import normalize_empty_agent_response
+from hermes_gateway.resume_pending import should_clear_resume_pending_after_turn
+from hermes_gateway.session_context import build_session_context, build_session_context_prompt
+from hermes_gateway.session_navigation_commands import session_navigation_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
+from hermes_gateway.voice_runtime import voice_runtime_for
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _load_gateway_config() -> dict:
+    return load_gateway_runtime_config(_active_hermes_home())
+
+
+def _active_hermes_home():
+    legacy = sys.modules.get("gateway.run")
+    if legacy is not None and hasattr(legacy, "_hermes_home"):
+        return getattr(legacy, "_hermes_home")
+    return get_hermes_home()
+
+
+def _resolve_runtime_agent_kwargs() -> dict:
+    legacy = sys.modules.get("gateway.run")
+    patched = getattr(legacy, "_resolve_runtime_agent_kwargs", None) if legacy is not None else None
+    if callable(patched):
+        return dict(patched())
+    return resolve_runtime_agent_kwargs(_active_hermes_home())
+
+
+def _platform_config_key(platform: Platform) -> str:
+    return "cli" if platform == Platform.LOCAL else platform.value
 
 
 class GatewayAgentTurnRuntime:
@@ -23,28 +71,6 @@ class GatewayAgentTurnRuntime:
     async def handle(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         runner = self._runner
-        from gateway import run as gateway_run
-
-        Platform = gateway_run.Platform
-        _drain_gateway_watch_events = gateway_run._drain_gateway_watch_events
-        _format_gateway_process_notification = gateway_run._format_gateway_process_notification
-        _home_target_env_var = gateway_run._home_target_env_var
-        _load_gateway_config = gateway_run._load_gateway_config
-        _normalize_empty_agent_response = gateway_run._normalize_empty_agent_response
-        _platform_config_key = gateway_run._platform_config_key
-        _resolve_gateway_model = gateway_run._resolve_gateway_model
-        _sanitize_gateway_final_response = gateway_run._sanitize_gateway_final_response
-        _should_clear_resume_pending_after_turn = gateway_run._should_clear_resume_pending_after_turn
-        agent_cache_for = gateway_run.agent_cache_for
-        build_session_context = gateway_run.build_session_context
-        build_session_context_prompt = gateway_run.build_session_context_prompt
-        media_delivery_for = gateway_run.media_delivery_for
-        platform_notice_for = gateway_run.platform_notice_for
-        process_watcher_for = gateway_run.process_watcher_for
-        runtime_config_for = gateway_run.runtime_config_for
-        session_navigation_for = gateway_run.session_navigation_for
-        session_runtime_state_for = gateway_run.session_runtime_state_for
-        voice_runtime_for = gateway_run.voice_runtime_for
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
@@ -253,10 +279,10 @@ class GatewayAgentTurnRuntime:
             session_key=session_key,
             event=event,
             quick_key=_quick_key,
-            gateway_run=gateway_run,
             load_gateway_config=_load_gateway_config,
             runtime_config_for=runtime_config_for,
             agent_cache_for=agent_cache_for,
+            resolve_runtime_agent_kwargs=_resolve_runtime_agent_kwargs,
         )
 
         context_prompt = await agent_turn_context_for(runner).enrich_context_prompt(
@@ -264,7 +290,7 @@ class GatewayAgentTurnRuntime:
             history=history,
             source=source,
             event=event,
-            home_target_env_var=_home_target_env_var,
+            home_target_env_var=home_target_env_var,
             platform_notice_for=platform_notice_for,
             voice_runtime_for=voice_runtime_for,
         )
@@ -377,7 +403,7 @@ class GatewayAgentTurnRuntime:
             # shutdown) — the turn ran to completion, so recovery
             # succeeded and subsequent messages should no longer receive
             # the restart-interruption system note.
-            if session_key and _should_clear_resume_pending_after_turn(agent_result):
+            if session_key and should_clear_resume_pending_after_turn(agent_result):
                 runner._clear_restart_failure_count(session_key)
                 try:
                     runner.session_store.clear_resume_pending(session_key)
@@ -389,10 +415,10 @@ class GatewayAgentTurnRuntime:
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            response = _normalize_empty_agent_response(
+            response = normalize_empty_agent_response(
                 agent_result, response, history_len=len(history),
             )
-            response = _sanitize_gateway_final_response(source.platform, response)
+            response = sanitize_gateway_final_response(source.platform, response)
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -469,9 +495,9 @@ class GatewayAgentTurnRuntime:
             # consumer — so we leave them on the queue here.
             try:
                 from tools.process_registry import process_registry as _pr
-                _watch_events = _drain_gateway_watch_events(_pr.completion_queue)
+                _watch_events = drain_gateway_watch_events(_pr.completion_queue)
                 for evt in _watch_events:
-                    synth_text = _format_gateway_process_notification(evt)
+                    synth_text = format_gateway_process_notification(evt)
                     if synth_text:
                         try:
                             await process_watcher_for(runner).inject_watch_notification(synth_text, evt)
@@ -567,7 +593,7 @@ class GatewayAgentTurnRuntime:
                     {
                         "role": "session_meta",
                         "tools": tool_defs or [],
-                        "model": _resolve_gateway_model(),
+                        "model": resolve_gateway_model(),
                         "platform": source.platform.value if source.platform else "",
                         "timestamp": ts,
                     }

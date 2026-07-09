@@ -21,10 +21,10 @@ class GatewayAgentTurnHygieneService:
         session_key: str,
         event,
         quick_key: str,
-        gateway_run,
         load_gateway_config,
         runtime_config_for,
         agent_cache_for,
+        resolve_runtime_agent_kwargs,
     ):
         runner = self._runner
         # -----------------------------------------------------------------
@@ -114,7 +114,7 @@ class GatewayAgentTurnHygieneService:
                     _hyg_api_key = _hyg_runtime.get("api_key") or _hyg_api_key
                 except Exception:
                     try:
-                        _hyg_runtime = dict(gateway_run._resolve_runtime_agent_kwargs())
+                        _hyg_runtime = dict(resolve_runtime_agent_kwargs())
                         _hyg_model = _hyg_runtime.get("model") or _hyg_model
                         _hyg_provider = _hyg_runtime.get("provider") or _hyg_provider
                         _hyg_base_url = _hyg_runtime.get("base_url") or _hyg_base_url
@@ -221,7 +221,7 @@ class GatewayAgentTurnHygieneService:
                                 user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
                             )
                         except Exception:
-                            _hyg_runtime = dict(gateway_run._resolve_runtime_agent_kwargs())
+                            _hyg_runtime = dict(resolve_runtime_agent_kwargs())
                             _hyg_model = _hyg_runtime.get("model") or _hyg_model
                         if _hyg_runtime.get("api_key"):
                             _hyg_msgs = [
