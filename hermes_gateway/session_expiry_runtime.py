@@ -103,7 +103,7 @@ class GatewaySessionExpiryRuntimeService:
                 platform=platform,
             )
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         cached_agent = None
         cache_lock = getattr(runner, "_agent_cache_lock", None)

@@ -186,23 +186,6 @@ def test_p2_verdict_passes_after_data_plane_decomposition() -> None:
     )
 
 
-def _verdict_for_phase(phase: str) -> dict:
-    result = subprocess.run(
-        [sys.executable, str(VERDICT), "--phase", phase, "--json"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    verdict = json.loads(result.stdout)
-    assert verdict["phase"] == phase
-    assert verdict["status"] == "fail"
-    assert verdict["checks"]
-    assert all(check["id"] != "phase:supported" for check in verdict["checks"])
-    return verdict
-
-
 def test_p3_verdict_defines_gateway_registry_structure_gates() -> None:
     result = subprocess.run(
         [sys.executable, str(VERDICT), "--phase", "P3", "--json"],
@@ -281,16 +264,27 @@ def test_p5_verdict_defines_gateway_retirement_relocation_gates() -> None:
 
 
 def test_p6_verdict_defines_closure_safety_net_gates() -> None:
-    verdict = _verdict_for_phase("P6")
+    result = subprocess.run(
+        [sys.executable, str(VERDICT), "--phase", "P6", "--json"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["phase"] == "P6"
+    assert verdict["status"] == "pass"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p6:no_silent_swallow_in_clean_trees",
         "p6:no_relocated_god_objects",
+        "p2:aggregate_table_single_owner",
+        "p3:single_dispatch_registry",
+        "p5:no_relocated_gateway_monolith",
     ):
         assert gate_id in checks
-    assert "p2:aggregate_table_single_owner" in checks
-    assert "p3:single_dispatch_registry" in checks
-    assert "p5:no_relocated_gateway_monolith" in checks
+        assert checks[gate_id]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p6_human_signoff.md"
     )

@@ -262,7 +262,7 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     async def _edit_message(
         self,
@@ -290,7 +290,7 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
                 ):
                     kwargs["metadata"] = self.metadata
             except (TypeError, ValueError):
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         return await self.adapter.edit_message(**kwargs)
 
     def on_segment_break(self) -> None:
@@ -759,7 +759,7 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
                         )
                     )
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             # Only confirm final delivery if the best-effort send above
             # actually succeeded OR if the final response was already
             # confirmed before we were cancelled.  Previously this

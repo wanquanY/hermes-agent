@@ -219,7 +219,7 @@ class GatewayKanbanDispatcherMixin:
                     try:
                         conn.close()
                     except Exception:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
@@ -270,7 +270,7 @@ class GatewayKanbanDispatcherMixin:
                         try:
                             conn.close()
                         except Exception:
-                            pass
+                            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             return False
 
         # Auto-decompose: turn fresh triage tasks into ready workgraphs

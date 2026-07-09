@@ -231,7 +231,7 @@ class GatewayUpdateLifecycleService:
                             session_key = f"{platform_str}:{chat_id}"
                     break
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         if not adapter or not chat_id:
             logger.warning("Update watcher: cannot resolve adapter/chat_id, falling back to completion-only")
@@ -285,7 +285,7 @@ class GatewayUpdateLifecycleService:
                             buffer += content[bytes_sent:]
                             bytes_sent = len(content)
                     except OSError:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                 await _flush_buffer()
 
                 # Send final status
@@ -320,7 +320,7 @@ class GatewayUpdateLifecycleService:
                         buffer += content[bytes_sent:]
                         bytes_sent = len(content)
                 except OSError:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
             # Flush buffer periodically
             if buffer.strip() and (loop.time() - last_stream_time) >= stream_interval:
@@ -389,7 +389,7 @@ class GatewayUpdateLifecycleService:
                     metadata=metadata,
                 )
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             for p in (pending_path, claimed_path, output_path,
                       exit_code_path, prompt_path):
                 p.unlink(missing_ok=True)

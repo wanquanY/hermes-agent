@@ -163,7 +163,7 @@ class StreamConsumerDeliveryMixin:
                         if result.success:
                             self._last_sent_text = clean_text
                     except Exception:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                 self._already_sent = True
                 self._final_response_sent = True
                 self._final_content_delivered = True
@@ -402,4 +402,4 @@ class StreamConsumerDeliveryMixin:
             )
             self._last_sent_text = prefix
         except Exception:
-            pass  # best-effort — don't let this block the fallback path
+            logger.debug("Failed to restore visible stream prefix before fallback", exc_info=True)

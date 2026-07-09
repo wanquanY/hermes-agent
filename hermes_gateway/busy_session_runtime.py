@@ -135,7 +135,7 @@ class GatewayBusySessionRuntimeService:
             try:
                 running_agent.interrupt(event.text)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
         if not busy_ack_enabled:

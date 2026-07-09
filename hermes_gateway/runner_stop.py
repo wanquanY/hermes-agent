@@ -335,7 +335,7 @@ async def stop_gateway_runner(
             try:
                 (_hermes_home / ".clean_shutdown").touch()
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         else:
             logger.info(
                 "Skipping .clean_shutdown marker — drain timed out with "

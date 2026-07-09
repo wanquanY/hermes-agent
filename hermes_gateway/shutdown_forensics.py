@@ -54,7 +54,7 @@ def _read_proc_field(pid: int, key: str) -> Optional[str]:
                 if line.startswith(key + ":"):
                     return line.split(":", 1)[1].strip()
     except (FileNotFoundError, PermissionError, OSError):
-        pass
+        return None
     return None
 
 
@@ -85,12 +85,12 @@ def _proc_summary(pid: int) -> Dict[str, Any]:
     state = _read_proc_field(pid, "State")
     if state is not None:
         summary["state"] = state
-    ppid = _read_proc_field(pid, "PPid")
-    if ppid is not None:
-        try:
-            summary["ppid"] = int(ppid)
-        except ValueError:
-            pass
+        ppid = _read_proc_field(pid, "PPid")
+        if ppid is not None:
+            try:
+                summary["ppid"] = int(ppid)
+            except ValueError:
+                summary["ppid_raw"] = ppid
     uid = _read_proc_field(pid, "Uid")
     if uid is not None:
         # "real effective saved fs"
@@ -148,7 +148,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     try:
         ctx["loadavg_1m"] = os.getloadavg()[0]
     except (OSError, AttributeError):
-        pass
+        ctx["loadavg_unavailable"] = True
 
     # /proc/self/status TracerPid: nonzero means a debugger / strace is
     # attached.  Useful when "phantom SIGKILL" turns out to be a manual
@@ -159,7 +159,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
             ctx["tracer_pid"] = int(tracer) if tracer.isdigit() else tracer
             ctx["tracer"] = _proc_summary(int(tracer)) if tracer.isdigit() else None
     except (TypeError, ValueError):
-        pass
+        ctx["tracer_parse_error"] = True
 
     # Race-detection hint: did somebody recently start a sibling gateway
     # with --replace?  We can't see the new process directly here, but if
@@ -180,17 +180,17 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
                         f'"target_pid": {pid}' in raw
                         or f"'target_pid': {pid}" in raw
                     )
-                except OSError:
-                    pass
+                except OSError as exc:
+                    ctx["takeover_marker_error"] = type(exc).__name__
             planned_stop_path = Path(hermes_home_str) / ".gateway-planned-stop.json"
             if planned_stop_path.exists():
                 try:
                     raw = planned_stop_path.read_text(encoding="utf-8")
                     ctx["planned_stop_marker"] = raw[:300]
-                except OSError:
-                    pass
-    except Exception:  # noqa: BLE001 — never raise from a signal handler
-        pass
+                except OSError as exc:
+                    ctx["planned_stop_marker_error"] = type(exc).__name__
+    except Exception as exc:  # noqa: BLE001 — never raise from a signal handler
+        ctx["shutdown_marker_probe_error"] = type(exc).__name__
 
     return ctx
 
@@ -271,14 +271,14 @@ def spawn_async_diagnostic(
         try:
             os.close(fd)
         except OSError:
-            pass
+            fd = -1
         return None
     finally:
         # Subprocess inherited the fd; we can drop our handle.
         try:
             os.close(fd)
         except OSError:
-            pass
+            fd = -1
 
     return proc.pid
 
@@ -361,7 +361,7 @@ def check_systemd_timing_alignment(drain_timeout: float) -> Optional[Dict[str, A
                     if unit_name:
                         break
     except (OSError, FileNotFoundError):
-        pass
+        unit_name = None
     if not unit_name:
         return None
 

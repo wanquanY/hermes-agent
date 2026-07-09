@@ -332,7 +332,7 @@ class GatewayConfig:
                     return entry.validate_config(config)
                 return True
         except Exception:
-            pass  # Registry not yet initialised during early import
+            logger.debug("Platform registry unavailable while checking %s", platform.value, exc_info=True)
 
         return False
     
@@ -395,7 +395,7 @@ class GatewayConfig:
                 platform = Platform(platform_name)
                 platforms[platform] = PlatformConfig.from_dict(platform_data)
             except ValueError:
-                pass  # Skip unknown platforms
+                logger.debug("Skipping unknown gateway platform %s", platform_name)
         
         reset_by_type = {}
         for type_name, policy_data in data.get("reset_by_type", {}).items():
@@ -407,7 +407,7 @@ class GatewayConfig:
                 platform = Platform(platform_name)
                 reset_by_platform[platform] = SessionResetPolicy.from_dict(policy_data)
             except ValueError:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         
         default_policy = SessionResetPolicy()
         if "default_reset_policy" in data:

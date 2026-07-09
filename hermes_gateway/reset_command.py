@@ -69,7 +69,7 @@ class GatewayResetCommandMixin:
                         try:
                             config_context_length = int(raw_ctx)
                         except (TypeError, ValueError):
-                            pass
+                            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                     provider = model_cfg.get("provider") or None
                     base_url = model_cfg.get("base_url") or None
                 try:
@@ -78,7 +78,7 @@ class GatewayResetCommandMixin:
                 except Exception:
                     custom_provs = data.get("custom_providers")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Also check custom_providers for context_length when top-level model.context_length is not set
         if config_context_length is None and data:
@@ -98,7 +98,7 @@ class GatewayResetCommandMixin:
                                     config_context_length = int(raw_cp_ctx)
                                     break
                                 except (TypeError, ValueError):
-                                    pass
+                                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                         # Also check per-model context_length
                         if isinstance(cp_models, dict):
                             model_entry = cp_models.get(model)
@@ -111,9 +111,9 @@ class GatewayResetCommandMixin:
                                     config_context_length = int(model_ctx)
                                     break
                                 except (TypeError, ValueError):
-                                    pass
+                                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Resolve runtime credentials for probing
         try:
@@ -122,7 +122,7 @@ class GatewayResetCommandMixin:
             base_url = base_url or runtime.get("base_url")
             api_key = runtime.get("api_key")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         context_length = get_model_context_length(
             model,
@@ -197,13 +197,13 @@ class GatewayResetCommandMixin:
             from tools.env_passthrough import clear_env_passthrough
             clear_env_passthrough()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         try:
             from tools.credential_files import clear_credential_files
             clear_credential_files()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
@@ -227,7 +227,7 @@ class GatewayResetCommandMixin:
             _invoke_hook("on_session_finalize", session_id=_old_sid,
                          platform=source.platform.value if source.platform else "")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Emit session:end hook (session is ending)
         await self.hooks.emit("session:end", {
@@ -276,7 +276,7 @@ class GatewayResetCommandMixin:
                 except ValueError as e:
                     _title_note = t("gateway.reset.title_error_untitled", error=str(e))
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             elif not _title_note:
                 # sanitize_title returned empty (whitespace-only / unprintable)
                 _title_note = t("gateway.reset.title_empty_untitled")
@@ -302,7 +302,7 @@ class GatewayResetCommandMixin:
             _invoke_hook("on_session_reset", session_id=_new_sid,
                          platform=source.platform.value if source.platform else "")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Append a random tip to the reset message
         try:

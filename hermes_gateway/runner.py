@@ -198,7 +198,7 @@ class GatewayRunner(
                 if isinstance(session_key, str) and session_key:
                     return session_key
             except Exception:
-                pass
+                logger.debug("Failed to resolve session key from session store", exc_info=True)
         config = getattr(self, "config", None)
         return build_session_key(
             source,
@@ -477,7 +477,7 @@ class GatewayRunner(
             while len(cached_sources) > max_size:
                 cached_sources.popitem(last=False)
         except Exception:
-            pass
+            logger.debug("Failed to maintain session-source LRU cache", exc_info=True)
 
     def _get_cached_session_source(self, session_key: str):
         if not session_key:
@@ -490,7 +490,7 @@ class GatewayRunner(
             try:
                 cached_sources.move_to_end(session_key)
             except Exception:
-                pass
+                logger.debug("Failed to refresh cached session-source recency for %s", session_key, exc_info=True)
         return source
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):

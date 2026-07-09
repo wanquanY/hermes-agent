@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_windows_gateway_venv_imports() -> None:
@@ -79,7 +82,7 @@ def ensure_ssl_certs() -> None:
         os.environ["SSL_CERT_FILE"] = certifi.where()
         return
     except ImportError:
-        pass
+        logger.debug("certifi is not installed; falling back to known system CA paths")
 
     for candidate in (
         "/etc/ssl/certs/ca-certificates.crt",
@@ -160,6 +163,6 @@ def resolve_hermes_bin() -> Optional[list[str]]:
         if importlib.util.find_spec("hermes_cli") is not None:
             return [sys.executable, "-m", "hermes_cli.main"]
     except Exception:
-        pass
+        logger.debug("Failed to inspect hermes_cli import spec while resolving update command", exc_info=True)
 
     return None

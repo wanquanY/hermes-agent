@@ -414,7 +414,7 @@ class GatewayVoiceService:
                 safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
                 await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Build a synthetic MessageEvent and feed through the normal pipeline
         # Use SimpleNamespace as raw_message so get_guild_id() can extract
@@ -560,7 +560,7 @@ class GatewayVoiceService:
                 try:
                     os.unlink(p)
                 except OSError:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
 
 def voice_runtime_for(runner) -> GatewayVoiceService:

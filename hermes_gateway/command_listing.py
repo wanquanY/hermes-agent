@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from hermes_gateway.config import Platform
 from hermes_gateway.output_policy import telegramize_command_mentions
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayCommandListingMixin:
@@ -28,7 +32,7 @@ class GatewayCommandListingMixin:
                 if len(sorted_cmds) > 10:
                     lines.append(t("gateway.help.more_use_commands", count=len(sorted_cmds) - 10))
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         return telegramize_command_mentions(
             "\n".join(lines),
             getattr(getattr(event, "source", None), "platform", None),
@@ -57,7 +61,7 @@ class GatewayCommandListingMixin:
                     desc = skill_cmds[cmd].get("description", "").strip() or t("gateway.commands.default_desc")
                     entries.append(f"`{cmd}` — {desc}")
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         if not entries:
             return t("gateway.commands.none")

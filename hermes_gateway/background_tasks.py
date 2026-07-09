@@ -209,7 +209,7 @@ class GatewayBackgroundTaskMixin:
                             metadata=_thread_metadata,
                         )
                     except Exception:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
                 # Send media files
                 for media_path, _is_voice in (media_files or []):
@@ -220,7 +220,7 @@ class GatewayBackgroundTaskMixin:
                             metadata=_thread_metadata,
                         )
                     except Exception:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             else:
                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
                 await adapter.send(
@@ -238,4 +238,4 @@ class GatewayBackgroundTaskMixin:
                     metadata=_thread_metadata,
                 )
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)

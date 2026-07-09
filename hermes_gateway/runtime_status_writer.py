@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayRuntimeStatusService:
@@ -24,7 +27,7 @@ class GatewayRuntimeStatusService:
                 active_agents=self._runner._running_agent_count(),
             )
         except Exception:
-            pass
+            logger.debug("Failed to update gateway runtime status", exc_info=True)
 
     def persist_active_agents(self) -> None:
         """Persist only the live in-flight agent count."""
@@ -33,7 +36,7 @@ class GatewayRuntimeStatusService:
 
             write_runtime_status(active_agents=self._runner._running_agent_count())
         except Exception:
-            pass
+            logger.debug("Failed to persist active gateway-agent count", exc_info=True)
 
     def update_platform_runtime_status(
         self,
@@ -53,7 +56,7 @@ class GatewayRuntimeStatusService:
                 error_message=error_message,
             )
         except Exception:
-            pass
+            logger.debug("Failed to update platform runtime status for %s", platform, exc_info=True)
 
 
 def runtime_status_for(runner) -> GatewayRuntimeStatusService:

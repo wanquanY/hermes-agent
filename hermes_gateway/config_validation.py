@@ -331,7 +331,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             try:
                 config.platforms[Platform.API_SERVER].extra["port"] = int(api_server_port)
             except ValueError:
-                pass
+                logger.debug("Ignoring invalid API_SERVER_PORT=%r", api_server_port)
         if api_server_host:
             config.platforms[Platform.API_SERVER].extra["host"] = api_server_host
         api_server_model_name = os.getenv("API_SERVER_MODEL_NAME", "")
@@ -350,7 +350,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             try:
                 config.platforms[Platform.WEBHOOK].extra["port"] = int(webhook_port)
             except ValueError:
-                pass
+                logger.debug("Ignoring invalid WEBHOOK_PORT=%r", webhook_port)
         if webhook_secret:
             config.platforms[Platform.WEBHOOK].extra["secret"] = webhook_secret
 
@@ -384,7 +384,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                     msgraph_webhook_port
                 )
             except ValueError:
-                pass
+                logger.debug("Ignoring invalid MSGRAPH_WEBHOOK_PORT=%r", msgraph_webhook_port)
         if msgraph_webhook_client_state:
             config.platforms[Platform.MSGRAPH_WEBHOOK].extra["client_state"] = (
                 msgraph_webhook_client_state
@@ -655,14 +655,14 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         try:
             config.default_reset_policy.idle_minutes = int(idle_minutes)
         except ValueError:
-            pass
+            logger.debug("Ignoring invalid SESSION_IDLE_MINUTES=%r", idle_minutes)
     
     reset_hour = os.getenv("SESSION_RESET_HOUR")
     if reset_hour:
         try:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
-            pass
+            logger.debug("Ignoring invalid SESSION_RESET_HOUR=%r", reset_hour)
 
     # Registry-driven enable for plugin platforms.  Built-ins have explicit
     # blocks above; plugins expose check_fn() which is the single source of

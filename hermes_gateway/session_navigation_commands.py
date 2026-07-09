@@ -657,13 +657,13 @@ class GatewaySessionNavigationCommandService:
                     codex_message_items=msg.get("codex_message_items"),
                 )
             except Exception:
-                pass  # Best-effort copy
+                logger.debug("Failed to copy message into branch session %s", new_session_id, exc_info=True)
 
         # Set title
         try:
             self._runner._session_db.set_session_title(new_session_id, branch_title)
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Switch the session store entry to the new session
         new_entry = self._runner.session_store.switch_session(session_key, new_session_id)

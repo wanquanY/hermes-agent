@@ -104,7 +104,7 @@ class GatewayRuntimeConfigService:
                         model, runtime_kwargs["provider"],
                     )
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         return model, runtime_kwargs
 

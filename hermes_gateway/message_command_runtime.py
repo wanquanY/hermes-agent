@@ -317,7 +317,7 @@ class GatewayMessageCommandService:
             try:
                 event.text = steer_payload
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             # Do NOT return — fall through to _handle_message_with_agent
             # at the end of this function so the rewritten text is sent
             # to the agent as a regular user turn.

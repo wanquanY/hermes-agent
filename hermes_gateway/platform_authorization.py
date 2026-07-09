@@ -130,7 +130,7 @@ class GatewayPlatformAuthorizationMixin:
                     if entry.allow_all_env:
                         platform_allow_all_map[source.platform] = entry.allow_all_env
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
         platform_allow_all_var = platform_allow_all_map.get(source.platform, "")

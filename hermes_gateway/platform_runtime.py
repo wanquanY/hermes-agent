@@ -179,7 +179,7 @@ class GatewayPlatformRuntimeService:
                 error_message=info["pause_reason"],
             )
         except Exception:
-            pass
+            logger.debug("Failed to persist paused status for %s", platform.value, exc_info=True)
         logger.warning(
             "%s paused after %d consecutive failures (%s) — "
             "fix the underlying issue then run `/platform resume %s` "
@@ -207,7 +207,7 @@ class GatewayPlatformRuntimeService:
                 error_message=None,
             )
         except Exception:
-            pass
+            logger.debug("Failed to persist retrying status for %s", platform.value, exc_info=True)
         logger.info("%s resumed — retrying on next watcher tick", platform.value)
         return True
 
@@ -276,7 +276,7 @@ class GatewayPlatformRuntimeService:
 
                             await build_channel_directory(runner.adapters)
                         except Exception:
-                            pass
+                            logger.debug("Failed to refresh channel directory after %s reconnect", platform.value, exc_info=True)
                     elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
                         runtime_status_for(runner).update_platform_runtime_status(
                             platform.value,

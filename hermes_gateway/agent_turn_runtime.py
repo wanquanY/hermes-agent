@@ -94,7 +94,7 @@ class GatewayAgentTurnRuntime:
             try:
                 event.source = source
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         session_entry = runner.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -164,7 +164,7 @@ class GatewayAgentTurnRuntime:
             _pcfg = _load_gateway_config()
             _redact_pii = bool((_pcfg.get("privacy") or {}).get("redact_pii", False))
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
@@ -222,7 +222,7 @@ class GatewayAgentTurnRuntime:
                             if session_info:
                                 notice = f"{notice}\n\n{session_info}"
                         except Exception:
-                            pass
+                            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                         await adapter.send(
                             source.chat_id, notice,
                             metadata=runner._thread_metadata_for_source(source),
@@ -354,7 +354,7 @@ class GatewayAgentTurnRuntime:
                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
                     await _typing_adapter.stop_typing(source.chat_id)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
             if not session_runtime_state_for(runner).is_session_run_current(_quick_key, run_generation):
                 logger.info(
@@ -730,7 +730,7 @@ class GatewayAgentTurnRuntime:
                 if _err_adapter and hasattr(_err_adapter, "stop_typing"):
                     await _err_adapter.stop_typing(source.chat_id)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             logger.exception("Agent error in session %s", session_key)
             error_type = type(e).__name__
             error_detail = str(e)[:300] if str(e) else "no details available"
@@ -751,7 +751,7 @@ class GatewayAgentTurnRuntime:
                         if not isinstance(_err_json, dict):
                             _err_json = {}
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                 if _err_json.get("type") == "usage_limit_reached":
                     _resets_in = _err_json.get("resets_in_seconds")
                     if _resets_in and _resets_in > 0:

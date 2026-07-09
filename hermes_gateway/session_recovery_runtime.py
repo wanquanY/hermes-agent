@@ -42,7 +42,7 @@ class GatewaySessionRecoveryRuntimeMixin:
         try:
             atomic_json_write(path, new_counts, indent=None)
         except Exception:
-            pass
+            logger.debug("Failed to persist restart failure counts to %s", path, exc_info=True)
 
     def _suspend_stuck_loop_sessions(self) -> int:
         """Suspend sessions that have been active across too many restarts."""
@@ -70,18 +70,18 @@ class GatewaySessionRecoveryRuntimeMixin:
                         session_key, counts[session_key],
                     )
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         if suspended:
             try:
                 self.session_store._save()
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         try:
             path.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         return suspended
 
@@ -99,7 +99,7 @@ class GatewaySessionRecoveryRuntimeMixin:
                 else:
                     path.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     def _schedule_resume_pending_sessions(self) -> int:
         """Auto-continue fresh restart-interrupted sessions after startup."""

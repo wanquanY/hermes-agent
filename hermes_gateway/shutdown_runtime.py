@@ -180,7 +180,7 @@ class GatewayShutdownRuntimeMixin:
                         try:
                             strip(session_messages)
                         except Exception:
-                            pass
+                            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                     flush(session_messages)
             except Exception as exc:
                 logger.debug("Shutdown transcript flush failed: %s", exc)
@@ -193,7 +193,7 @@ class GatewayShutdownRuntimeMixin:
                     platform="gateway",
                 )
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             self._cleanup_agent_resources(agent)
 
     def _cleanup_agent_resources(self, agent: Any) -> None:
@@ -208,15 +208,15 @@ class GatewayShutdownRuntimeMixin:
                 else:
                     agent.shutdown_memory_provider()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         try:
             if hasattr(agent, "close"):
                 agent.close()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         try:
             from agent.auxiliary_client import cleanup_stale_async_clients
 
             cleanup_stale_async_clients()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)

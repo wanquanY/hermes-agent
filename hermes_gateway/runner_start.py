@@ -67,7 +67,7 @@ async def start_gateway_runner(runner) -> bool:
             _effective_max_iter,
         )
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     # Redaction status: ON by default (#17691). Surface a prominent
     # warning if an operator has explicitly opted out so they don't
     # forget the downgrade is active — the redactor snapshots its
@@ -90,19 +90,19 @@ async def start_gateway_runner(runner) -> bool:
                 _redact_raw,
             )
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     try:
         from hermes_cli.profiles import get_active_profile_name
         _profile = get_active_profile_name()
         if _profile and _profile != "default":
             logger.info("Active profile: %s", _profile)
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     try:
         from channels.runtime_status import write_runtime_status
         write_runtime_status(gateway_state="starting", exit_reason=None)
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     # Log any active supply-chain security advisories. Operators see this
     # in gateway.log and `hermes status` surfaces it; we do NOT block
@@ -177,7 +177,7 @@ async def start_gateway_runner(runner) -> bool:
             if e.allow_all_env
         )
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     _any_allowlist = any(
         os.getenv(v) for v in _builtin_allowed_vars + _plugin_allowed_vars
     )
@@ -253,7 +253,7 @@ async def start_gateway_runner(runner) -> bool:
         try:
             _clean_marker.unlink()
         except Exception:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     else:
         try:
             suspended = self.session_store.suspend_recently_active()
@@ -405,7 +405,7 @@ async def start_gateway_runner(runner) -> bool:
                 from channels.runtime_status import write_runtime_status
                 write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             self._request_clean_exit(reason)
             return True
         if enabled_platform_count > 0:
@@ -433,7 +433,7 @@ async def start_gateway_runner(runner) -> bool:
                         exit_reason=None,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                 # Fall through to the normal "running" state — reconnect
                 # watcher takes it from here.
             # All enabled platforms had no adapter (missing library or credentials).

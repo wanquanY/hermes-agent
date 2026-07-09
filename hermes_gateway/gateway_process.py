@@ -77,7 +77,7 @@ async def start_gateway_process(
             try:
                 terminate_pid(existing_pid, force=False)
             except ProcessLookupError:
-                pass  # Already gone
+                logger.debug("Gateway process %s exited before takeover termination", existing_pid)
             except (PermissionError, OSError):
                 logger.error(
                     "Permission denied killing PID %d. Cannot replace.",
@@ -89,7 +89,7 @@ async def start_gateway_process(
                     from channels.runtime_status import clear_takeover_marker
                     clear_takeover_marker()
                 except Exception:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                 return False
             # Wait up to 10 seconds for the old process to exit.
             # ``os.kill(pid, 0)`` on Windows is NOT a no-op — use the
@@ -109,21 +109,21 @@ async def start_gateway_process(
                     terminate_pid(existing_pid, force=True)
                     time.sleep(0.5)
                 except (ProcessLookupError, PermissionError, OSError):
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             remove_pid_file()
             # remove_pid_file() is a no-op when the PID doesn't match.
             # Force-unlink to cover the old-process-crashed case.
             try:
                 (get_hermes_home() / "gateway.pid").unlink(missing_ok=True)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             # Clean up any takeover marker the old process didn't consume
             # (e.g. SIGKILL'd before its shutdown handler could read it).
             try:
                 from channels.runtime_status import clear_takeover_marker
                 clear_takeover_marker()
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             # Also release all scoped locks left by the old process.
             # Stopped (Ctrl+Z) processes don't release locks on exit,
             # leaving stale lock files that block the new gateway from starting.
@@ -136,7 +136,7 @@ async def start_gateway_process(
                 if _released:
                     logger.info("Released %d stale scoped lock(s) from old gateway.", _released)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         else:
             hermes_home = str(get_hermes_home())
             logger.error(
@@ -157,7 +157,7 @@ async def start_gateway_process(
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     # Centralized logging — agent.log (INFO+), errors.log (WARNING+),
     # and gateway.log (INFO+, gateway-component records only).
@@ -332,12 +332,12 @@ async def start_gateway_process(
             try:
                 loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
             except NotImplementedError:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         if hasattr(signal, "SIGUSR1"):
             try:
                 loop.add_signal_handler(signal.SIGUSR1, restart_signal_handler)  # windows-footgun: ok — POSIX signal, guarded by hasattr above + try/except NotImplementedError
             except NotImplementedError:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     else:
         logger.info("Skipping signal handlers (not running in main thread).")
     
@@ -423,7 +423,7 @@ async def start_gateway_process(
 
         stop_nous_auth_keepalive()
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     if runner.should_exit_with_failure:
         if runner.exit_reason:
@@ -439,7 +439,7 @@ async def start_gateway_process(
         from tools.mcp_tool import shutdown_mcp_servers
         shutdown_mcp_servers()
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     # Stop the periodic memory monitor (if it was started above).
     # This also emits one final "[MEMORY] shutdown rss=..." line so the
@@ -449,7 +449,7 @@ async def start_gateway_process(
 
         _memory_monitor.stop_memory_monitoring(timeout=2.0)
     except Exception:
-        pass
+        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)

@@ -20,6 +20,7 @@ Storage: ~/.hermes/pairing/
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -30,6 +31,8 @@ from typing import Optional
 
 from hermes_constants import get_hermes_dir
 from utils import atomic_replace
+
+logger = logging.getLogger(__name__)
 
 
 # Unambiguous alphabet -- excludes 0/O, 1/I to prevent confusion
@@ -65,12 +68,12 @@ def _secure_write(path: Path, data: str) -> None:
         try:
             os.chmod(path, 0o600)
         except OSError:
-            pass  # Windows doesn't support chmod the same way
+            logger.debug("Could not chmod pairing data file %s", path, exc_info=True)
     except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:
-            pass
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
         raise
 
 

@@ -227,7 +227,7 @@ class AgentPendingFollowupRuntime:
                 try:
                     await stream_task
                 except asyncio.CancelledError:
-                    pass
+                    logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             except Exception as exc:
                 logger.debug(
                     "Stream consumer wait before queued message failed: %s",

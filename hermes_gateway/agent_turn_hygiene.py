@@ -81,7 +81,7 @@ class GatewayAgentTurnHygieneService:
                             try:
                                 _hyg_config_context_length = int(_raw_ctx)
                             except (TypeError, ValueError):
-                                pass
+                                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
                         # Read provider for accurate context detection
                         _hyg_provider = _model_cfg.get("provider") or None
                         _hyg_base_url = _model_cfg.get("base_url") or None
@@ -101,7 +101,7 @@ class GatewayAgentTurnHygieneService:
                                 if _parsed > 0:
                                     _hyg_hard_msg_limit = _parsed
                             except (TypeError, ValueError):
-                                pass
+                                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
                 try:
                     _hyg_model, _hyg_runtime = runtime_config_for(runner).resolve_session_agent_runtime(
@@ -120,7 +120,7 @@ class GatewayAgentTurnHygieneService:
                         _hyg_base_url = _hyg_runtime.get("base_url") or _hyg_base_url
                         _hyg_api_key = _hyg_runtime.get("api_key") or _hyg_api_key
                     except Exception:
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
                 # Check custom_providers per-model context_length
                 # (same fallback as run_agent.py lines 1171-1189).
@@ -148,9 +148,9 @@ class GatewayAgentTurnHygieneService:
                                             _hyg_config_context_length = int(_cp_ctx)
                                 break
                     except (TypeError, ValueError):
-                        pass
+                        logger.debug("Suppressed recoverable gateway exception", exc_info=True)
             except Exception:
-                pass
+                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
             if _hyg_compression_enabled:
                 _hyg_context_length = get_model_context_length(

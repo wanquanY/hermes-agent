@@ -107,7 +107,11 @@ def build_session_context_prompt(
             if entry and entry.pii_safe:
                 _is_pii_safe = True
         except Exception:
-            pass
+            logger.debug(
+                "Failed to inspect plugin PII policy for platform %s",
+                context.source.platform.value,
+                exc_info=True,
+            )
     redact_pii = redact_pii and _is_pii_safe
     lines = [
         "## Current Session Context",

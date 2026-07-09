@@ -28,7 +28,7 @@ def coerce_gateway_timestamp(value: Any) -> Optional[float]:
             numeric = float(text)
             return numeric / 1000.0 if numeric > 10_000_000_000 else numeric
         except ValueError:
-            pass
+            numeric = None
         try:
             return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
         except ValueError:
