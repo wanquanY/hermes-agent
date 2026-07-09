@@ -26,7 +26,6 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
-import inspect
 import json
 import logging
 import os
@@ -57,6 +56,10 @@ from hermes_gateway.agent_interaction_callbacks import agent_interaction_callbac
 from hermes_gateway.agent_input_preparation import agent_input_preparation_for
 from hermes_gateway.agent_result_finalizer import agent_result_finalizer_for
 from hermes_gateway.agent_execution_monitor import agent_execution_monitor_for
+from hermes_gateway.agent_pending_followup_runtime import (
+    PendingFollowupContext,
+    agent_pending_followup_for,
+)
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -82,16 +85,13 @@ from hermes_gateway.conversation_editing_commands import conversation_editing_fo
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
-from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
 from hermes_gateway.media_delivery import media_delivery_for
 from hermes_gateway.message_ingress import message_ingress_for
 from hermes_gateway.message_command_runtime import message_command_for
 from hermes_gateway.model_command import model_command_for
-from hermes_gateway.media_context import build_media_placeholder as _build_media_placeholder
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.inbound_message_preparation import GatewayInboundMessagePreparationMixin
 from hermes_gateway.insights_command import GatewayInsightsCommandMixin
-from hermes_gateway.pending_events import dequeue_pending_event as _dequeue_pending_event
 from hermes_gateway.profile_home_commands import GatewayProfileHomeCommandMixin
 from hermes_gateway.process_notifications import (
     drain_gateway_watch_events as _drain_gateway_watch_events,
@@ -118,7 +118,6 @@ from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.runtime_status_command import runtime_status_command_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.resume_pending import (
-    preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
 from hermes_gateway.session_navigation_commands import session_navigation_for
@@ -425,7 +424,6 @@ from channels.platforms.base import (
     MessageEvent,
     MessageType,
     _reply_anchor_for_event,
-    merge_pending_message_event,
 )
 from hermes_gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
@@ -2037,225 +2035,25 @@ class GatewayRunner(
                     # agent so the next message retries the primary model.
                     agent_cache_for(self).evict_cached_agent(session_key)
 
-            # Check if we were interrupted OR have a queued message (/queue).
-            result = result_holder[0]
-            adapter = self.adapters.get(source.platform)
-            
-            # Get pending message from adapter.
-            # Use session_key (not source.chat_id) to match adapter's storage keys.
-            pending_event = None
-            pending = None
-            if result and adapter and session_key:
-                pending_event = _dequeue_pending_event(adapter, session_key)
-                # /queue overflow: after consuming the adapter's "next-up"
-                # slot, promote the next queued event into it so the
-                # recursive run's drain will see it.  This keeps the slot
-                # occupied for the full FIFO chain, which (a) preserves
-                # order, and (b) causes any mid-chain /queue to correctly
-                # route to overflow rather than jumping the queue.
-                pending_event = busy_session_runtime_for(self).promote_queued_event(session_key, adapter, pending_event)
-                if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
-                    interrupt_message = result.get("interrupt_message")
-                    if _is_control_interrupt_message(interrupt_message):
-                        logger.info(
-                            "Ignoring control interrupt message for session %s: %s",
-                            session_key or "?",
-                            interrupt_message,
-                        )
-                    else:
-                        pending = interrupt_message
-                elif pending_event:
-                    pending = pending_event.text or _build_media_placeholder(pending_event)
-                    logger.debug("Processing queued message after agent completion: '%s...'", pending[:40])
-
-            # Leftover /steer: if a steer arrived after the last tool batch
-            # (e.g. during the final API call), the agent couldn't inject it
-            # and returned it in result["pending_steer"]. Deliver it as the
-            # next user turn so it isn't silently dropped.
-            if result and not pending and not pending_event:
-                _leftover_steer = result.get("pending_steer")
-                if _leftover_steer:
-                    pending = _leftover_steer
-                    logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
-
-            # Safety net: if the pending text is a slash command (e.g. "/stop",
-            # "/new"), discard it — commands should never be passed to the agent
-            # as user input.  The primary fix is in base.py (commands bypass the
-            # active-session guard), but this catches edge cases where command
-            # text leaks through the interrupt_message fallback.
-            if pending and pending.strip().startswith("/"):
-                _pending_parts = pending.strip().split(None, 1)
-                _pending_cmd_word = _pending_parts[0][1:].lower() if _pending_parts else ""
-                if _pending_cmd_word:
-                    try:
-                        from hermes_cli.commands import resolve_command as _rc_pending
-                        if _rc_pending(_pending_cmd_word):
-                            logger.info(
-                                "Discarding command '/%s' from pending queue — "
-                                "commands must not be passed as agent input",
-                                _pending_cmd_word,
-                            )
-                            pending_event = None
-                            pending = None
-                    except Exception:
-                        pass
-
-            if self._draining and (pending_event or pending):
-                logger.info(
-                    "Discarding pending follow-up for session %s during gateway %s",
-                    session_key or "?",
-                    self._status_action_label(),
-                )
-                pending_event = None
-                pending = None
-
-            if pending_event or pending:
-                logger.debug("Processing pending message: '%s...'", pending[:40])
-
-                # Clear the adapter's interrupt event so the next _run_agent call
-                # doesn't immediately re-trigger the interrupt before the new agent
-                # even makes its first API call (this was causing an infinite loop).
-                if adapter and hasattr(adapter, '_active_sessions') and session_key and session_key in adapter._active_sessions:
-                    adapter._active_sessions[session_key].clear()
-
-                # Cap recursion depth to prevent resource exhaustion when the
-                # user sends multiple messages while the agent keeps failing. (#816)
-                if _interrupt_depth >= self._MAX_INTERRUPT_DEPTH:
-                    logger.warning(
-                        "Interrupt recursion depth %d reached for session %s — "
-                        "queueing message instead of recursing.",
-                        _interrupt_depth, session_key,
-                    )
-                    adapter = self.adapters.get(source.platform)
-                    if adapter and pending_event:
-                        merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
-                    elif adapter and hasattr(adapter, 'queue_message'):
-                        adapter.queue_message(session_key, pending)
-                    return result_holder[0] or {"final_response": response, "messages": history}
-
-                was_interrupted = result.get("interrupted")
-                if not was_interrupted:
-                    # Queued message after normal completion — deliver the first
-                    # response before processing the queued follow-up.
-                    # Skip if streaming already delivered it.
-                    _sc = stream_consumer_holder[0]
-                    if _sc and stream_task:
-                        try:
-                            await asyncio.wait_for(stream_task, timeout=5.0)
-                        except (asyncio.TimeoutError, asyncio.CancelledError):
-                            stream_task.cancel()
-                            try:
-                                await stream_task
-                            except asyncio.CancelledError:
-                                pass
-                        except Exception as e:
-                            logger.debug("Stream consumer wait before queued message failed: %s", e)
-                    _previewed = bool(result.get("response_previewed"))
-                    _already_streamed = bool(
-                        (_sc and getattr(_sc, "final_response_sent", False))
-                        or _previewed
-                        or (_sc and getattr(_sc, "final_content_delivered", False))
-                    )
-                    first_response = result.get("final_response", "")
-                    if first_response and not _already_streamed:
-                        try:
-                            logger.info(
-                                "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
-                                session_key or "?",
-                            )
-                            await adapter.send(
-                                source.chat_id,
-                                first_response,
-                                metadata=_status_thread_metadata,
-                            )
-                        except Exception as e:
-                            logger.warning("Failed to send first response before queued message: %s", e)
-                    elif first_response:
-                        logger.info(
-                            "Queued follow-up for session %s: skipping resend because final streamed delivery was confirmed.",
-                            session_key or "?",
-                        )
-                    # Release deferred bg-review notifications now that the
-                    # first response has been delivered.  Pop from the
-                    # adapter's callback dict (prevents double-fire in
-                    # base.py's finally block) and call it.
-                    if getattr(type(adapter), "pop_post_delivery_callback", None) is not None:
-                        _bg_cb = adapter.pop_post_delivery_callback(
-                            session_key,
-                            generation=run_generation,
-                        )
-                        if callable(_bg_cb):
-                            try:
-                                _bg_result = _bg_cb()
-                                if inspect.isawaitable(_bg_result):
-                                    await _bg_result
-                            except Exception:
-                                pass
-                    elif adapter and hasattr(adapter, "_post_delivery_callbacks"):
-                        _bg_cb = adapter._post_delivery_callbacks.pop(session_key, None)
-                        if callable(_bg_cb):
-                            try:
-                                _bg_result = _bg_cb()
-                                if inspect.isawaitable(_bg_result):
-                                    await _bg_result
-                            except Exception:
-                                pass
-                # else: interrupted — discard the interrupted response ("Operation
-                # interrupted." is just noise; the user already knows they sent a
-                # new message).
-
-                updated_history = result.get("messages", history)
-                next_source = source
-                next_message = pending
-                next_message_id = None
-                next_channel_prompt = None
-                if pending_event is not None:
-                    next_source = getattr(pending_event, "source", None) or source
-                    if (
-                        goal_command_for(self).is_goal_continuation_event(pending_event)
-                        and not goal_command_for(self).goal_still_active_for_session(session_id)
-                    ):
-                        logger.info(
-                            "Discarding stale goal continuation for session %s — goal is no longer active",
-                            session_key or "?",
-                        )
-                        return result
-                    next_message = await self._prepare_inbound_message_text(
-                        event=pending_event,
-                        source=next_source,
-                        history=updated_history,
-                    )
-                    if next_message is None:
-                        return result
-                    next_message_id = self._reply_anchor_for_event(pending_event)
-                    next_channel_prompt = getattr(pending_event, "channel_prompt", None)
-
-                # Restart typing indicator so the user sees activity while
-                # the follow-up turn runs.  The outer _process_message_background
-                # typing task is still alive but may be stale.
-                _followup_adapter = self.adapters.get(source.platform)
-                if _followup_adapter:
-                    try:
-                        await _followup_adapter.send_typing(
-                            source.chat_id,
-                            metadata=_status_thread_metadata,
-                        )
-                    except Exception:
-                        pass
-
-                followup_result = await self._run_agent(
-                    message=next_message,
+            followup_result = await agent_pending_followup_for(self).process(
+                response=response,
+                result=result_holder[0],
+                context=PendingFollowupContext(
+                    message=message,
                     context_prompt=context_prompt,
-                    history=updated_history,
-                    source=next_source,
+                    history=history,
+                    source=source,
                     session_id=session_id,
                     session_key=session_key,
                     run_generation=run_generation,
-                    _interrupt_depth=_interrupt_depth + 1,
-                    event_message_id=next_message_id,
-                    channel_prompt=next_channel_prompt,
-                )
-                return _preserve_queued_followup_history_offset(result, followup_result)
+                    interrupt_depth=_interrupt_depth,
+                    status_thread_metadata=_status_thread_metadata,
+                    stream_consumer=stream_consumer_holder[0],
+                    stream_task=stream_task,
+                ),
+            )
+            if followup_result is not None:
+                return followup_result
         finally:
             # Stop progress sender, interrupt monitor, and notification task
             if progress_task:

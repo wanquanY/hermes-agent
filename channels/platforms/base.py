@@ -1804,11 +1804,25 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
     def peek_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Return a pending message without consuming it."""
         return self._pending_messages.get(session_key)
-    
+
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
         return self._pending_messages.pop(session_key, None)
-    
+
+    def queue_pending_message_event(self, session_key: str, event: MessageEvent) -> None:
+        """Queue or merge a pending message event for the next session turn."""
+        if not session_key or event is None:
+            return
+        merge_pending_message_event(self._pending_messages, session_key, event)
+
+    def clear_pending_interrupt(self, session_key: str) -> None:
+        """Clear the interrupt signal while keeping the session guard active."""
+        if not session_key:
+            return
+        interrupt_event = self._active_sessions.get(session_key)
+        if interrupt_event is not None:
+            interrupt_event.clear()
+
     def build_source(
         self,
         chat_id: str,
