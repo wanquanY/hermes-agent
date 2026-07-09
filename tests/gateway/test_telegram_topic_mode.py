@@ -15,6 +15,7 @@ from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 
@@ -166,7 +167,7 @@ async def test_root_telegram_dm_prompt_is_system_lobby_when_topic_mode_enabled(m
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._telegram_topic_mode_enabled = lambda source: True
+    session_navigation_for(runner).telegram_topic_mode_enabled = lambda source: True
     runner._run_agent = AsyncMock(
         side_effect=AssertionError("root Telegram DM prompt leaked to the agent loop")
     )
@@ -188,7 +189,7 @@ async def test_root_telegram_dm_new_shows_create_topic_instruction(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._telegram_topic_mode_enabled = lambda source: True
+    session_navigation_for(runner).telegram_topic_mode_enabled = lambda source: True
     runner._run_agent = AsyncMock(
         side_effect=AssertionError("/new in root Telegram DM must not start an agent")
     )
@@ -212,7 +213,7 @@ async def test_telegram_topic_prompt_still_runs_agent_when_topic_mode_enabled(mo
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._telegram_topic_mode_enabled = lambda source: True
+    session_navigation_for(runner).telegram_topic_mode_enabled = lambda source: True
     runner._handle_message_with_agent = AsyncMock(return_value="agent response")
 
     monkeypatch.setattr(
@@ -353,7 +354,7 @@ async def test_new_inside_telegram_topic_resets_current_topic_with_parallel_tip(
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._telegram_topic_mode_enabled = lambda source: True
+    session_navigation_for(runner).telegram_topic_mode_enabled = lambda source: True
     topic_source = _make_source(thread_id="17585")
     topic_key = build_session_key(topic_source)
     old_entry = SessionEntry(
@@ -472,7 +473,7 @@ async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp
     assert "All Messages" in result
     assert session_db.get_meta("telegram_dm_topic_schema_version") == "2"
     assert session_db.is_telegram_topic_mode_enabled(chat_id="208214988", user_id="208214988")
-    assert runner._telegram_topic_mode_enabled(_make_source()) is True
+    assert session_navigation_for(runner).telegram_topic_mode_enabled(_make_source()) is True
     runner._run_agent.assert_not_called()
 
     lobby_result = await runner._handle_message(_make_event("hello after activation"))
@@ -703,7 +704,7 @@ async def test_first_message_inside_topic_records_topic_binding(tmp_path, monkey
 
     source = _make_source(thread_id="17585")
     entry = runner.session_store.get_or_create_session(source)
-    runner._record_telegram_topic_binding(source, entry)
+    session_navigation_for(runner).record_telegram_topic_binding(source, entry)
 
     binding = session_db.get_telegram_topic_binding(
         chat_id="208214988",
@@ -760,16 +761,16 @@ def test_general_topic_is_treated_as_root_lobby(tmp_path):
     runner = _make_runner(session_db=db)
 
     general_source = _make_source(thread_id="1")
-    assert runner._is_telegram_topic_root_lobby(general_source) is True
-    assert runner._is_telegram_topic_lane(general_source) is False
+    assert session_navigation_for(runner).is_telegram_topic_root_lobby(general_source) is True
+    assert session_navigation_for(runner).is_telegram_topic_lane(general_source) is False
 
     no_thread_source = _make_source(thread_id=None)
-    assert runner._is_telegram_topic_root_lobby(no_thread_source) is True
-    assert runner._is_telegram_topic_lane(no_thread_source) is False
+    assert session_navigation_for(runner).is_telegram_topic_root_lobby(no_thread_source) is True
+    assert session_navigation_for(runner).is_telegram_topic_lane(no_thread_source) is False
 
     real_topic = _make_source(thread_id="17585")
-    assert runner._is_telegram_topic_root_lobby(real_topic) is False
-    assert runner._is_telegram_topic_lane(real_topic) is True
+    assert session_navigation_for(runner).is_telegram_topic_root_lobby(real_topic) is False
+    assert session_navigation_for(runner).is_telegram_topic_lane(real_topic) is True
 
 
 def test_lobby_reminder_is_debounced_per_chat(tmp_path):
@@ -779,17 +780,17 @@ def test_lobby_reminder_is_debounced_per_chat(tmp_path):
     runner = _make_runner(session_db=db)
 
     source = _make_source(thread_id=None)
-    assert runner._should_send_telegram_lobby_reminder(source) is True
+    assert session_navigation_for(runner).should_send_telegram_lobby_reminder(source) is True
     # Next call inside the cooldown window must return False.
-    assert runner._should_send_telegram_lobby_reminder(source) is False
-    assert runner._should_send_telegram_lobby_reminder(source) is False
+    assert session_navigation_for(runner).should_send_telegram_lobby_reminder(source) is False
+    assert session_navigation_for(runner).should_send_telegram_lobby_reminder(source) is False
 
     # A different chat gets its own window.
     other = _make_source(thread_id=None)
     # Swap chat_id so the debounce key is different.
     from dataclasses import replace
     other = replace(other, chat_id="999999999")
-    assert runner._should_send_telegram_lobby_reminder(other) is True
+    assert session_navigation_for(runner).should_send_telegram_lobby_reminder(other) is True
 
 
 def test_binding_survives_session_deletion_via_cascade(tmp_path):
@@ -878,7 +879,7 @@ async def test_topic_help_subcommand_returns_usage(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     runner = _make_runner(session_db=db)
 
-    result = await runner._handle_topic_command(_make_event("/topic help"))
+    result = await session_navigation_for(runner).handle_topic_command(_make_event("/topic help"))
 
     assert "/topic help" in result
     assert "/topic off" in result
@@ -914,7 +915,7 @@ async def test_topic_off_disables_mode_and_clears_bindings(tmp_path, monkeypatch
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
 
-    result = await runner._handle_topic_command(_make_event("/topic off"))
+    result = await session_navigation_for(runner).handle_topic_command(_make_event("/topic off"))
 
     assert "OFF" in result or "off" in result
     assert db.is_telegram_topic_mode_enabled(
@@ -932,7 +933,7 @@ async def test_topic_off_is_idempotent_when_never_enabled(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     runner = _make_runner(session_db=db)
 
-    result = await runner._handle_topic_command(_make_event("/topic off"))
+    result = await session_navigation_for(runner).handle_topic_command(_make_event("/topic off"))
 
     assert "not currently enabled" in result
 
@@ -950,7 +951,7 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
 
-    result = await runner._handle_topic_command(_make_event("/topic"))
+    result = await session_navigation_for(runner).handle_topic_command(_make_event("/topic"))
 
     assert "not authorized" in result.lower()
     # Tables must not be created for an unauthorized caller.
@@ -1006,7 +1007,7 @@ def test_recover_returns_none_for_known_topic(tmp_path):
     _seed_two_topic_bindings(db)
     runner = _make_runner(session_db=db)
 
-    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id="222")) is None
+    assert session_navigation_for(runner).recover_telegram_topic_thread_id(_make_source(thread_id="222")) is None
 
 
 def test_recover_rewrites_unknown_thread_id_to_most_recent(tmp_path):
@@ -1015,7 +1016,7 @@ def test_recover_rewrites_unknown_thread_id_to_most_recent(tmp_path):
     _seed_two_topic_bindings(db)
     runner = _make_runner(session_db=db)
 
-    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id="9999")) == "222"
+    assert session_navigation_for(runner).recover_telegram_topic_thread_id(_make_source(thread_id="9999")) == "222"
 
 
 def test_recover_rewrites_lobby_thread_id_to_most_recent(tmp_path):
@@ -1024,7 +1025,7 @@ def test_recover_rewrites_lobby_thread_id_to_most_recent(tmp_path):
     _seed_two_topic_bindings(db)
     runner = _make_runner(session_db=db)
 
-    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) == "222"
+    assert session_navigation_for(runner).recover_telegram_topic_thread_id(_make_source(thread_id=None)) == "222"
 
 
 def test_recover_returns_none_when_topic_mode_disabled(tmp_path):
@@ -1032,7 +1033,7 @@ def test_recover_returns_none_when_topic_mode_disabled(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     runner = _make_runner(session_db=db)
 
-    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
+    assert session_navigation_for(runner).recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
 
 
 def test_recover_returns_none_when_no_bindings_yet(tmp_path):
@@ -1040,7 +1041,7 @@ def test_recover_returns_none_when_no_bindings_yet(tmp_path):
     db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
     runner = _make_runner(session_db=db)
 
-    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
+    assert session_navigation_for(runner).recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
 
 
 def test_list_telegram_topic_bindings_for_chat(tmp_path):

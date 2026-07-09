@@ -109,7 +109,7 @@ from hermes_gateway.resume_pending import (
     preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
-from hermes_gateway.session_navigation_commands import GatewaySessionNavigationCommandMixin
+from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session_recovery_runtime import GatewaySessionRecoveryRuntimeMixin
@@ -526,7 +526,6 @@ class GatewayRunner(
     GatewayReloadSkillsCommandMixin,
     GatewayResetCommandMixin,
     GatewayRollbackCommandMixin,
-    GatewaySessionNavigationCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewayShutdownRuntimeMixin,
     GatewayTitleCommandMixin,
@@ -1958,8 +1957,8 @@ class GatewayRunner(
                     break
 
         if canonical == "new":
-            if self._is_telegram_topic_root_lobby(source):
-                return self._telegram_topic_root_new_message()
+            if session_navigation_for(self).is_telegram_topic_root_lobby(source):
+                return session_navigation_for(self).telegram_topic_root_new_message()
             async def _do_reset():
                 return await self._handle_reset_command(event)
             from channels.slash_commands import maybe_confirm_destructive_slash
@@ -1977,7 +1976,7 @@ class GatewayRunner(
             )
 
         if canonical == "topic":
-            return await self._handle_topic_command(event)
+            return await session_navigation_for(self).handle_topic_command(event)
         
         if canonical == "help":
             return await self._handle_help_command(event)
@@ -2098,10 +2097,10 @@ class GatewayRunner(
             return await self._handle_title_command(event)
 
         if canonical == "resume":
-            return await self._handle_resume_command(event)
+            return await session_navigation_for(self).handle_resume_command(event)
 
         if canonical == "branch":
-            return await self._handle_branch_command(event)
+            return await session_navigation_for(self).handle_branch_command(event)
 
         if canonical == "rollback":
             return await self._handle_rollback_command(event)
@@ -2301,11 +2300,11 @@ class GatewayRunner(
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
 
-        if self._is_telegram_topic_root_lobby(source):
+        if session_navigation_for(self).is_telegram_topic_root_lobby(source):
             # Debounce the lobby reminder so a user who forgets about
             # topic mode and fires ten prompts doesn't get ten copies.
-            if self._should_send_telegram_lobby_reminder(source):
-                return self._telegram_topic_root_lobby_message()
+            if session_navigation_for(self).should_send_telegram_lobby_reminder(source):
+                return session_navigation_for(self).telegram_topic_root_lobby_message()
             return None
 
         # ── Claim this session before any await ───────────────────────
@@ -2415,7 +2414,7 @@ class GatewayRunner(
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's
         # last-active topic so a cross-topic Reply or stripped plain reply
         # doesn't fragment the conversation across sessions.
-        recovered = self._recover_telegram_topic_thread_id(source)
+        recovered = session_navigation_for(self).recover_telegram_topic_thread_id(source)
         if recovered is not None:
             logger.info(
                 "telegram topic recovery: chat=%s user=%s %r -> %s",
@@ -2430,7 +2429,7 @@ class GatewayRunner(
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         self._cache_session_source(session_key, source)
-        if self._is_telegram_topic_lane(source):
+        if session_navigation_for(self).is_telegram_topic_lane(source):
             try:
                 binding = self._session_db.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
@@ -2452,7 +2451,7 @@ class GatewayRunner(
                         session_entry = switched
             else:
                 try:
-                    self._record_telegram_topic_binding(source, session_entry)
+                    session_navigation_for(self).record_telegram_topic_binding(source, session_entry)
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
         if getattr(session_entry, "was_auto_reset", False):

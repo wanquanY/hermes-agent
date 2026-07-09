@@ -8,6 +8,7 @@ import pytest
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 from tools import approval as approval_mod
 from tools import slash_confirm as slash_confirm_mod
@@ -141,7 +142,7 @@ async def test_resume_clears_session_scoped_approval_and_yolo_state():
     runner._update_prompt_pending[session_key] = True
     runner._update_prompt_pending[other_key] = True
 
-    result = await runner._handle_resume_command(_make_event("/resume Resumed Work"))
+    result = await session_navigation_for(runner).handle_resume_command(_make_event("/resume Resumed Work"))
 
     assert "Resumed session" in result
     assert is_approved(session_key, "recursive delete") is False
@@ -174,7 +175,7 @@ async def test_branch_clears_session_scoped_approval_and_yolo_state():
     runner._update_prompt_pending[session_key] = True
     runner._update_prompt_pending[other_key] = True
 
-    result = await runner._handle_branch_command(_make_event("/branch"))
+    result = await session_navigation_for(runner).handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
     assert is_approved(session_key, "recursive delete") is False
@@ -206,7 +207,7 @@ async def test_branch_preserves_persisted_assistant_metadata():
         },
     ]
 
-    result = await runner._handle_branch_command(_make_event("/branch"))
+    result = await session_navigation_for(runner).handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
     append_calls = runner._session_db.append_message.call_args_list

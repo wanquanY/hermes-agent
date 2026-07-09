@@ -27,6 +27,7 @@ from hermes_gateway.config import GatewayConfig, Platform
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource
+from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
@@ -49,7 +50,7 @@ def _bootstrap(monkeypatch, tmp_path):
         return_value=False
     )
     runner._session_db = MagicMock()
-    runner._recover_telegram_topic_thread_id = lambda _source: None
+    session_navigation_for(runner).recover_telegram_topic_thread_id = lambda _source: None
     runner._cache_session_source = lambda _key, _source: None
     runtime_state = session_runtime_state_for(runner)
     runtime_state.is_session_run_current = lambda _key, _gen: True

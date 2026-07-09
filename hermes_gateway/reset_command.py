@@ -250,11 +250,15 @@ class GatewayResetCommandMixin:
             session_info = ""
 
         if new_entry:
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default")
+            from hermes_gateway.session_navigation_commands import session_navigation_for
+
+            header = session_navigation_for(self).telegram_topic_new_header(source) or t("gateway.reset.header_default")
         else:
             # No existing session, just create one
             new_entry = self.session_store.get_or_create_session(source, force_new=True)
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_new")
+            from hermes_gateway.session_navigation_commands import session_navigation_for
+
+            header = session_navigation_for(self).telegram_topic_new_header(source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
@@ -283,9 +287,11 @@ class GatewayResetCommandMixin:
         # uses the freshly-created session. Without this, the binding
         # still points at the old session and the binding-lookup at the
         # top of _handle_message_with_agent would switch right back.
-        if self._is_telegram_topic_lane(source) and new_entry is not None:
+        from hermes_gateway.session_navigation_commands import session_navigation_for
+
+        if session_navigation_for(self).is_telegram_topic_lane(source) and new_entry is not None:
             try:
-                self._record_telegram_topic_binding(source, new_entry)
+                session_navigation_for(self).record_telegram_topic_binding(source, new_entry)
             except Exception:
                 logger.debug("Failed to rebind Telegram topic after /new", exc_info=True)
 
