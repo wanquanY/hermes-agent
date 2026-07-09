@@ -56,6 +56,7 @@ from hermes_gateway.agent_streaming_runtime import agent_streaming_for
 from hermes_gateway.agent_interaction_callbacks import agent_interaction_callbacks_for
 from hermes_gateway.agent_input_preparation import agent_input_preparation_for
 from hermes_gateway.agent_result_finalizer import agent_result_finalizer_for
+from hermes_gateway.agent_execution_monitor import agent_execution_monitor_for
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -457,7 +458,6 @@ def _try_resolve_fallback_provider() -> dict | None:
 
 _INTERRUPT_REASON_STOP = "Stop requested"
 _INTERRUPT_REASON_RESET = "Session reset requested"
-_INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
 _INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
 _INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
 _INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
@@ -2001,175 +2001,23 @@ class GatewayRunner(
             _agent_timeout = _agent_timeout_raw if _agent_timeout_raw > 0 else None
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
-            _warning_fired = False
             _executor_task = asyncio.ensure_future(
                 self._run_in_executor_with_context(run_sync)
             )
             _executor_task_ref[0] = _executor_task
-
-            _inactivity_timeout = False
-            _POLL_INTERVAL = 5.0
-
-            if _agent_timeout is None:
-                # Unlimited — still poll periodically for backup interrupt
-                # detection in case monitor_for_interrupt() silently died.
-                response = None
-                while True:
-                    done, _ = await asyncio.wait(
-                        {_executor_task}, timeout=_POLL_INTERVAL
-                    )
-                    if done:
-                        response = _executor_task.result()
-                        break
-                    # Backup interrupt check: if the monitor task died or
-                    # missed the interrupt, catch it here.
-                    if not _interrupt_detected.is_set() and session_key:
-                        _backup_adapter = self.adapters.get(source.platform)
-                        _backup_agent = agent_holder[0]
-                        if (_backup_adapter and _backup_agent
-                                and hasattr(_backup_adapter, 'has_pending_interrupt')
-                                and _backup_adapter.has_pending_interrupt(session_key)):
-                            _bp_event = (
-                                _backup_adapter.peek_pending_message(session_key)
-                                if hasattr(_backup_adapter, "peek_pending_message")
-                                else None
-                            )
-                            _bp_text = _bp_event.text if _bp_event else None
-                            logger.info(
-                                "Backup interrupt detected for session %s "
-                                "(monitor task state: %s)",
-                                session_key,
-                                "done" if interrupt_monitor.done() else "running",
-                            )
-                            _backup_agent.interrupt(_bp_text)
-                            _interrupt_detected.set()
-            else:
-                # Poll loop: check the agent's built-in activity tracker
-                # (updated by _touch_activity() on every tool call, API
-                # call, and stream delta) every few seconds.
-                response = None
-                while True:
-                    done, _ = await asyncio.wait(
-                        {_executor_task}, timeout=_POLL_INTERVAL
-                    )
-                    if done:
-                        response = _executor_task.result()
-                        break
-                    # Agent still running — check inactivity.
-                    _agent_ref = agent_holder[0]
-                    _idle_secs = 0.0
-                    if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
-                        try:
-                            _act = _agent_ref.get_activity_summary()
-                            _idle_secs = _act.get("seconds_since_activity", 0.0)
-                        except Exception:
-                            pass
-                    # Staged warning: fire once before escalating to full timeout.
-                    if (not _warning_fired and _agent_warning is not None
-                            and _idle_secs >= _agent_warning):
-                        _warning_fired = True
-                        _warn_adapter = self.adapters.get(source.platform)
-                        if _warn_adapter:
-                            _elapsed_warn = int(_agent_warning // 60) or 1
-                            _remaining_mins = int((_agent_timeout - _agent_warning) // 60) or 1
-                            try:
-                                await _warn_adapter.send(
-                                    source.chat_id,
-                                    f"⚠️ No activity for {_elapsed_warn} min. "
-                                    f"If the agent does not respond soon, it will "
-                                    f"be timed out in {_remaining_mins} min. "
-                                    f"You can continue waiting or use /reset.",
-                                    metadata=_status_thread_metadata,
-                                )
-                            except Exception as _warn_err:
-                                logger.debug("Inactivity warning send error: %s", _warn_err)
-                    if _idle_secs >= _agent_timeout:
-                        _inactivity_timeout = True
-                        break
-                    # Backup interrupt check (same as unlimited path).
-                    if not _interrupt_detected.is_set() and session_key:
-                        _backup_adapter = self.adapters.get(source.platform)
-                        _backup_agent = agent_holder[0]
-                        if (_backup_adapter and _backup_agent
-                                and hasattr(_backup_adapter, 'has_pending_interrupt')
-                                and _backup_adapter.has_pending_interrupt(session_key)):
-                            _bp_event = (
-                                _backup_adapter.peek_pending_message(session_key)
-                                if hasattr(_backup_adapter, "peek_pending_message")
-                                else None
-                            )
-                            _bp_text = _bp_event.text if _bp_event else None
-                            logger.info(
-                                "Backup interrupt detected for session %s "
-                                "(monitor task state: %s)",
-                                session_key,
-                                "done" if interrupt_monitor.done() else "running",
-                            )
-                            _backup_agent.interrupt(_bp_text)
-                            _interrupt_detected.set()
-
-            if _inactivity_timeout:
-                # Build a diagnostic summary from the agent's activity tracker.
-                _timed_out_agent = agent_holder[0]
-                _activity = {}
-                if _timed_out_agent and hasattr(_timed_out_agent, "get_activity_summary"):
-                    try:
-                        _activity = _timed_out_agent.get_activity_summary()
-                    except Exception:
-                        pass
-
-                _last_desc = _activity.get("last_activity_desc", "unknown")
-                _secs_ago = _activity.get("seconds_since_activity", 0)
-                _cur_tool = _activity.get("current_tool")
-                _iter_n = _activity.get("api_call_count", 0)
-                _iter_max = _activity.get("max_iterations", 0)
-
-                logger.error(
-                    "Agent idle for %.0fs (timeout %.0fs) in session %s "
-                    "| last_activity=%s | iteration=%s/%s | tool=%s",
-                    _secs_ago, _agent_timeout, session_key,
-                    _last_desc, _iter_n, _iter_max,
-                    _cur_tool or "none",
-                )
-
-                # Interrupt the agent if it's still running so the thread
-                # pool worker is freed.
-                if _timed_out_agent and hasattr(_timed_out_agent, "interrupt"):
-                    _timed_out_agent.interrupt(_INTERRUPT_REASON_TIMEOUT)
-
-                _timeout_mins = int(_agent_timeout // 60) or 1
-
-                # Construct a user-facing message with diagnostic context.
-                _diag_lines = [
-                    f"⏱️ Agent inactive for {_timeout_mins} min — no tool calls "
-                    f"or API responses."
-                ]
-                if _cur_tool:
-                    _diag_lines.append(
-                        f"The agent appears stuck on tool `{_cur_tool}` "
-                        f"({_secs_ago:.0f}s since last activity, "
-                        f"iteration {_iter_n}/{_iter_max})."
-                    )
-                else:
-                    _diag_lines.append(
-                        f"Last activity: {_last_desc} ({_secs_ago:.0f}s ago, "
-                        f"iteration {_iter_n}/{_iter_max}). "
-                        "The agent may have been waiting on an API response."
-                    )
-                _diag_lines.append(
-                    "To increase the limit, set agent.gateway_timeout in config.yaml "
-                    "(value in seconds, 0 = no limit) and restart the gateway.\n"
-                    "Try again, or use /reset to start fresh."
-                )
-
-                response = {
-                    "final_response": "\n".join(_diag_lines),
-                    "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
-                    "api_calls": _iter_n,
-                    "tools": tools_holder[0] or [],
-                    "history_offset": 0,
-                    "failed": True,
-                }
+            response = await agent_execution_monitor_for(
+                runner=self,
+                source=source,
+                session_key=session_key,
+                agent_holder=agent_holder,
+                result_holder=result_holder,
+                tools_holder=tools_holder,
+                interrupt_detected=_interrupt_detected,
+                interrupt_monitor=interrupt_monitor,
+                status_thread_metadata=_status_thread_metadata,
+                agent_timeout=_agent_timeout,
+                agent_warning=_agent_warning,
+            ).wait(_executor_task)
 
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows
