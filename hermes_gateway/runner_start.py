@@ -10,6 +10,7 @@ import time
 from hermes_constants import get_hermes_home
 from hermes_gateway.bootstrap import restart_notification_pending as _restart_notification_pending_for_home
 from hermes_gateway.config import Platform
+from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 
@@ -297,7 +298,7 @@ async def start_gateway_runner(runner) -> bool:
 
         # Set up message + fatal error handlers
         adapter.set_message_handler(self._handle_message)
-        adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
+        adapter.set_fatal_error_handler(platform_runtime_for(self).handle_adapter_fatal_error)
         adapter.set_session_store(self.session_store)
         adapter.set_busy_session_handler(self._handle_active_session_busy_message)
 
@@ -543,7 +544,7 @@ async def start_gateway_runner(runner) -> bool:
             len(self._failed_platforms),
             ", ".join(p.value for p in self._failed_platforms),
         )
-    asyncio.create_task(self._platform_reconnect_watcher())
+    asyncio.create_task(platform_runtime_for(self).platform_reconnect_watcher())
 
     # Start background handoff watcher — picks up CLI sessions marked
     # handoff_state='pending' in state.db and re-binds them to the

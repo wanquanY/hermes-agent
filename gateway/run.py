@@ -145,7 +145,7 @@ from hermes_gateway.output_policy import (
 from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
 from hermes_gateway.platform_notice import GatewayPlatformNoticeMixin
-from hermes_gateway.platform_runtime import GatewayPlatformRuntimeMixin
+from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.reasoning_command import GatewayReasoningCommandMixin
 from hermes_gateway.reload_mcp_command import GatewayReloadMcpCommandMixin
 from hermes_gateway.reload_skills_command import GatewayReloadSkillsCommandMixin
@@ -521,7 +521,6 @@ class GatewayRunner(
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
     GatewayPlatformNoticeMixin,
-    GatewayPlatformRuntimeMixin,
     GatewayProfileHomeCommandMixin,
     GatewayProxyModeMixin,
     GatewayInboundMediaMixin,

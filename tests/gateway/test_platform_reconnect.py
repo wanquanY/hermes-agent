@@ -9,6 +9,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
+from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.session import SessionSource
 
 
@@ -209,7 +210,7 @@ class TestPlatformReconnectWatcher:
                         await real_sleep(0)
 
                     with patch("asyncio.sleep", side_effect=fake_sleep):
-                        await runner._platform_reconnect_watcher()
+                        await platform_runtime_for(runner).platform_reconnect_watcher()
 
                 await run_one_iteration()
 
@@ -247,7 +248,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -285,7 +286,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -327,7 +328,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -367,7 +368,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -403,7 +404,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -431,7 +432,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_briefly()
 
@@ -464,7 +465,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -486,7 +487,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         assert Platform.TELEGRAM in runner._failed_platforms
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 0
@@ -503,7 +504,7 @@ class TestRuntimeDisconnectQueuing:
         # Need to prevent stop() from running fully
         runner.stop = AsyncMock()
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         assert Platform.TELEGRAM not in runner._failed_platforms
 
@@ -522,7 +523,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         # stop() should NOT be called — gateway stays alive for the watcher
         runner.stop.assert_not_called()
@@ -543,7 +544,7 @@ class TestRuntimeDisconnectQueuing:
         healthy_adapter = StubAdapter(succeed=True)
         runner.adapters[Platform.DISCORD] = healthy_adapter
 
-        await runner._handle_adapter_fatal_error(failing_adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(failing_adapter)
 
         # stop() should NOT have been called — Discord is still up
         runner.stop.assert_not_called()
@@ -559,7 +560,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("auth_error", "bad token", retryable=False)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         runner.stop.assert_called_once()
 
@@ -577,7 +578,7 @@ class TestPauseResume:
             "attempts": 3,
             "next_retry": time.monotonic() + 30,
         }
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="manual")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="manual")
         info = runner._failed_platforms[Platform.TELEGRAM]
         assert info["paused"] is True
         assert info["pause_reason"] == "manual"
@@ -592,7 +593,7 @@ class TestPauseResume:
             "paused": True,
             "pause_reason": "first reason",
         }
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="second reason")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="second reason")
         # Reason should not be overwritten on a second pause call.
         assert (
             runner._failed_platforms[Platform.TELEGRAM]["pause_reason"]
@@ -602,7 +603,7 @@ class TestPauseResume:
     def test_pause_no_op_when_platform_not_queued(self):
         runner = _make_runner()
         # No exception even when the platform isn't in _failed_platforms.
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="x")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="x")
         assert Platform.TELEGRAM not in runner._failed_platforms
 
     def test_resume_clears_paused_and_resets_attempts(self):
@@ -614,7 +615,7 @@ class TestPauseResume:
             "paused": True,
             "pause_reason": "auto-paused",
         }
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is True
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is True
         info = runner._failed_platforms[Platform.TELEGRAM]
         assert info["paused"] is False
         assert info["attempts"] == 0
@@ -628,11 +629,11 @@ class TestPauseResume:
             "attempts": 1,
             "next_retry": time.monotonic() + 30,
         }
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is False
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is False
 
     def test_resume_returns_false_when_not_queued(self):
         runner = _make_runner()
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is False
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is False
 
 
 class TestPlatformSlashCommand:

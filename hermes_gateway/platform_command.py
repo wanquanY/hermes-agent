@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from channels.platforms.base import MessageEvent
 from hermes_gateway.config import Platform
+from hermes_gateway.platform_runtime import platform_runtime_for
 
 
 def _resolve_platform(name: str):
@@ -64,7 +65,9 @@ class GatewayPlatformCommandMixin:
                     )
                 if failed[platform].get("paused"):
                     return f"{platform.value} is already paused."
-                self._pause_failed_platform(platform, reason="paused via /platform pause")
+                platform_runtime_for(self).pause_failed_platform(
+                    platform, reason="paused via /platform pause"
+                )
                 return (
                     f"✓ {platform.value} paused. "
                     f"Resume with `/platform resume {platform.value}` or "
@@ -80,7 +83,7 @@ class GatewayPlatformCommandMixin:
                     f"{platform.value} is already retrying — "
                     f"no resume needed."
                 )
-            self._resume_paused_platform(platform)
+            platform_runtime_for(self).resume_paused_platform(platform)
             return f"✓ {platform.value} resumed — retrying on next watcher tick."
 
         return (
