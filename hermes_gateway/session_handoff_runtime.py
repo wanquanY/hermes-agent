@@ -10,6 +10,7 @@ from channels.platforms.base import MessageEvent
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource, build_session_key
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ class GatewaySessionHandoffRuntimeService:
             raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
 
         agent_cache_for(runner).evict_cached_agent(session_key)
-        runner._release_running_agent_state(session_key)
+        session_runtime_state_for(runner).release_running_agent_state(session_key)
 
         synthetic_text = (
             f"[Session was just handed off from CLI (\"{cli_title}\") to this "

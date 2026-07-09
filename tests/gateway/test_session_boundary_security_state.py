@@ -8,6 +8,7 @@ import pytest
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 from tools import approval as approval_mod
 from tools import slash_confirm as slash_confirm_mod
 from tools.approval import (
@@ -261,7 +262,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     slash_confirm_mod.register(session_key, "confirm-target", "reload-mcp", _target_handler)
     slash_confirm_mod.register(other_key, "confirm-other", "reload-mcp", _other_handler)
 
-    runner._clear_session_boundary_security_state(session_key)
+    session_runtime_state_for(runner).clear_session_boundary_security_state(session_key)
 
     # Target session cleared
     assert is_approved(session_key, "recursive delete") is False
@@ -279,7 +280,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     assert slash_confirm_mod.get_pending(other_key) is not None
 
     # Empty session_key is a no-op
-    runner._clear_session_boundary_security_state("")
+    session_runtime_state_for(runner).clear_session_boundary_security_state("")
     assert is_approved(other_key, "recursive delete") is True
     assert other_key in runner._update_prompt_pending
     assert other_key in runner._pending_skills_reload_notes
@@ -303,7 +304,7 @@ def test_clear_session_boundary_security_state_wakes_blocked_approvals():
     approval_mod._gateway_queues[session_key] = [target_entry]
     approval_mod._gateway_queues[other_key] = [other_entry]
 
-    runner._clear_session_boundary_security_state(session_key)
+    session_runtime_state_for(runner).clear_session_boundary_security_state(session_key)
 
     assert target_entry.event.is_set()
     assert target_entry.result == "deny"

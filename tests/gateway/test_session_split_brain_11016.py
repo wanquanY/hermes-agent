@@ -28,6 +28,7 @@ from channels.platforms.base import (
     MessageType,
 )
 from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.session import SessionSource, build_session_key
 
 
@@ -306,35 +307,38 @@ class TestStaleSessionLockSelfHeal:
 class TestRunnerSessionGenerationGuard:
     def test_release_without_generation_behaves_as_before(self):
         runner = _make_runner()
+        runtime_state = session_runtime_state_for(runner)
         sk = "agent:main:telegram:dm:12345"
         runner._running_agents[sk] = "agent"
         runner._running_agents_ts[sk] = 1.0
-        assert runner._release_running_agent_state(sk) is True
+        assert runtime_state.release_running_agent_state(sk) is True
         assert sk not in runner._running_agents
         assert sk not in runner._running_agents_ts
 
     def test_release_with_current_generation_clears_slot(self):
         runner = _make_runner()
+        runtime_state = session_runtime_state_for(runner)
         sk = "agent:main:telegram:dm:12345"
-        gen = runner._begin_session_run_generation(sk)
+        gen = runtime_state.begin_session_run_generation(sk)
         runner._running_agents[sk] = "agent"
         runner._running_agents_ts[sk] = 1.0
 
-        assert runner._release_running_agent_state(sk, run_generation=gen) is True
+        assert runtime_state.release_running_agent_state(sk, run_generation=gen) is True
         assert sk not in runner._running_agents
 
     def test_release_with_stale_generation_blocks(self):
         runner = _make_runner()
+        runtime_state = session_runtime_state_for(runner)
         sk = "agent:main:telegram:dm:12345"
-        stale_gen = runner._begin_session_run_generation(sk)
+        stale_gen = runtime_state.begin_session_run_generation(sk)
         # /stop bumps the generation — stale run's generation is no longer current.
-        runner._invalidate_session_run_generation(sk, reason="stop")
+        runtime_state.invalidate_session_run_generation(sk, reason="stop")
         # The fresh run lands next; imagine it has its own state installed.
         runner._running_agents[sk] = "fresh_agent"
         runner._running_agents_ts[sk] = 2.0
 
         # Stale run's unwind MUST NOT clobber the fresh run's state.
-        released = runner._release_running_agent_state(sk, run_generation=stale_gen)
+        released = runtime_state.release_running_agent_state(sk, run_generation=stale_gen)
 
         assert released is False
         assert runner._running_agents[sk] == "fresh_agent"
@@ -342,16 +346,17 @@ class TestRunnerSessionGenerationGuard:
 
     def test_is_session_run_current_tracks_bumps(self):
         runner = _make_runner()
+        runtime_state = session_runtime_state_for(runner)
         sk = "agent:main:telegram:dm:12345"
-        gen1 = runner._begin_session_run_generation(sk)
-        assert runner._is_session_run_current(sk, gen1) is True
+        gen1 = runtime_state.begin_session_run_generation(sk)
+        assert runtime_state.is_session_run_current(sk, gen1) is True
 
-        runner._invalidate_session_run_generation(sk, reason="test")
-        assert runner._is_session_run_current(sk, gen1) is False
+        runtime_state.invalidate_session_run_generation(sk, reason="test")
+        assert runtime_state.is_session_run_current(sk, gen1) is False
 
-        gen2 = runner._begin_session_run_generation(sk)
+        gen2 = runtime_state.begin_session_run_generation(sk)
         assert gen2 > gen1
-        assert runner._is_session_run_current(sk, gen2) is True
+        assert runtime_state.is_session_run_current(sk, gen2) is True
 
 
 # ===========================================================================

@@ -12,6 +12,7 @@ from channels.platforms.base_models import EphemeralReply
 from hermes_agent.repositories.session_repo import sanitize_session_title
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 logger = logging.getLogger(__name__)
 
@@ -166,8 +167,8 @@ class GatewayResetCommandMixin:
         
         # Get existing session key
         session_key = self._session_key_for_source(source)
-        self._invalidate_session_run_generation(session_key, reason="session_reset")
-        self._release_running_agent_state(session_key)
+        session_runtime_state_for(self).invalidate_session_run_generation(session_key, reason="session_reset")
+        session_runtime_state_for(self).release_running_agent_state(session_key)
 
         # Snapshot the old entry so on_session_finalize can report the
         # expiring session id before reset_session() rotates it.
@@ -217,7 +218,7 @@ class GatewayResetCommandMixin:
         # Clear session-scoped dangerous-command approvals and /yolo state.
         # /new is a conversation-boundary operation — approval state from the
         # previous conversation must not survive the reset.
-        self._clear_session_boundary_security_state(session_key)
+        session_runtime_state_for(self).clear_session_boundary_security_state(session_key)
 
         # Fire plugin on_session_finalize hook (session boundary)
         try:

@@ -25,6 +25,7 @@ import gateway.run as gateway_run
 from hermes_gateway.config import GatewayConfig, Platform
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 def _bootstrap(monkeypatch, tmp_path):
@@ -46,8 +47,9 @@ def _bootstrap(monkeypatch, tmp_path):
     runner._session_db = MagicMock()
     runner._recover_telegram_topic_thread_id = lambda _source: None
     runner._cache_session_source = lambda _key, _source: None
-    runner._is_session_run_current = lambda _key, _gen: True
-    runner._begin_session_run_generation = lambda _key: 1
+    runtime_state = session_runtime_state_for(runner)
+    runtime_state.is_session_run_current = lambda _key, _gen: True
+    runtime_state.begin_session_run_generation = lambda _key: 1
     runner._reply_anchor_for_event = lambda _event: None
     runner._get_guild_id = lambda _event: None
     runner._should_send_voice_reply = lambda *_a, **_kw: False

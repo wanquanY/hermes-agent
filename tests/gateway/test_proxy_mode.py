@@ -28,9 +28,6 @@ def _make_runner(proxy_url=None):
     runner._thread_metadata_for_source = GatewayRunner._thread_metadata_for_source.__get__(
         runner, GatewayRunner
     )
-    runner._is_session_run_current = GatewayRunner._is_session_run_current.__get__(
-        runner, GatewayRunner
-    )
     return runner
 
 

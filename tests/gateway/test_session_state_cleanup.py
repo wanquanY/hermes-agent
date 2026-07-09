@@ -1,4 +1,4 @@
-"""Regression tests for _release_running_agent_state and SessionDB shutdown.
+"""Regression tests for session runtime state release and SessionDB shutdown.
 
 Before this change, running-agent state lived in three dicts that drifted
 out of sync:
@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from hermes_gateway.session_runtime_state import session_runtime_state_for
+
 
 def _make_runner():
     """Bare GatewayRunner wired with just the state the helper touches."""
@@ -40,7 +42,7 @@ class TestReleaseRunningAgentStateUnit:
         runner._running_agents_ts["k"] = 123.0
         runner._busy_ack_ts["k"] = 456.0
 
-        runner._release_running_agent_state("k")
+        session_runtime_state_for(runner).release_running_agent_state("k")
 
         assert "k" not in runner._running_agents
         assert "k" not in runner._running_agents_ts
@@ -49,14 +51,14 @@ class TestReleaseRunningAgentStateUnit:
     def test_idempotent_on_missing_key(self):
         """Calling twice (or on an absent key) must not raise."""
         runner = _make_runner()
-        runner._release_running_agent_state("missing")
-        runner._release_running_agent_state("missing")  # still fine
+        session_runtime_state_for(runner).release_running_agent_state("missing")
+        session_runtime_state_for(runner).release_running_agent_state("missing")  # still fine
 
     def test_noop_on_empty_session_key(self):
         """Empty string / None key is treated as a no-op."""
         runner = _make_runner()
         runner._running_agents[""] = "guard"
-        runner._release_running_agent_state("")
+        session_runtime_state_for(runner).release_running_agent_state("")
         # Empty key not processed — guard value survives.
         assert runner._running_agents[""] == "guard"
 
@@ -67,7 +69,7 @@ class TestReleaseRunningAgentStateUnit:
             runner._running_agents_ts[k] = 1.0
             runner._busy_ack_ts[k] = 1.0
 
-        runner._release_running_agent_state("b")
+        session_runtime_state_for(runner).release_running_agent_state("b")
 
         assert set(runner._running_agents.keys()) == {"a", "c"}
         assert set(runner._running_agents_ts.keys()) == {"a", "c"}
@@ -80,7 +82,7 @@ class TestReleaseRunningAgentStateUnit:
         runner._running_agents["k"] = MagicMock()
         runner._running_agents_ts["k"] = 1.0
 
-        runner._release_running_agent_state("k")  # should not raise
+        session_runtime_state_for(runner).release_running_agent_state("k")  # should not raise
 
         assert "k" not in runner._running_agents
         assert "k" not in runner._running_agents_ts
@@ -96,7 +98,7 @@ class TestReleaseRunningAgentStateUnit:
 
         def worker(keys):
             for k in keys:
-                runner._release_running_agent_state(k)
+                session_runtime_state_for(runner).release_running_agent_state(k)
 
         threads = [
             threading.Thread(target=worker, args=([f"s{i}" for i in range(start, 50, 5)],))
@@ -152,7 +154,7 @@ class TestNoMoreBareDeleteSites:
 
         assert offenders == [], (
             "Found bare `del self._running_agents[...]` sites in gateway/run.py. "
-            "Use self._release_running_agent_state(session_key) instead so "
+            "Use session_runtime_state_for(self).release_running_agent_state(session_key) instead so "
             "_running_agents_ts and _busy_ack_ts are popped in lockstep.\n"
             + "\n".join(f"  line {n}: {l}" for n, l in offenders)
         )
@@ -239,18 +241,19 @@ class TestSessionResetZombieRace:
         runner._session_run_generation = {}
         key = "agent:main:telegram:private:1"
 
-        gen_n = runner._begin_session_run_generation(key)
+        runtime_state = session_runtime_state_for(runner)
+        gen_n = runtime_state.begin_session_run_generation(key)
         dead_agent = MagicMock()
         runner._running_agents[key] = dead_agent
         runner._running_agents_ts[key] = 1.0
         runner._busy_ack_ts[key] = 1.0
 
-        runner._invalidate_session_run_generation(key, reason="session_reset")
+        runtime_state.invalidate_session_run_generation(key, reason="session_reset")
 
-        assert runner._release_running_agent_state(key, run_generation=gen_n) is False
+        assert runtime_state.release_running_agent_state(key, run_generation=gen_n) is False
         assert runner._running_agents.get(key) is dead_agent
 
-        assert runner._release_running_agent_state(key) is True
+        assert runtime_state.release_running_agent_state(key) is True
         assert key not in runner._running_agents
         assert key not in runner._running_agents_ts
         assert key not in runner._busy_ack_ts
@@ -260,13 +263,14 @@ class TestSessionResetZombieRace:
         runner._session_run_generation = {}
         key = "agent:main:telegram:private:2"
 
-        gen = runner._begin_session_run_generation(key)
+        runtime_state = session_runtime_state_for(runner)
+        gen = runtime_state.begin_session_run_generation(key)
         runner._running_agents[key] = MagicMock()
         runner._running_agents_ts[key] = 1.0
         runner._busy_ack_ts[key] = 1.0
 
-        assert runner._release_running_agent_state(key, run_generation=gen) is True
+        assert runtime_state.release_running_agent_state(key, run_generation=gen) is True
         assert key not in runner._running_agents
-        assert runner._release_running_agent_state(key) is True
+        assert runtime_state.release_running_agent_state(key) is True
         assert key not in runner._running_agents_ts
         assert key not in runner._busy_ack_ts

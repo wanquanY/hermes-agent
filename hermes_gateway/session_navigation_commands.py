@@ -11,6 +11,7 @@ from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
 from hermes_gateway.assets import telegram_botfather_threads_settings_path
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 logger = logging.getLogger(__name__)
 
@@ -556,13 +557,13 @@ class GatewaySessionNavigationCommandMixin:
             return t("gateway.resume.already_on", name=name)
 
         # Clear any running agent for this session key
-        self._release_running_agent_state(session_key)
+        session_runtime_state_for(self).release_running_agent_state(session_key)
 
         # Switch the session entry to point at the old session
         new_entry = self.session_store.switch_session(session_key, target_id)
         if not new_entry:
             return t("gateway.resume.switch_failed")
-        self._clear_session_boundary_security_state(session_key)
+        session_runtime_state_for(self).clear_session_boundary_security_state(session_key)
 
         # Evict any cached agent for this session so the next message
         # rebuilds with the correct session_id end-to-end — mirrors
@@ -665,7 +666,7 @@ class GatewaySessionNavigationCommandMixin:
         new_entry = self.session_store.switch_session(session_key, new_session_id)
         if not new_entry:
             return t("gateway.branch.switch_failed")
-        self._clear_session_boundary_security_state(session_key)
+        session_runtime_state_for(self).clear_session_boundary_security_state(session_key)
 
         # Evict any cached agent for this session
         agent_cache_for(self).evict_cached_agent(session_key)

@@ -14,6 +14,8 @@ from hermes_state import SessionDB
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.agent_cache import agent_cache_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 def _make_source(*, thread_id: str | None = None) -> SessionSource:
@@ -141,17 +143,18 @@ def _make_runner(session_db=None):
     runner._send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
-    runner._invalidate_session_run_generation = MagicMock()
-    runner._begin_session_run_generation = MagicMock(return_value=1)
-    runner._is_session_run_current = MagicMock(return_value=True)
+    runtime_state = session_runtime_state_for(runner)
+    runtime_state.invalidate_session_run_generation = MagicMock()
+    runtime_state.begin_session_run_generation = MagicMock(return_value=1)
+    runtime_state.is_session_run_current = MagicMock(return_value=True)
     # Bypass the destructive-slash confirm gate — these tests focus on
     # /new topic-mode mechanics, not the confirm prompt itself.
     runner._read_user_config = lambda: {
         "approvals": {"destructive_slash_confirm": False}
     }
-    runner._release_running_agent_state = MagicMock()
-    runner._evict_cached_agent = MagicMock()
-    runner._clear_session_boundary_security_state = MagicMock()
+    runtime_state.release_running_agent_state = MagicMock()
+    agent_cache_for(runner).evict_cached_agent = MagicMock()
+    runtime_state.clear_session_boundary_security_state = MagicMock()
     runner._set_session_reasoning_override = MagicMock()
     runner._format_session_info = MagicMock(return_value="")
     return runner

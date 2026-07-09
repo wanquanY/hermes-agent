@@ -12,6 +12,7 @@ import pytest
 from hermes_gateway.config import Platform, PlatformConfig, StreamingConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from hermes_gateway.session import SessionSource
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 class ProgressCaptureAdapter(BasePlatformAdapter):
@@ -245,6 +246,22 @@ def _make_runner(adapter):
     return runner
 
 
+def _patch_gateway_runtime_config(monkeypatch, gateway_run, *, api_key: str = "***"):
+    runtime = SimpleNamespace(
+        resolve_session_agent_runtime=lambda **_kwargs: (
+            "test-model",
+            {"api_key": api_key},
+        ),
+        resolve_session_reasoning_config=lambda **_kwargs: None,
+        resolve_turn_agent_config=lambda _message, model, runtime_kwargs: {
+            "model": model,
+            "runtime": runtime_kwargs,
+            "request_overrides": {},
+        },
+    )
+    monkeypatch.setattr(gateway_run, "runtime_config_for", lambda _runner: runtime)
+
+
 @pytest.mark.asyncio
 async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
@@ -262,7 +279,7 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="fake")
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
@@ -308,7 +325,7 @@ async def test_run_agent_progress_edits_keep_originating_topic_metadata(monkeypa
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="fake")
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
@@ -347,7 +364,7 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.TELEGRAM,
@@ -397,7 +414,7 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.SLACK,
@@ -439,7 +456,7 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.FEISHU,
@@ -499,7 +516,7 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.TELEGRAM,
@@ -707,7 +724,7 @@ async def _run_with_agent(
     if config_data and "streaming" in config_data:
         runner.config.streaming = StreamingConfig.from_dict(config_data["streaming"])
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
     source = SessionSource(
         platform=platform,
         chat_id=chat_id,
@@ -1042,7 +1059,7 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -1060,7 +1077,10 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if "first command" in content and not invalidated["done"]:
             invalidated["done"] = True
-            runner._invalidate_session_run_generation(session_key, reason="test_stop")
+            session_runtime_state_for(runner).invalidate_session_run_generation(
+                session_key,
+                reason="test_stop",
+            )
         return result
 
     adapter.send = send_and_invalidate
@@ -1103,7 +1123,7 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -1121,7 +1141,10 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if content == "first interim" and not invalidated["done"]:
             invalidated["done"] = True
-            runner._invalidate_session_run_generation(session_key, reason="test_stop")
+            session_runtime_state_for(runner).invalidate_session_run_generation(
+                session_key,
+                reason="test_stop",
+            )
         return result
 
     adapter.send = send_and_invalidate

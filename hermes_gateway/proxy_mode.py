@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from hermes_gateway.config import Platform
 from hermes_gateway.config_model import StreamingConfig
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class GatewayProxyModeService:
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
                 return True
-            return runner._is_session_run_current(session_key, run_generation)
+            return session_runtime_state_for(runner).is_session_run_current(session_key, run_generation)
 
         # Build messages in OpenAI chat format --------------------------
         #

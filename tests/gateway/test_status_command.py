@@ -10,6 +10,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
@@ -390,7 +391,10 @@ async def test_handle_message_discards_stale_result_after_session_invalidation(m
     runner.adapters[Platform.TELEGRAM]._post_delivery_callbacks = {session_key: object()}
 
     async def _stale_result(**kwargs):
-        runner._invalidate_session_run_generation(kwargs["session_key"], reason="test_stale_result")
+        session_runtime_state_for(runner).invalidate_session_run_generation(
+            kwargs["session_key"],
+            reason="test_stale_result",
+        )
         return {
             "final_response": "late reply",
             "messages": [],
@@ -576,7 +580,7 @@ async def test_post_delivery_callback_generation_snapshot_happens_after_bind():
     must happen AFTER the handler runs, not before.
 
     _hermes_run_generation is set on the interrupt event by
-    GatewayRunner._bind_adapter_run_generation during _handle_message_with_agent.
+    session runtime state binding during _handle_message_with_agent.
     The earlier snapshot-at-task-start always captured None, which bypassed the
     generation-ownership check in pop_post_delivery_callback and let stale runs
     fire a fresher run's callbacks.
@@ -601,7 +605,7 @@ async def test_post_delivery_callback_generation_snapshot_happens_after_bind():
     )
 
     async def fake_handler(event):
-        # Simulate what _bind_adapter_run_generation does mid-run.
+        # Simulate what session runtime state binding does mid-run.
         interrupt_event = adapter._active_sessions.get(session_key)
         setattr(interrupt_event, "_hermes_run_generation", 1)
         # Stale run registers its callback at generation=1.

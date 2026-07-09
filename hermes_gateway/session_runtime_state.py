@@ -10,43 +10,48 @@ from hermes_gateway.runtime_status_writer import runtime_status_for
 logger = logging.getLogger(__name__)
 
 
-class GatewaySessionRuntimeStateMixin:
-    def _release_running_agent_state(
+class GatewaySessionRuntimeStateService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    def release_running_agent_state(
         self,
         session_key: str,
         *,
         run_generation: Optional[int] = None,
     ) -> bool:
         """Pop all per-running-agent state entries for ``session_key``."""
+        runner = self._runner
         if not session_key:
             return False
-        if run_generation is not None and not self._is_session_run_current(
+        if run_generation is not None and not self.is_session_run_current(
             session_key, run_generation
         ):
             return False
-        self._running_agents.pop(session_key, None)
-        self._running_agents_ts.pop(session_key, None)
-        if hasattr(self, "_busy_ack_ts"):
-            self._busy_ack_ts.pop(session_key, None)
-        runtime_status_for(self).persist_active_agents()
+        runner._running_agents.pop(session_key, None)
+        runner._running_agents_ts.pop(session_key, None)
+        if hasattr(runner, "_busy_ack_ts"):
+            runner._busy_ack_ts.pop(session_key, None)
+        runtime_status_for(runner).persist_active_agents()
         return True
 
-    def _clear_session_boundary_security_state(self, session_key: str) -> None:
+    def clear_session_boundary_security_state(self, session_key: str) -> None:
         """Clear per-session control state that must not survive a boundary switch."""
+        runner = self._runner
         if not session_key:
             return
 
         pending_skills_reload_notes = getattr(
-            self, "_pending_skills_reload_notes", None
+            runner, "_pending_skills_reload_notes", None
         )
         if isinstance(pending_skills_reload_notes, dict):
             pending_skills_reload_notes.pop(session_key, None)
 
-        pending_approvals = getattr(self, "_pending_approvals", None)
+        pending_approvals = getattr(runner, "_pending_approvals", None)
         if isinstance(pending_approvals, dict):
             pending_approvals.pop(session_key, None)
 
-        update_prompt_pending = getattr(self, "_update_prompt_pending", None)
+        update_prompt_pending = getattr(runner, "_update_prompt_pending", None)
         if isinstance(update_prompt_pending, dict):
             update_prompt_pending.pop(session_key, None)
 
@@ -78,21 +83,22 @@ class GatewaySessionRuntimeStateMixin:
                 exc,
             )
 
-    def _begin_session_run_generation(self, session_key: str) -> int:
+    def begin_session_run_generation(self, session_key: str) -> int:
         """Claim a fresh run generation token for ``session_key``."""
+        runner = self._runner
         if not session_key:
             return 0
-        generations = self.__dict__.get("_session_run_generation")
+        generations = runner.__dict__.get("_session_run_generation")
         if generations is None:
             generations = {}
-            self._session_run_generation = generations
+            runner._session_run_generation = generations
         next_generation = int(generations.get(session_key, 0)) + 1
         generations[session_key] = next_generation
         return next_generation
 
-    def _invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
+    def invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
         """Invalidate any in-flight run token for ``session_key``."""
-        generation = self._begin_session_run_generation(session_key)
+        generation = self.begin_session_run_generation(session_key)
         if reason:
             logger.info(
                 "Invalidated run generation for %s → %d (%s)",
@@ -102,14 +108,15 @@ class GatewaySessionRuntimeStateMixin:
             )
         return generation
 
-    def _is_session_run_current(self, session_key: str, generation: int) -> bool:
+    def is_session_run_current(self, session_key: str, generation: int) -> bool:
         """Return True when ``generation`` is still current for ``session_key``."""
+        runner = self._runner
         if not session_key:
             return True
-        generations = self.__dict__.get("_session_run_generation") or {}
+        generations = runner.__dict__.get("_session_run_generation") or {}
         return int(generations.get(session_key, 0)) == int(generation)
 
-    def _bind_adapter_run_generation(
+    def bind_adapter_run_generation(
         self,
         adapter: Any,
         session_key: str,
@@ -122,5 +129,14 @@ class GatewaySessionRuntimeStateMixin:
             interrupt_event = getattr(adapter, "_active_sessions", {}).get(session_key)
             if interrupt_event is not None:
                 setattr(interrupt_event, "_hermes_run_generation", int(generation))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to bind adapter run generation for %s: %s", session_key, exc)
+
+
+def session_runtime_state_for(runner) -> GatewaySessionRuntimeStateService:
+    service = getattr(runner, "session_runtime_state", None)
+    if isinstance(service, GatewaySessionRuntimeStateService):
+        return service
+    service = GatewaySessionRuntimeStateService(runner)
+    runner.session_runtime_state = service
+    return service

@@ -113,7 +113,7 @@ from hermes_gateway.session_navigation_commands import GatewaySessionNavigationC
 from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session_recovery_runtime import GatewaySessionRecoveryRuntimeMixin
-from hermes_gateway.session_runtime_state import GatewaySessionRuntimeStateMixin
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.shutdown_runtime import GatewayShutdownRuntimeMixin
 from hermes_gateway.skill_hint import (
     check_unavailable_skill as _check_unavailable_skill_for_repo,
@@ -531,7 +531,6 @@ class GatewayRunner(
     GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
-    GatewaySessionRuntimeStateMixin,
     GatewayShutdownRuntimeMixin,
     GatewayTitleCommandMixin,
     GatewayUpdateRestartMixin,
@@ -1520,11 +1519,11 @@ class GatewayRunner(
                     _quick_key, _stale_age, _stale_idle,
                     _raw_stale_timeout, _stale_detail,
                 )
-                self._invalidate_session_run_generation(
+                session_runtime_state_for(self).invalidate_session_run_generation(
                     _quick_key,
                     reason="stale_running_agent_eviction",
                 )
-                self._release_running_agent_state(_quick_key)
+                session_runtime_state_for(self).release_running_agent_state(_quick_key)
 
         if _quick_key in self._running_agents:
             if event.get_command() == "status":
@@ -1803,7 +1802,7 @@ class GatewayRunner(
                 # Agent is being set up but not ready yet.
                 if event.get_command() == "stop":
                     # Force-clean the sentinel so the session is unlocked.
-                    self._release_running_agent_state(_quick_key)
+                    session_runtime_state_for(self).release_running_agent_state(_quick_key)
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 # Queue the message so it will be picked up after the
@@ -2323,7 +2322,7 @@ class GatewayRunner(
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
         runtime_status_for(self).persist_active_agents()
-        _run_generation = self._begin_session_run_generation(_quick_key)
+        _run_generation = session_runtime_state_for(self).begin_session_run_generation(_quick_key)
 
         try:
             _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
@@ -2362,7 +2361,7 @@ class GatewayRunner(
             # the generation-guarded release inside _run_agent then refuses to
             # clear the old agent, so a sentinel-only cleanup would leave a
             # zombie busy slot until gateway restart.
-            self._release_running_agent_state(_quick_key)
+            session_runtime_state_for(self).release_running_agent_state(_quick_key)
 
     def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
@@ -2996,7 +2995,7 @@ class GatewayRunner(
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
-        self._bind_adapter_run_generation(
+        session_runtime_state_for(self).bind_adapter_run_generation(
             self.adapters.get(source.platform),
             session_key,
             run_generation,
@@ -3034,7 +3033,7 @@ class GatewayRunner(
             except Exception:
                 pass
 
-            if not self._is_session_run_current(_quick_key, run_generation):
+            if not session_runtime_state_for(self).is_session_run_current(_quick_key, run_generation):
                 logger.info(
                     "Discarding stale agent result for %s — generation %d is no longer current",
                     _quick_key or "?",
@@ -3715,7 +3714,7 @@ class GatewayRunner(
         running_agent = self._running_agents.get(session_key)
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             running_agent.interrupt(interrupt_reason)
-        self._invalidate_session_run_generation(session_key, reason=invalidation_reason)
+        session_runtime_state_for(self).invalidate_session_run_generation(session_key, reason=invalidation_reason)
         adapter = self.adapters.get(source.platform)
         if adapter and hasattr(adapter, "interrupt_session_activity"):
             await adapter.interrupt_session_activity(session_key, source.chat_id)
@@ -3723,7 +3722,7 @@ class GatewayRunner(
             adapter.get_pending_message(session_key)  # consume and discard
         self._pending_messages.pop(session_key, None)
         if release_running_state:
-            self._release_running_agent_state(session_key)
+            session_runtime_state_for(self).release_running_agent_state(session_key)
 
     # ------------------------------------------------------------------
     # Proxy mode: forward messages to a remote Hermes API server
@@ -3777,7 +3776,7 @@ class GatewayRunner(
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
                 return True
-            return self._is_session_run_current(session_key, run_generation)
+            return session_runtime_state_for(self).is_session_run_current(session_key, run_generation)
         
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
@@ -5274,7 +5273,7 @@ class GatewayRunner(
             # current.  If /stop or /new bumped the generation while we were
             # spinning up, leave the newer run's slot alone — we'll be
             # discarded by the stale-result check in _handle_message_with_agent.
-            if run_generation is not None and not self._is_session_run_current(
+            if run_generation is not None and not session_runtime_state_for(self).is_session_run_current(
                 session_key, run_generation
             ):
                 logger.info(
@@ -5852,7 +5851,7 @@ class GatewayRunner(
                 # were unwinding has already installed its own state; this
                 # guard prevents an old run from clobbering it on the way
                 # out.
-                self._release_running_agent_state(
+                session_runtime_state_for(self).release_running_agent_state(
                     session_key, run_generation=run_generation
                 )
             if self._draining:
