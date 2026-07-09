@@ -72,6 +72,7 @@ from hermes_gateway.bootstrap import (
 from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
+from hermes_gateway.conversation_editing_commands import GatewayConversationEditingCommandMixin
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import GatewayDebugCommandMixin
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
@@ -501,6 +502,7 @@ class GatewayRunner(
     GatewayCodexRuntimeCommandMixin,
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
+    GatewayConversationEditingCommandMixin,
     GatewayDebugCommandMixin,
     GatewayFastCommandMixin,
     GatewayFooterCommandMixin,
@@ -8527,71 +8529,7 @@ class GatewayRunner(
 
 
 
-    async def _handle_retry_command(self, event: MessageEvent) -> str:
-        """Handle /retry command - re-send the last user message."""
-        source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
-        
-        # Find the last user message
-        last_user_msg = None
-        last_user_idx = None
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get("role") == "user":
-                last_user_msg = history[i].get("content", "")
-                last_user_idx = i
-                break
-        
-        if not last_user_msg:
-            return t("gateway.retry.no_previous")
-        
-        # Truncate history to before the last user message and persist
-        truncated = history[:last_user_idx]
-        self.session_store.rewrite_transcript(session_entry.session_id, truncated)
-        # Reset stored token count — transcript was truncated
-        session_entry.last_prompt_tokens = 0
-        
-        # Re-send by creating a fake text event with the old message
-        retry_event = MessageEvent(
-            text=last_user_msg,
-            message_type=MessageType.TEXT,
-            source=source,
-            raw_message=event.raw_message,
-            channel_prompt=event.channel_prompt,
-        )
-        
-        # Let the normal message handler process it
-        return await self._handle_message(retry_event)
 
-    async def _handle_suggestions_command(self, event: MessageEvent) -> str:
-        """Handle /suggestions in the gateway.
-
-        Delegates to the shared handler so CLI and gateway never drift. The
-        origin is built from the event source so an accepted suggestion's job
-        delivers back to this chat/thread.
-        """
-        args = (event.get_command_args() or "").strip()
-        source = event.source
-        origin = None
-        try:
-            platform = getattr(source.platform, "value", None) or str(getattr(source, "platform", "") or "")
-            chat_id = getattr(source, "chat_id", None)
-            if platform and chat_id:
-                origin = {
-                    "platform": platform,
-                    "chat_id": str(chat_id),
-                    "chat_name": getattr(source, "chat_name", None),
-                    "thread_id": getattr(source, "thread_id", None),
-                }
-        except Exception:
-            origin = None
-        try:
-            from hermes_cli.suggestions_cmd import handle_suggestions_command
-
-            return handle_suggestions_command(args, origin=origin)
-        except Exception as e:
-            logger.debug("suggestions command failed: %s", e)
-            return f"Suggestions command failed: {e}"
 
     # ────────────────────────────────────────────────────────────────
     # /goal — persistent cross-turn goals (Ralph-style loop)
@@ -8898,30 +8836,6 @@ class GatewayRunner(
         except Exception as exc:
             logger.debug("goal continuation: enqueue failed: %s", exc)
 
-    async def _handle_undo_command(self, event: MessageEvent) -> str:
-        """Handle /undo command - remove the last user/assistant exchange."""
-        source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
-        
-        # Find the last user message and remove everything from it onward
-        last_user_idx = None
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get("role") == "user":
-                last_user_idx = i
-                break
-        
-        if last_user_idx is None:
-            return t("gateway.undo.nothing")
-        
-        removed_msg = history[last_user_idx].get("content", "")
-        removed_count = len(history) - last_user_idx
-        self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
-        # Reset stored token count — transcript was truncated
-        session_entry.last_prompt_tokens = 0
-        
-        preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg
-        return t("gateway.undo.removed", count=removed_count, preview=preview)
 
     async def _handle_set_home_command(self, event: MessageEvent) -> str:
         """Handle /sethome command -- set the current chat as the platform's home channel."""
