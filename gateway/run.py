@@ -53,6 +53,7 @@ from hermes_cli.config import cfg_get
 from hermes_gateway.approval_commands import GatewayApprovalCommandMixin
 from hermes_gateway.agent_turn_runtime import agent_turn_runtime_for
 from hermes_gateway.agent_run_supervision import agent_run_supervisor_for
+from hermes_gateway.agent_streaming_runtime import agent_streaming_for
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -1795,109 +1796,26 @@ class GatewayRunner(
             )
             self._reasoning_config = reasoning_config
             self._service_tier = fast_command_for(self).load_service_tier()
-            # Set up stream consumer for token streaming or interim commentary.
-            _stream_consumer = None
-            _stream_delta_cb = None
-            _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
-            if _scfg is None:
-                from hermes_gateway.config import StreamingConfig
-                _scfg = StreamingConfig()
-
-            # Per-platform streaming gate: display.platforms.<plat>.streaming
-            # can disable streaming for specific platforms even when the global
-            # streaming config is enabled.
-            _plat_streaming = resolve_display_setting(
-                user_config, platform_key, "streaming"
+            stream_runtime = agent_streaming_for(
+                self,
+                source=source,
+                user_config=user_config,
+                platform_key=platform_key,
+                status_adapter=_status_adapter,
+                status_chat_id=_status_chat_id,
+                status_thread_metadata=_status_thread_metadata,
+                event_message_id=event_message_id,
+                loop=_loop_for_step,
+                run_still_current=_run_still_current,
+                on_new_content_message=(
+                    tool_progress.reset_current_bubble
+                    if tool_progress.queue is not None
+                    else None
+                ),
+                stream_consumer_holder=stream_consumer_holder,
+                interim_messages_enabled=interim_assistant_messages_enabled,
             )
-            # None = no per-platform override → follow global config
-            _streaming_enabled = (
-                _scfg.enabled and _scfg.transport != "off"
-                if _plat_streaming is None
-                else bool(_plat_streaming)
-            )
-            _want_stream_deltas = _streaming_enabled
-            _want_interim_messages = interim_assistant_messages_enabled
-            _want_interim_consumer = _want_interim_messages
-            if _want_stream_deltas or _want_interim_consumer:
-                try:
-                    from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                    _adapter = self.adapters.get(source.platform)
-                    if _adapter:
-                        # Platforms that don't support editing sent messages
-                        # (e.g. QQ, WeChat) should skip streaming entirely —
-                        # without edit support, the consumer sends a partial
-                        # first message that can never be updated, resulting in
-                        # duplicate messages (partial + final).
-                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
-                            raise RuntimeError("skip streaming for non-editable platform")
-                        _effective_cursor = _scfg.cursor
-                        # Some Matrix clients render the streaming cursor
-                        # as a visible tofu/white-box artifact.  Keep
-                        # streaming text on Matrix, but suppress the cursor.
-                        _buffer_only = False
-                        if source.platform == Platform.MATRIX:
-                            _effective_cursor = ""
-                            _buffer_only = True
-                        # Fresh-final applies to Telegram only — other
-                        # platforms either edit in place cheaply or don't
-                        # have the edit-timestamp-stays-stale problem.
-                        # (Ported from openclaw/openclaw#72038.)
-                        _fresh_final_secs = (
-                            float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                            if source.platform == Platform.TELEGRAM
-                            else 0.0
-                        )
-                        _consumer_cfg = StreamConsumerConfig(
-                            edit_interval=_scfg.edit_interval,
-                            buffer_threshold=_scfg.buffer_threshold,
-                            cursor=_effective_cursor,
-                            buffer_only=_buffer_only,
-                            fresh_final_after_seconds=_fresh_final_secs,
-                            transport=_scfg.transport or "edit",
-                            chat_type=getattr(source, "chat_type", "") or "",
-                        )
-                        _stream_consumer = GatewayStreamConsumer(
-                            adapter=_adapter,
-                            chat_id=source.chat_id,
-                            config=_consumer_cfg,
-                            metadata=_status_thread_metadata,
-                            on_new_message=(
-                                tool_progress.reset_current_bubble
-                                if tool_progress.queue is not None
-                                else None
-                            ),
-                            initial_reply_to_id=event_message_id,
-                        )
-                        if _want_stream_deltas:
-                            def _stream_delta_cb(text: str) -> None:
-                                if _run_still_current():
-                                    _stream_consumer.on_delta(text)
-                        stream_consumer_holder[0] = _stream_consumer
-                except Exception as _sc_err:
-                    logger.debug("Could not set up stream consumer: %s", _sc_err)
-
-            def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-                if not _run_still_current():
-                    return
-                if _stream_consumer is not None:
-                    if already_streamed:
-                        _stream_consumer.on_segment_break()
-                    else:
-                        _stream_consumer.on_commentary(text)
-                    return
-                if already_streamed or not _status_adapter or not str(text or "").strip():
-                    return
-                safe_schedule_threadsafe(
-                    _status_adapter.send(
-                        _status_chat_id,
-                        text,
-                        metadata=_status_thread_metadata,
-                    ),
-                    _loop_for_step,
-                    logger=logger,
-                    log_message="interim_assistant_callback scheduling error",
-                )
+            stream_runtime.configure()
 
             turn_route = runtime_config_for(self).resolve_turn_agent_config(message, model, runtime_kwargs)
 
@@ -1973,8 +1891,12 @@ class GatewayRunner(
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = tool_progress.callback if tool_progress_enabled else None
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
-            agent.stream_delta_callback = _stream_delta_cb
-            agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
+            agent.stream_delta_callback = stream_runtime.stream_delta_callback
+            agent.interim_assistant_callback = (
+                stream_runtime.interim_callback
+                if interim_assistant_messages_enabled
+                else None
+            )
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
@@ -2391,8 +2313,8 @@ class GatewayRunner(
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
-            if _stream_consumer is not None:
-                _stream_consumer.finish()
+            if stream_consumer_holder[0] is not None:
+                stream_consumer_holder[0].finish()
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
