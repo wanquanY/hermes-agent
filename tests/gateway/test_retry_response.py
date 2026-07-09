@@ -8,6 +8,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from gateway.run import GatewayRunner
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.conversation_editing_commands import conversation_editing_for
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ async def test_retry_returns_response_not_none(gateway):
         message_type=MessageType.TEXT,
         source=MagicMock(),
     )
-    result = await gateway._handle_retry_command(event)
+    result = await conversation_editing_for(gateway).handle_retry_command(event)
     assert result is not None, "/retry must not return None"
     assert result == expected_response
 
@@ -56,5 +57,5 @@ async def test_retry_no_previous_message(gateway):
         message_type=MessageType.TEXT,
         source=MagicMock(),
     )
-    result = await gateway._handle_retry_command(event)
+    result = await conversation_editing_for(gateway).handle_retry_command(event)
     assert result == "No previous message to retry."

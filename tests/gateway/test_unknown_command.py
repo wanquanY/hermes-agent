@@ -156,16 +156,21 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
 
     runner = _make_runner()
     # Prevent real MCP work; we only care that the unknown guard doesn't fire.
-    async def _noop_reload(*_a, **_kw):
-        return "mcp reloaded"
-
-    runner._handle_reload_mcp_command = _noop_reload  # type: ignore[attr-defined]
+    reload_service = type(
+        "ReloadService",
+        (),
+        {"handle_reload_mcp_command": AsyncMock(return_value="mcp reloaded")},
+    )()
 
     monkeypatch.setattr(
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
+    monkeypatch.setattr(
+        gateway_run, "reload_mcp_command_for", lambda _runner: reload_service
+    )
 
     result = await runner._handle_message(_make_event("/reload_mcp"))
+    reload_service.handle_reload_mcp_command.assert_awaited_once()
 
     # Whatever /reload_mcp returns, it must not be the unknown-command guard.
     if result is not None:

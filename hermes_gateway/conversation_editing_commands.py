@@ -10,13 +10,16 @@ from channels.platforms.base import MessageEvent, MessageType
 logger = logging.getLogger(__name__)
 
 
-class GatewayConversationEditingCommandMixin:
-    async def _handle_retry_command(self, event: MessageEvent) -> str:
+class GatewayConversationEditingCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_retry_command(self, event: MessageEvent) -> str:
         """Replay the last user message after removing its old response."""
 
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_entry = self._runner.session_store.get_or_create_session(source)
+        history = self._runner.session_store.load_transcript(session_entry.session_id)
 
         last_user_msg = None
         last_user_idx = None
@@ -29,7 +32,7 @@ class GatewayConversationEditingCommandMixin:
         if not last_user_msg:
             return t("gateway.retry.no_previous")
 
-        self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        self._runner.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
         session_entry.last_prompt_tokens = 0
 
         retry_event = MessageEvent(
@@ -39,14 +42,14 @@ class GatewayConversationEditingCommandMixin:
             raw_message=event.raw_message,
             channel_prompt=event.channel_prompt,
         )
-        return await self._handle_message(retry_event)
+        return await self._runner._handle_message(retry_event)
 
-    async def _handle_undo_command(self, event: MessageEvent) -> str:
+    async def handle_undo_command(self, event: MessageEvent) -> str:
         """Remove the last user/assistant exchange from the transcript."""
 
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_entry = self._runner.session_store.get_or_create_session(source)
+        history = self._runner.session_store.load_transcript(session_entry.session_id)
 
         last_user_idx = None
         for idx in range(len(history) - 1, -1, -1):
@@ -59,13 +62,13 @@ class GatewayConversationEditingCommandMixin:
 
         removed_msg = history[last_user_idx].get("content", "")
         removed_count = len(history) - last_user_idx
-        self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        self._runner.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
         session_entry.last_prompt_tokens = 0
 
         preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg
         return t("gateway.undo.removed", count=removed_count, preview=preview)
 
-    async def _handle_suggestions_command(self, event: MessageEvent) -> str:
+    async def handle_suggestions_command(self, event: MessageEvent) -> str:
         """Delegate /suggestions to the shared CLI handler with gateway origin."""
 
         args = (event.get_command_args() or "").strip()
@@ -90,3 +93,12 @@ class GatewayConversationEditingCommandMixin:
         except Exception as e:
             logger.debug("suggestions command failed: %s", e)
             return f"Suggestions command failed: {e}"
+
+
+def conversation_editing_for(runner) -> GatewayConversationEditingCommandService:
+    service = getattr(runner, "conversation_editing", None)
+    if isinstance(service, GatewayConversationEditingCommandService):
+        return service
+    service = GatewayConversationEditingCommandService(runner)
+    runner.conversation_editing = service
+    return service

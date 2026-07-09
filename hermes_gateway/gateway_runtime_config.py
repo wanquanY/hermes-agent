@@ -17,6 +17,7 @@ from hermes_agent.gateway.runtime_config import (
 )
 from hermes_cli.config import cfg_get
 from hermes_constants import get_hermes_home
+from hermes_gateway.model_command import model_command_for
 from hermes_gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     parse_restart_drain_timeout,
@@ -88,7 +89,7 @@ class GatewayRuntimeConfigService:
             )
             model = runtime_model
         if override and resolved_session_key:
-            model, runtime_kwargs = self._runner._apply_session_model_override(
+            model, runtime_kwargs = model_command_for(self._runner).apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
 

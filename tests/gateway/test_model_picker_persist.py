@@ -23,6 +23,7 @@ import types
 import yaml
 import pytest
 
+from hermes_gateway.model_command import model_command_for
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
@@ -126,7 +127,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
 
 async def _drive_picker(runner, event):
     """Run the handler (which sends the picker) then fire the captured tap."""
-    sent = await runner._handle_model_command(event)
+    sent = await model_command_for(runner).handle_model_command(event)
     # Bare /model returns None (picker sent); the adapter captured the callback.
     assert sent is None
     adapter = runner.adapters[Platform.TELEGRAM]

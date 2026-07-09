@@ -179,14 +179,29 @@ async def test_fast_rejected_mid_run():
 @pytest.mark.asyncio
 async def test_reasoning_rejected_mid_run():
     """/reasoning mid-run must hit the busy catch-all — config-only, next message."""
+    import gateway.run as gateway_run
+
     runner = _make_runner()
-    runner._handle_reasoning_command = AsyncMock(
-        side_effect=AssertionError("/reasoning should not dispatch mid-run")
+    called = False
+
+    def _fail_reasoning_factory(_runner):
+        nonlocal called
+        called = True
+        raise AssertionError("/reasoning should not dispatch mid-run")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        gateway_run,
+        "reasoning_command_for",
+        _fail_reasoning_factory,
     )
 
-    result = await runner._handle_message(_make_event("/reasoning high"))
+    try:
+        result = await runner._handle_message(_make_event("/reasoning high"))
+    finally:
+        monkeypatch.undo()
 
-    runner._handle_reasoning_command.assert_not_awaited()
+    assert called is False
     assert result is not None
     assert "can't run mid-turn" in result
     assert "/reasoning" in result

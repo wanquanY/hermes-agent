@@ -12,21 +12,24 @@ from channels.platforms.base import MessageEvent
 logger = logging.getLogger(__name__)
 
 
-class GatewayReloadMcpCommandMixin:
-    async def _handle_reload_mcp_command(self, event: MessageEvent) -> Optional[str]:
+class GatewayReloadMcpCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_reload_mcp_command(self, event: MessageEvent) -> Optional[str]:
         """Reconnect MCP servers after a prompt-cache invalidation confirmation."""
 
         source = event.source
-        session_key = self._session_key_for_source(source)
+        session_key = self._runner._session_key_for_source(source)
 
-        user_config = self._read_user_config()
+        user_config = self._runner._read_user_config()
         approvals = user_config.get("approvals") if isinstance(user_config, dict) else None
         confirm_required = True
         if isinstance(approvals, dict):
             confirm_required = bool(approvals.get("mcp_reload_confirm", True))
 
         if not confirm_required:
-            return await self._execute_mcp_reload(event)
+            return await self.execute_mcp_reload(event)
 
         async def _on_confirm(choice: str) -> Optional[str]:
             if choice == "cancel":
@@ -41,7 +44,7 @@ class GatewayReloadMcpCommandMixin:
                     )
                 except Exception as exc:
                     logger.warning("Failed to persist mcp_reload_confirm=false: %s", exc)
-            result = await self._execute_mcp_reload(event)
+            result = await self.execute_mcp_reload(event)
             if choice == "always":
                 return f"{result}\n\n" + t("gateway.reload_mcp.always_followup")
             return result
@@ -49,7 +52,7 @@ class GatewayReloadMcpCommandMixin:
         from channels.slash_commands import request_slash_confirm
 
         return await request_slash_confirm(
-            runtime=self._slash_confirmation_runtime(),
+            runtime=self._runner._slash_confirmation_runtime(),
             event=event,
             command="reload-mcp",
             title="/reload-mcp",
@@ -57,7 +60,7 @@ class GatewayReloadMcpCommandMixin:
             handler=_on_confirm,
         )
 
-    async def _execute_mcp_reload(self, event: MessageEvent) -> str:
+    async def execute_mcp_reload(self, event: MessageEvent) -> str:
         """Disconnect, reconnect, and notify the active session of MCP changes."""
 
         loop = asyncio.get_running_loop()
@@ -91,8 +94,8 @@ class GatewayReloadMcpCommandMixin:
 
             try:
                 from tools.mcp_tool import refresh_agent_mcp_tools
-                cache = getattr(self, "_agent_cache", None)
-                cache_lock = getattr(self, "_agent_cache_lock", None)
+                cache = getattr(self._runner, "_agent_cache", None)
+                cache_lock = getattr(self._runner, "_agent_cache_lock", None)
                 if cache_lock is not None and cache:
                     with cache_lock:
                         for entry in list(cache.values()):
@@ -123,15 +126,24 @@ class GatewayReloadMcpCommandMixin:
                 "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
             }
             try:
-                session_entry = self.session_store.get_or_create_session(event.source)
-                self.session_store.append_to_transcript(
+                session_entry = self._runner.session_store.get_or_create_session(event.source)
+                self._runner.session_store.append_to_transcript(
                     session_entry.session_id, reload_msg
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not append MCP reload notice to transcript: %s", exc)
 
             return "\n".join(lines)
 
         except Exception as e:
             logger.warning("MCP reload failed: %s", e)
             return t("gateway.reload_mcp.failed", error=e)
+
+
+def reload_mcp_command_for(runner) -> GatewayReloadMcpCommandService:
+    service = getattr(runner, "reload_mcp_command", None)
+    if isinstance(service, GatewayReloadMcpCommandService):
+        return service
+    service = GatewayReloadMcpCommandService(runner)
+    runner.reload_mcp_command = service
+    return service

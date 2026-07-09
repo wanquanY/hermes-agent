@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig
+from hermes_gateway.conversation_editing_commands import conversation_editing_for
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from hermes_gateway.session import SessionStore
@@ -58,7 +59,7 @@ async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
 
     gw._handle_message = AsyncMock(side_effect=fake_handle_message)
 
-    result = await gw._handle_retry_command(
+    result = await conversation_editing_for(gw).handle_retry_command(
         MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
     )
 
@@ -100,7 +101,7 @@ async def test_gateway_retry_replays_original_text_not_retry_command(tmp_path):
 
     gw._handle_message = AsyncMock(side_effect=fake_handle_message)
 
-    await gw._handle_retry_command(
+    await conversation_editing_for(gw).handle_retry_command(
         MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
     )
 

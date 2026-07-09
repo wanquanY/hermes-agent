@@ -25,9 +25,12 @@ def _platform_config_key(platform: Platform) -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
-class GatewayReasoningCommandMixin:
+class GatewayReasoningCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
     @staticmethod
-    def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
+    def parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
         """Parse `/reasoning` args into `(value, persist_global)`.
 
         `/reasoning <level>` is session-scoped by default. `--global` may be
@@ -53,7 +56,7 @@ class GatewayReasoningCommandMixin:
         return " ".join(value_tokens).strip().lower(), persist_global
 
     @staticmethod
-    def _load_show_reasoning() -> bool:
+    def load_show_reasoning() -> bool:
         """Load show_reasoning toggle from config.yaml display section."""
         try:
             import yaml as _y
@@ -65,11 +68,11 @@ class GatewayReasoningCommandMixin:
                     cfg_get(cfg, "display", "show_reasoning"),
                     default=False,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not load show_reasoning from gateway config: %s", exc)
         return False
 
-    async def _handle_reasoning_command(self, event: MessageEvent) -> str:
+    async def handle_reasoning_command(self, event: MessageEvent) -> str:
         """Handle /reasoning command — manage reasoning effort and display toggle.
 
         Usage:
@@ -83,11 +86,11 @@ class GatewayReasoningCommandMixin:
         import yaml
 
         raw_args = event.get_command_args().strip()
-        args, persist_global = self._parse_reasoning_command_args(raw_args)
+        args, persist_global = self.parse_reasoning_command_args(raw_args)
         config_path = gateway_home() / "config.yaml"
-        session_key = self._session_key_for_source(event.source)
-        self._show_reasoning = self._load_show_reasoning()
-        self._reasoning_config = runtime_config_for(self).resolve_session_reasoning_config(
+        session_key = self._runner._session_key_for_source(event.source)
+        self._runner._show_reasoning = self.load_show_reasoning()
+        self._runner._reasoning_config = runtime_config_for(self._runner).resolve_session_reasoning_config(
             source=event.source,
             session_key=session_key,
         )
@@ -114,7 +117,7 @@ class GatewayReasoningCommandMixin:
 
         if not raw_args:
             # Show current state
-            rc = self._reasoning_config
+            rc = self._runner._reasoning_config
             if rc is None:
                 level = t("gateway.reasoning.level_default")
             elif rc.get("enabled") is False:
@@ -123,10 +126,10 @@ class GatewayReasoningCommandMixin:
                 level = rc.get("effort", "medium")
             display_state = (
                 t("gateway.reasoning.display_on")
-                if self._show_reasoning
+                if self._runner._show_reasoning
                 else t("gateway.reasoning.display_off")
             )
-            has_session_override = session_key in (getattr(self, "_session_reasoning_overrides", {}) or {})
+            has_session_override = session_key in (getattr(self._runner, "_session_reasoning_overrides", {}) or {})
             scope = (
                 t("gateway.reasoning.scope_session")
                 if has_session_override
@@ -142,12 +145,12 @@ class GatewayReasoningCommandMixin:
         # Display toggle (per-platform)
         platform_key = _platform_config_key(event.source.platform)
         if args in {"show", "on"}:
-            self._show_reasoning = True
+            self._runner._show_reasoning = True
             _save_config_key(f"display.platforms.{platform_key}.show_reasoning", True)
             return t("gateway.reasoning.display_set_on", platform=platform_key)
 
         if args in {"hide", "off"}:
-            self._show_reasoning = False
+            self._runner._show_reasoning = False
             _save_config_key(f"display.platforms.{platform_key}.show_reasoning", False)
             return t("gateway.reasoning.display_set_off", platform=platform_key)
 
@@ -156,9 +159,9 @@ class GatewayReasoningCommandMixin:
         if effort == "reset":
             if persist_global:
                 return t("gateway.reasoning.reset_global_unsupported")
-            runtime_config_for(self).set_session_reasoning_override(session_key, None)
-            self._reasoning_config = runtime_config_for(self).load_reasoning_config()
-            agent_cache_for(self).evict_cached_agent(session_key)
+            runtime_config_for(self._runner).set_session_reasoning_override(session_key, None)
+            self._runner._reasoning_config = runtime_config_for(self._runner).load_reasoning_config()
+            agent_cache_for(self._runner).evict_cached_agent(session_key)
             return t("gateway.reasoning.reset_done")
         if effort == "none":
             parsed = {"enabled": False}
@@ -170,16 +173,25 @@ class GatewayReasoningCommandMixin:
                 arg=effort or raw_args.lower(),
             )
 
-        self._reasoning_config = parsed
+        self._runner._reasoning_config = parsed
         if persist_global:
             if _save_config_key("agent.reasoning_effort", effort):
-                runtime_config_for(self).set_session_reasoning_override(session_key, None)
-                agent_cache_for(self).evict_cached_agent(session_key)
+                runtime_config_for(self._runner).set_session_reasoning_override(session_key, None)
+                agent_cache_for(self._runner).evict_cached_agent(session_key)
                 return t("gateway.reasoning.set_global", effort=effort)
-            runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
-            agent_cache_for(self).evict_cached_agent(session_key)
+            runtime_config_for(self._runner).set_session_reasoning_override(session_key, parsed)
+            agent_cache_for(self._runner).evict_cached_agent(session_key)
             return t("gateway.reasoning.set_global_save_failed", effort=effort)
 
-        runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
-        agent_cache_for(self).evict_cached_agent(session_key)
+        runtime_config_for(self._runner).set_session_reasoning_override(session_key, parsed)
+        agent_cache_for(self._runner).evict_cached_agent(session_key)
         return t("gateway.reasoning.set_session", effort=effort)
+
+
+def reasoning_command_for(runner) -> GatewayReasoningCommandService:
+    service = getattr(runner, "reasoning_command", None)
+    if isinstance(service, GatewayReasoningCommandService):
+        return service
+    service = GatewayReasoningCommandService(runner)
+    runner.reasoning_command = service
+    return service

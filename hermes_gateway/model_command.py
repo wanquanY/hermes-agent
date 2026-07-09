@@ -55,8 +55,11 @@ def _persist_model_switch(config_path: Path, result: object) -> None:
     save_config(cfg)
 
 
-class GatewayModelCommandMixin:
-    async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
+class GatewayModelCommandService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model for this session.
 
         Supports:
@@ -86,7 +89,7 @@ class GatewayModelCommandMixin:
                 from hermes_cli.models import clear_provider_models_cache
                 clear_provider_models_cache()
             except Exception:
-                pass
+                logger.debug("Could not clear provider models cache for /model --refresh", exc_info=True)
 
         # Read current model/provider from config
         current_model = ""
@@ -108,15 +111,16 @@ class GatewayModelCommandMixin:
                 try:
                     from hermes_cli.config import get_compatible_custom_providers
                     custom_provs = get_compatible_custom_providers(cfg)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Could not resolve compatible custom providers: %s", exc)
                     custom_provs = cfg.get("custom_providers")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not load gateway model config for /model: %s", exc)
 
         # Check for session override
         source = event.source
-        session_key = self._session_key_for_source(source)
-        override = self._session_model_overrides.get(session_key, {})
+        session_key = self._runner._session_key_for_source(source)
+        override = self._runner._session_model_overrides.get(session_key, {})
         if override:
             current_model = override.get("model", current_model)
             current_provider = override.get("provider", current_provider)
@@ -126,7 +130,7 @@ class GatewayModelCommandMixin:
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
             # Try interactive picker if the platform supports it
-            adapter = self.adapters.get(source.platform)
+            adapter = self._runner.adapters.get(source.platform)
             has_picker = (
                 adapter is not None
                 and getattr(type(adapter), "send_model_picker", None) is not None
@@ -142,13 +146,14 @@ class GatewayModelCommandMixin:
                         custom_providers=custom_provs,
                         max_models=50,
                     )
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Could not build model picker providers: %s", exc)
                     providers = []
 
                 if providers:
                     # Build a callback closure for when the user picks a model.
                     # Captures self + locals needed for the switch logic.
-                    _self = self
+                    _self = self._runner
                     _session_key = session_key
                     _cur_model = current_model
                     _cur_provider = current_provider
@@ -233,8 +238,8 @@ class GatewayModelCommandMixin:
                                 _sw_raw = _sw_model_cfg.get("context_length")
                                 if _sw_raw is not None:
                                     _sw_config_ctx = int(_sw_raw)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Could not resolve picker model context length: %s", exc)
                         ctx = resolve_display_context_length(
                             result.new_model,
                             result.target_provider,
@@ -258,7 +263,10 @@ class GatewayModelCommandMixin:
                             lines.append(t("gateway.model.session_only_hint"))
                         return "\n".join(lines)
 
-                    metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    metadata = self._runner._thread_metadata_for_source(
+                        source,
+                        self._runner._reply_anchor_for_event(event),
+                    )
                     result = await adapter.send_model_picker(
                         chat_id=source.chat_id,
                         providers=providers,
@@ -294,8 +302,8 @@ class GatewayModelCommandMixin:
                     elif p.get("api_url"):
                         lines.append(f"  `{p['api_url']}`")
                     lines.append("")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not list authenticated providers for /model: %s", exc)
 
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
@@ -305,8 +313,8 @@ class GatewayModelCommandMixin:
         def _apply_resolved_switch(result: object, *, persist_global: bool) -> str:
             # If there's a cached agent, update it in-place
             cached_entry = None
-            _cache_lock = getattr(self, "_agent_cache_lock", None)
-            _cache = getattr(self, "_agent_cache", None)
+            _cache_lock = getattr(self._runner, "_agent_cache_lock", None)
+            _cache = getattr(self._runner, "_agent_cache", None)
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     cached_entry = _cache.get(session_key)
@@ -325,16 +333,16 @@ class GatewayModelCommandMixin:
 
             # Store a note to prepend to the next user message so the model
             # knows about the switch (avoids system messages mid-history).
-            if not hasattr(self, "_pending_model_notes"):
-                self._pending_model_notes = {}
-            self._pending_model_notes[session_key] = (
+            if not hasattr(self._runner, "_pending_model_notes"):
+                self._runner._pending_model_notes = {}
+            self._runner._pending_model_notes[session_key] = (
                 f"[Note: model was just switched from {current_model} to {result.new_model} "
                 f"via {result.provider_label or result.target_provider}. "
                 f"Adjust your self-identification accordingly.]"
             )
 
             # Store session override so next agent creation uses the new model
-            self._session_model_overrides[session_key] = {
+            self._runner._session_model_overrides[session_key] = {
                 "model": result.new_model,
                 "provider": result.target_provider,
                 "api_key": result.api_key,
@@ -344,7 +352,7 @@ class GatewayModelCommandMixin:
 
             # Evict cached agent so the next turn creates a fresh agent from the
             # override rather than relying on cache signature mismatch detection.
-            agent_cache_for(self).evict_cached_agent(session_key)
+            agent_cache_for(self._runner).evict_cached_agent(session_key)
 
             # Persist to config if --global
             if persist_global:
@@ -370,8 +378,8 @@ class GatewayModelCommandMixin:
                     _sw2_raw = _sw2_model_cfg.get("context_length")
                     if _sw2_raw is not None:
                         _sw2_config_ctx = int(_sw2_raw)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not resolve switched model context length: %s", exc)
             ctx = resolve_display_context_length(
                 result.new_model,
                 result.target_provider,
@@ -435,6 +443,7 @@ class GatewayModelCommandMixin:
                 model_info=result.model_info,
             )
         except Exception:
+            logger.debug("Could not evaluate expensive model warning for /model", exc_info=True)
             expensive_warning = None
 
         if expensive_warning is not None:
@@ -443,7 +452,7 @@ class GatewayModelCommandMixin:
                     return "Model switch cancelled."
                 return _apply_resolved_switch(result, persist_global=persist_global)
 
-            request_confirm = getattr(self, "_request_slash_confirm", None)
+            request_confirm = getattr(self._runner, "_request_slash_confirm", None)
             if request_confirm is not None:
                 return await request_confirm(
                     command="model",
@@ -455,7 +464,7 @@ class GatewayModelCommandMixin:
             from channels.slash_commands import request_slash_confirm
 
             return await request_slash_confirm(
-                runtime=self._slash_confirmation_runtime(),
+                runtime=self._runner._slash_confirmation_runtime(),
                 event=event,
                 command="model",
                 title="/model",
@@ -466,7 +475,7 @@ class GatewayModelCommandMixin:
         return _apply_resolved_switch(result, persist_global=persist_global)
 
 
-    def _apply_session_model_override(
+    def apply_session_model_override(
         self, session_key: str, model: str, runtime_kwargs: dict
     ) -> tuple:
         """Apply /model session overrides if present, returning (model, runtime_kwargs).
@@ -477,7 +486,7 @@ class GatewayModelCommandMixin:
         subsequent messages.  Fields with ``None`` values are skipped so
         partial overrides don't clobber valid config defaults.
         """
-        override = self._session_model_overrides.get(session_key)
+        override = self._runner._session_model_overrides.get(session_key)
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
@@ -487,7 +496,16 @@ class GatewayModelCommandMixin:
                 runtime_kwargs[key] = val
         return model, runtime_kwargs
 
-    def _is_intentional_model_switch(self, session_key: str, agent_model: str) -> bool:
+    def is_intentional_model_switch(self, session_key: str, agent_model: str) -> bool:
         """Return True if *agent_model* matches an active /model session override."""
-        override = self._session_model_overrides.get(session_key)
+        override = self._runner._session_model_overrides.get(session_key)
         return override is not None and override.get("model") == agent_model
+
+
+def model_command_for(runner) -> GatewayModelCommandService:
+    service = getattr(runner, "model_command", None)
+    if isinstance(service, GatewayModelCommandService):
+        return service
+    service = GatewayModelCommandService(runner)
+    runner.model_command = service
+    return service

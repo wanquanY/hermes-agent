@@ -85,8 +85,8 @@ class TestReasoningCommand:
         assert '"reasoning"' in source
 
     def test_parse_reasoning_command_args_accepts_ascii_and_smart_global_flags(self):
-        assert gateway_run.GatewayRunner._parse_reasoning_command_args("high --global") == ("high", True)
-        assert gateway_run.GatewayRunner._parse_reasoning_command_args("—global xhigh") == ("xhigh", True)
+        assert reasoning_command.GatewayReasoningCommandService.parse_reasoning_command_args("high --global") == ("high", True)
+        assert reasoning_command.GatewayReasoningCommandService.parse_reasoning_command_args("—global xhigh") == ("xhigh", True)
 
     @pytest.mark.asyncio
     async def test_reasoning_command_reloads_current_state_from_config(self, tmp_path, monkeypatch):
@@ -105,7 +105,7 @@ class TestReasoningCommand:
         runner._reasoning_config = {"enabled": True, "effort": "xhigh"}
         runner._show_reasoning = False
 
-        result = await runner._handle_reasoning_command(_make_event("/reasoning"))
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(_make_event("/reasoning"))
 
         assert "**Effort:** `none (disabled)`" in result
         assert "**Display:** on ✓" in result
@@ -125,7 +125,7 @@ class TestReasoningCommand:
         runner = _make_runner()
         runner._reasoning_config = {"enabled": True, "effort": "medium"}
 
-        result = await runner._handle_reasoning_command(_make_event("/reasoning low --global"))
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(_make_event("/reasoning low --global"))
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "low"
@@ -146,7 +146,7 @@ class TestReasoningCommand:
         event = _make_event("/reasoning high")
         session_key = runner._session_key_for_source(event.source)
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "medium"
@@ -169,7 +169,7 @@ class TestReasoningCommand:
         session_key = runner._session_key_for_source(event.source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "low"
@@ -191,7 +191,7 @@ class TestReasoningCommand:
         session_key = runner._session_key_for_source(event.source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "medium"
@@ -435,7 +435,7 @@ class TestLoadShowReasoningCoercion:
         (hermes_home / "config.yaml").write_text(yaml_body, encoding="utf-8")
         _patch_hermes_home(monkeypatch, hermes_home)
         monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
-        return gateway_run.GatewayRunner._load_show_reasoning()
+        return reasoning_command.GatewayReasoningCommandService.load_show_reasoning()
 
     def test_quoted_false_is_false(self, tmp_path, monkeypatch):
         assert self._load_with_config(

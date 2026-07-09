@@ -71,13 +71,13 @@ from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
-from hermes_gateway.conversation_editing_commands import GatewayConversationEditingCommandMixin
+from hermes_gateway.conversation_editing_commands import conversation_editing_for
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
 from hermes_gateway.media_delivery import media_delivery_for
-from hermes_gateway.model_command import GatewayModelCommandMixin
+from hermes_gateway.model_command import model_command_for
 from hermes_gateway.media_context import build_media_placeholder as _build_media_placeholder
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.inbound_message_preparation import GatewayInboundMessagePreparationMixin
@@ -146,8 +146,8 @@ from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
 from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.platform_runtime import platform_runtime_for
-from hermes_gateway.reasoning_command import GatewayReasoningCommandMixin
-from hermes_gateway.reload_mcp_command import GatewayReloadMcpCommandMixin
+from hermes_gateway.reasoning_command import reasoning_command_for
+from hermes_gateway.reload_mcp_command import reload_mcp_command_for
 from hermes_gateway.reload_skills_command import reload_skills_command_for
 from hermes_gateway.rollback_command import rollback_command_for
 from hermes_gateway.replay import (
@@ -510,16 +510,12 @@ class GatewayRunner(
     GatewayCodexRuntimeCommandMixin,
     GatewayCommandListingMixin,
     GatewayCompressCommandMixin,
-    GatewayConversationEditingCommandMixin,
     GatewayPlatformAuthorizationMixin,
     GatewayProfileHomeCommandMixin,
     GatewayInboundMediaMixin,
     GatewayInboundMessagePreparationMixin,
     GatewayKanbanWatcherMixin,
     GatewayInsightsCommandMixin,
-    GatewayModelCommandMixin,
-    GatewayReasoningCommandMixin,
-    GatewayReloadMcpCommandMixin,
     GatewayResetCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewayShutdownRuntimeMixin,
@@ -559,7 +555,7 @@ class GatewayRunner(
         self._ephemeral_system_prompt = runtime_config_for(self).load_ephemeral_system_prompt()
         self._reasoning_config = runtime_config_for(self).load_reasoning_config()
         self._service_tier = fast_command_for(self).load_service_tier()
-        self._show_reasoning = self._load_show_reasoning()
+        self._show_reasoning = reasoning_command_for(self).load_show_reasoning()
         self._busy_input_mode = runtime_config_for(self).load_busy_input_mode()
         self._restart_drain_timeout = runtime_config_for(self).load_restart_drain_timeout()
         self._provider_routing = runtime_config_for(self).load_provider_routing()
@@ -1999,7 +1995,7 @@ class GatewayRunner(
             return await runtime_status_command_for(self).handle_stop_command(event)
         
         if canonical == "reasoning":
-            return await self._handle_reasoning_command(event)
+            return await reasoning_command_for(self).handle_reasoning_command(event)
 
         if canonical == "fast":
             return await fast_command_for(self).handle_fast_command(event)
@@ -2014,7 +2010,7 @@ class GatewayRunner(
             return await yolo_command_for(self).handle_yolo_command(event)
 
         if canonical == "model":
-            return await self._handle_model_command(event)
+            return await model_command_for(self).handle_model_command(event)
 
         if canonical == "codex-runtime":
             return await self._handle_codex_runtime_command(event)
@@ -2032,14 +2028,14 @@ class GatewayRunner(
             )
 
         if canonical == "suggestions":
-            return await self._handle_suggestions_command(event)
+            return await conversation_editing_for(self).handle_suggestions_command(event)
 
         if canonical == "retry":
-            return await self._handle_retry_command(event)
+            return await conversation_editing_for(self).handle_retry_command(event)
         
         if canonical == "undo":
             async def _do_undo():
-                return await self._handle_undo_command(event)
+                return await conversation_editing_for(self).handle_undo_command(event)
             from channels.slash_commands import maybe_confirm_destructive_slash
 
             return await maybe_confirm_destructive_slash(
@@ -2064,7 +2060,7 @@ class GatewayRunner(
             return await self._handle_insights_command(event)
 
         if canonical == "reload-mcp":
-            return await self._handle_reload_mcp_command(event)
+            return await reload_mcp_command_for(self).handle_reload_mcp_command(event)
 
         if canonical == "reload-skills":
             return await reload_skills_command_for(self).handle_reload_skills_command(event)
@@ -5578,7 +5574,7 @@ class GatewayRunner(
             _run_failed = _result_for_fb.get("failed") if _result_for_fb else False
             if _agent is not None and hasattr(_agent, 'model') and not _run_failed:
                 _cfg_model = _resolve_gateway_model()
-                if _agent.model != _cfg_model and not self._is_intentional_model_switch(session_key, _agent.model):
+                if _agent.model != _cfg_model and not model_command_for(self).is_intentional_model_switch(session_key, _agent.model):
                     # Fallback activated on a successful run — evict cached
                     # agent so the next message retries the primary model.
                     agent_cache_for(self).evict_cached_agent(session_key)
