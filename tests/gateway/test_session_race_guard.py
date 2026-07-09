@@ -15,7 +15,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
-from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 from hermes_gateway.session import SessionSource, build_session_key
 
 

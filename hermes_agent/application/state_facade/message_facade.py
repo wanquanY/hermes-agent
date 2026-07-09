@@ -479,6 +479,7 @@ class MessageStateFacadeMixin:
                 status=status,
                 reasoning=reasoning,
                 tool_calls=tool_calls,
+                timestamp=timestamp,
             )
 
         def _upsert_team_message_by_id(

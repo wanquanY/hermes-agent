@@ -46,15 +46,15 @@ def _load_gateway_config() -> dict:
 
 
 def _active_hermes_home():
-    legacy = sys.modules.get("gateway.run")
-    if legacy is not None and hasattr(legacy, "_hermes_home"):
-        return getattr(legacy, "_hermes_home")
+    runner_module = sys.modules.get("hermes_gateway.runner")
+    if runner_module is not None and hasattr(runner_module, "_hermes_home"):
+        return getattr(runner_module, "_hermes_home")
     return get_hermes_home()
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
-    legacy = sys.modules.get("gateway.run")
-    patched = getattr(legacy, "_resolve_runtime_agent_kwargs", None) if legacy is not None else None
+    runner_module = sys.modules.get("hermes_gateway.runner")
+    patched = getattr(runner_module, "_resolve_runtime_agent_kwargs", None) if runner_module is not None else None
     if callable(patched):
         return dict(patched())
     return resolve_runtime_agent_kwargs(_active_hermes_home())

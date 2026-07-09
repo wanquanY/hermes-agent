@@ -32,6 +32,8 @@ from hermes_agent.repositories.session_repo import (
 from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+from hermes_agent.application.state_facade.team_capability_facade import TeamCapabilityStateMixin
+from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ def open_cli_session_store(db_path: Path | str | None = None):
     return CliSessionStore(connect_session_repository_db(db_path))
 
 
-class CliSessionStore:
+class CliSessionStore(TeamMissionStateMixin, TeamCapabilityStateMixin):
     """Method surface currently required by CLI and AIAgent persistence."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:

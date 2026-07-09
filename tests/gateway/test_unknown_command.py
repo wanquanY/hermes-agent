@@ -33,7 +33,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -109,7 +109,7 @@ async def test_unknown_slash_command_returns_guidance(monkeypatch):
 async def test_unknown_slash_command_underscored_form_also_guarded(monkeypatch):
     """Telegram may send /foo_bar — same guard must trigger for underscored
     commands that normalize to unknown hyphenated names."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
@@ -177,7 +177,7 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
 @pytest.mark.asyncio
 async def test_command_hook_can_deny_before_dispatch(monkeypatch):
     """A handler returning {"decision": "deny"} blocks a slash command early."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
@@ -206,7 +206,7 @@ async def test_command_hook_can_deny_before_dispatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_deny_without_message_uses_default(monkeypatch):
     """A deny decision with no message falls back to a generic blocked string."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runtime_status_command_for(runner).handle_status_command = AsyncMock(
@@ -227,7 +227,7 @@ async def test_command_hook_deny_without_message_uses_default(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_can_mark_command_as_handled(monkeypatch):
     """A handled decision short-circuits dispatch cleanly with a custom reply."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runtime_status_command_for(runner).handle_status_command = AsyncMock(
@@ -249,7 +249,7 @@ async def test_command_hook_can_mark_command_as_handled(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_allow_decision_is_passthrough(monkeypatch):
     """A handler returning {"decision": "allow"} must NOT prevent normal dispatch."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runtime_status_command_for(runner).handle_status_command = AsyncMock(
@@ -272,7 +272,7 @@ async def test_command_hook_allow_decision_is_passthrough(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_non_dict_return_values_ignored(monkeypatch):
     """Hook return values that aren't dicts must not break dispatch."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runtime_status_command_for(runner).handle_status_command = AsyncMock(
@@ -294,7 +294,7 @@ async def test_command_hook_non_dict_return_values_ignored(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_fires_for_plugin_registered_command(monkeypatch):
     """Plugin-registered slash commands should also trigger command:<name> hooks."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
@@ -330,7 +330,7 @@ async def test_command_hook_fires_for_plugin_registered_command(monkeypatch):
 @pytest.mark.asyncio
 async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     """A rewrite decision should re-resolve the command and route to the new one."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(

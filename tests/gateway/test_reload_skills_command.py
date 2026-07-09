@@ -7,7 +7,7 @@ Verifies:
     human-readable diff
   * when any skills changed, a one-shot note is queued on
     ``runner._pending_skills_reload_notes[session_key]`` (the agent loop
-    consumes and clears it on the next user turn — see ``gateway/run.py``
+    consumes and clears it on the next user turn — see ``hermes_gateway/runner.py``
     near the ``_has_fresh_tool_tail`` block)
   * the handler does NOT append to the session transcript out-of-band —
     message alternation must not be broken by a phantom user turn
@@ -41,7 +41,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -85,7 +85,7 @@ def _make_runner():
     voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
     # Use the real _session_key_for_source binding so the key matches what
     # the agent-loop consumer will look up later.
-    from gateway.run import GatewayRunner as _GR
+    from hermes_gateway.runner import GatewayRunner as _GR
     runner._session_key_for_source = _GR._session_key_for_source.__get__(runner, _GR)
     return runner
 
@@ -171,7 +171,8 @@ async def test_reload_skills_handler_reports_no_changes(monkeypatch):
 @pytest.mark.asyncio
 async def test_dispatcher_routes_reload_skills(monkeypatch):
     """``/reload-skills`` must reach ``_handle_reload_skills_command``."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_commands
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     sentinel = "reload-skills handler reached"
@@ -183,7 +184,7 @@ async def test_dispatcher_routes_reload_skills(monkeypatch):
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
     monkeypatch.setattr(
-        gateway_run, "reload_skills_command_for", lambda _runner: reload_service
+        message_commands, "reload_skills_command_for", lambda _runner: reload_service
     )
 
     result = await runner._handle_message(_make_event("/reload-skills"))
@@ -194,7 +195,8 @@ async def test_dispatcher_routes_reload_skills(monkeypatch):
 @pytest.mark.asyncio
 async def test_underscored_alias_not_flagged_unknown(monkeypatch):
     """Telegram autocomplete sends ``/reload_skills`` for ``/reload-skills``."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_commands
+    import hermes_gateway.runner as gateway_run
 
     runner = _make_runner()
     reload_service = SimpleNamespace(
@@ -205,7 +207,7 @@ async def test_underscored_alias_not_flagged_unknown(monkeypatch):
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
     monkeypatch.setattr(
-        gateway_run, "reload_skills_command_for", lambda _runner: reload_service
+        message_commands, "reload_skills_command_for", lambda _runner: reload_service
     )
 
     result = await runner._handle_message(_make_event("/reload_skills"))

@@ -30,7 +30,7 @@ def _make_event(text="/title", platform=Platform.TELEGRAM,
 
 def _make_runner(session_db=None):
     """Create a bare GatewayRunner with a mock session_store and optional session_db."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -223,7 +223,7 @@ class TestResetCommandWithTitle:
         """Sending /new <title> resets session and sets the title."""
         from datetime import datetime
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
         runner = object.__new__(GatewayRunner)
@@ -283,7 +283,7 @@ class TestResetCommandWithTitle:
         """/new <title> with an already-in-use title returns a warning in the reply."""
         from datetime import datetime
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
         runner = object.__new__(GatewayRunner)

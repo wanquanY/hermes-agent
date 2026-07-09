@@ -47,7 +47,7 @@ def _make_event(text: str) -> MessageEvent:
 
 def _make_runner():
     """Minimal GatewayRunner with an active running agent for this session."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -167,7 +167,7 @@ async def test_footer_dispatches_mid_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_fast_rejected_mid_run():
     """/fast mid-run must hit the busy catch-all — config-only, next message."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_commands
 
     runner = _make_runner()
     called = False
@@ -179,7 +179,7 @@ async def test_fast_rejected_mid_run():
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        gateway_run,
+        message_commands,
         "fast_command_for",
         _fail_fast_factory,
     )
@@ -197,7 +197,7 @@ async def test_fast_rejected_mid_run():
 @pytest.mark.asyncio
 async def test_reasoning_rejected_mid_run():
     """/reasoning mid-run must hit the busy catch-all — config-only, next message."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_commands
 
     runner = _make_runner()
     called = False
@@ -209,7 +209,7 @@ async def test_reasoning_rejected_mid_run():
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        gateway_run,
+        message_commands,
         "reasoning_command_for",
         _fail_reasoning_factory,
     )

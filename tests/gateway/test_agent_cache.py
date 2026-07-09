@@ -21,7 +21,7 @@ import hermes_gateway.agent_cache as agent_cache
 
 def _make_runner():
     """Create a minimal GatewayRunner with just the cache infrastructure."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._agent_cache = {}
@@ -33,7 +33,7 @@ class TestAgentConfigSignature:
     """Config signature produces stable, distinct keys."""
 
     def test_same_config_same_signature(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
@@ -42,7 +42,7 @@ class TestAgentConfigSignature:
         assert sig1 == sig2
 
     def test_model_change_different_signature(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter"}
@@ -52,7 +52,7 @@ class TestAgentConfigSignature:
 
     def test_same_token_prefix_different_full_token_changes_signature(self):
         """Tokens sharing a JWT-style prefix must not collide."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         rt1 = {
             "api_key": "eyJhbGci.token-for-account-a",
@@ -73,7 +73,7 @@ class TestAgentConfigSignature:
         assert sig1 != sig2
 
     def test_provider_change_different_signature(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         rt1 = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         rt2 = {"api_key": "sk-test12345678", "base_url": "https://api.anthropic.com", "provider": "anthropic"}
@@ -82,7 +82,7 @@ class TestAgentConfigSignature:
         assert sig1 != sig2
 
     def test_toolset_change_different_signature(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
@@ -91,7 +91,7 @@ class TestAgentConfigSignature:
 
     def test_reasoning_not_in_signature(self):
         """Reasoning config is set per-message, not part of the signature."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         # Same config — signature should be identical regardless of what
@@ -106,7 +106,7 @@ class TestAgentConfigSignature:
 
     def test_cache_keys_default_omitted_matches_empty(self):
         """Omitted cache_keys must produce the same signature as empty {}."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig_omitted = agent_cache.GatewayAgentCacheService.agent_config_signature("m", runtime, [], "")
@@ -116,7 +116,7 @@ class TestAgentConfigSignature:
 
     def test_context_length_change_busts_cache(self):
         """Editing model.context_length in config must produce a new signature."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -131,7 +131,7 @@ class TestAgentConfigSignature:
 
     def test_max_tokens_change_busts_cache(self):
         """Editing model.max_tokens in config must produce a new signature."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -145,7 +145,7 @@ class TestAgentConfigSignature:
         assert sig1 != sig2
 
     def test_compression_threshold_change_busts_cache(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -159,7 +159,7 @@ class TestAgentConfigSignature:
         assert sig1 != sig2
 
     def test_compression_enabled_toggle_busts_cache(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig_on = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -174,7 +174,7 @@ class TestAgentConfigSignature:
 
     def test_cache_keys_key_order_does_not_matter(self):
         """Signature must be stable regardless of dict key insertion order."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig_a = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -189,7 +189,7 @@ class TestAgentConfigSignature:
 
     def test_tool_registry_generation_change_busts_cache(self):
         """MCP reloads mutate the tool registry, so cached agents must rebuild."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         sig_before = agent_cache.GatewayAgentCacheService.agent_config_signature(
@@ -209,7 +209,7 @@ class TestExtractCacheBustingConfig:
     config values that must invalidate the cached agent on change."""
 
     def test_reads_model_context_length(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
             {
@@ -224,7 +224,7 @@ class TestExtractCacheBustingConfig:
         assert out["model.max_tokens"] == 4096
 
     def test_reads_compression_subkeys(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
             {
@@ -244,7 +244,7 @@ class TestExtractCacheBustingConfig:
 
     def test_missing_keys_yield_none(self):
         """Absent config keys must produce None values (still contribute to signature)."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config({})
         # Every documented cache-busting key must be present, even if None
@@ -253,7 +253,7 @@ class TestExtractCacheBustingConfig:
             assert out[f"{section}.{key}"] is None
 
     def test_non_dict_section_treated_as_missing(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         # compression is a string — should not crash, all compression.* keys None
         out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
@@ -264,7 +264,7 @@ class TestExtractCacheBustingConfig:
         assert out["model.context_length"] == 100_000
 
     def test_none_config_is_safe(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(None)
         for section, key in agent_cache.CACHE_BUSTING_CONFIG_KEYS:
@@ -272,7 +272,7 @@ class TestExtractCacheBustingConfig:
         assert "tools.registry_generation" in out
 
     def test_extract_includes_live_tool_registry_generation(self, monkeypatch):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from tools.registry import registry
 
         monkeypatch.setattr(registry, "_generation", 12345)
@@ -284,7 +284,7 @@ class TestExtractCacheBustingConfig:
     def test_full_round_trip_busts_cache_on_real_edit(self):
         """End-to-end: simulate a config edit on main and verify the
         extracted cache_keys change produces a new signature."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
         cfg_before = {
@@ -477,7 +477,7 @@ class TestAgentCacheBoundedGrowth:
     def _bounded_runner(self):
         """Runner with an OrderedDict cache (matches real gateway init)."""
         from collections import OrderedDict
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._agent_cache = OrderedDict()
@@ -604,7 +604,7 @@ class TestAgentCacheBoundedGrowth:
 
     def test_plain_dict_cache_is_tolerated(self):
         """Test fixtures using plain {} don't crash enforce_agent_cache_cap."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._agent_cache = {}  # plain dict, not OrderedDict
@@ -653,7 +653,7 @@ class TestAgentCacheActiveSafety:
 
     def _runner(self):
         from collections import OrderedDict
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._agent_cache = OrderedDict()
@@ -779,7 +779,7 @@ class TestAgentCacheActiveSafety:
         real AIAgent instance exists.  Cached agents from other sessions
         can still be evicted safely.
         """
-        from gateway.run import _AGENT_PENDING_SENTINEL
+        from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
         monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", 1)
         runner = self._runner()
@@ -863,7 +863,7 @@ class TestAgentCacheSpilloverLive:
 
     def _runner(self):
         from collections import OrderedDict
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._agent_cache = OrderedDict()
@@ -1007,7 +1007,7 @@ class TestAgentCacheIdleResume:
 
     def _runner(self):
         from collections import OrderedDict
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._agent_cache = OrderedDict()
@@ -1229,7 +1229,7 @@ class TestCachedAgentInactivityReset:
     def test_fresh_turn_resets_idle_clock(self):
         """interrupt_depth=0: clock resets so a post-idle turn gets a
         fresh 30-min inactivity window (guard for #9051)."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent = self._fake_agent(stale_seconds=1800.0)
         old_ts = agent._last_activity_ts
@@ -1247,7 +1247,7 @@ class TestCachedAgentInactivityReset:
 
     def test_fresh_turn_resets_desc(self):
         """interrupt_depth=0: description is updated to reflect the new turn."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent = self._fake_agent()
 
@@ -1260,7 +1260,7 @@ class TestCachedAgentInactivityReset:
     def test_interrupt_turn_preserves_idle_clock(self):
         """interrupt_depth=1: clock preserved so accumulated stuck-turn
         idle time is not discarded by an interrupt-recursive re-entry (#15654)."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent = self._fake_agent(stale_seconds=1200.0)
         old_ts = agent._last_activity_ts
@@ -1274,7 +1274,7 @@ class TestCachedAgentInactivityReset:
 
     def test_interrupt_turn_preserves_desc(self):
         """interrupt_depth=1: desc preserved — it is semantically paired with ts."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent = self._fake_agent(stale_seconds=1200.0)
 
@@ -1287,7 +1287,7 @@ class TestCachedAgentInactivityReset:
 
     def test_deep_interrupt_recursion_preserves_idle_clock(self):
         """interrupt_depth=MAX-1: clock still preserved at any non-zero depth."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent = self._fake_agent(stale_seconds=600.0)
         old_ts = agent._last_activity_ts
@@ -1298,7 +1298,7 @@ class TestCachedAgentInactivityReset:
 
     def test_api_call_count_reset_regardless_of_depth(self):
         """_api_call_count is always reset to 0 for the new turn, at any depth."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         agent_fresh = self._fake_agent()
         agent_interrupted = self._fake_agent()
@@ -1317,7 +1317,7 @@ class TestCachedAgentInactivityReset:
         The idle time seen by the watchdog must reflect the full stuck
         duration, not restart from zero on the recursive re-entry.
         """
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         STUCK_FOR = 1750.0
         agent = self._fake_agent(stale_seconds=STUCK_FOR)

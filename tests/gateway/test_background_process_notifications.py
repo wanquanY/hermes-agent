@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.session_key import parse_session_key

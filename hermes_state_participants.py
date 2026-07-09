@@ -1,12 +1,12 @@
-"""Compatibility exports for `hermes_agent.storage.state_mixins.participants`."""
+"""Compatibility exports for conversation participant helpers."""
 
 from __future__ import annotations
 
 from hermes_agent.storage.state_mixins.participants import ParticipantsMixin
-from hermes_agent.storage.state_mixins.participants import agent_participant_id
-from hermes_agent.storage.state_mixins.participants import leader_participant_id
-from hermes_agent.storage.state_mixins.participants import member_participant_id
-from hermes_agent.storage.state_mixins.participants import user_participant_id
+from hermes_agent.repositories.conversation_participant_repo import agent_participant_id
+from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
+from hermes_agent.repositories.conversation_participant_repo import member_participant_id
+from hermes_agent.repositories.conversation_participant_repo import user_participant_id
 
 __all__ = [
     "ParticipantsMixin",

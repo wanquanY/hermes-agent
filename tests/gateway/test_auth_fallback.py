@@ -21,7 +21,7 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
             "  model: meta-llama/llama-4-maverick\n"
         )
 
-        monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+        monkeypatch.setattr("hermes_gateway.runner._hermes_home", tmp_path)
 
         call_count = {"n": 0}
 
@@ -46,7 +46,7 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             side_effect=_mock_resolve,
         ):
-            from gateway.run import _resolve_runtime_agent_kwargs
+            from hermes_gateway.runner import _resolve_runtime_agent_kwargs
             result = _resolve_runtime_agent_kwargs()
 
         assert result["provider"] == "openrouter"
@@ -61,13 +61,13 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
         config_path = tmp_path / "config.yaml"
         config_path.write_text("model:\n  provider: openai-codex\n")
 
-        monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+        monkeypatch.setattr("hermes_gateway.runner._hermes_home", tmp_path)
         monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openai-codex")
 
         with patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             side_effect=AuthError("token expired"),
         ):
-            from gateway.run import _resolve_runtime_agent_kwargs
+            from hermes_gateway.runner import _resolve_runtime_agent_kwargs
             with pytest.raises(RuntimeError):
                 _resolve_runtime_agent_kwargs()

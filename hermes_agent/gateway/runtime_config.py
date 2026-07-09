@@ -2,8 +2,8 @@
 
 These helpers are shared by the long-lived gateway runner and request/response
 channel adapters such as the API server. They intentionally avoid importing
-``gateway.run`` so channel code can resolve model/provider settings without
-coupling to the legacy runner god-file.
+``hermes_gateway.runner`` so channel code can resolve model/provider settings
+without coupling to the runner coordinator.
 """
 
 from __future__ import annotations

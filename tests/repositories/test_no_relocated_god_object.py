@@ -14,9 +14,9 @@ Audit 2026-07-08/09 established the failure mode this gate closes:
       — a verbatim relocation of ``tui_gateway/services/worker_*.py`` into
       ``hermes_agent/orchestration/`` passes.
     * P5 gates only check "``gateway/`` is gone" + "no ``^from gateway``"
-      — relocating ``gateway/run.py`` (18277 lines / GatewayRunner **209
-      methods**) into ``hermes_gateway/run.py`` passes while the monolith
-      survives under a new name.
+      — relocating the legacy GatewayRunner (18277 lines / **209 methods**)
+      into ``hermes_gateway/runner.py`` passes while the monolith survives
+      under a new name.
 
 This gate uses **method count per class** — a behavioral, name- and
 path-independent god-object signal. A class with an extreme number of
@@ -78,7 +78,7 @@ MAX_CLASS_METHODS = 80
 # The trees a god-object must never sneak into. gateway/ and tui_gateway/
 # are legacy (being retired) — this gate guards only the trees meant to
 # stay clean. hermes_gateway/ is pre-included in case P4/P5 create it as
-# gateway/run.py's new home.
+# hermes_gateway/runner.py's new home.
 _BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
 
 _EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
@@ -127,10 +127,9 @@ def _god_object_classes() -> list[tuple[str, str, int]]:
 # no matter that each mixin body is tiny.
 #
 # The composition ROOT (``GatewayRunner``) currently still lives in the
-# legacy ``gateway/run.py`` mid-flight; its mixins already live in the
-# blessed ``hermes_gateway/`` tree. We therefore index the blessed trees
-# PLUS ``gateway/run.py`` so the recomposed surface is measured now (and
-# keeps being measured after P5 moves the root into ``hermes_gateway/``).
+# blessed ``hermes_gateway/`` tree after P5. We therefore index blessed trees
+# and expand local MRO surfaces so a mixin-only textual split still counts as
+# the same production god-object.
 
 
 def _iter_composition_index_files():
@@ -209,7 +208,7 @@ _COMPOSED_EXCLUDE_TREES = ("channels/",)
 # surface is inert source slated for deletion, not a live god-object, so
 # the composed arm defers it to the P2 gate and excludes it here — leaving
 # this arm to isolate the LIVE fake-out (a composed god-object that IS
-# instantiated in production, e.g. GatewayRunner at gateway/run.py).
+# instantiated in production, e.g. GatewayRunner in hermes_gateway/runner.py).
 _COMPOSED_ALLOWLIST_CLASSES = frozenset({"HermesStateStore"})
 
 
@@ -275,8 +274,8 @@ def test_threshold_does_not_flag_legit_classes():
         "HermesStateStore (199 methods in hermes_agent/storage/state_store.py) "
         "— the known P2 god-object still being decomposed. Flips to xpassed "
         "when P2 decomposes it and no P4/P5 relocation reintroduces a "
-        "monolith (e.g. GatewayRunner, 209 methods, moved from gateway/run.py "
-        "into hermes_gateway/). Fix by decomposing, never by raising the "
+        "monolith (e.g. GatewayRunner moved into hermes_gateway/). "
+        "Fix by decomposing, never by raising the "
         "threshold."
     ),
 )

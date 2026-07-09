@@ -249,7 +249,7 @@ def test_unmentioned_group_observe_requires_chat_allowlist_for_shared_context():
 
 
 def test_shared_group_observe_source_is_authorized_by_group_allowed_chats(monkeypatch):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     source = SessionSource(

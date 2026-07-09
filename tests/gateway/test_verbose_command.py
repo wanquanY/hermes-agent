@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.verbose_command as verbose_command
 from hermes_gateway.config import Platform
 from channels.platforms.base import MessageEvent

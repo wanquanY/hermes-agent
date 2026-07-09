@@ -252,7 +252,7 @@ def test_cli_session_store_session_index_bootstraps_cross_read_tables(tmp_path):
     assert result["sessions"] == []
 
 
-def test_cli_session_store_migrates_legacy_team_conversation_session_column(tmp_path):
+def test_cli_session_store_indexes_team_conversation_session_column(tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -261,7 +261,7 @@ def test_cli_session_store_migrates_legacy_team_conversation_session_column(tmp_
             CREATE TABLE team_mission_conversations (
                 conversation_id TEXT PRIMARY KEY,
                 team_id TEXT,
-                stable_session_id TEXT NOT NULL UNIQUE,
+                conversation_session_id TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 objective TEXT,
                 workspace_id TEXT,
@@ -274,7 +274,7 @@ def test_cli_session_store_migrates_legacy_team_conversation_session_column(tmp_
                 updated_at REAL NOT NULL
             );
             INSERT INTO team_mission_conversations (
-                conversation_id, team_id, stable_session_id, title, objective,
+                conversation_id, team_id, conversation_session_id, title, objective,
                 workspace_id, workspace_path, status, active_mission_id,
                 created_by_user_id, metadata_json, created_at, updated_at
             )
@@ -311,5 +311,37 @@ def test_cli_session_store_migrates_legacy_team_conversation_session_column(tmp_
     result = SessionIndexReadModel(store._conn).list(SessionIndexQuery(limit=10))
 
     assert "conversation_session_id" in columns
+    assert "stable_session_id" not in columns
     assert row["conversation_session_id"] == "team-session-1"
     assert result["sessions"][0]["session_id"] == "team-session-1"
+
+    store._conn.execute(
+        """
+        INSERT INTO team_mission_conversations (
+            conversation_id, team_id, conversation_session_id, title, objective,
+            workspace_id, workspace_path, status, created_by_user_id,
+            metadata_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "conversation-2",
+            "team-1",
+            "team-session-2",
+            "New Team",
+            "new objective",
+            "workspace-1",
+            "/tmp/workspace",
+            "active",
+            "",
+            "{}",
+            2,
+            2,
+        ),
+    )
+    created = store._conn.execute(
+        "SELECT conversation_id, conversation_session_id FROM team_mission_conversations WHERE conversation_id = ?",
+        ("conversation-2",),
+    ).fetchone()
+    assert created["conversation_id"] == "conversation-2"
+    assert created["conversation_session_id"] == "team-session-2"

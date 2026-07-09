@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Import the module (not the class) to reach stop() and helpers
-import gateway.run as gw_mod
+import hermes_gateway.runner as gw_mod
 
 
 # ---------------------------------------------------------------------------

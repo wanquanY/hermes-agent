@@ -176,7 +176,7 @@ class TestQueueConsumptionAfterCompletion:
         but GatewayRunner layers an overflow buffer on top so repeated
         /queue invocations all get their own turn in order.
         """
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._queued_events = {}
@@ -203,7 +203,7 @@ class TestQueueConsumptionAfterCompletion:
 
     def test_promote_advances_queue_fifo(self):
         """After the slot drains, the next overflow item is promoted."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._queued_events = {}
@@ -251,7 +251,7 @@ class TestQueueConsumptionAfterCompletion:
     def test_promote_stages_overflow_when_slot_already_populated(self):
         """If the slot was re-populated (e.g. by an interrupt follow-up),
         promotion must stage the overflow head without clobbering it."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._queued_events = {}
@@ -301,7 +301,7 @@ class TestQueueConsumptionAfterCompletion:
         assert adapter._pending_messages[session_key].text == "Q2"
 
     def test_busy_service_depth_counts_slot_plus_overflow(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._queued_events = {}
@@ -337,7 +337,7 @@ class TestQueueConsumptionAfterCompletion:
 
     def test_enqueue_preserves_text_no_merging(self):
         """Each /queue item keeps its own text — never merged with neighbors."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._queued_events = {}

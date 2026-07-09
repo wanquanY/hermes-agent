@@ -28,7 +28,7 @@ class TestConfigYamlBridging:
         config_yaml = tmp_path / "config.yaml"
         config_yaml.write_text('whatsapp:\n  reply_prefix: "Custom Bot"\n')
 
-        with patch("hermes_gateway.config.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_gateway.config_loader.get_hermes_home", return_value=tmp_path):
             from hermes_gateway.config import load_gateway_config
             # Need to also patch WHATSAPP_ENABLED so the platform exists
             with patch.dict("os.environ", {"WHATSAPP_ENABLED": "true"}, clear=False):
@@ -43,7 +43,7 @@ class TestConfigYamlBridging:
         config_yaml = tmp_path / "config.yaml"
         config_yaml.write_text('whatsapp:\n  reply_prefix: ""\n')
 
-        with patch("hermes_gateway.config.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_gateway.config_loader.get_hermes_home", return_value=tmp_path):
             from hermes_gateway.config import load_gateway_config
             with patch.dict("os.environ", {"WHATSAPP_ENABLED": "true"}, clear=False):
                 config = load_gateway_config()

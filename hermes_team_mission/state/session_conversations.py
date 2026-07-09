@@ -1067,7 +1067,7 @@ class TeamMissionConversationMixin:
             conversation["running"] = _text(conversation.get("conversation_id")) in active_conversation_ids
         return conversations
 
-    def list_team_mission_conversation_runtime_session_ids(
+    def list_team_mission_conversation_execution_session_ids(
         self,
         *,
         team_id: str = "",

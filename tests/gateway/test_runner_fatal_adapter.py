@@ -4,7 +4,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 
 
 class _FatalAdapter(BasePlatformAdapter):

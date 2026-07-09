@@ -56,7 +56,7 @@ def _make_event(platform: Platform, user_id: str, chat_id: str) -> MessageEvent:
 
 
 def _make_runner(platform: Platform, config: GatewayConfig):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = config

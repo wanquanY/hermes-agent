@@ -82,7 +82,7 @@ class NoDeleteAdapter(CleanupCaptureAdapter):
 
     async def delete_message(self, chat_id, message_id) -> bool:  # type: ignore[override]
         # Pretend to be an adapter whose platform doesn't support deletion:
-        # match the base class behavior exactly. gateway/run.py checks
+        # match the base class behavior exactly. hermes_gateway/runner.py checks
         # ``type(adapter).delete_message is BasePlatformAdapter.delete_message``
         # to detect this, so we re-assign at class body level below.
         raise AssertionError("should not be called — cleanup must skip this adapter")
@@ -120,7 +120,7 @@ class FailingAgent:
             cb("tool.started", "terminal", "pwd", {})
             time.sleep(0.25)
         # Empty final_response + failed=True is the shape the gateway
-        # actually returns on provider errors (see gateway/run.py where
+        # actually returns on provider errors (see hermes_gateway/runner.py where
         # failed keys are only propagated when final_response is empty).
         return {
             "final_response": "",
@@ -132,7 +132,7 @@ class FailingAgent:
 
 
 def _make_runner(adapter):
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {adapter.platform: adapter}
@@ -168,7 +168,7 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 — register tool emoji
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     runtime = SimpleNamespace(
         resolve_session_agent_runtime=lambda **_kwargs: (
             "test-model",

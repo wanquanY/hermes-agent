@@ -48,7 +48,7 @@ def _mock_dotenv(monkeypatch):
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     return runner
@@ -184,7 +184,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         assert len(before) == 2, before
 
         # Drive the gateway shutdown finalization with this real agent.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
         runner._finalize_shutdown_agents({"agent:main:discord:dm:7": agent})
 
@@ -235,7 +235,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         assert len(db.get_messages_as_conversation(session_id)) == 2
 
         # Shutdown re-flush of the SAME list identity must add nothing.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
         runner._finalize_shutdown_agents({"k": agent})
 

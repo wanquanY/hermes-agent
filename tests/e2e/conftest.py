@@ -170,7 +170,7 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
 
     Skips __init__ to avoid filesystem/network side effects.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     if session_entry is None:
         session_entry = make_session_entry(platform)

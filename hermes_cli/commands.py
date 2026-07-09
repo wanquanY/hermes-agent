@@ -357,13 +357,13 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     """Return True for any resolvable slash command.
 
     Rationale: every gateway-registered slash command either has a
-    specific Level-2 handler in gateway/run.py (/stop, /new, /model,
+    specific Level-2 handler in the gateway command runtime (/stop, /new, /model,
     /approve, etc.) or reaches the running-agent catch-all that returns
     a "busy — wait or /stop first" response. In both paths the command
     is dispatched, not queued.
 
     Queueing is always wrong for a recognized slash command because the
-    safety net in gateway.run discards any command text that reaches
+    safety net in the gateway command runtime discards any command text that reaches
     the pending queue — which meant a mid-run /model (or /reasoning,
     /voice, /insights, /title, /resume, /retry, /undo, /compress,
     /usage, /reload-mcp, /sethome, /reset) would silently

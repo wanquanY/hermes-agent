@@ -359,7 +359,7 @@ class TestSignalPhoneRedaction:
 class TestSignalAuthorization:
     def test_signal_in_allowlist_maps(self):
         """Signal should be in the platform auth maps."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.config import GatewayConfig
 
         gw = GatewayRunner.__new__(GatewayRunner)

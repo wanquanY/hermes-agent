@@ -34,7 +34,7 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=False)
@@ -60,7 +60,7 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_omits_duration_on_probe_failure():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=False)
@@ -80,7 +80,7 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_avoids_bogus_no_provider_message_for_backend_key_errors():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
@@ -109,7 +109,7 @@ async def test_enrich_message_with_transcription_strips_empty_content_placeholde
     succeeds, the gateway should return just the transcript prefix as the
     enriched message text.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
@@ -135,7 +135,7 @@ async def test_enrich_message_with_transcription_strips_empty_content_placeholde
 
 @pytest.mark.asyncio
 async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)

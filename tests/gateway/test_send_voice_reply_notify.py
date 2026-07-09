@@ -18,7 +18,7 @@ import pytest
 from hermes_gateway.config import Platform
 from hermes_gateway.voice_runtime import GatewayVoiceService, voice_runtime_for
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.session import SessionSource
 
 

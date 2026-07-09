@@ -1288,7 +1288,7 @@ class TestEditMessage:
 
     @pytest.mark.asyncio
     async def test_edit_message_overrides_base_so_progress_pipeline_runs(self, adapter):
-        """The gateway tool-progress flow at gateway/run.py:10199 gates on
+        """The gateway tool-progress flow at hermes_gateway/runner.py:10199 gates on
         ``type(adapter).edit_message is BasePlatformAdapter.edit_message``.
         If our subclass doesn't override edit_message, no tool progress is
         ever shown to the user — so this test guards against a future
@@ -2578,7 +2578,7 @@ class TestAuthorizationEmailMatch:
         check_ids path picks it up. No platform-specific bridge needed.
         """
         from hermes_gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
@@ -2599,7 +2599,7 @@ class TestAuthorizationEmailMatch:
 
     def test_allowlist_denies_wrong_email(self, monkeypatch):
         from hermes_gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
@@ -2625,7 +2625,7 @@ class TestAuthorizationEmailMatch:
         name. Operators who allowlist by ``users/{id}`` still match.
         """
         from hermes_gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "users/77777")

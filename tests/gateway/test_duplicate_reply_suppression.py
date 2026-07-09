@@ -266,7 +266,7 @@ class TestEmptyResponseNotSuppressed:
         )
 
     def _apply_suppression_logic(self, response, sc):
-        """Reproduce the fixed logic from gateway/run.py return path."""
+        """Reproduce the fixed logic from hermes_gateway/runner.py return path."""
         if sc and isinstance(response, dict) and not response.get("failed"):
             _final = response.get("final_response") or ""
             _is_empty_sentinel = not _final or _final == "(empty)"

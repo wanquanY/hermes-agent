@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 
 
 @pytest.fixture()

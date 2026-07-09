@@ -124,7 +124,7 @@ class TestGatewayRunnerRegistration:
                 sys.modules[mod] = MagicMock()
 
         try:
-            from gateway.run import GatewayRunner
+            from hermes_gateway.runner import GatewayRunner
         finally:
             # Restore only the ones we injected
             for mod, orig in _orig.items():

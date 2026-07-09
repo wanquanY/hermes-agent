@@ -71,7 +71,7 @@ def _team_task_brief(label: str = "deliverable") -> dict:
     }
 
 
-def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
+def test_team_mission_conversation_execution_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -109,14 +109,14 @@ def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(mo
         role="worker",
     )
 
-    response = server._methods["team_mission.conversation.runtime_session_ids"](
+    response = server._methods["team_mission.conversation.execution_session_ids"](
         1,
         {"team_id": "team-1", "workspace_id": "workspace-1", "mission_id": "mission-1"},
     )
 
     assert "error" not in response
     assert response["result"]["session_ids"] == ["team-session-1", "worker-session-1", "runtime-worker-1"]
-    assert response["result"]["runtime_session_ids"] == response["result"]["session_ids"]
+    assert response["result"]["execution_session_ids"] == response["result"]["session_ids"]
     assert "conversations" not in response["result"]
 
 

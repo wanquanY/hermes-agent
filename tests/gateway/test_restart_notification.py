@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.lifecycle_home as lifecycle_home
 import hermes_gateway.restart_lifecycle as restart_lifecycle
 from hermes_gateway.bootstrap import restart_notification_pending

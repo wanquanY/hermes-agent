@@ -630,6 +630,7 @@ class MessageRepository:
         status: str = "",
         reasoning: Any = "",
         tool_calls: Any = None,
+        timestamp: float | None = None,
     ) -> dict[str, Any]:
         stable_sid = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
@@ -669,6 +670,7 @@ class MessageRepository:
         status: str = "",
         reasoning: Any = "",
         tool_calls: Any = None,
+        timestamp: float | None = None,
     ) -> dict[str, Any]:
         stable_sid = str(session_id or "").strip()
         stable_message_id = str(conversation_message_id or "").strip()
@@ -686,6 +688,7 @@ class MessageRepository:
             status=status,
             reasoning=reasoning,
             tool_calls=tool_calls,
+            timestamp=timestamp,
         )
 
     def _replace_conversation_locked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
@@ -731,6 +734,7 @@ class MessageRepository:
         status: str,
         reasoning: Any,
         tool_calls: Any,
+        timestamp: float | None = None,
     ) -> dict[str, Any]:
         normalized_role = str(role or "assistant").strip() or "assistant"
         normalized_participant_id = str(participant_id or "").strip()
@@ -743,7 +747,7 @@ class MessageRepository:
         metadata_json = json.dumps(next_metadata, ensure_ascii=False) if next_metadata else None
         stored_content = _encode_content(content)
         stored_reasoning = str(reasoning or "")
-        message_timestamp = time.time()
+        message_timestamp = float(timestamp) if timestamp is not None else time.time()
         stored_tool_calls = _json_or_none(tool_calls) if tool_calls is not None else None
 
         existing = self._select_team_message_by_conversation_id(

@@ -6,10 +6,10 @@ within a single conversation:
 - LID form: ``999999999999999@lid``
 - Phone form: ``15551234567@s.whatsapp.net``
 
-Both the authorisation path (:mod:`gateway.run`) and the session-key path
-(:mod:`hermes_gateway.session`) need to collapse these aliases to a single stable
-identity. This module is the single source of truth for that resolution so
-the two paths can never drift apart.
+Both the gateway runtime (:mod:`hermes_gateway.runner`) and the session-key
+path (:mod:`hermes_gateway.session`) need to collapse these aliases to a single
+stable identity. This module is the single source of truth for that resolution
+so the two paths can never drift apart.
 
 Public helpers:
 

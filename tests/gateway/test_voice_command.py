@@ -74,7 +74,7 @@ def _make_event(text: str = "", message_type=MessageType.TEXT, chat_id="123") ->
 
 def _make_runner(tmp_path):
     """Create a bare GatewayRunner without calling __init__."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -1358,7 +1358,7 @@ class TestCallbackWiringOrder:
     def test_callback_set_before_join(self):
         """_handle_voice_channel_join wires callback before calling join."""
         import ast, inspect
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         source = inspect.getsource(GatewayVoiceService.handle_voice_channel_join)
         lines = source.split("\n")
         callback_line = None
@@ -1825,7 +1825,7 @@ class TestSendVoiceReplyFilename:
     def test_filename_uses_uuid(self):
         """The method uses uuid in the filename, not time-based."""
         import inspect
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         source = inspect.getsource(GatewayVoiceService.send_voice_reply)
         assert "uuid" in source, \
             "_send_voice_reply should use uuid for unique filenames"
@@ -2045,7 +2045,7 @@ class TestSendVoiceReplyCleanup:
     def test_cleanup_in_finally(self):
         """The method has cleanup in a finally block, not inside try."""
         import inspect, textwrap, ast
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         source = textwrap.dedent(inspect.getsource(GatewayVoiceService.send_voice_reply))
         tree = ast.parse(source)
         func = tree.body[0]
@@ -2083,7 +2083,7 @@ class TestSendVoiceReplyCleanup:
             "file_path": str(audio_file),
         })
 
-        with patch("gateway.run.asyncio.to_thread", new_callable=AsyncMock, return_value=tts_result), \
+        with patch("hermes_gateway.runner.asyncio.to_thread", new_callable=AsyncMock, return_value=tts_result), \
              patch("tools.tts_tool._strip_markdown_for_tts", return_value="hello"), \
              patch("os.path.isfile", return_value=True), \
              patch("os.makedirs"):
@@ -2659,7 +2659,7 @@ class TestVoiceTTSPlayback:
 
     @staticmethod
     def _make_runner():
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
         runner._voice_mode = {}
         runner.adapters = {}

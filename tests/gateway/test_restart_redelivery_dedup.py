@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.lifecycle_home as lifecycle_home
 from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.restart_lifecycle import restart_lifecycle_for

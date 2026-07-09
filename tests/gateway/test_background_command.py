@@ -30,7 +30,7 @@ def _make_event(text="/background", platform=Platform.TELEGRAM,
 
 def _make_runner():
     """Create a bare GatewayRunner with minimal mocks."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -272,7 +272,7 @@ class TestRunBackgroundTask:
     @pytest.mark.asyncio
     async def test_telegram_dm_topic_completion_preserves_reply_anchor_metadata(self, monkeypatch):
         """Background completion metadata must let Telegram send thread id plus reply id."""
-        from gateway import run as gateway_run
+        import hermes_gateway.runner as gateway_run
 
         runner = _make_runner()
         runner.runtime_config = MagicMock()

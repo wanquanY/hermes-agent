@@ -68,7 +68,7 @@ def _make_entry(session_id: str, source: SessionSource | None = None) -> Session
 
 
 def _make_resume_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -95,7 +95,7 @@ def _make_resume_runner():
 
 
 def _make_branch_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -228,7 +228,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     Also exercises the /new reset path indirectly: /new calls this helper,
     so if the helper is scoped correctly, /new's clearing is correct too.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._pending_approvals = {}
@@ -290,7 +290,7 @@ def test_clear_session_boundary_security_state_is_scoped():
 
 def test_clear_session_boundary_security_state_wakes_blocked_approvals():
     """Boundary cleanup must cancel blocked approval waiters immediately."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._pending_approvals = {}

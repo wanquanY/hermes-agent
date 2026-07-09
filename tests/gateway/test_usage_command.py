@@ -46,7 +46,7 @@ def _make_mock_agent(**overrides):
 
 def _make_runner(session_key, agent=None, cached_agent=None):
     """Build a bare GatewayRunner with just the fields _handle_usage_command needs."""
-    from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 
     runner = object.__new__(GatewayRunner)
     runner._running_agents = {}
@@ -113,7 +113,7 @@ class TestUsageCachedAgent:
     @pytest.mark.asyncio
     async def test_sentinel_skipped_uses_cache(self):
         """PENDING sentinel in _running_agents should fall through to cache."""
-        from gateway.run import _AGENT_PENDING_SENTINEL
+        from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
         cached = _make_mock_agent()
         runner = _make_runner(SK, cached_agent=cached)

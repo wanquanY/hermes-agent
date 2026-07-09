@@ -4,7 +4,7 @@ import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import SendResult
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.session import SessionSource
 

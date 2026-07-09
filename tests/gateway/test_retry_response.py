@@ -6,7 +6,7 @@ so users never received the final response.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.conversation_editing_commands import conversation_editing_for
 

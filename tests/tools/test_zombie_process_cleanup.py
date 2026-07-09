@@ -248,7 +248,7 @@ class TestGatewayCleanupWiring:
         import threading
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._running = True
@@ -304,7 +304,7 @@ class TestGatewayCleanupWiring:
         import threading
         from unittest.mock import MagicMock
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._agent_cache_lock = threading.Lock()

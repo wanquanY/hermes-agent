@@ -52,8 +52,8 @@ class GatewayTeamsPipelineRuntime:
 
 
 def _load_gateway_config() -> dict:
-    legacy = sys.modules.get("gateway.run")
-    patched = getattr(legacy, "_load_gateway_config", None) if legacy is not None else None
+    runner_module = sys.modules.get("hermes_gateway.runner")
+    patched = getattr(runner_module, "_load_gateway_config", None) if runner_module is not None else None
     if callable(patched):
         return patched()
     return load_gateway_runtime_config(get_hermes_home())

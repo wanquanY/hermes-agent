@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from channels.runtime_status import read_runtime_status
 
 
@@ -163,9 +163,9 @@ async def test_start_gateway_verbosity_imports_redacting_formatter(monkeypatch, 
     monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
     monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
     monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gateway.run.GatewayRunner", _CleanExitRunner)
+    monkeypatch.setattr("hermes_gateway.runner.GatewayRunner", _CleanExitRunner)
 
-    from gateway.run import start_gateway
+    from hermes_gateway.runner import start_gateway
 
     # verbosity=1 triggers the code path that uses RedactingFormatter.
     # Before the fix this raised NameError.
@@ -207,15 +207,15 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
         lambda **kwargs: 0,
     )
     monkeypatch.setattr("channels.runtime_status.terminate_pid", lambda pid, force=False: calls.append((pid, force)))
-    monkeypatch.setattr("gateway.run.os.getpid", lambda: 100)
-    monkeypatch.setattr("gateway.run.os.kill", lambda pid, sig: None)
+    monkeypatch.setattr("hermes_gateway.runner.os.getpid", lambda: 100)
+    monkeypatch.setattr("hermes_gateway.runner.os.kill", lambda pid, sig: None)
     monkeypatch.setattr("time.sleep", lambda _: None)
     monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
     monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
     monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gateway.run.GatewayRunner", _CleanExitRunner)
+    monkeypatch.setattr("hermes_gateway.runner.GatewayRunner", _CleanExitRunner)
 
-    from gateway.run import start_gateway
+    from hermes_gateway.runner import start_gateway
 
     ok = await start_gateway(config=GatewayConfig(), replace=True, verbosity=None)
 
@@ -285,19 +285,19 @@ async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
     )
     monkeypatch.setattr("channels.runtime_status.write_takeover_marker", record_write_marker)
     monkeypatch.setattr("channels.runtime_status.terminate_pid", record_terminate)
-    monkeypatch.setattr("gateway.run.os.getpid", lambda: 100)
+    monkeypatch.setattr("hermes_gateway.runner.os.getpid", lambda: 100)
     # Simulate old process exiting on first check so we don't loop into force-kill
     monkeypatch.setattr(
-        "gateway.run.os.kill",
+        "hermes_gateway.runner.os.kill",
         lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()),
     )
     monkeypatch.setattr("time.sleep", lambda _: None)
     monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
     monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
     monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
-    monkeypatch.setattr("gateway.run.GatewayRunner", _CleanExitRunner)
+    monkeypatch.setattr("hermes_gateway.runner.GatewayRunner", _CleanExitRunner)
 
-    from gateway.run import start_gateway
+    from hermes_gateway.runner import start_gateway
 
     ok = await start_gateway(config=GatewayConfig(), replace=True, verbosity=None)
 
@@ -333,12 +333,12 @@ async def test_start_gateway_replace_clears_marker_on_permission_denied(
     monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 42)
     monkeypatch.setattr("channels.runtime_status.write_takeover_marker", write_marker)
     monkeypatch.setattr("channels.runtime_status.terminate_pid", raise_permission)
-    monkeypatch.setattr("gateway.run.os.getpid", lambda: 100)
+    monkeypatch.setattr("hermes_gateway.runner.os.getpid", lambda: 100)
     monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
     monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
     monkeypatch.setattr("hermes_logging._add_rotating_handler", lambda *args, **kwargs: None)
 
-    from gateway.run import start_gateway
+    from hermes_gateway.runner import start_gateway
 
     # Should return False due to permission error
     ok = await start_gateway(config=GatewayConfig(), replace=True, verbosity=None)

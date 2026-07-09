@@ -121,7 +121,7 @@ class TestPruneBasics:
 
         The callback is keyed by session_key — matching what
         process_registry.has_active_for_session() actually consumes in
-        gateway/run.py.  Prior to the fix this test passed the callback a
+        hermes_gateway/runner.py.  Prior to the fix this test passed the callback a
         session_id, which silently matched an implementation bug where
         prune_old_entries was also passing session_id; real-world usage
         (via process_registry) takes a session_key and never matched, so

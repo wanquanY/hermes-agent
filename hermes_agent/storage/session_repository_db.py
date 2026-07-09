@@ -18,6 +18,7 @@ from hermes_agent.domain.seq_allocator import ensure_seq_counter_table
 from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
 from hermes_agent.repositories.team_registry_repo import ensure_team_registry_repository_schema
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
 from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
@@ -293,6 +294,7 @@ def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
     )
     cursor = conn.cursor()
     cursor.executescript(team_mission_schema_sql())
+    migrate_team_mission_runtime_session_columns(cursor)
     migrate_team_mission_conversation_session_id(cursor)
     reconcile_team_mission_node_primary_key(cursor)
     migrate_active_mission_id_to_conversation_missions(cursor)

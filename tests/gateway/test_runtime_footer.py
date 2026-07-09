@@ -203,7 +203,7 @@ def test_resolve_ignores_malformed_config():
 
 
 # ---------------------------------------------------------------------------
-# build_footer_line — top-level entry point used by gateway/run.py
+# build_footer_line — top-level entry point used by hermes_gateway/runner.py
 # ---------------------------------------------------------------------------
 
 def test_build_footer_empty_when_disabled():

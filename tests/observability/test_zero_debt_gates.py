@@ -254,15 +254,27 @@ def test_p4_verdict_defines_worker_decomposition_and_relocation_gates() -> None:
 
 
 def test_p5_verdict_defines_gateway_retirement_relocation_gates() -> None:
-    verdict = _verdict_for_phase("P5")
+    result = subprocess.run(
+        [sys.executable, str(VERDICT), "--phase", "P5", "--json"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["phase"] == "P5"
+    assert verdict["status"] == "pass"
     checks = {check["id"]: check for check in verdict["checks"]}
     for gate_id in (
         "p5:gateway_directory_removed",
         "p5:no_legacy_gateway_imports",
         "p5:no_relocated_gateway_monolith",
+        "p5:no_mixin_recomposed_gateway_monolith",
         "p5:gateway_run_decomposed",
     ):
         assert gate_id in checks
+        assert checks[gate_id]["ok"]
     assert verdict["next_required_human_signoff"] == (
         "docs/audits/zero_debt_phase_p5_human_signoff.md"
     )

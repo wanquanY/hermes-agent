@@ -15,7 +15,7 @@ import pytest
 
 from hermes_gateway.config import Platform
 from hermes_gateway.voice_runtime import GatewayVoiceService, voice_runtime_for
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 
 
 class TestVoiceKeyHelper:

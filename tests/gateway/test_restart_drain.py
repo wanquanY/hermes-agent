@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 import hermes_gateway.lifecycle_home as lifecycle_home
 import hermes_gateway.restart_lifecycle as restart_lifecycle
@@ -249,7 +249,7 @@ async def test_shutdown_notification_skipped_when_no_active_agents():
 @pytest.mark.asyncio
 async def test_shutdown_notification_ignores_pending_sentinels():
     """Pending sentinels (not-yet-started agents) don't trigger notifications."""
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
     runner, adapter = make_restart_runner()
     runner._running_agents["agent:main:telegram:dm:999"] = _AGENT_PENDING_SENTINEL

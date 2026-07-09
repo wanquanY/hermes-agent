@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from hermes_gateway.config import Platform, PlatformConfig
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from plugins.teams_pipeline.runtime import (
     bind_gateway_runtime,
     build_pipeline_runtime,
@@ -29,7 +29,7 @@ def test_gateway_runner_wires_teams_pipeline_runtime(monkeypatch):
 
     monkeypatch.setattr("plugins.teams_pipeline.runtime.bind_gateway_runtime", _bind)
     monkeypatch.setattr(
-        "gateway.run._load_gateway_config",
+        "hermes_gateway.runner._load_gateway_config",
         lambda: {"plugins": {"enabled": ["teams_pipeline"]}},
     )
 
@@ -52,7 +52,7 @@ def test_gateway_runner_skips_wiring_without_msgraph_adapter(monkeypatch):
 
     monkeypatch.setattr("plugins.teams_pipeline.runtime.bind_gateway_runtime", _bind)
     monkeypatch.setattr(
-        "gateway.run._load_gateway_config",
+        "hermes_gateway.runner._load_gateway_config",
         lambda: {"plugins": {"enabled": ["teams_pipeline"]}},
     )
 
@@ -75,7 +75,7 @@ def test_gateway_runner_skips_wiring_when_teams_pipeline_plugin_disabled(monkeyp
 
     monkeypatch.setattr("plugins.teams_pipeline.runtime.bind_gateway_runtime", _bind)
     monkeypatch.setattr(
-        "gateway.run._load_gateway_config",
+        "hermes_gateway.runner._load_gateway_config",
         lambda: {"plugins": {"enabled": []}},
     )
 

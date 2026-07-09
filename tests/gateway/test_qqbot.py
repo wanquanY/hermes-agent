@@ -1543,7 +1543,7 @@ class TestDefaultInteractionDispatch:
         assert adapter._interaction_callback == adapter._default_interaction_dispatch
 
     def test_send_exec_approval_is_a_class_method(self):
-        """gateway/run.py uses ``type(adapter).send_exec_approval`` to detect support."""
+        """hermes_gateway/runner.py uses ``type(adapter).send_exec_approval`` to detect support."""
         from channels.platforms.qqbot.adapter import QQAdapter
         assert getattr(QQAdapter, "send_exec_approval", None) is not None
         assert getattr(QQAdapter, "send_update_prompt", None) is not None

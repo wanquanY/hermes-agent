@@ -153,7 +153,7 @@ async def test_acp_steer_on_idle_session_runs_as_regular_prompt():
     # run the steer payload as a normal user prompt — NOT silently append it
     # to state.queued_prompts. Without this, users on Zed / other ACP clients
     # see their /steer turn into "queued for the next turn" when they never
-    # typed /queue. Matches gateway/run.py ~L4898 idle-/steer behavior.
+    # typed /queue. Matches hermes_gateway/runner.py ~L4898 idle-/steer behavior.
     acp_agent, state, fake, _conn = make_agent_and_state()
 
     response = await acp_agent.prompt(

@@ -335,7 +335,7 @@ def test_register_send_subparser_is_reusable():
 def test_load_hermes_env_bridges_config_yaml_scalars(tmp_path, monkeypatch):
     """Top-level config.yaml scalars should be bridged into os.environ.
 
-    This mirrors the gateway/run.py bootstrap behavior: without this, running
+    This mirrors the hermes_gateway/runner.py bootstrap behavior: without this, running
     ``hermes send`` from a fresh shell cannot resolve the home channel
     because ``TELEGRAM_HOME_CHANNEL`` (saved by ``hermes config set``) lives
     in config.yaml, not in .env — and the gateway's config loader reads via

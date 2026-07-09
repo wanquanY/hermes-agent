@@ -14,7 +14,7 @@ import pytest
 
 from hermes_gateway.config import Platform, PlatformConfig
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.media_delivery import media_delivery_for
 from hermes_gateway.session import SessionSource, build_session_key
 

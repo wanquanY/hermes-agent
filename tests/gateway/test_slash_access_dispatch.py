@@ -1,4 +1,4 @@
-"""Integration tests for slash command access control gating in gateway/run.py.
+"""Integration tests for slash command access control gating in hermes_gateway/runner.py.
 
 Drives the real ``GatewayRunner._handle_message`` path with a stub session
 store so we exercise the actual gate inserted at the dispatch site (not a
@@ -54,7 +54,7 @@ def _make_event(text: str, source: SessionSource) -> MessageEvent:
 
 def _make_runner(*, platform_extra: dict | None = None,
                  platform: Platform = Platform.DISCORD):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -492,7 +492,7 @@ async def test_dm_admin_blocked_in_group_with_separate_admin_list():
 async def test_gating_isolated_per_platform():
     """When Discord is gated and Telegram isn't, the same user_id on
     Telegram must be unrestricted."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 
     runner = object.__new__(GatewayRunner)

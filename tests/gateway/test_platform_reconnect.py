@@ -11,7 +11,7 @@ from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.platform_command import platform_command_for
 from hermes_gateway.platform_runtime import platform_runtime_for
 from hermes_gateway.session import SessionSource
@@ -130,7 +130,7 @@ class TestStartupPlatformIsolation:
                                 "hermes_gateway.channel_directory.build_channel_directory",
                                 new=AsyncMock(return_value={"platforms": {}}),
                             ):
-                                with patch("gateway.run.asyncio.create_task", side_effect=fake_create_task):
+                                with patch("hermes_gateway.runner.asyncio.create_task", side_effect=fake_create_task):
                                     assert await runner.start() is True
 
         assert Platform.TELEGRAM in runner._failed_platforms
@@ -199,7 +199,7 @@ class TestPlatformReconnectWatcher:
         real_sleep = asyncio.sleep
 
         with patch.object(runner, "_create_adapter", return_value=succeed_adapter):
-            with patch("gateway.run.build_channel_directory", create=True):
+            with patch("hermes_gateway.runner.build_channel_directory", create=True):
                 # Run one iteration of the watcher then stop
                 async def run_one_iteration():
                     runner._running = True

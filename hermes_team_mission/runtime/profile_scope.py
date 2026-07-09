@@ -233,7 +233,7 @@ def _worker_rpc_proxy() -> Any:
         return None
 
 
-def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def gateway_call(method: str, params: dict[str, Any], *, db: Any = None) -> dict[str, Any]:
     normalized_method = text(method)
     payload = dict(params) if isinstance(params, Mapping) else {}
     proxy = _worker_rpc_proxy()
@@ -276,7 +276,15 @@ def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
         fn = server._methods.get(normalized_method)
         if not callable(fn):
             return {"error": {"message": f"Gateway method {normalized_method} is unavailable."}}
-        return fn(None, payload)
+        if db is None:
+            return fn(None, payload)
+        original_get_db = getattr(server, "_get_db", None)
+        try:
+            server._get_db = lambda: db
+            return fn(None, payload)
+        finally:
+            if original_get_db is not None:
+                server._get_db = original_get_db
     except Exception as exc:
         return {"error": {"message": str(exc)}}
 

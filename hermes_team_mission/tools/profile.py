@@ -22,6 +22,10 @@ _LEADER_NODE_KINDS = {"root"}
 
 
 def _get_db(parent_agent=None):
+    if _active_run_id({}, parent_agent):
+        db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
+        if db is not None:
+            return db
     return team_mission_control_db(parent_agent)
 
 
@@ -208,7 +212,11 @@ def _handle_leader_team_profile(args: dict[str, Any], parent_agent=None) -> str:
     team_context = ctx
     db = _get_db(parent_agent)
     mission_id, _graph = _active_mission_graph(db, team_context)
-    response = gateway_call("team_mission.team_profile.get", _leader_profile_params(team_context, mission_id))
+    response = gateway_call(
+        "team_mission.team_profile.get",
+        _leader_profile_params(team_context, mission_id),
+        db=db,
+    )
     result, error = unwrap_response(response)
     if error:
         return tool_error(error)
@@ -235,6 +243,7 @@ def _handle_leader_run_team_profile(args: dict[str, Any], parent_agent=None) -> 
     response = gateway_call(
         "team_mission.team_profile.get",
         _leader_run_profile_params(mission_id, mission, node),
+        db=_db,
     )
     result, error = unwrap_response(response)
     if error:

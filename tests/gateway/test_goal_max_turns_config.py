@@ -3,7 +3,7 @@ import pytest
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from hermes_gateway.goal_commands import goal_command_for
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.session import SessionSource
 from hermes_cli import goals
 

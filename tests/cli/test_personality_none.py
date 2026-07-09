@@ -83,7 +83,7 @@ class TestGatewayPersonalityNone:
         return event
 
     def _make_runner(self, personalities=None):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._ephemeral_system_prompt = "You are kawaii~"
         runner.config = {

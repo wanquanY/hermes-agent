@@ -21,7 +21,7 @@ import yaml
 from hermes_gateway.config import Platform
 from hermes_gateway.model_command import model_command_for
 from channels.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.session import SessionSource
 
 
@@ -68,7 +68,7 @@ def _fake_warning():
 
 
 def _setup_isolated_home(tmp_path, monkeypatch, *, warn):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()

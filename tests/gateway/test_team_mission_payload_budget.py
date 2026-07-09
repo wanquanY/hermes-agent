@@ -77,10 +77,16 @@ def _context(tmp_path: Path, *, member_count: int = 2):
     return db, root_node_id, SimpleNamespace(_session_db=db, _hermes_active_run_id="run-leader")
 
 
-def _create_worker(agent, *, node_id: str = "node-worker", idempotency_key: str = "") -> dict:
+def _create_worker(
+    agent,
+    *,
+    node_id: str = "node-worker",
+    kind: str = "worker",
+    idempotency_key: str = "",
+) -> dict:
     args = {
         "node_id": node_id,
-        "kind": "worker",
+        "kind": kind,
         "title": "Worker",
         "objective": "Produce a bounded deliverable.",
         "status": "ready",
@@ -116,10 +122,26 @@ def test_node_create_returns_ack_only_and_under_4kb(tmp_path: Path):
 def test_plan_complete_excludes_full_graph_and_stays_under_8kb(tmp_path: Path):
     db, root, agent = _context(tmp_path)
     _create_worker(agent, node_id="node-worker")
+    _create_worker(agent, node_id="node-verifier", kind="verifier")
+    _create_worker(agent, node_id="node-synthesis", kind="synthesis")
     _json_result(
         registry.dispatch(
             "team_mission_edge_create",
             {"from_node_id": root, "to_node_id": "node-worker"},
+            parent_agent=agent,
+        )
+    )
+    _json_result(
+        registry.dispatch(
+            "team_mission_edge_create",
+            {"from_node_id": "node-worker", "to_node_id": "node-verifier"},
+            parent_agent=agent,
+        )
+    )
+    _json_result(
+        registry.dispatch(
+            "team_mission_edge_create",
+            {"from_node_id": "node-verifier", "to_node_id": "node-synthesis"},
             parent_agent=agent,
         )
     )

@@ -79,7 +79,7 @@ def _make_store(tmp_path):
 
 
 def _build_agent_history(history: list) -> list:
-    """Mirror gateway/run.py's ``history → agent_history`` conversion.
+    """Mirror hermes_gateway/runner.py's ``history → agent_history`` conversion.
 
     This is the transformation that strips ``timestamp`` off tool/tool_call
     rows before the agent sees them.  Tests that check the freshness gate
@@ -111,7 +111,7 @@ def _simulate_note_injection(
     agent_history: list | None = None,
     window_secs: float | None = None,
 ) -> str:
-    """Mirror the note-injection logic in gateway/run.py _run_agent().
+    """Mirror the note-injection logic in hermes_gateway/runner.py _run_agent().
 
     The freshness signal reads ``history[-1].timestamp`` (the raw transcript
     row), NOT ``agent_history[-1].timestamp`` (which has been stripped).
@@ -827,7 +827,7 @@ async def test_drain_timeout_skips_pending_sentinel_sessions():
     ``_interrupt_running_agents()``.  The resume_pending marking must
     mirror that: no agent started means no turn was interrupted.
     """
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
     runner, adapter = make_restart_runner()
     adapter.disconnect = AsyncMock()
@@ -1179,7 +1179,7 @@ class TestStuckLoopEscalation:
         fresh-session despite resume_pending being set."""
         import json
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         store = _make_store(tmp_path)
         source = _make_source()
@@ -1211,7 +1211,7 @@ class TestStuckLoopEscalation:
         future restart-interrupt starts with a fresh counter."""
         import json
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         store = _make_store(tmp_path)
         source = _make_source()
@@ -1234,7 +1234,7 @@ class TestStuckLoopEscalation:
     def test_increment_restart_failure_counts_uses_atomic_json_write(
         self, tmp_path, monkeypatch
     ):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         source = _make_source()
         session_key = _make_store(tmp_path).get_or_create_session(source).session_key
@@ -1263,7 +1263,7 @@ class TestStuckLoopEscalation:
     ):
         import json
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         source = _make_source()
         session_key = _make_store(tmp_path).get_or_create_session(source).session_key

@@ -34,7 +34,7 @@ def _session_key_for_event(event):
 def _make_runner(session_db=None, current_session_id="current_session_001",
                  event=None):
     """Create a bare GatewayRunner with a mock session_store and optional session_db."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}

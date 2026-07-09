@@ -55,7 +55,7 @@ class DiscordSlashCommandMixin:
         """
         # ``getattr`` fallbacks here guard against test fixtures that build
         # an adapter via ``object.__new__(DiscordAdapter)`` and skip __init__
-        # (see AGENTS.md pitfall #17 — same pattern as gateway.run).
+        # (see AGENTS.md pitfall #17 — same pattern as the gateway runner).
         allowed_users = getattr(self, "_allowed_user_ids", set())
         allowed_roles = getattr(self, "_allowed_role_ids", set())
         has_users = bool(allowed_users)
@@ -844,7 +844,7 @@ class DiscordSlashCommandMixin:
     def refresh_skill_group(self) -> tuple[int, int]:
         """Rescan skills and update the live ``/skill`` autocomplete state.
     
-        Invoked by :meth:`gateway.run.GatewayOrchestrator._handle_reload_skills_command`
+        Invoked by the gateway reload-skills command runtime
         after :func:`agent.skill_commands.reload_skills` has refreshed
         the in-process skill-command registry. Without this call, the
         ``/skill`` autocomplete dropdown keeps showing the list captured

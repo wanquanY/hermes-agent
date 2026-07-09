@@ -323,7 +323,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     fake_run_agent.AIAgent = FakeCompressAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -432,7 +432,7 @@ async def test_session_hygiene_warns_user_when_compression_aborts(monkeypatch, t
     fake_run_agent.AIAgent = FakeCompressAgentWithSummaryFailure
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -552,7 +552,7 @@ async def test_session_hygiene_informs_user_when_aux_model_fails_but_recovers(mo
     fake_run_agent.AIAgent = FakeCompressAgentWithAuxRecovery
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -679,7 +679,7 @@ async def test_session_hygiene_honors_configurable_hard_message_limit(
         "  hygiene_hard_message_limit: 10\n"
     )
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -784,7 +784,7 @@ async def test_session_hygiene_default_hard_message_limit_does_not_fire_at_12_me
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     # No config.yaml — use defaults (hard_limit=400)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()

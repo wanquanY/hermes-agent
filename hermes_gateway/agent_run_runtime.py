@@ -58,10 +58,10 @@ _hermes_home = get_hermes_home()
 
 
 def _load_gateway_config() -> dict:
-    legacy = _legacy_gateway_run_module()
-    legacy_loader = getattr(legacy, "_load_gateway_config", None) if legacy else None
-    if callable(legacy_loader):
-        return legacy_loader()
+    runner_module = _gateway_runner_module()
+    patched_loader = getattr(runner_module, "_load_gateway_config", None) if runner_module else None
+    if callable(patched_loader):
+        return patched_loader()
     from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 
     return load_gateway_runtime_config(_active_hermes_home())
@@ -83,20 +83,20 @@ def _redact_approval_command(text: str) -> str:
     return redact_approval_command(text)
 
 
-def _legacy_gateway_run_module():
-    return sys.modules.get("gateway.run")
+def _gateway_runner_module():
+    return sys.modules.get("hermes_gateway.runner")
 
 
 def _active_hermes_home():
-    legacy = _legacy_gateway_run_module()
-    return getattr(legacy, "_hermes_home", _hermes_home) if legacy else _hermes_home
+    runner_module = _gateway_runner_module()
+    return getattr(runner_module, "_hermes_home", _hermes_home) if runner_module else _hermes_home
 
 
 def _runtime_config_for(runner):
-    legacy = _legacy_gateway_run_module()
-    legacy_factory = getattr(legacy, "runtime_config_for", None) if legacy else None
-    if callable(legacy_factory) and legacy_factory is not runtime_config_for:
-        return legacy_factory(runner)
+    runner_module = _gateway_runner_module()
+    patched_factory = getattr(runner_module, "runtime_config_for", None) if runner_module else None
+    if callable(patched_factory) and patched_factory is not runtime_config_for:
+        return patched_factory(runner)
     return runtime_config_for(runner)
 
 

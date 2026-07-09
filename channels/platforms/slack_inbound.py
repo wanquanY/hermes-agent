@@ -593,7 +593,7 @@ class SlackInboundMixin:
         )
 
         # Extract reply context if this message is a thread reply.
-        # Mirrors the Telegram/Discord implementations so that gateway.run
+        # Mirrors the Telegram/Discord implementations so that the gateway runtime
         # can inject a `[Replying to: "..."]` prefix when the parent is not
         # already in the session history. Uses the thread-context cache when
         # available to avoid redundant conversations.replies calls.

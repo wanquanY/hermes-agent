@@ -39,7 +39,7 @@ def _make_source() -> SessionSource:
 
 def _make_runner():
     """Create a minimal GatewayRunner with stubbed internals."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(

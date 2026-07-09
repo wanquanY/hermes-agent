@@ -26,7 +26,7 @@ from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 def _make_runner():
     """Bare GatewayRunner wired with just the state the helper touches."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running_agents = {}
@@ -126,7 +126,7 @@ class TestNoMoreBareDeleteSites:
         from pathlib import Path
         import re
 
-        gateway_run = (Path(__file__).parent.parent.parent / "gateway" / "run.py").read_text()
+        gateway_run = (Path(__file__).parent.parent.parent / "hermes_gateway" / "runner.py").read_text()
         # Match `del self._running_agents[...]` that is NOT inside a
         # triple-quoted docstring.  We scan non-docstring lines only.
         lines = gateway_run.splitlines()
@@ -153,7 +153,7 @@ class TestNoMoreBareDeleteSites:
                     docstring_delim = None
 
         assert offenders == [], (
-            "Found bare `del self._running_agents[...]` sites in gateway/run.py. "
+            "Found bare `del self._running_agents[...]` sites in hermes_gateway/runner.py. "
             "Use session_runtime_state_for(self).release_running_agent_state(session_key) instead so "
             "_running_agents_ts and _busy_ack_ts are popped in lockstep.\n"
             + "\n".join(f"  line {n}: {l}" for n, l in offenders)
@@ -169,7 +169,7 @@ class TestSessionDbCloseOnShutdown:
     def test_stop_impl_closes_both_session_dbs(self):
         """Run the exact shutdown block that closes SessionDBs and verify
         .close() was called on both holders."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
 
@@ -192,7 +192,7 @@ class TestSessionDbCloseOnShutdown:
 
     def test_shutdown_tolerates_missing_session_store(self):
         """Gateway without a session_store attribute must not crash on shutdown."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._db = MagicMock()
@@ -208,7 +208,7 @@ class TestSessionDbCloseOnShutdown:
 
     def test_shutdown_tolerates_close_raising(self):
         """A close() that raises must not prevent subsequent cleanup."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
         flaky_db = MagicMock()

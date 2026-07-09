@@ -27,7 +27,7 @@ from channels.platforms.base import (
     MessageEvent,
     MessageType,
 )
-from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.session import SessionSource, build_session_key
 

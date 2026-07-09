@@ -279,12 +279,149 @@ def _row_value(row: sqlite3.Row | tuple[Any, ...] | None, key: str, index: int, 
             return default
 
 
+def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    try:
+        rows = cursor.execute(f'PRAGMA table_info("{table}")').fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {
+        str(_row_value(row, "name", 1, "") or "")
+        for row in rows
+        if str(_row_value(row, "name", 1, "") or "")
+    }
+
+
+def _quoted_legacy_column(column: str) -> str:
+    return f'legacy."{column}"'
+
+
+def _coalesced_text_expr(columns: set[str], *candidates: str, default: str = "''") -> str:
+    parts = [
+        f"NULLIF({_quoted_legacy_column(column)}, '')"
+        for column in candidates
+        if column in columns
+    ]
+    parts.append(default)
+    return f"COALESCE({', '.join(parts)})"
+
+
+def _coalesced_number_expr(columns: set[str], candidate: str, default: float) -> str:
+    if candidate in columns:
+        return f"COALESCE({_quoted_legacy_column(candidate)}, {default!r})"
+    return repr(default)
+
+
+def _create_canonical_team_mission_conversations(cursor: sqlite3.Cursor, table_name: str) -> None:
+    cursor.execute(
+        f"""
+        CREATE TABLE "{table_name}" (
+            conversation_id TEXT PRIMARY KEY,
+            team_id TEXT,
+            conversation_session_id TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            objective TEXT,
+            workspace_id TEXT,
+            workspace_path TEXT,
+            status TEXT NOT NULL,
+            active_mission_id TEXT,
+            created_by_user_id TEXT,
+            metadata_json TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+
+
+def _rebuild_team_mission_conversations_for_conversation_session_id(
+    cursor: sqlite3.Cursor,
+    columns: set[str],
+) -> None:
+    """Rebuild conversation rows with the canonical conversation_session_id shape."""
+
+    temp_table = "team_mission_conversations__canonical_session_id"
+    now = time.time()
+    conversation_id_expr = _coalesced_text_expr(
+        columns,
+        "conversation_id",
+        "conversation_session_id",
+        default="NULL",
+    )
+    conversation_session_id_expr = _coalesced_text_expr(
+        columns,
+        "conversation_session_id",
+        "conversation_id",
+        default="NULL",
+    )
+    created_at_expr = _coalesced_number_expr(columns, "created_at", now)
+    updated_at_expr = _coalesced_number_expr(columns, "updated_at", now)
+
+    cursor.execute(f'DROP TABLE IF EXISTS "{temp_table}"')
+    _create_canonical_team_mission_conversations(cursor, temp_table)
+    cursor.execute(
+        f"""
+        INSERT OR REPLACE INTO "{temp_table}" (
+            conversation_id, team_id, conversation_session_id, title, objective,
+            workspace_id, workspace_path, status, active_mission_id,
+            created_by_user_id, metadata_json, created_at, updated_at
+        )
+        SELECT
+            {conversation_id_expr},
+            {_coalesced_text_expr(columns, "team_id")},
+            {conversation_session_id_expr},
+            {_coalesced_text_expr(columns, "title", default="'Team Mission'")},
+            {_coalesced_text_expr(columns, "objective")},
+            {_coalesced_text_expr(columns, "workspace_id")},
+            {_coalesced_text_expr(columns, "workspace_path")},
+            {_coalesced_text_expr(columns, "status", default="'active'")},
+            {_coalesced_text_expr(columns, "active_mission_id")},
+            {_coalesced_text_expr(columns, "created_by_user_id")},
+            {_coalesced_text_expr(columns, "metadata_json", default="'{}'")},
+            {created_at_expr},
+            {updated_at_expr}
+        FROM team_mission_conversations AS legacy
+        WHERE {conversation_id_expr} IS NOT NULL
+          AND {conversation_session_id_expr} IS NOT NULL
+        ORDER BY {updated_at_expr} ASC, {created_at_expr} ASC
+        """
+    )
+    cursor.execute('DROP TABLE "team_mission_conversations"')
+    cursor.execute(f'ALTER TABLE "{temp_table}" RENAME TO "team_mission_conversations"')
+
+
+def migrate_team_mission_runtime_session_columns(cursor: sqlite3.Cursor) -> None:
+    """Ensure Team Mission graph tables expose canonical execution identity columns."""
+
+    node_columns = _table_columns(cursor, "team_mission_nodes")
+    if node_columns:
+        if "runtime_conversation_session_id" not in node_columns:
+            cursor.execute(
+                "ALTER TABLE team_mission_nodes "
+                "ADD COLUMN runtime_conversation_session_id TEXT"
+            )
+            node_columns.add("runtime_conversation_session_id")
+        if "execution_session_id" not in node_columns:
+            cursor.execute(
+                "ALTER TABLE team_mission_nodes "
+                "ADD COLUMN execution_session_id TEXT"
+            )
+            node_columns.add("execution_session_id")
+
+    binding_columns = _table_columns(cursor, "team_mission_run_bindings")
+    if binding_columns:
+        if "execution_session_id" not in binding_columns:
+            cursor.execute(
+                "ALTER TABLE team_mission_run_bindings "
+                "ADD COLUMN execution_session_id TEXT"
+            )
+            binding_columns.add("execution_session_id")
+
+
 def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
     """Ensure Team Mission nodes are keyed by mission and node."""
 
-    try:
-        rows = cursor.execute('PRAGMA table_info("team_mission_nodes")').fetchall()
-    except sqlite3.OperationalError:
+    rows = cursor.execute('PRAGMA table_info("team_mission_nodes")').fetchall()
+    if not rows:
         return
     pk_columns = [
         str(_row_value(row, "name", 1, ""))
@@ -358,29 +495,14 @@ def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
 def migrate_team_mission_conversation_session_id(cursor: sqlite3.Cursor) -> None:
     """Backfill the canonical conversation_session_id column on legacy tables."""
 
-    try:
-        rows = cursor.execute('PRAGMA table_info("team_mission_conversations")').fetchall()
-    except sqlite3.OperationalError:
-        return
-    columns = {
-        str(_row_value(row, "name", 1, "") or "")
-        for row in rows
-        if str(_row_value(row, "name", 1, "") or "")
-    }
+    columns = _table_columns(cursor, "team_mission_conversations")
     if not columns:
         return
+    added_conversation_session_id = False
     if "conversation_session_id" not in columns:
         cursor.execute("ALTER TABLE team_mission_conversations ADD COLUMN conversation_session_id TEXT")
         columns.add("conversation_session_id")
-    if "stable_session_id" in columns:
-        cursor.execute(
-            """
-            UPDATE team_mission_conversations
-               SET conversation_session_id = stable_session_id
-             WHERE COALESCE(conversation_session_id, '') = ''
-               AND COALESCE(stable_session_id, '') != ''
-            """
-        )
+        added_conversation_session_id = True
     cursor.execute(
         """
         UPDATE team_mission_conversations
@@ -388,6 +510,8 @@ def migrate_team_mission_conversation_session_id(cursor: sqlite3.Cursor) -> None
          WHERE COALESCE(conversation_session_id, '') = ''
         """
     )
+    if added_conversation_session_id:
+        _rebuild_team_mission_conversations_for_conversation_session_id(cursor, columns)
     cursor.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_team_mission_conversations_session_id

@@ -32,7 +32,7 @@ def _make_event(text="/update", platform=Platform.TELEGRAM,
 
 def _make_runner():
     """Create a bare GatewayRunner without calling __init__."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -67,7 +67,7 @@ class TestHandleUpdateCommand:
         fake_root = tmp_path / "project"
         fake_root.mkdir()
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", tmp_path), \
-             patch("gateway.run.Path") as MockPath:
+             patch("hermes_gateway.runner.Path") as MockPath:
             # Path(__file__).parent.parent.resolve() -> fake_root
             MockPath.return_value = MagicMock()
             MockPath.__truediv__ = Path.__truediv__
@@ -75,13 +75,13 @@ class TestHandleUpdateCommand:
             pass
 
         # Simpler approach — mock at method level using a wrapper
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = _make_runner()
 
         with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", tmp_path):
             # The handler does Path(__file__).parent.parent.resolve()
             # We need to make project_root / '.git' not exist.
-            # Since Path(__file__) resolves to the real gateway/run.py,
+            # Since Path(__file__) resolves to the real hermes_gateway/runner.py,
             # project_root will be the real hermes-agent dir (which HAS .git).
             # Patch Path to control this.
             original_path = Path

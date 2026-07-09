@@ -108,7 +108,7 @@ class InterruptedAgent:
 
 
 def _make_runner(adapter):
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     runner = object.__new__(GatewayRunner)
@@ -145,7 +145,7 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
 
     adapter = ProgressCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     runtime = SimpleNamespace(
         resolve_session_agent_runtime=lambda **_kwargs: (

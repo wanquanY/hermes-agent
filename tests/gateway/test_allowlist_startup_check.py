@@ -1,4 +1,4 @@
-"""Tests for the startup allowlist warning check in gateway/run.py."""
+"""Tests for the startup allowlist warning check in hermes_gateway/runner.py."""
 
 import os
 from unittest.mock import patch

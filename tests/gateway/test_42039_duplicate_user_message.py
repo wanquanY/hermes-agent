@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import GatewayConfig, Platform
 from hermes_gateway.voice_runtime import voice_runtime_for

@@ -229,7 +229,7 @@ class TestSystemdServiceRefresh:
         async def fake_start_gateway(**kwargs):
             return True
 
-        monkeypatch.setattr("gateway.run.start_gateway", fake_start_gateway)
+        monkeypatch.setattr("hermes_gateway.runner.start_gateway", fake_start_gateway)
 
         gateway_cli.run_gateway()
 
@@ -1932,14 +1932,14 @@ class TestLegacyHermesUnitDetection:
           - python -m hermes_cli.main gateway run
           - python path/to/hermes_cli/main.py gateway run
           - hermes gateway run   (direct binary)
-          - python path/to/gateway/run.py
+          - python path/to/hermes_gateway/runner.py
         """
         user_dir, _ = self._setup_search_paths(tmp_path, monkeypatch)
         variants = [
             "ExecStart=/venv/bin/python -m hermes_cli.main gateway run --replace",
             "ExecStart=/venv/bin/python /opt/hermes/hermes_cli/main.py gateway run",
             "ExecStart=/usr/local/bin/hermes gateway run --replace",
-            "ExecStart=/venv/bin/python /opt/hermes/gateway/run.py",
+            "ExecStart=/venv/bin/python /opt/hermes/hermes_gateway/runner.py",
         ]
         for i, execstart in enumerate(variants):
             name = f"hermes.service" if i == 0 else f"hermes.service"  # same name

@@ -3542,7 +3542,7 @@ def test_cli_daemon_help_marks_deprecated():
 def test_gateway_dispatcher_watcher_respects_config_flag_off(monkeypatch):
     """dispatch_in_gateway=false -> watcher exits fast, no loop."""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
 
     runner = object.__new__(GatewayRunner)
@@ -3563,7 +3563,7 @@ def test_gateway_dispatcher_watcher_respects_config_flag_off(monkeypatch):
 def test_gateway_dispatcher_watcher_respects_env_override(monkeypatch):
     """HERMES_KANBAN_DISPATCH_IN_GATEWAY=0 disables without touching config."""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "0")
 
     runner = object.__new__(GatewayRunner)
@@ -3581,7 +3581,7 @@ def test_gateway_dispatcher_watcher_env_truthy_uses_config(monkeypatch):
     (We only treat explicit falses as an override; unset or truthy
     defers to config.)"""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
 
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "yes")
@@ -3610,7 +3610,7 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     import logging
     import sqlite3
 
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
     import hermes_cli.kanban_db as _kb
 
@@ -3658,8 +3658,8 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
         return None
 
     monkeypatch.setattr(_kb, "connect", _connect)
-    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
-    monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
+    monkeypatch.setattr("hermes_gateway.runner.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hermes_gateway.runner.asyncio.sleep", _sleep)
 
     with caplog.at_level(logging.ERROR, logger="gateway.run"):
         asyncio.run(

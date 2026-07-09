@@ -9,7 +9,7 @@ import pytest
 
 from hermes_gateway.config import Platform, StreamingConfig
 from channels.platforms.base import resolve_proxy_url
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.proxy_mode import proxy_mode_for
 from hermes_gateway.session import SessionSource
 

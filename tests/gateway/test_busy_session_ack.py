@@ -58,7 +58,7 @@ def _make_event(text="hello", chat_id="123", platform_val="telegram"):
 
 def _make_runner():
     """Build a minimal GatewayRunner-like object for testing."""
-    from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 
     runner = object.__new__(GatewayRunner)
     runner._running_agents = {}
@@ -98,7 +98,7 @@ class TestBusySessionAck:
     @pytest.mark.asyncio
     async def test_handle_message_queue_mode_queues_without_interrupt(self):
         """Runner queue mode must not interrupt an active agent for text follow-ups."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner, _sentinel = _make_runner()
         adapter = _make_adapter()
@@ -562,7 +562,7 @@ class TestLongRunningNotificationOwnership:
     """
 
     def test_notification_stops_after_session_ownership_moves(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._running_agents = {}
@@ -576,7 +576,7 @@ class TestLongRunningNotificationOwnership:
         ) is False
 
     def test_notification_stops_after_executor_finishes(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         agent = MagicMock()
@@ -590,7 +590,7 @@ class TestLongRunningNotificationOwnership:
         ) is False
 
     def test_notification_stops_when_agent_is_gone(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._running_agents = {}
@@ -600,7 +600,7 @@ class TestLongRunningNotificationOwnership:
         ) is False
 
     def test_notification_continues_for_live_active_run(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         agent = MagicMock()

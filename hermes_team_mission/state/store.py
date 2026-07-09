@@ -25,6 +25,7 @@ from hermes_constants import get_hermes_home
 from hermes_team_mission.state.activity_projection import TeamMissionActivityProjectionMixin
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
 from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
@@ -337,6 +338,7 @@ class TeamMissionStateStore(TeamMissionActivityProjectionMixin, TeamMissionState
         cursor.executescript(_TEAM_MISSION_RUNTIME_SQL)
         backfill_seq_counter(self._conn, updated_at=time.time())
         cursor.executescript(team_mission_schema_sql())
+        migrate_team_mission_runtime_session_columns(cursor)
         migrate_team_mission_conversation_session_id(cursor)
         reconcile_team_mission_node_primary_key(cursor)
         migrate_active_mission_id_to_conversation_missions(cursor)

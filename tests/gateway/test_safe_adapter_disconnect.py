@@ -6,7 +6,7 @@ subprocesses) before giving up. Without a defensive disconnect() call
 these leak and surface as "Unclosed client session" warnings at
 process exit (seen on the 2026-04-18 18:08:16 gateway restart).
 
-The fix: gateway/run.py wraps each adapter connect() with a safety-net
+The fix: hermes_gateway/runner.py wraps each adapter connect() with a safety-net
 call to _safe_adapter_disconnect() in the failure branches.
 """
 
@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import Platform
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 
 
 @pytest.fixture

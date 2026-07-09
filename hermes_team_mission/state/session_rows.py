@@ -76,6 +76,8 @@ class TeamMissionRowsMixin:
         raw_kind = str(row["kind"] or "")
         kind = _normalize_node_kind(raw_kind)
         metadata = _metadata_with_normalized_node_kind(metadata, raw_kind=raw_kind, canonical_kind=kind)
+        runtime_conversation_session_id = _text(_row_value(row, "runtime_conversation_session_id", ""))
+        execution_session_id = _text(_row_value(row, "execution_session_id", ""))
         # CR-P3.3: graph identity only; for speaker use participant_id.
         return {
             "node_id": str(row["node_id"] or ""),
@@ -104,10 +106,10 @@ class TeamMissionRowsMixin:
                 if _text(_row_value(row, "mission_id", ""))
                 else ""
             ),
-            "runtime_conversation_session_id": _text(_row_value(row, "runtime_conversation_session_id", "")),
-            "runtimeConversationSessionId": _text(_row_value(row, "runtime_conversation_session_id", "")),
-            "execution_session_id": _text(_row_value(row, "execution_session_id", "")),
-            "executionSessionId": _text(_row_value(row, "execution_session_id", "")),
+            "runtime_conversation_session_id": runtime_conversation_session_id,
+            "runtimeConversationSessionId": runtime_conversation_session_id,
+            "execution_session_id": execution_session_id,
+            "executionSessionId": execution_session_id,
             "runtime_scope_key": str(row["runtime_scope_key"] or ""),
             "runtimeScopeKey": str(row["runtime_scope_key"] or ""),
             "output_contract": _json_loads(row["output_contract_json"], {}),
@@ -182,12 +184,13 @@ class TeamMissionRowsMixin:
     def _team_mission_run_binding_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
+        execution_session_id = _text(_row_value(row, "execution_session_id", ""))
         return {
             "mission_id": str(row["mission_id"] or ""),
             "node_id": str(row["node_id"] or ""),
             "run_id": str(row["run_id"] or ""),
             "session_id": str(row["session_id"] or ""),
-            "execution_session_id": str(row["execution_session_id"] or ""),
+            "execution_session_id": execution_session_id,
             "runtime_scope_key": str(row["runtime_scope_key"] or ""),
             "role": str(row["role"] or ""),
             "metadata": _json_loads(row["metadata_json"], {}),

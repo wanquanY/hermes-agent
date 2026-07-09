@@ -334,7 +334,7 @@ class TestGatewaySurfacesNullResponse:
 
     def test_partial_response_surfaces_error(self):
         """Agent returns partial=True with no response → user sees error."""
-        from gateway.run import _normalize_empty_agent_response
+        from hermes_gateway.runner import _normalize_empty_agent_response
 
         agent_result = {
             "final_response": None,
@@ -354,7 +354,7 @@ class TestGatewaySurfacesNullResponse:
 
     def test_interrupted_response_stays_empty(self):
         """Interrupted agent → response stays empty (platform handles UX)."""
-        from gateway.run import _normalize_empty_agent_response
+        from hermes_gateway.runner import _normalize_empty_agent_response
 
         agent_result = {
             "final_response": None,
@@ -372,7 +372,7 @@ class TestGatewaySurfacesNullResponse:
 
     def test_failed_context_overflow(self):
         """Agent failed with context overflow → specific guidance message."""
-        from gateway.run import _normalize_empty_agent_response
+        from hermes_gateway.runner import _normalize_empty_agent_response
 
         agent_result = {
             "final_response": None,
@@ -391,7 +391,7 @@ class TestGatewaySurfacesNullResponse:
 
     def test_failed_generic_error(self):
         """Agent failed with non-context error → generic error message."""
-        from gateway.run import _normalize_empty_agent_response
+        from hermes_gateway.runner import _normalize_empty_agent_response
 
         agent_result = {
             "final_response": None,
@@ -410,7 +410,7 @@ class TestGatewaySurfacesNullResponse:
 
     def test_nonempty_response_passes_through(self):
         """Non-empty response is returned unchanged."""
-        from gateway.run import _normalize_empty_agent_response
+        from hermes_gateway.runner import _normalize_empty_agent_response
 
         agent_result = {"final_response": "Hello!", "api_calls": 1}
         response = "Hello!"

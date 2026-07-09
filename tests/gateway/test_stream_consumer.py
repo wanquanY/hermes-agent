@@ -1070,7 +1070,7 @@ class TestInterimCommentaryMessages:
 class TestCancelledConsumerSetsFlags:
     """Cancellation must set final_response_sent when already_sent is True.
 
-    The 5-second stream_task timeout in gateway/run.py can cancel the
+    The 5-second stream_task timeout in hermes_gateway/runner.py can cancel the
     consumer while it's still processing.  If final_response_sent stays
     False, the gateway falls through to the normal send path and the
     user sees a duplicate message.

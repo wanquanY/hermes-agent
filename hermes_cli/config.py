@@ -3573,7 +3573,7 @@ def get_custom_provider_context_length(
       * ``AIAgent.__init__`` (startup resolution)
       * ``AIAgent.switch_model`` (mid-session ``/model`` switch)
       * ``hermes_cli.model_switch.resolve_display_context_length`` (``/model`` confirmation display)
-      * ``gateway.run._format_session_info`` (``/info`` display)
+      * gateway session-info formatting (``/info`` display)
       * ``agent.model_metadata.get_model_context_length`` (when custom_providers is threaded through)
 
     Before this helper existed, the lookup was duplicated in ``run_agent.py``'s

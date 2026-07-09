@@ -1,6 +1,6 @@
 """Tests for EphemeralReply — system-notice auto-delete in gateway adapters.
 
-Slash-command handlers in ``gateway/run.py`` can return an
+Slash-command handlers in ``hermes_gateway/runner.py`` can return an
 ``EphemeralReply`` wrapper to request auto-deletion of the reply message
 after a TTL.  The base adapter unwraps the sentinel before sending and
 schedules a detached delete task when the platform supports

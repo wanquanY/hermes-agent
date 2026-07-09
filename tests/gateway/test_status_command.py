@@ -33,7 +33,7 @@ def _make_event(text: str, *, platform: Platform = Platform.TELEGRAM) -> Message
 
 
 def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.TELEGRAM):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -247,7 +247,7 @@ async def test_tasks_alias_routes_to_agents_command(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_message_persists_agent_token_counts(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
@@ -289,7 +289,7 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source(Platform.SLACK)),
@@ -333,7 +333,7 @@ async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monke
 
 @pytest.mark.asyncio
 async def test_first_run_non_slack_home_channel_onboarding_keeps_direct_command(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source(Platform.TELEGRAM)),
@@ -376,7 +376,7 @@ async def test_first_run_non_slack_home_channel_onboarding_keeps_direct_command(
 
 @pytest.mark.asyncio
 async def test_handle_message_discards_stale_result_after_session_invalidation(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
@@ -425,7 +425,7 @@ async def test_handle_message_discards_stale_result_after_session_invalidation(m
 
 @pytest.mark.asyncio
 async def test_handle_message_stale_result_keeps_newer_generation_callback(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     class _Adapter:
         def __init__(self):

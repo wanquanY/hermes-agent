@@ -454,7 +454,7 @@ class TestSenderPrefixWithBackfill:
 
     @pytest.fixture()
     def runner(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         r = GatewayRunner.__new__(GatewayRunner)
         r.config = GatewayConfig(group_sessions_per_user=False)

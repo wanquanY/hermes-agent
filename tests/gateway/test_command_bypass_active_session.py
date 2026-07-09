@@ -423,7 +423,7 @@ class TestNoActiveSessionNormalDispatch:
 
 
 class TestPendingCommandSafetyNet:
-    """The safety net in gateway/run.py _run_agent must discard command text
+    """The safety net in hermes_gateway/runner.py _run_agent must discard command text
     that leaks into the pending queue via interrupt_message fallback."""
 
     def test_stop_command_detected(self):

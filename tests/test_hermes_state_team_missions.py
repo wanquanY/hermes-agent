@@ -311,7 +311,7 @@ def test_team_mission_conversation_runtime_summary_returns_frames_and_runtime_se
     assert summary["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
 
 
-def test_team_mission_conversation_runtime_session_ids_are_lightweight(tmp_path: Path):
+def test_team_mission_conversation_execution_session_ids_are_lightweight(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
@@ -342,13 +342,13 @@ def test_team_mission_conversation_runtime_session_ids_are_lightweight(tmp_path:
         role="worker",
     )
 
-    assert db.list_team_mission_conversation_runtime_session_ids(
+    assert db.list_team_mission_conversation_execution_session_ids(
         team_id="team-1",
         workspace_id="workspace-1",
         mission_id="mission-1",
     ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
 
-    assert db.list_team_mission_conversation_runtime_session_ids(
+    assert db.list_team_mission_conversation_execution_session_ids(
         mission_id="conversation-1",
     ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
 

@@ -141,7 +141,7 @@ class TestGatewayHistoryOffsetAfterSplit:
 
     def test_history_offset_zero_on_session_split(self):
         """When agent.session_id differs from the original, history_offset must be 0."""
-        # This tests the logic in gateway/run.py run_sync():
+        # This tests the logic in hermes_gateway/runner.py run_sync():
         # _session_was_split = agent.session_id != session_id
         # _effective_history_offset = 0 if _session_was_split else len(agent_history)
 

@@ -22,7 +22,7 @@ def _make_event(text="/debug", platform=Platform.TELEGRAM,
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig()

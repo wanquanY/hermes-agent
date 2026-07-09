@@ -5,14 +5,23 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import os
 from collections import OrderedDict
 from contextvars import copy_context
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.i18n import t
+from channels.platforms.base import MessageType
 from channels.platforms.base import BasePlatformAdapter, MessageEvent
 from channels.platforms.base_text import _reply_anchor_for_event
 from channels.session_identity import SessionContext, SessionSource, build_session_key
+from hermes_agent.gateway.runtime_config import (
+    load_gateway_runtime_config,
+    redact_approval_command as _redact_approval_command,
+    resolve_gateway_model as _resolve_gateway_model,
+    resolve_runtime_agent_kwargs,
+)
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 from hermes_gateway.approval_commands import GatewayApprovalCommandMixin
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL
@@ -24,8 +33,10 @@ from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
 from hermes_gateway.compress_command import GatewayCompressCommandMixin
+from hermes_gateway.config_env_bridge import bridge_gateway_config_env
 from hermes_gateway.config import GatewayConfig, Platform
 from hermes_gateway.gateway_media_warnings import media_warnings_for
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.inbound_message_preparation import GatewayInboundMessagePreparationMixin
 from hermes_gateway.insights_command import GatewayInsightsCommandMixin
@@ -43,8 +54,41 @@ from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.shutdown_runtime import GatewayShutdownRuntimeMixin
 from hermes_gateway.teams_pipeline_gateway_runtime import teams_pipeline_runtime_for
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
+from hermes_gateway.process_notifications import (
+    drain_gateway_watch_events as _drain_gateway_watch_events,
+    format_gateway_process_notification as _format_gateway_process_notification,
+)
+from hermes_gateway.response_normalization import normalize_empty_agent_response as _normalize_empty_agent_response
+from hermes_gateway.runner_ref import gateway_runner_ref as _gateway_runner_ref
+from hermes_gateway.skill_hint import check_unavailable_skill as _check_unavailable_skill_for_repo
 
 logger = logging.getLogger(__name__)
+_hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+_env_path = _hermes_home / ".env"
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
+from hermes_cli.env_loader import load_hermes_dotenv
+
+load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / ".env")
+bridge_gateway_config_env(_hermes_home)
+
+
+def _load_gateway_config() -> dict:
+    return load_gateway_runtime_config(_hermes_home)
+
+
+def _resolve_runtime_agent_kwargs() -> dict:
+    return resolve_runtime_agent_kwargs(_hermes_home)
+
+
+def _check_unavailable_skill(command_name: str) -> str | None:
+    repo_root = Path(__file__).resolve().parent.parent
+    return _check_unavailable_skill_for_repo(command_name, repo_root=repo_root)
 
 class GatewayRunner(
     GatewayApprovalCommandMixin,

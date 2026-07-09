@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.fast_command as fast_command
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 from hermes_gateway.config import Platform

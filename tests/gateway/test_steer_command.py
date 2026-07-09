@@ -43,7 +43,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner(session_entry: SessionEntry):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -135,7 +135,7 @@ async def test_steer_without_payload_returns_usage():
 async def test_steer_with_pending_sentinel_falls_back_to_queue():
     """When the agent hasn't finished booting (sentinel), /steer should
     queue as a turn-boundary follow-up instead of crashing."""
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
     runner, adapter = _make_runner(_session_entry())
     sk = build_session_key(_make_source())

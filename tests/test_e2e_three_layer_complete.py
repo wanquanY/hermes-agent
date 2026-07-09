@@ -644,7 +644,7 @@ def test_e2e_sidebar_single_source_session_index_only(
     )
     monkeypatch.setitem(
         gateway_server._methods,
-        "team_mission.conversation.runtime_session_ids",
+        "team_mission.conversation.execution_session_ids",
         lambda _rid, _params: pytest.fail("sidebar must not fetch runtime session ids"),
     )
 

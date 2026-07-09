@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from hermes_gateway.config import Platform
-from gateway.run import GatewayRunner
+from hermes_gateway.runner import GatewayRunner
 from hermes_cli import kanban_db as kb
 
 

@@ -698,7 +698,7 @@ class TestWeixinSendImageFileParameterName:
 
         send_document_mock.return_value = weixin.SendResult(success=True, message_id="test-id")
 
-        # This is the call pattern used by gateway/run.py extract_media
+        # This is the call pattern used by hermes_gateway/runner.py extract_media
         result = asyncio.run(
             adapter.send_image_file(
                 chat_id="wxid_test123",

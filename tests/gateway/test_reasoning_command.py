@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 import hermes_gateway.reasoning_command as reasoning_command
 from hermes_gateway.config import Platform

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
@@ -185,7 +185,7 @@ fallback_providers:
 """.lstrip(),
         encoding="utf-8",
     )
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
 

@@ -36,7 +36,7 @@ def _make_event(text="/update", platform=Platform.TELEGRAM,
 
 def _make_runner(hermes_home=None):
     """Create a bare GatewayRunner without calling __init__."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -612,7 +612,7 @@ class TestUpdatePromptInterception:
         runner._is_user_authorized = MagicMock(return_value=True)
         runner._session_key_for_source = MagicMock(return_value=session_key)
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         assert result is not None
@@ -645,7 +645,7 @@ class TestUpdatePromptInterception:
         runner._handle_reset_command = AsyncMock(return_value="reset ok")
         (hermes_home / ".update_prompt.json").write_text(json.dumps({"prompt": "test"}))
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         assert result == "reset ok"
@@ -675,7 +675,7 @@ class TestUpdatePromptInterception:
         runner._session_key_for_source = MagicMock(return_value=session_key)
         (hermes_home / ".update_prompt.json").write_text(json.dumps({"prompt": "test"}))
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         response_path = hermes_home / ".update_response"

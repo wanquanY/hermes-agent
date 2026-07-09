@@ -1,7 +1,7 @@
 """Regression guard for Feishu bot-sender authorization bypass.
 
 Mirrors tests/gateway/test_discord_bot_auth_bypass.py for Platform.FEISHU.
-Without the bypass in gateway/run.py, Feishu bot senders admitted by the
+Without the bypass in hermes_gateway/runner.py, Feishu bot senders admitted by the
 adapter would be rejected at _is_user_authorized with "Unauthorized user"
 — same class of bug as Discord #4466.
 """
@@ -28,7 +28,7 @@ def _isolate_feishu_env(monkeypatch):
 
 
 def _make_bare_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.pairing_store = SimpleNamespace(is_approved=lambda *_a, **_kw: False)

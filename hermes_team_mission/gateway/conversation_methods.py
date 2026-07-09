@@ -778,14 +778,14 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("team_mission.conversation.runtime_session_ids")
+@method("team_mission.conversation.execution_session_ids")
 def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
-        return _ok(rid, {"session_ids": [], "sessionIds": [], "runtime_session_ids": [], "runtimeSessionIds": []})
-    getter = getattr(db, "list_team_mission_conversation_runtime_session_ids", None)
+        return _ok(rid, {"session_ids": [], "sessionIds": [], "execution_session_ids": [], "executionSessionIds": []})
+    getter = getattr(db, "list_team_mission_conversation_execution_session_ids", None)
     if not callable(getter):
-        return _ok(rid, {"session_ids": [], "sessionIds": [], "runtime_session_ids": [], "runtimeSessionIds": []})
+        return _ok(rid, {"session_ids": [], "sessionIds": [], "execution_session_ids": [], "executionSessionIds": []})
     session_ids = getter(
         team_id=str(params.get("team_id") or params.get("teamId") or ""),
         workspace_id=_workspace_id_from_params(params),
@@ -803,8 +803,8 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "session_ids": normalized,
         "sessionIds": normalized,
-        "runtime_session_ids": normalized,
-        "runtimeSessionIds": normalized,
+        "execution_session_ids": normalized,
+        "executionSessionIds": normalized,
     })
 
 

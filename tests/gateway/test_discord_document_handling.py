@@ -391,7 +391,7 @@ class TestAllowAnyAttachment:
 
     With the flag off (default), unknown file types are dropped. With it on,
     they get cached and surfaced to the agent as DOCUMENT events with
-    application/octet-stream MIME so gateway/run.py emits a path-pointing
+    application/octet-stream MIME so hermes_gateway/runner.py emits a path-pointing
     context note.
     """
 

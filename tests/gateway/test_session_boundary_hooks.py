@@ -25,7 +25,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -117,7 +117,7 @@ async def test_finalize_before_reset(mock_invoke_hook):
 @patch("hermes_cli.plugins.invoke_hook")
 async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     """Gateway stop() must fire on_session_finalize for each active agent."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -181,7 +181,7 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
     """
     from datetime import datetime, timedelta
 
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 
     runner = object.__new__(GatewayRunner)

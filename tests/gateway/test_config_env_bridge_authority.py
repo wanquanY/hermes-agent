@@ -1,4 +1,4 @@
-"""Regression tests for the config.yaml → env var bridge in gateway/run.py.
+"""Regression tests for the config.yaml → env var bridge in hermes_gateway/runner.py.
 
 Guards against the 60-vs-500 bug where a stale `.env HERMES_MAX_ITERATIONS=60`
 entry silently shadowed `agent.max_turns: 500` in config.yaml because the
@@ -22,7 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[str, str]:
-    """Import gateway.run in a clean subprocess and return the post-import env.
+    """Import hermes_gateway.runner in a clean subprocess and return the post-import env.
 
     The bridge runs at module-import time, so simply importing is enough
     to exercise it. Running in a subprocess isolates the test from other
@@ -35,7 +35,7 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
         sys.path.insert(0, {str(PROJECT_ROOT)!r})
 
         try:
-            from gateway import run  # noqa: F401  — module import triggers bridge
+            import hermes_gateway.runner  # noqa: F401  — module import triggers bridge
         except Exception as exc:
             print(f"IMPORT_ERROR:{{type(exc).__name__}}:{{exc}}", file=sys.stderr)
             sys.exit(2)
@@ -68,7 +68,7 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
     )
     if result.returncode != 0:
         pytest.fail(
-            f"gateway.run import failed (rc={result.returncode})\n"
+            f"hermes_gateway.runner import failed (rc={result.returncode})\n"
             f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
         )
     out: dict[str, str] = {}

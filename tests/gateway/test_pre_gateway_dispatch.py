@@ -42,7 +42,7 @@ def _make_event(text: str = "hello", platform: Platform = Platform.WHATSAPP) -> 
 
 
 def _make_runner(platform: Platform):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     config = GatewayConfig(
         platforms={platform: PlatformConfig(enabled=True)},

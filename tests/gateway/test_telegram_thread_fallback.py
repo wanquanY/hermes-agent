@@ -513,7 +513,7 @@ def test_base_gateway_replies_to_triggering_message_for_telegram_dm_topic():
 @pytest.mark.asyncio
 async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegram_dm_topic(monkeypatch, tmp_path):
     """GatewayRunner's duplicate thread metadata must match the base helper."""
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     GatewayRunner = gateway_run.GatewayRunner

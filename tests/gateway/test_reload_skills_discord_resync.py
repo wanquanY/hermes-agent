@@ -200,7 +200,7 @@ class TestHandleReloadSkillsCallsRefreshSkillGroup:
 
         # Import without constructing a real runner — test the method
         # directly against an ``object.__new__`` instance.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
 
         sync_refresh = MagicMock(return_value=(5, 0))
