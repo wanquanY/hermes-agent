@@ -8,6 +8,7 @@ from agent.i18n import t
 from hermes_constants import get_hermes_home
 from hermes_cli.config import cfg_get
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 from utils import atomic_yaml_write, is_truthy_value
@@ -157,7 +158,7 @@ class GatewayReasoningCommandMixin:
                 return t("gateway.reasoning.reset_global_unsupported")
             runtime_config_for(self).set_session_reasoning_override(session_key, None)
             self._reasoning_config = runtime_config_for(self).load_reasoning_config()
-            self._evict_cached_agent(session_key)
+            agent_cache_for(self).evict_cached_agent(session_key)
             return t("gateway.reasoning.reset_done")
         if effort == "none":
             parsed = {"enabled": False}
@@ -173,12 +174,12 @@ class GatewayReasoningCommandMixin:
         if persist_global:
             if _save_config_key("agent.reasoning_effort", effort):
                 runtime_config_for(self).set_session_reasoning_override(session_key, None)
-                self._evict_cached_agent(session_key)
+                agent_cache_for(self).evict_cached_agent(session_key)
                 return t("gateway.reasoning.set_global", effort=effort)
             runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
-            self._evict_cached_agent(session_key)
+            agent_cache_for(self).evict_cached_agent(session_key)
             return t("gateway.reasoning.set_global_save_failed", effort=effort)
 
         runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
-        self._evict_cached_agent(session_key)
+        agent_cache_for(self).evict_cached_agent(session_key)
         return t("gateway.reasoning.set_session", effort=effort)

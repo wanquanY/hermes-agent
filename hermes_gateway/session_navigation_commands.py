@@ -7,6 +7,7 @@ from typing import Optional
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
 from hermes_gateway.assets import telegram_botfather_threads_settings_path
@@ -568,7 +569,7 @@ class GatewaySessionNavigationCommandMixin:
         # /branch and /reset. Without this, the cached AIAgent (and its
         # memory provider, which cached `_session_id` during initialize())
         # keeps writing into the wrong session's record. See #6672.
-        self._evict_cached_agent(session_key)
+        agent_cache_for(self).evict_cached_agent(session_key)
 
         # Get the title for confirmation
         title = self._session_db.get_session_title(target_id) or name
@@ -667,7 +668,7 @@ class GatewaySessionNavigationCommandMixin:
         self._clear_session_boundary_security_state(session_key)
 
         # Evict any cached agent for this session
-        self._evict_cached_agent(session_key)
+        agent_cache_for(self).evict_cached_agent(session_key)
 
         msg_count = len([m for m in history if m.get("role") == "user"])
         key = "gateway.branch.branched_one" if msg_count == 1 else "gateway.branch.branched_many"

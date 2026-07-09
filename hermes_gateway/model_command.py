@@ -8,6 +8,7 @@ from typing import Optional
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 from utils import base_url_host_matches
 
 logger = logging.getLogger(__name__)
@@ -210,7 +211,7 @@ class GatewayModelCommandMixin:
                         # Evict cached agent so the next turn creates a fresh
                         # agent from the override rather than relying on the
                         # stale cache signature to trigger a rebuild.
-                        _self._evict_cached_agent(_session_key)
+                        agent_cache_for(_self).evict_cached_agent(_session_key)
 
                         if persist_global:
                             try:
@@ -343,7 +344,7 @@ class GatewayModelCommandMixin:
 
             # Evict cached agent so the next turn creates a fresh agent from the
             # override rather than relying on cache signature mismatch detection.
-            self._evict_cached_agent(session_key)
+            agent_cache_for(self).evict_cached_agent(session_key)
 
             # Persist to config if --global
             if persist_global:

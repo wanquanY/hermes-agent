@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class GatewayCodexRuntimeCommandMixin:
         if result.success and new_value is not None and result.requires_new_session:
             try:
                 session_key = self._session_key_for_source(event.source)
-                self._evict_cached_agent(session_key)
+                agent_cache_for(self).evict_cached_agent(session_key)
             except Exception:
                 logger.debug(
                     "could not evict cached agent after codex-runtime change",

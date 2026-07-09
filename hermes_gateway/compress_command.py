@@ -7,6 +7,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ class GatewayCompressCommandMixin:
                 aux_fail_model = getattr(compressor, "_last_aux_model_failure_model", None)
                 aux_fail_err = getattr(compressor, "_last_aux_model_failure_error", None)
             finally:
-                self._evict_cached_agent(session_key)
+                agent_cache_for(self).evict_cached_agent(session_key)
                 self._cleanup_agent_resources(tmp_agent)
             lines = [f"🗜️ {summary['headline']}"]
             if focus_topic:

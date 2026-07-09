@@ -15,12 +15,25 @@ AGENT_CACHE_MAX_SIZE = 128
 AGENT_CACHE_IDLE_TTL_SECS = 3600.0
 AGENT_PENDING_SENTINEL = object()
 
+CACHE_BUSTING_CONFIG_KEYS: tuple = (
+    ("model", "context_length"),
+    ("model", "max_tokens"),
+    ("compression", "enabled"),
+    ("compression", "threshold"),
+    ("compression", "target_ratio"),
+    ("compression", "protect_last_n"),
+    ("agent", "disabled_toolsets"),
+)
 
-class GatewayAgentCacheMixin:
+
+class GatewayAgentCacheService:
     """AIAgent cache signature, eviction, and idle sweep behavior."""
 
+    def __init__(self, runner):
+        self._runner = runner
+
     @staticmethod
-    def _agent_config_signature(
+    def agent_config_signature(
         model: str,
         runtime: dict,
         enabled_toolsets: list,
@@ -48,15 +61,36 @@ class GatewayAgentCacheMixin:
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def _evict_cached_agent(self, session_key: str) -> None:
+    @staticmethod
+    def extract_cache_busting_config(user_config: dict | None) -> dict:
+        """Pull values that must bust the cached agent."""
+        out: dict[str, Any] = {}
+        cfg = user_config if isinstance(user_config, dict) else {}
+        for section, key in CACHE_BUSTING_CONFIG_KEYS:
+            section_val = cfg.get(section)
+            if isinstance(section_val, dict):
+                out[f"{section}.{key}"] = section_val.get(key)
+            else:
+                out[f"{section}.{key}"] = None
+        try:
+            from tools.registry import registry
+
+            out["tools.registry_generation"] = getattr(registry, "_generation", None)
+        except Exception as exc:
+            logger.debug("Could not read tool registry generation for agent cache signature: %s", exc)
+            out["tools.registry_generation"] = None
+        return out
+
+    def evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session and soft-release its clients."""
-        lock = getattr(self, "_agent_cache_lock", None)
+        runner = self._runner
+        lock = getattr(runner, "_agent_cache_lock", None)
         evicted = None
         if lock:
             with lock:
-                evicted = self._agent_cache.pop(session_key, None)
+                evicted = runner._agent_cache.pop(session_key, None)
         else:
-            cache = getattr(self, "_agent_cache", None)
+            cache = getattr(runner, "_agent_cache", None)
             if cache is not None:
                 evicted = cache.pop(session_key, None)
 
@@ -66,7 +100,7 @@ class GatewayAgentCacheMixin:
 
         running_ids = {
             id(a)
-            for a in getattr(self, "_running_agents", {}).values()
+            for a in getattr(runner, "_running_agents", {}).values()
             if a is not None and a is not AGENT_PENDING_SENTINEL
         }
         if id(agent) in running_ids:
@@ -87,7 +121,7 @@ class GatewayAgentCacheMixin:
                 logger.debug("Inline agent cache release failed for %s: %s", session_key, release_exc)
 
     @staticmethod
-    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
+    def init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
         """Reset per-turn state on a cached agent before a new turn starts."""
         if interrupt_depth == 0:
             agent._last_activity_ts = time.time()
@@ -102,15 +136,16 @@ class GatewayAgentCacheMixin:
             if hasattr(agent, "release_clients"):
                 agent.release_clients()
             else:
-                self._cleanup_agent_resources(agent)
+                self._runner._cleanup_agent_resources(agent)
         except Exception as exc:
             logger.debug("Soft release of cache-evicted agent failed: %s", exc)
         if hasattr(agent, "_session_messages"):
             agent._session_messages = []
 
-    def _enforce_agent_cache_cap(self) -> None:
+    def enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents when cache exceeds ``AGENT_CACHE_MAX_SIZE``."""
-        cache = getattr(self, "_agent_cache", None)
+        runner = self._runner
+        cache = getattr(runner, "_agent_cache", None)
         if cache is None:
             return
         if not hasattr(cache, "move_to_end"):
@@ -118,7 +153,7 @@ class GatewayAgentCacheMixin:
 
         running_ids = {
             id(a)
-            for a in getattr(self, "_running_agents", {}).values()
+            for a in getattr(runner, "_running_agents", {}).values()
             if a is not None and a is not AGENT_PENDING_SENTINEL
         }
 
@@ -155,17 +190,18 @@ class GatewayAgentCacheMixin:
                     name=f"agent-cache-evict-{key[:24]}",
                 ).start()
 
-    def _sweep_idle_cached_agents(self) -> int:
+    def sweep_idle_cached_agents(self) -> int:
         """Evict cached agents idle past ``AGENT_CACHE_IDLE_TTL_SECS``."""
-        cache = getattr(self, "_agent_cache", None)
-        lock = getattr(self, "_agent_cache_lock", None)
+        runner = self._runner
+        cache = getattr(runner, "_agent_cache", None)
+        lock = getattr(runner, "_agent_cache_lock", None)
         if cache is None or lock is None:
             return 0
         now = time.time()
         to_evict: List[tuple] = []
         running_ids = {
             id(a)
-            for a in getattr(self, "_running_agents", {}).values()
+            for a in getattr(runner, "_running_agents", {}).values()
             if a is not None and a is not AGENT_PENDING_SENTINEL
         }
         with lock:
@@ -195,3 +231,12 @@ class GatewayAgentCacheMixin:
                 name=f"agent-cache-idle-{key[:24]}",
             ).start()
         return len(to_evict)
+
+
+def agent_cache_for(runner) -> GatewayAgentCacheService:
+    service = getattr(runner, "agent_cache", None)
+    if isinstance(service, GatewayAgentCacheService):
+        return service
+    service = GatewayAgentCacheService(runner)
+    runner.agent_cache = service
+    return service

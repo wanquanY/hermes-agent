@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from channels.platforms.base import SendResult
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import HomeChannel, Platform
 from hermes_gateway.session_handoff_runtime import session_handoff_runtime_for
 from hermes_gateway.session import build_session_key
@@ -30,7 +31,8 @@ async def test_process_handoff_switches_cli_session_and_dispatches_synthetic_tur
         return "handoff acknowledged"
 
     runner._handle_message = _handle_message
-    runner._evict_cached_agent = MagicMock()
+    cache_service = agent_cache_for(runner)
+    cache_service.evict_cached_agent = MagicMock()
     runner._release_running_agent_state = MagicMock(return_value=True)
     runner.session_store.get_or_create_session = MagicMock()
     runner.session_store.switch_session = MagicMock(return_value=object())
@@ -53,7 +55,7 @@ async def test_process_handoff_switches_cli_session_and_dispatches_synthetic_tur
     session_key = build_session_key(event.source)
     runner.session_store.get_or_create_session.assert_called_once_with(event.source)
     runner.session_store.switch_session.assert_called_once_with(session_key, "cli-session-1")
-    runner._evict_cached_agent.assert_called_once_with(session_key)
+    cache_service.evict_cached_agent.assert_called_once_with(session_key)
     runner._release_running_agent_state.assert_called_once_with(session_key)
     adapter.send.assert_called_once_with(
         chat_id="home-chat",

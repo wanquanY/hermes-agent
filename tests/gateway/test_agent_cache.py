@@ -37,8 +37,8 @@ class TestAgentConfigSignature:
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         assert sig1 == sig2
 
     def test_model_change_different_signature(self):
@@ -46,8 +46,8 @@ class TestAgentConfigSignature:
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-opus-4.6", runtime, ["hermes-telegram"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-opus-4.6", runtime, ["hermes-telegram"], "")
         assert sig1 != sig2
 
     def test_same_token_prefix_different_full_token_changes_signature(self):
@@ -68,8 +68,8 @@ class TestAgentConfigSignature:
         }
 
         assert rt1["api_key"][:8] == rt2["api_key"][:8]
-        sig1 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt1, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt2, ["hermes-telegram"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("gpt-5.3-codex", rt1, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("gpt-5.3-codex", rt2, ["hermes-telegram"], "")
         assert sig1 != sig2
 
     def test_provider_change_different_signature(self):
@@ -77,16 +77,16 @@ class TestAgentConfigSignature:
 
         rt1 = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         rt2 = {"api_key": "sk-test12345678", "base_url": "https://api.anthropic.com", "provider": "anthropic"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt1, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt2, ["hermes-telegram"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", rt1, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", rt2, ["hermes-telegram"], "")
         assert sig1 != sig2
 
     def test_toolset_change_different_signature(self):
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-discord"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-discord"], "")
         assert sig1 != sig2
 
     def test_reasoning_not_in_signature(self):
@@ -96,8 +96,8 @@ class TestAgentConfigSignature:
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         # Same config — signature should be identical regardless of what
         # reasoning_config the caller might have (it's not passed in)
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         assert sig1 == sig2
 
     # ---------------------------------------------------------------
@@ -109,9 +109,9 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig_omitted = GatewayRunner._agent_config_signature("m", runtime, [], "")
-        sig_empty = GatewayRunner._agent_config_signature("m", runtime, [], "", cache_keys={})
-        sig_none = GatewayRunner._agent_config_signature("m", runtime, [], "", cache_keys=None)
+        sig_omitted = agent_cache.GatewayAgentCacheService.agent_config_signature("m", runtime, [], "")
+        sig_empty = agent_cache.GatewayAgentCacheService.agent_config_signature("m", runtime, [], "", cache_keys={})
+        sig_none = agent_cache.GatewayAgentCacheService.agent_config_signature("m", runtime, [], "", cache_keys=None)
         assert sig_omitted == sig_empty == sig_none
 
     def test_context_length_change_busts_cache(self):
@@ -119,11 +119,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig1 = GatewayRunner._agent_config_signature(
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"model.context_length": 200_000},
         )
-        sig2 = GatewayRunner._agent_config_signature(
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"model.context_length": 400_000},
         )
@@ -134,11 +134,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig1 = GatewayRunner._agent_config_signature(
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"model.max_tokens": 4096},
         )
-        sig2 = GatewayRunner._agent_config_signature(
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"model.max_tokens": 8192},
         )
@@ -148,11 +148,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig1 = GatewayRunner._agent_config_signature(
+        sig1 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"compression.threshold": 0.50},
         )
-        sig2 = GatewayRunner._agent_config_signature(
+        sig2 = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"compression.threshold": 0.75},
         )
@@ -162,11 +162,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig_on = GatewayRunner._agent_config_signature(
+        sig_on = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"compression.enabled": True},
         )
-        sig_off = GatewayRunner._agent_config_signature(
+        sig_off = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"compression.enabled": False},
         )
@@ -177,11 +177,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig_a = GatewayRunner._agent_config_signature(
+        sig_a = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"model.context_length": 200_000, "compression.threshold": 0.5},
         )
-        sig_b = GatewayRunner._agent_config_signature(
+        sig_b = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
             cache_keys={"compression.threshold": 0.5, "model.context_length": 200_000},
         )
@@ -192,11 +192,11 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "k", "base_url": "u", "provider": "p"}
-        sig_before = GatewayRunner._agent_config_signature(
+        sig_before = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, ["telegram"], "",
             cache_keys={"tools.registry_generation": 10},
         )
-        sig_after = GatewayRunner._agent_config_signature(
+        sig_after = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, ["telegram"], "",
             cache_keys={"tools.registry_generation": 11},
         )
@@ -205,13 +205,13 @@ class TestAgentConfigSignature:
 
 
 class TestExtractCacheBustingConfig:
-    """Verify _extract_cache_busting_config pulls the documented subset of
+    """Verify extract_cache_busting_config pulls the documented subset of
     config values that must invalidate the cached agent on change."""
 
     def test_reads_model_context_length(self):
         from gateway.run import GatewayRunner
 
-        out = GatewayRunner._extract_cache_busting_config(
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
             {
                 "model": {
                     "context_length": 272_000,
@@ -226,7 +226,7 @@ class TestExtractCacheBustingConfig:
     def test_reads_compression_subkeys(self):
         from gateway.run import GatewayRunner
 
-        out = GatewayRunner._extract_cache_busting_config(
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
             {
                 "compression": {
                     "enabled": False,
@@ -246,9 +246,9 @@ class TestExtractCacheBustingConfig:
         """Absent config keys must produce None values (still contribute to signature)."""
         from gateway.run import GatewayRunner
 
-        out = GatewayRunner._extract_cache_busting_config({})
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config({})
         # Every documented cache-busting key must be present, even if None
-        for section, key in GatewayRunner._CACHE_BUSTING_CONFIG_KEYS:
+        for section, key in agent_cache.CACHE_BUSTING_CONFIG_KEYS:
             assert f"{section}.{key}" in out
             assert out[f"{section}.{key}"] is None
 
@@ -256,7 +256,7 @@ class TestExtractCacheBustingConfig:
         from gateway.run import GatewayRunner
 
         # compression is a string — should not crash, all compression.* keys None
-        out = GatewayRunner._extract_cache_busting_config(
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(
             {"compression": "broken", "model": {"context_length": 100_000}}
         )
         assert out["compression.enabled"] is None
@@ -266,8 +266,8 @@ class TestExtractCacheBustingConfig:
     def test_none_config_is_safe(self):
         from gateway.run import GatewayRunner
 
-        out = GatewayRunner._extract_cache_busting_config(None)
-        for section, key in GatewayRunner._CACHE_BUSTING_CONFIG_KEYS:
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config(None)
+        for section, key in agent_cache.CACHE_BUSTING_CONFIG_KEYS:
             assert out[f"{section}.{key}"] is None
         assert "tools.registry_generation" in out
 
@@ -277,7 +277,7 @@ class TestExtractCacheBustingConfig:
 
         monkeypatch.setattr(registry, "_generation", 12345)
 
-        out = GatewayRunner._extract_cache_busting_config({})
+        out = agent_cache.GatewayAgentCacheService.extract_cache_busting_config({})
 
         assert out["tools.registry_generation"] == 12345
 
@@ -296,13 +296,13 @@ class TestExtractCacheBustingConfig:
             "compression": {"threshold": 0.75, "enabled": True},  # user raised threshold
         }
 
-        sig_before = GatewayRunner._agent_config_signature(
+        sig_before = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
-            cache_keys=GatewayRunner._extract_cache_busting_config(cfg_before),
+            cache_keys=agent_cache.GatewayAgentCacheService.extract_cache_busting_config(cfg_before),
         )
-        sig_after = GatewayRunner._agent_config_signature(
+        sig_after = agent_cache.GatewayAgentCacheService.agent_config_signature(
             "m", runtime, [], "",
-            cache_keys=GatewayRunner._extract_cache_busting_config(cfg_after),
+            cache_keys=agent_cache.GatewayAgentCacheService.extract_cache_busting_config(cfg_after),
         )
         assert sig_before != sig_after, (
             "Editing compression.threshold in config.yaml must bust the "
@@ -321,7 +321,7 @@ class TestAgentCacheLifecycle:
         session_key = "telegram:12345"
         runtime = {"api_key": "test", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
-        sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig = agent_cache.agent_cache_for(runner).agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
 
         # First message — create and cache
         agent1 = AIAgent(
@@ -349,7 +349,7 @@ class TestAgentCacheLifecycle:
         runtime = {"api_key": "test", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
 
-        old_sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        old_sig = agent_cache.agent_cache_for(runner).agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
         agent1 = AIAgent(
             model="anthropic/claude-sonnet-4", api_key="test",
             base_url="https://openrouter.ai/api/v1", provider="openrouter",
@@ -360,7 +360,7 @@ class TestAgentCacheLifecycle:
             runner._agent_cache[session_key] = (agent1, old_sig)
 
         # New model → different signature
-        new_sig = runner._agent_config_signature("anthropic/claude-opus-4.6", runtime, ["hermes-telegram"], "")
+        new_sig = agent_cache.agent_cache_for(runner).agent_config_signature("anthropic/claude-opus-4.6", runtime, ["hermes-telegram"], "")
         assert new_sig != old_sig
 
         with runner._agent_cache_lock:
@@ -368,7 +368,7 @@ class TestAgentCacheLifecycle:
         assert cached[1] != new_sig  # signature mismatch → would create new agent
 
     def test_evict_on_session_reset(self):
-        """_evict_cached_agent removes the entry."""
+        """agent_cache.evict_cached_agent removes the entry."""
         from run_agent import AIAgent
 
         runner = _make_runner()
@@ -383,7 +383,7 @@ class TestAgentCacheLifecycle:
         with runner._agent_cache_lock:
             runner._agent_cache[session_key] = (agent, "sig123")
 
-        runner._evict_cached_agent(session_key)
+        agent_cache.agent_cache_for(runner).evict_cached_agent(session_key)
 
         with runner._agent_cache_lock:
             assert session_key not in runner._agent_cache
@@ -395,7 +395,7 @@ class TestAgentCacheLifecycle:
             runner._agent_cache["session-A"] = ("agent-A", "sig-A")
             runner._agent_cache["session-B"] = ("agent-B", "sig-B")
 
-        runner._evict_cached_agent("session-A")
+        agent_cache.agent_cache_for(runner).evict_cached_agent("session-A")
 
         with runner._agent_cache_lock:
             assert "session-A" not in runner._agent_cache
@@ -507,7 +507,7 @@ class TestAgentCacheBoundedGrowth:
         # Insert a 4th — oldest (s0) must be evicted.
         with runner._agent_cache_lock:
             runner._agent_cache["s3"] = (self._fake_agent(), "sig3")
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         assert "s0" not in runner._agent_cache
         assert "s3" in runner._agent_cache
@@ -528,7 +528,7 @@ class TestAgentCacheBoundedGrowth:
 
         with runner._agent_cache_lock:
             runner._agent_cache["s3"] = (self._fake_agent(), "sig3")
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         assert "s0" in runner._agent_cache  # rescued by move_to_end
         assert "s1" not in runner._agent_cache  # now oldest → evicted
@@ -550,7 +550,8 @@ class TestAgentCacheBoundedGrowth:
         # Intercept both paths; only release_clients path should fire.
         def _soft(agent):
             release_calls.append(agent)
-        runner._release_evicted_agent_soft = _soft
+        cache_service = agent_cache.agent_cache_for(runner)
+        cache_service._release_evicted_agent_soft = _soft
         runner._cleanup_agent_resources = lambda a: cleanup_calls.append(a)
 
         old_agent = self._fake_agent()
@@ -558,7 +559,7 @@ class TestAgentCacheBoundedGrowth:
         with runner._agent_cache_lock:
             runner._agent_cache["old"] = (old_agent, "sig_old")
             runner._agent_cache["new"] = (new_agent, "sig_new")
-            runner._enforce_agent_cache_cap()
+            cache_service.enforce_agent_cache_cap()
 
         # Cleanup is dispatched to a daemon thread; join briefly to observe.
         import time as _t
@@ -571,7 +572,7 @@ class TestAgentCacheBoundedGrowth:
         assert cleanup_calls == []
 
     def test_idle_ttl_sweep_evicts_stale_agents(self, monkeypatch):
-        """_sweep_idle_cached_agents removes agents idle past the TTL."""
+        """sweep_idle_cached_agents removes agents idle past the TTL."""
 
         monkeypatch.setattr(agent_cache, "AGENT_CACHE_IDLE_TTL_SECS", 0.05)
         runner = self._bounded_runner()
@@ -583,7 +584,7 @@ class TestAgentCacheBoundedGrowth:
         runner._agent_cache["fresh"] = (fresh, "s1")
         runner._agent_cache["stale"] = (stale, "s2")
 
-        evicted = runner._sweep_idle_cached_agents()
+        evicted = agent_cache.agent_cache_for(runner).sweep_idle_cached_agents()
         assert evicted == 1
         assert "stale" not in runner._agent_cache
         assert "fresh" in runner._agent_cache
@@ -598,11 +599,11 @@ class TestAgentCacheBoundedGrowth:
         no_ts = MagicMock(spec=[])  # no _last_activity_ts attribute
         runner._agent_cache["s"] = (no_ts, "sig")
 
-        assert runner._sweep_idle_cached_agents() == 0
+        assert agent_cache.agent_cache_for(runner).sweep_idle_cached_agents() == 0
         assert "s" in runner._agent_cache
 
     def test_plain_dict_cache_is_tolerated(self):
-        """Test fixtures using plain {} don't crash _enforce_agent_cache_cap."""
+        """Test fixtures using plain {} don't crash enforce_agent_cache_cap."""
         from gateway.run import GatewayRunner
 
         runner = GatewayRunner.__new__(GatewayRunner)
@@ -614,7 +615,7 @@ class TestAgentCacheBoundedGrowth:
         with runner._agent_cache_lock:
             for i in range(200):
                 runner._agent_cache[f"s{i}"] = (MagicMock(), f"sig{i}")
-            runner._enforce_agent_cache_cap()  # no crash, no eviction
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()  # no crash, no eviction
 
         assert len(runner._agent_cache) == 200
 
@@ -694,7 +695,7 @@ class TestAgentCacheActiveSafety:
         runner._running_agents["session-active"] = active
 
         with runner._agent_cache_lock:
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         # All three remain; no eviction ran, no cleanup dispatched.
         assert "session-active" in runner._agent_cache
@@ -727,7 +728,7 @@ class TestAgentCacheActiveSafety:
         runner._running_agents["s1"] = oldest_active  # oldest is mid-turn
 
         with runner._agent_cache_lock:
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         # s1 protected (active), s2 evicted (idle + in excess window),
         # s3 and s4 untouched (outside excess window).
@@ -762,7 +763,7 @@ class TestAgentCacheActiveSafety:
 
         with caplog.at_level(_logging.WARNING, logger="hermes_gateway.agent_cache"):
             with runner._agent_cache_lock:
-                runner._enforce_agent_cache_cap()
+                agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         # Cache unchanged because eviction had to skip every candidate.
         assert len(runner._agent_cache) == 3
@@ -792,7 +793,7 @@ class TestAgentCacheActiveSafety:
         runner._running_agents["s3-being-created"] = _AGENT_PENDING_SENTINEL
 
         with runner._agent_cache_lock:
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         assert "s1" not in runner._agent_cache  # evicted normally
         assert "s2" in runner._agent_cache
@@ -808,7 +809,7 @@ class TestAgentCacheActiveSafety:
         runner._agent_cache["s1"] = (old_but_active, "sig")
         runner._running_agents["s1"] = old_but_active
 
-        evicted = runner._sweep_idle_cached_agents()
+        evicted = agent_cache.agent_cache_for(runner).sweep_idle_cached_agents()
 
         assert evicted == 0
         assert "s1" in runner._agent_cache
@@ -844,7 +845,7 @@ class TestAgentCacheActiveSafety:
         # Real cleanup function, not mocked — we want to see whether close()
         # runs on the active agent.  (It shouldn't.)
         with runner._agent_cache_lock:
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         # Let any eviction cleanup threads drain.
         import time as _t
@@ -892,14 +893,14 @@ class TestAgentCacheSpilloverLive:
         for i, a in enumerate(agents):
             with runner._agent_cache_lock:
                 runner._agent_cache[f"s{i}"] = (a, "sig")
-                runner._enforce_agent_cache_cap()
+                agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
         assert len(runner._agent_cache) == CAP
 
         # Spillover insertion.
         newcomer = self._real_agent()
         with runner._agent_cache_lock:
             runner._agent_cache["new"] = (newcomer, "sig")
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         # Oldest (s0) evicted, cap still CAP.
         assert "s0" not in runner._agent_cache
@@ -930,7 +931,7 @@ class TestAgentCacheSpilloverLive:
         with caplog.at_level(_logging.WARNING, logger="hermes_gateway.agent_cache"):
             with runner._agent_cache_lock:
                 runner._agent_cache["new"] = (newcomer, "sig")
-                runner._enforce_agent_cache_cap()
+                agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         assert len(runner._agent_cache) == CAP + 1  # temporarily over cap
         # All existing agents still usable.
@@ -966,7 +967,7 @@ class TestAgentCacheSpilloverLive:
         a2 = self._real_agent()
         with runner._agent_cache_lock:
             runner._agent_cache["sC"] = (a2, "sig")
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
         assert "sA" not in runner._agent_cache
 
         # Let the eviction cleanup thread run.
@@ -977,7 +978,7 @@ class TestAgentCacheSpilloverLive:
         a0_new = self._real_agent()
         with runner._agent_cache_lock:
             runner._agent_cache["sA"] = (a0_new, "sig")
-            runner._enforce_agent_cache_cap()
+            agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
 
         assert "sA" in runner._agent_cache
         assert runner._agent_cache["sA"][0] is a0_new  # the new one, not stale
@@ -1172,7 +1173,7 @@ class TestAgentCacheIdleResume:
         runner._agent_cache["sKey"] = (old, "sig")
 
         # Simulate the idle-TTL sweep firing.
-        runner._sweep_idle_cached_agents()
+        agent_cache.agent_cache_for(runner).sweep_idle_cached_agents()
         assert "sKey" not in runner._agent_cache
 
         # Wait for the daemon thread doing release_clients() to finish.
@@ -1235,7 +1236,7 @@ class TestCachedAgentInactivityReset:
 
         with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
-            GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=0)
+            agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=0)
 
         assert agent._last_activity_ts == _FAKE_NOW, (
             "_last_activity_ts was not reset on a fresh turn (interrupt_depth=0)"
@@ -1252,7 +1253,7 @@ class TestCachedAgentInactivityReset:
 
         with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
-            GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=0)
+            agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=0)
 
         assert agent._last_activity_desc == "starting new turn (cached)"
 
@@ -1264,7 +1265,7 @@ class TestCachedAgentInactivityReset:
         agent = self._fake_agent(stale_seconds=1200.0)
         old_ts = agent._last_activity_ts
 
-        GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=1)
+        agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=1)
 
         assert agent._last_activity_ts == old_ts, (
             "_last_activity_ts must not be reset on interrupt-recursive turns "
@@ -1277,7 +1278,7 @@ class TestCachedAgentInactivityReset:
 
         agent = self._fake_agent(stale_seconds=1200.0)
 
-        GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=1)
+        agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=1)
 
         assert agent._last_activity_desc == "previous turn activity", (
             "_last_activity_desc must not change on interrupt-recursive turns; "
@@ -1291,7 +1292,7 @@ class TestCachedAgentInactivityReset:
         agent = self._fake_agent(stale_seconds=600.0)
         old_ts = agent._last_activity_ts
 
-        GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=4)
+        agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=4)
 
         assert agent._last_activity_ts == old_ts
 
@@ -1304,8 +1305,8 @@ class TestCachedAgentInactivityReset:
 
         with patch("hermes_gateway.agent_cache.time") as mock_time:
             mock_time.time.return_value = _FAKE_NOW
-            GatewayRunner._init_cached_agent_for_turn(agent_fresh, interrupt_depth=0)
-        GatewayRunner._init_cached_agent_for_turn(agent_interrupted, interrupt_depth=1)
+            agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent_fresh, interrupt_depth=0)
+        agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent_interrupted, interrupt_depth=1)
 
         assert agent_fresh._api_call_count == 0
         assert agent_interrupted._api_call_count == 0
@@ -1323,7 +1324,7 @@ class TestCachedAgentInactivityReset:
 
         # Simulate: user sees "Still working..." and sends another message.
         # That triggers an interrupt → _run_agent recurses at depth=1.
-        GatewayRunner._init_cached_agent_for_turn(agent, interrupt_depth=1)
+        agent_cache.GatewayAgentCacheService.init_cached_agent_for_turn(agent, interrupt_depth=1)
 
         # Watchdog sees time.time() - _last_activity_ts ≥ STUCK_FOR.
         idle_secs = _FAKE_NOW - agent._last_activity_ts

@@ -14,6 +14,8 @@ import threading
 
 import pytest
 
+import hermes_gateway.agent_cache as agent_cache
+
 
 def _spawn_sleep(seconds: float = 60) -> subprocess.Popen:
     """Spawn a portable long-lived Python sleep process (no shell wrapper)."""
@@ -297,7 +299,7 @@ class TestGatewayCleanupWiring:
         mock_agent_2.close.assert_called()
 
     def test_evict_does_not_call_close(self):
-        """_evict_cached_agent() should NOT call close() — it's also used
+        """agent_cache.evict_cached_agent() should NOT call close() — it's also used
         for non-destructive refreshes (model switch, branch, fallback)."""
         import threading
         from unittest.mock import MagicMock
@@ -310,7 +312,7 @@ class TestGatewayCleanupWiring:
         mock_agent = MagicMock()
         runner._agent_cache = {"session-key": (mock_agent, 12345)}
 
-        GatewayRunner._evict_cached_agent(runner, "session-key")
+        agent_cache.agent_cache_for(runner).evict_cached_agent("session-key")
 
         mock_agent.close.assert_not_called()
         assert "session-key" not in runner._agent_cache

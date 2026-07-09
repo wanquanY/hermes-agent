@@ -10,6 +10,7 @@ from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from channels.platforms.base_models import EphemeralReply
 from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ class GatewayResetCommandMixin:
                 _old_agent = _cached[0] if isinstance(_cached, tuple) else _cached if _cached else None
             if _old_agent is not None:
                 self._cleanup_agent_resources(_old_agent)
-        self._evict_cached_agent(session_key)
+        agent_cache_for(self).evict_cached_agent(session_key)
 
         # Discard any /queue overflow for this session — /new is a
         # conversation-boundary operation, queued follow-ups from the

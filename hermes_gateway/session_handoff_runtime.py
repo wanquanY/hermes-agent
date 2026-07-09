@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict
 
 from channels.platforms.base import MessageEvent
+from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource, build_session_key
 
@@ -108,7 +109,7 @@ class GatewaySessionHandoffRuntimeService:
         if switched is None:
             raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
 
-        runner._evict_cached_agent(session_key)
+        agent_cache_for(runner).evict_cached_agent(session_key)
         runner._release_running_agent_state(session_key)
 
         synthetic_text = (

@@ -52,10 +52,8 @@ from hermes_agent.storage.session_availability import format_session_store_unava
 from hermes_cli.config import cfg_get
 from hermes_gateway.approval_commands import GatewayApprovalCommandMixin
 from hermes_gateway.agent_cache import (
-    AGENT_CACHE_IDLE_TTL_SECS as _AGENT_CACHE_IDLE_TTL_SECS,
-    AGENT_CACHE_MAX_SIZE as _AGENT_CACHE_MAX_SIZE,
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
-    GatewayAgentCacheMixin,
+    agent_cache_for,
 )
 from hermes_gateway.assets import telegram_botfather_threads_settings_path
 from hermes_gateway.background_tasks import GatewayBackgroundTaskMixin
@@ -516,7 +514,6 @@ class GatewayRunner(
     GatewayFastCommandMixin,
     GatewayFooterCommandMixin,
     GatewayGoalCommandMixin,
-    GatewayAgentCacheMixin,
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
@@ -636,7 +633,7 @@ class GatewayRunner(
         # and costing ~10x more on providers with prompt caching (Anthropic).
         # Key: session_key, Value: (AIAgent, config_signature_str)
         #
-        # OrderedDict so _enforce_agent_cache_cap() can pop the least-recently-
+        # OrderedDict so the agent cache service can pop the least-recently-
         # used entry (move_to_end() on cache hits, popitem(last=False) for
         # eviction).  Hard cap via _AGENT_CACHE_MAX_SIZE, idle TTL enforced
         # from _session_expiry_watcher().
@@ -2924,7 +2921,7 @@ class GatewayRunner(
                                     # Evict the cached agent so the next turn
                                     # rebuilds its system prompt from current
                                     # SOUL.md, memory, and skills.
-                                    self._evict_cached_agent(session_key)
+                                    agent_cache_for(self).evict_cached_agent(session_key)
                                     self._cleanup_agent_resources(_hyg_agent)
 
                     except Exception as e:
@@ -3249,7 +3246,7 @@ class GatewayRunner(
                     session_entry.session_id,
                 )
                 self.session_store.reset_session(session_key)
-                self._evict_cached_agent(session_key)
+                agent_cache_for(self).evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
                 runtime_config_for(self).set_session_reasoning_override(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
@@ -3693,57 +3690,7 @@ class GatewayRunner(
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
-
-
     _MAX_INTERRUPT_DEPTH = 3  # Cap recursive interrupt handling (#816)
-
-    # Config keys whose values MUST invalidate the gateway's cached agent
-    # when they change.  The agent bakes these into its compressor / context
-    # handling at construction time, so a mid-running-gateway config edit
-    # would otherwise be silently ignored until the user triggers a
-    # different cache eviction (model switch, /reset, etc.).
-    #
-    # Each entry is a tuple of (section, key) read from the raw config dict.
-    # Add more here as new baked-at-construction config settings are added.
-    _CACHE_BUSTING_CONFIG_KEYS: tuple = (
-        ("model", "context_length"),
-        ("model", "max_tokens"),
-        ("compression", "enabled"),
-        ("compression", "threshold"),
-        ("compression", "target_ratio"),
-        ("compression", "protect_last_n"),
-        ("agent", "disabled_toolsets"),
-    )
-
-    @classmethod
-    def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
-        """Pull values that must bust the cached agent.
-
-        Returns a flat dict keyed by 'section.key'.  Missing config keys and
-        non-dict sections yield None values, which still contribute to the
-        signature (so 'absent' vs 'present-and-null' differ).
-
-        The live tool registry generation is included too.  MCP reloads and
-        dynamic MCP tool-list changes mutate the registry without necessarily
-        changing config.yaml.  Cached AIAgent instances freeze their tool
-        schemas at construction time, so a registry generation change must
-        rebuild the agent before the next turn.
-        """
-        out: Dict[str, Any] = {}
-        cfg = user_config if isinstance(user_config, dict) else {}
-        for section, key in cls._CACHE_BUSTING_CONFIG_KEYS:
-            section_val = cfg.get(section)
-            if isinstance(section_val, dict):
-                out[f"{section}.{key}"] = section_val.get(key)
-            else:
-                out[f"{section}.{key}"] = None
-        try:
-            from tools.registry import registry
-
-            out["tools.registry_generation"] = getattr(registry, "_generation", None)
-        except Exception:
-            out["tools.registry_generation"] = None
-        return out
 
 
 
@@ -4648,12 +4595,13 @@ class GatewayRunner(
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
-            _sig = self._agent_config_signature(
+            agent_cache = agent_cache_for(self)
+            _sig = agent_cache.agent_config_signature(
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys=agent_cache.extract_cache_busting_config(user_config),
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -4670,7 +4618,7 @@ class GatewayRunner(
                                 _cache.move_to_end(session_key)
                             except KeyError:
                                 pass
-                        self._init_cached_agent_for_turn(agent, _interrupt_depth)
+                        agent_cache.init_cached_agent_for_turn(agent, _interrupt_depth)
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
@@ -4709,7 +4657,7 @@ class GatewayRunner(
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig)
-                        self._enforce_agent_cache_cap()
+                        agent_cache.enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
             # Per-message state — callbacks and reasoning config change every
@@ -5643,7 +5591,7 @@ class GatewayRunner(
                 if _agent.model != _cfg_model and not self._is_intentional_model_switch(session_key, _agent.model):
                     # Fallback activated on a successful run — evict cached
                     # agent so the next message retries the primary model.
-                    self._evict_cached_agent(session_key)
+                    agent_cache_for(self).evict_cached_agent(session_key)
 
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]

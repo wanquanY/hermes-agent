@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 
-from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
+from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL, agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ class GatewaySessionExpiryRuntimeService:
         if cached_agent and cached_agent is not AGENT_PENDING_SENTINEL:
             runner._cleanup_agent_resources(cached_agent)
 
-        runner._evict_cached_agent(key)
+        agent_cache_for(runner).evict_cached_agent(key)
         runner._session_model_overrides.pop(key, None)
         runtime_config_for(runner).set_session_reasoning_override(key, None)
         if hasattr(runner, "_pending_model_notes"):
@@ -135,7 +135,7 @@ class GatewaySessionExpiryRuntimeService:
     def sweep_idle_and_prune_sessions(self) -> None:
         runner = self._runner
         try:
-            idle_evicted = runner._sweep_idle_cached_agents()
+            idle_evicted = agent_cache_for(runner).sweep_idle_cached_agents()
             if idle_evicted:
                 logger.info("Agent cache idle sweep: evicted %d agent(s)", idle_evicted)
         except Exception as exc:
