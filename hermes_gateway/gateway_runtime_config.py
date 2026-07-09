@@ -30,8 +30,12 @@ def _read_gateway_config() -> dict:
     return load_gateway_runtime_config(_hermes_home)
 
 
-class GatewayRuntimeConfigMixin:
-    def _resolve_session_agent_runtime(
+class GatewayRuntimeConfigService:
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def resolve_session_agent_runtime(
         self,
         *,
         source=None,
@@ -42,12 +46,12 @@ class GatewayRuntimeConfigMixin:
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
             try:
-                resolved_session_key = self._session_key_for_source(source)
+                resolved_session_key = self._runner._session_key_for_source(source)
             except Exception:
                 resolved_session_key = None
 
         model = resolve_gateway_model(user_config)
-        override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
+        override = self._runner._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
         if override:
             override_model = override.get("model", model)
             override_runtime = {
@@ -71,7 +75,7 @@ class GatewayRuntimeConfigMixin:
             logger.debug(
                 "No session model override: session=%s config_model=%s override_keys=%s",
                 resolved_session_key or "", model,
-                list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
+                list(self._runner._session_model_overrides.keys())[:5] if self._runner._session_model_overrides else "[]",
             )
 
         runtime_kwargs = resolve_runtime_agent_kwargs(_hermes_home)
@@ -84,7 +88,7 @@ class GatewayRuntimeConfigMixin:
             )
             model = runtime_model
         if override and resolved_session_key:
-            model, runtime_kwargs = self._apply_session_model_override(
+            model, runtime_kwargs = self._runner._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
 
@@ -103,7 +107,7 @@ class GatewayRuntimeConfigMixin:
 
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         """Build the effective model/runtime config for a single turn."""
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -129,7 +133,7 @@ class GatewayRuntimeConfigMixin:
             ),
         }
 
-        service_tier = getattr(self, "_service_tier", None)
+        service_tier = getattr(self._runner, "_service_tier", None)
         if not service_tier:
             route["request_overrides"] = {}
             return route
@@ -142,7 +146,7 @@ class GatewayRuntimeConfigMixin:
         return route
 
     @staticmethod
-    def _load_prefill_messages() -> list[Dict[str, Any]]:
+    def load_prefill_messages() -> list[Dict[str, Any]]:
         """Load ephemeral prefill messages from config or env var."""
         file_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "")
         if not file_path:
@@ -167,7 +171,7 @@ class GatewayRuntimeConfigMixin:
             return []
 
     @staticmethod
-    def _load_ephemeral_system_prompt() -> str:
+    def load_ephemeral_system_prompt() -> str:
         """Load ephemeral system prompt from config or env var."""
         prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
         if prompt:
@@ -175,10 +179,10 @@ class GatewayRuntimeConfigMixin:
         return (cfg_get(_read_gateway_config(), "agent", "system_prompt", default="") or "").strip()
 
     @staticmethod
-    def _load_reasoning_config() -> dict | None:
+    def load_reasoning_config() -> dict | None:
         return load_reasoning_config(_read_gateway_config())
 
-    def _resolve_session_reasoning_config(
+    def resolve_session_reasoning_config(
         self,
         *,
         source=None,
@@ -188,16 +192,16 @@ class GatewayRuntimeConfigMixin:
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
             try:
-                resolved_session_key = self._session_key_for_source(source)
+                resolved_session_key = self._runner._session_key_for_source(source)
             except Exception:
                 resolved_session_key = None
 
-        overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
+        overrides = getattr(self._runner, "_session_reasoning_overrides", {}) or {}
         if resolved_session_key and resolved_session_key in overrides:
             return overrides[resolved_session_key]
-        return self._load_reasoning_config()
+        return self.load_reasoning_config()
 
-    def _set_session_reasoning_override(
+    def set_session_reasoning_override(
         self,
         session_key: str,
         reasoning_config: Optional[dict],
@@ -205,15 +209,15 @@ class GatewayRuntimeConfigMixin:
         """Set or clear the session-scoped reasoning override."""
         if not session_key:
             return
-        if not hasattr(self, "_session_reasoning_overrides"):
-            self._session_reasoning_overrides = {}
+        if not hasattr(self._runner, "_session_reasoning_overrides"):
+            self._runner._session_reasoning_overrides = {}
         if reasoning_config is None:
-            self._session_reasoning_overrides.pop(session_key, None)
+            self._runner._session_reasoning_overrides.pop(session_key, None)
         else:
-            self._session_reasoning_overrides[session_key] = dict(reasoning_config)
+            self._runner._session_reasoning_overrides[session_key] = dict(reasoning_config)
 
     @staticmethod
-    def _load_busy_input_mode() -> str:
+    def load_busy_input_mode() -> str:
         """Load gateway drain-time busy-input behavior from config/env."""
         mode = os.getenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
         if not mode:
@@ -225,7 +229,7 @@ class GatewayRuntimeConfigMixin:
         return "interrupt"
 
     @staticmethod
-    def _load_restart_drain_timeout() -> float:
+    def load_restart_drain_timeout() -> float:
         """Load graceful gateway restart/stop drain timeout in seconds."""
         raw = os.getenv("HERMES_RESTART_DRAIN_TIMEOUT", "").strip()
         if not raw:
@@ -243,7 +247,7 @@ class GatewayRuntimeConfigMixin:
         return value
 
     @staticmethod
-    def _load_background_notifications_mode() -> str:
+    def load_background_notifications_mode() -> str:
         """Load background process notification mode from config or env var."""
         mode = os.getenv("HERMES_BACKGROUND_NOTIFICATIONS", "")
         if not mode:
@@ -263,11 +267,20 @@ class GatewayRuntimeConfigMixin:
         return mode
 
     @staticmethod
-    def _load_provider_routing() -> dict:
+    def load_provider_routing() -> dict:
         """Load OpenRouter provider routing preferences from config.yaml."""
         cfg = _read_gateway_config()
         return cfg.get("provider_routing", {}) or {}
 
     @staticmethod
-    def _load_fallback_model() -> list | dict | None:
+    def load_fallback_model() -> list | dict | None:
         return load_fallback_model(_read_gateway_config())
+
+
+def runtime_config_for(runner) -> GatewayRuntimeConfigService:
+    service = getattr(runner, "runtime_config", None)
+    if isinstance(service, GatewayRuntimeConfigService):
+        return service
+    service = GatewayRuntimeConfigService(runner)
+    runner.runtime_config = service
+    return service

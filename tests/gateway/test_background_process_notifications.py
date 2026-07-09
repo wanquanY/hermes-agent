@@ -74,7 +74,7 @@ class TestLoadBackgroundNotificationsMode:
     def test_defaults_to_all(self, monkeypatch, tmp_path):
         monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "all"
 
     def test_reads_config_yaml(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -82,7 +82,7 @@ class TestLoadBackgroundNotificationsMode:
         )
         monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "error"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "error"
 
     def test_env_var_overrides_config(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -90,7 +90,7 @@ class TestLoadBackgroundNotificationsMode:
         )
         monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.setenv("HERMES_BACKGROUND_NOTIFICATIONS", "off")
-        assert GatewayRunner._load_background_notifications_mode() == "off"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "off"
 
     def test_false_value_maps_to_off(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -98,7 +98,7 @@ class TestLoadBackgroundNotificationsMode:
         )
         monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "off"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "off"
 
     def test_invalid_value_defaults_to_all(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -106,7 +106,7 @@ class TestLoadBackgroundNotificationsMode:
         )
         monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "all"
 
 
 # ---------------------------------------------------------------------------

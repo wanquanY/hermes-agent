@@ -98,7 +98,7 @@ def test_turn_route_injects_priority_processing_without_changing_runtime():
         "credential_pool": None,
     }
 
-    route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.4", runtime_kwargs)
+    route = gateway_runtime_config.runtime_config_for(runner).resolve_turn_agent_config("hi", "gpt-5.4", runtime_kwargs)
 
     assert route["runtime"]["provider"] == "openrouter"
     assert route["runtime"]["api_mode"] == "chat_completions"
@@ -118,7 +118,7 @@ def test_turn_route_skips_priority_processing_for_unsupported_models():
         "credential_pool": None,
     }
 
-    route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.3-codex", runtime_kwargs)
+    route = gateway_runtime_config.runtime_config_for(runner).resolve_turn_agent_config("hi", "gpt-5.3-codex", runtime_kwargs)
 
     assert route["request_overrides"] == {}
 

@@ -9,6 +9,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.config import cfg_get
 from channels.platforms.base import MessageEvent
 from hermes_gateway.config import Platform
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 from utils import atomic_yaml_write, is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class GatewayReasoningCommandMixin:
         config_path = gateway_home() / "config.yaml"
         session_key = self._session_key_for_source(event.source)
         self._show_reasoning = self._load_show_reasoning()
-        self._reasoning_config = self._resolve_session_reasoning_config(
+        self._reasoning_config = runtime_config_for(self).resolve_session_reasoning_config(
             source=event.source,
             session_key=session_key,
         )
@@ -154,8 +155,8 @@ class GatewayReasoningCommandMixin:
         if effort == "reset":
             if persist_global:
                 return t("gateway.reasoning.reset_global_unsupported")
-            self._set_session_reasoning_override(session_key, None)
-            self._reasoning_config = self._load_reasoning_config()
+            runtime_config_for(self).set_session_reasoning_override(session_key, None)
+            self._reasoning_config = runtime_config_for(self).load_reasoning_config()
             self._evict_cached_agent(session_key)
             return t("gateway.reasoning.reset_done")
         if effort == "none":
@@ -171,13 +172,13 @@ class GatewayReasoningCommandMixin:
         self._reasoning_config = parsed
         if persist_global:
             if _save_config_key("agent.reasoning_effort", effort):
-                self._set_session_reasoning_override(session_key, None)
+                runtime_config_for(self).set_session_reasoning_override(session_key, None)
                 self._evict_cached_agent(session_key)
                 return t("gateway.reasoning.set_global", effort=effort)
-            self._set_session_reasoning_override(session_key, parsed)
+            runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
             self._evict_cached_agent(session_key)
             return t("gateway.reasoning.set_global_save_failed", effort=effort)
 
-        self._set_session_reasoning_override(session_key, parsed)
+        runtime_config_for(self).set_session_reasoning_override(session_key, parsed)
         self._evict_cached_agent(session_key)
         return t("gateway.reasoning.set_session", effort=effort)

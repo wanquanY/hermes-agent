@@ -222,7 +222,7 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": None}):
+        with patch("hermes_gateway.gateway_runtime_config.resolve_runtime_agent_kwargs", return_value={"api_key": None}):
             await runner._run_background_task("test prompt", source, "bg_test")
 
         # Should have sent an error message
@@ -249,7 +249,7 @@ class TestRunBackgroundTask:
 
         mock_result = {"final_response": "Hello from background!", "messages": []}
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+        with patch("hermes_gateway.gateway_runtime_config.resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
              patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
@@ -274,18 +274,18 @@ class TestRunBackgroundTask:
         from gateway import run as gateway_run
 
         runner = _make_runner()
-        runner._resolve_session_agent_runtime = MagicMock(
-            return_value=("test-model", {"api_key": "test-key"})
+        runner.runtime_config = MagicMock()
+        runner.runtime_config.resolve_session_agent_runtime.return_value = (
+            "test-model",
+            {"api_key": "test-key"},
         )
-        runner._resolve_session_reasoning_config = MagicMock(return_value=None)
+        runner.runtime_config.resolve_session_reasoning_config.return_value = None
         runner._load_service_tier = MagicMock(return_value=None)
-        runner._resolve_turn_agent_config = MagicMock(
-            return_value={
-                "model": "test-model",
-                "runtime": {"api_key": "test-key"},
-                "request_overrides": None,
-            }
-        )
+        runner.runtime_config.resolve_turn_agent_config.return_value = {
+            "model": "test-model",
+            "runtime": {"api_key": "test-key"},
+            "request_overrides": None,
+        }
         runner._run_in_executor_with_context = AsyncMock(
             return_value={"final_response": "done", "messages": []}
         )
@@ -335,7 +335,7 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
+        with patch("hermes_gateway.gateway_runtime_config.resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
              patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
@@ -364,7 +364,7 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", side_effect=RuntimeError("boom")):
+        with patch("hermes_gateway.gateway_runtime_config.resolve_runtime_agent_kwargs", side_effect=RuntimeError("boom")):
             await runner._run_background_task("test prompt", source, "bg_test")
 
         mock_adapter.send.assert_called_once()

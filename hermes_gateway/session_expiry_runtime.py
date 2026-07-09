@@ -7,6 +7,7 @@ import logging
 import time
 
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class GatewaySessionExpiryRuntimeMixin:
 
         self._evict_cached_agent(key)
         self._session_model_overrides.pop(key, None)
-        self._set_session_reasoning_override(key, None)
+        runtime_config_for(self).set_session_reasoning_override(key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(key, None)
         pending_approvals = getattr(self, "_pending_approvals", None)

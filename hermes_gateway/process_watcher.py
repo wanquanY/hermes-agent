@@ -8,6 +8,7 @@ import logging
 from channels.platforms.base_models import MessageEvent, MessageType
 from hermes_gateway.config import Platform
 from hermes_gateway.config_model import _BUILTIN_PLATFORM_VALUES
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 from hermes_gateway.process_notifications import format_gateway_process_notification
 from hermes_gateway.session import SessionSource
 from hermes_gateway.session_key import parse_session_key
@@ -170,7 +171,7 @@ class GatewayProcessWatcherMixin:
         user_name = watcher.get("user_name", "")
         message_id = str(watcher.get("message_id") or "").strip() or None
         agent_notify = watcher.get("notify_on_complete", False)
-        notify_mode = self._load_background_notifications_mode()
+        notify_mode = runtime_config_for(self).load_background_notifications_mode()
 
         logger.debug(
             "Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",

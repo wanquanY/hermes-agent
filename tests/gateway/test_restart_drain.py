@@ -96,27 +96,27 @@ def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, mon
     monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
     monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
 
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
     (tmp_path / "config.yaml").write_text(
         "display:\n  busy_input_mode: queue\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "queue"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "queue"
 
     (tmp_path / "config.yaml").write_text(
         "display:\n  busy_input_mode: steer\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "steer"
 
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "interrupt")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "steer")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "steer"
 
     # Unknown values fall through to the safe default
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "bogus")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
 
 def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
@@ -126,21 +126,21 @@ def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
     monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
 
     assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
+        gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout()
         == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     )
 
     (tmp_path / "config.yaml").write_text(
         "agent:\n  restart_drain_timeout: 12\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 12.0
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout() == 12.0
 
     monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "7")
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 7.0
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout() == 7.0
 
     monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "invalid")
     assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
+        gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout()
         == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     )
     assert "Invalid restart_drain_timeout" in caplog.text

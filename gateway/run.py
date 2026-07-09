@@ -130,7 +130,7 @@ from hermes_gateway.freshness import (
     is_fresh_gateway_interruption as _is_fresh_gateway_interruption,
     last_transcript_timestamp as _last_transcript_timestamp,
 )
-from hermes_gateway.gateway_runtime_config import GatewayRuntimeConfigMixin
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 from hermes_gateway.media import (
     collect_auto_append_media_tags as _collect_auto_append_media_tags,
     collect_history_media_paths as _collect_history_media_paths,
@@ -515,7 +515,6 @@ class GatewayRunner(
     GatewayDebugCommandMixin,
     GatewayFastCommandMixin,
     GatewayFooterCommandMixin,
-    GatewayRuntimeConfigMixin,
     GatewayGoalCommandMixin,
     GatewayAgentCacheMixin,
     GatewayPersonalityCommandMixin,
@@ -582,15 +581,15 @@ class GatewayRunner(
 
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
-        self._prefill_messages = self._load_prefill_messages()
-        self._ephemeral_system_prompt = self._load_ephemeral_system_prompt()
-        self._reasoning_config = self._load_reasoning_config()
+        self._prefill_messages = runtime_config_for(self).load_prefill_messages()
+        self._ephemeral_system_prompt = runtime_config_for(self).load_ephemeral_system_prompt()
+        self._reasoning_config = runtime_config_for(self).load_reasoning_config()
         self._service_tier = self._load_service_tier()
         self._show_reasoning = self._load_show_reasoning()
-        self._busy_input_mode = self._load_busy_input_mode()
-        self._restart_drain_timeout = self._load_restart_drain_timeout()
-        self._provider_routing = self._load_provider_routing()
-        self._fallback_model = self._load_fallback_model()
+        self._busy_input_mode = runtime_config_for(self).load_busy_input_mode()
+        self._restart_drain_timeout = runtime_config_for(self).load_restart_drain_timeout()
+        self._provider_routing = runtime_config_for(self).load_provider_routing()
+        self._fallback_model = runtime_config_for(self).load_fallback_model()
 
         # Wire process registry into session store for reset protection
         from tools.process_registry import process_registry
@@ -2478,7 +2477,7 @@ class GatewayRunner(
             # inherit the previous conversation's model/reasoning overrides
             # or a queued "/model switched" note.
             self._session_model_overrides.pop(session_key, None)
-            self._set_session_reasoning_override(session_key, None)
+            runtime_config_for(self).set_session_reasoning_override(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
         
@@ -2697,7 +2696,7 @@ class GatewayRunner(
                                 pass
 
                 try:
-                    _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
+                    _hyg_model, _hyg_runtime = runtime_config_for(self).resolve_session_agent_runtime(
                         source=source,
                         session_key=session_key,
                         user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
@@ -2800,7 +2799,7 @@ class GatewayRunner(
                     try:
                         from run_agent import AIAgent
 
-                        _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
+                        _hyg_model, _hyg_runtime = runtime_config_for(self).resolve_session_agent_runtime(
                             source=source,
                             session_key=session_key,
                             user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
@@ -3260,7 +3259,7 @@ class GatewayRunner(
                 self.session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
-                self._set_session_reasoning_override(session_key, None)
+                runtime_config_for(self).set_session_reasoning_override(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
                     self._pending_model_notes.pop(session_key, None)
                 response = (response or "") + (
@@ -4523,7 +4522,7 @@ class GatewayRunner(
             )
 
             try:
-                model, runtime_kwargs = self._resolve_session_agent_runtime(
+                model, runtime_kwargs = runtime_config_for(self).resolve_session_agent_runtime(
                     source=source,
                     session_key=session_key,
                     user_config=user_config,
@@ -4541,7 +4540,7 @@ class GatewayRunner(
                 }
 
             pr = self._provider_routing
-            reasoning_config = self._resolve_session_reasoning_config(
+            reasoning_config = runtime_config_for(self).resolve_session_reasoning_config(
                 source=source,
                 session_key=session_key,
             )
@@ -4651,7 +4650,7 @@ class GatewayRunner(
                     log_message="interim_assistant_callback scheduling error",
                 )
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = runtime_config_for(self).resolve_turn_agent_config(message, model, runtime_kwargs)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool

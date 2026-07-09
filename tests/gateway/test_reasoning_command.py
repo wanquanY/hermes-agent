@@ -211,7 +211,7 @@ class TestReasoningCommand:
         session_key = runner._session_key_for_source(source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        assert runner._resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
+        assert gateway_runtime_config.runtime_config_for(runner).resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
 
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"

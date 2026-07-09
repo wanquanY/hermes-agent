@@ -7,6 +7,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class GatewayCompressCommandMixin:
             from agent.model_metadata import estimate_request_tokens_rough
 
             session_key = self._session_key_for_source(source)
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
+            model, runtime_kwargs = runtime_config_for(self).resolve_session_agent_runtime(
                 source=source,
                 session_key=session_key,
             )

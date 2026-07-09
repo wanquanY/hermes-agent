@@ -209,7 +209,7 @@ fallback_providers:
     monkeypatch.setattr(runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
 
     runner = _make_runner()
-    model, runtime_kwargs = runner._resolve_session_agent_runtime(
+    model, runtime_kwargs = gateway_runtime_config.runtime_config_for(runner).resolve_session_agent_runtime(
         session_key="agent:main:telegram:group:-1003715515980:63",
         user_config={
             "model": {"default": "gpt-5.5", "provider": "openai-codex"},

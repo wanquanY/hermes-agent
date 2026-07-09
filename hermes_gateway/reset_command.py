@@ -10,6 +10,7 @@ from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from channels.platforms.base_models import EphemeralReply
 from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ class GatewayResetCommandMixin:
         # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
         self._session_model_overrides.pop(session_key, None)
-        self._set_session_reasoning_override(session_key, None)
+        runtime_config_for(self).set_session_reasoning_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
