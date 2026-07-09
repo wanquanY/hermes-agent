@@ -109,6 +109,7 @@ from hermes_gateway.response_normalization import (
     normalize_empty_agent_response as _normalize_empty_agent_response,
 )
 from hermes_gateway.runtime_status_command import GatewayRuntimeStatusCommandMixin
+from hermes_gateway.runtime_status_writer import GatewayRuntimeStatusWriterMixin
 from hermes_gateway.resume_pending import (
     preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
@@ -536,6 +537,7 @@ class GatewayRunner(
     GatewayResetCommandMixin,
     GatewayRollbackCommandMixin,
     GatewayRuntimeStatusCommandMixin,
+    GatewayRuntimeStatusWriterMixin,
     GatewaySessionNavigationCommandMixin,
     GatewaySessionExpiryRuntimeMixin,
     GatewaySessionRecoveryRuntimeMixin,
@@ -1288,58 +1290,8 @@ class GatewayRunner(
 
 
 
-    def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
-        try:
-            from channels.runtime_status import write_runtime_status
-            write_runtime_status(
-                gateway_state=gateway_state,
-                exit_reason=exit_reason,
-                restart_requested=self._restart_requested,
-                active_agents=self._running_agent_count(),
-            )
-        except Exception:
-            pass
 
-    def _persist_active_agents(self) -> None:
-        """Persist the live in-flight agent count to ``gateway_state.json``.
 
-        Called at every turn boundary (a running-agent slot is claimed or
-        released) so the dashboard ``/api/status`` readout reflects in-flight
-        gateway turns in near-real-time.  Without this the file is only
-        rewritten on lifecycle transitions, so any ``active_agents`` read
-        between transitions is stale (a turn could start and finish without the
-        file ever moving).
-
-        Deliberately passes ONLY ``active_agents`` — ``gateway_state`` and the
-        other fields stay ``_UNSET`` so ``write_runtime_status``'s
-        read-merge-write preserves the current lifecycle state (``running`` /
-        ``draining`` / …).  Passing ``gateway_state=None`` here would clobber it.
-        Best-effort: a failed status write must never disrupt a turn.
-        """
-        try:
-            from channels.runtime_status import write_runtime_status
-            write_runtime_status(active_agents=self._running_agent_count())
-        except Exception:
-            pass
-
-    def _update_platform_runtime_status(
-        self,
-        platform: str,
-        *,
-        platform_state: Optional[str] = None,
-        error_code: Optional[str] = None,
-        error_message: Optional[str] = None,
-    ) -> None:
-        try:
-            from channels.runtime_status import write_runtime_status
-            write_runtime_status(
-                platform=platform,
-                platform_state=platform_state,
-                error_code=error_code,
-                error_message=error_message,
-            )
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # Per-platform circuit breaker (pause/resume) — used by the reconnect
