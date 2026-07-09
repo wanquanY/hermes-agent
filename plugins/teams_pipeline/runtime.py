@@ -74,8 +74,8 @@ def build_pipeline_runtime_config(gateway_config: Any) -> dict[str, Any]:
 
 def build_pipeline_runtime(gateway: Any) -> TeamsMeetingPipeline:
     teams_sender = None
-    teams_config = hermes_gateway.config.platforms.get(Platform("teams"))
-    pipeline_config = build_pipeline_runtime_config(hermes_gateway.config)
+    teams_config = gateway.config.platforms.get(Platform("teams"))
+    pipeline_config = build_pipeline_runtime_config(gateway.config)
     teams_delivery = dict(pipeline_config.get("teams_delivery") or {})
     if teams_config and teams_config.enabled and teams_delivery.get("enabled"):
         try:
