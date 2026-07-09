@@ -178,7 +178,9 @@ class GatewayPlatformRuntimeService:
                     success = await runner._connect_adapter_with_timeout(adapter, platform)
                     if success:
                         runner.adapters[platform] = adapter
-                        runner._sync_voice_mode_state_to_adapter(adapter)
+                        from hermes_gateway.voice_runtime import voice_runtime_for
+
+                        voice_runtime_for(runner).sync_voice_mode_state_to_adapter(adapter)
                         runner.delivery_router.adapters = runner.adapters
                         del runner._failed_platforms[platform]
                         runtime_status_for(runner).update_platform_runtime_status(

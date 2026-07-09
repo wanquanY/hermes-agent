@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent, SendResult
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -220,8 +221,8 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._handle_message_with_agent = AsyncMock(return_value="agent-handled-default")
-    runner._should_send_voice_reply = lambda *_a, **_kw: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_a, **_kw: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *a, **kw: None
     runner._emit_gateway_run_progress = AsyncMock()
 

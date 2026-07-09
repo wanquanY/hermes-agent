@@ -1,6 +1,6 @@
 """Regression test for issue #27970 Bug 2.
 
-The auto Telegram voice reply (``GatewayRunner._send_voice_reply``) is the
+The auto Telegram voice reply (``GatewayVoiceService.send_voice_reply``) is the
 final response of a turn. It must mark its metadata as ``notify=True`` so
 adapters that gate push notifications (Telegram's "important" mode) deliver
 it as a normal push instead of a silent message — mirroring the existing
@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hermes_gateway.config import Platform
+from hermes_gateway.voice_runtime import GatewayVoiceService, voice_runtime_for
 from channels.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from hermes_gateway.session import SessionSource
@@ -76,7 +77,7 @@ async def test_voice_reply_marks_metadata_notify_true_for_dm(monkeypatch, tmp_pa
     runner = _runner_with_adapter(send_voice)
     event = _make_event()
 
-    await runner._send_voice_reply(event, "Hello there.")
+    await voice_runtime_for(runner).send_voice_reply(event, "Hello there.")
 
     send_voice.assert_awaited_once()
     kwargs = send_voice.await_args.kwargs
@@ -100,7 +101,7 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
     assert source_meta_snapshot is not None
     snapshot_copy = dict(source_meta_snapshot)
 
-    await runner._send_voice_reply(event, "Hello there.")
+    await voice_runtime_for(runner).send_voice_reply(event, "Hello there.")
 
     send_voice.assert_awaited_once()
     kwargs = send_voice.await_args.kwargs

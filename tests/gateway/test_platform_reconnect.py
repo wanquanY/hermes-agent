@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.run import GatewayRunner
 from hermes_gateway.platform_runtime import platform_runtime_for
@@ -92,7 +93,7 @@ class TestStartupPlatformIsolation:
         runner.hooks.loaded_hooks = []
         runner.hooks.emit = AsyncMock()
         runner._suspend_stuck_loop_sessions = MagicMock(return_value=0)
-        runner._sync_voice_mode_state_to_adapter = MagicMock()
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter = MagicMock()
         runner._send_update_notification = AsyncMock(return_value=True)
         runner._send_restart_notification = AsyncMock()
 
@@ -182,7 +183,7 @@ class TestPlatformReconnectWatcher:
     async def test_reconnect_succeeds_on_retry(self):
         """Watcher should reconnect a failed platform when connect() succeeds."""
         runner = _make_runner()
-        runner._sync_voice_mode_state_to_adapter = MagicMock()
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter = MagicMock()
 
         platform_config = PlatformConfig(enabled=True, token="test")
         runner._failed_platforms[Platform.TELEGRAM] = {

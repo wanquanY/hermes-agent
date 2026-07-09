@@ -21,16 +21,23 @@ from hermes_gateway.session import SessionSource
 logger = logging.getLogger(__name__)
 
 
-class GatewayVoiceMixin:
+class GatewayVoiceService:
     _VOICE_MODE_PATH = get_hermes_home() / "gateway_voice_mode.json"
 
-    def _voice_key(self, platform: Platform, chat_id: str) -> str:
+    def __init__(self, runner):
+        self._runner = runner
+
+    @property
+    def voice_mode_path(self):
+        return getattr(self._runner, "_VOICE_MODE_PATH", self._VOICE_MODE_PATH)
+
+    def voice_key(self, platform: Platform, chat_id: str) -> str:
         """Return a platform-namespaced key for voice mode state."""
         return f"{platform.value}:{chat_id}"
 
-    def _load_voice_modes(self) -> Dict[str, str]:
+    def load_voice_modes(self) -> Dict[str, str]:
         try:
-            data = json.loads(self._VOICE_MODE_PATH.read_text())
+            data = json.loads(self.voice_mode_path.read_text())
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
@@ -54,16 +61,16 @@ class GatewayVoiceMixin:
             result[key] = mode
         return result
 
-    def _save_voice_modes(self) -> None:
+    def save_voice_modes(self) -> None:
         try:
-            self._VOICE_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._VOICE_MODE_PATH.write_text(
-                json.dumps(self._voice_mode, indent=2)
+            self.voice_mode_path.parent.mkdir(parents=True, exist_ok=True)
+            self.voice_mode_path.write_text(
+                json.dumps(self._runner._voice_mode, indent=2)
             )
         except OSError as e:
             logger.warning("Failed to save voice modes: %s", e)
 
-    def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
+    def set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
         disabled_chats = getattr(adapter, "_auto_tts_disabled_chats", None)
         if not isinstance(disabled_chats, set):
@@ -77,7 +84,7 @@ class GatewayVoiceMixin:
         else:
             disabled_chats.discard(chat_id)
 
-    def _set_adapter_auto_tts_enabled(self, adapter, chat_id: str, enabled: bool) -> None:
+    def set_adapter_auto_tts_enabled(self, adapter, chat_id: str, enabled: bool) -> None:
         """Update an adapter's per-chat auto-TTS opt-in set if present.
 
         Used for ``/voice on``/``/voice tts`` where the user explicitly wants
@@ -95,7 +102,7 @@ class GatewayVoiceMixin:
         else:
             enabled_chats.discard(chat_id)
 
-    def _sync_voice_mode_state_to_adapter(self, adapter) -> None:
+    def sync_voice_mode_state_to_adapter(self, adapter) -> None:
         """Restore persisted /voice state into a live platform adapter.
 
         Populates three fields from config + ``self._voice_mode``:
@@ -129,18 +136,18 @@ class GatewayVoiceMixin:
         if isinstance(disabled_chats, set):
             disabled_chats.clear()
             disabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
+                key[len(prefix):] for key, mode in self._runner._voice_mode.items()
                 if mode == "off" and key.startswith(prefix)
             )
         if isinstance(enabled_chats, set):
             enabled_chats.clear()
             enabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
+                key[len(prefix):] for key, mode in self._runner._voice_mode.items()
                 if mode in {"voice_only", "all"} and key.startswith(prefix)
             )
 
     @staticmethod
-    def _get_guild_id(event: MessageEvent) -> Optional[int]:
+    def get_guild_id(event: MessageEvent) -> Optional[int]:
         """Extract Discord guild_id from the raw message object."""
         raw = getattr(event, "raw_message", None)
         if raw is None:
@@ -153,47 +160,48 @@ class GatewayVoiceMixin:
             return raw.guild.id
         return None
 
-    async def _handle_voice_command(self, event: MessageEvent) -> str:
+    async def handle_voice_command(self, event: MessageEvent) -> str:
         """Handle /voice [on|off|tts|channel|leave|status] command."""
         args = event.get_command_args().strip().lower()
         chat_id = event.source.chat_id
         platform = event.source.platform
-        voice_key = self._voice_key(platform, chat_id)
+        runner = self._runner
+        voice_key = self.voice_key(platform, chat_id)
 
-        adapter = self.adapters.get(platform)
+        adapter = runner.adapters.get(platform)
 
         if args in {"on", "enable"}:
-            self._voice_mode[voice_key] = "voice_only"
-            self._save_voice_modes()
+            runner._voice_mode[voice_key] = "voice_only"
+            self.save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                self.set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
             return t("gateway.voice.enabled_voice_only")
         elif args in {"off", "disable"}:
-            self._voice_mode[voice_key] = "off"
-            self._save_voice_modes()
+            runner._voice_mode[voice_key] = "off"
+            self.save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+                self.set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
             return t("gateway.voice.disabled_text")
         elif args == "tts":
-            self._voice_mode[voice_key] = "all"
-            self._save_voice_modes()
+            runner._voice_mode[voice_key] = "all"
+            self.save_voice_modes()
             if adapter:
-                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                self.set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
             return t("gateway.voice.tts_enabled")
         elif args in {"channel", "join"}:
-            return await self._handle_voice_channel_join(event)
+            return await self.handle_voice_channel_join(event)
         elif args == "leave":
-            return await self._handle_voice_channel_leave(event)
+            return await self.handle_voice_channel_leave(event)
         elif args == "status":
-            mode = self._voice_mode.get(voice_key, "off")
+            mode = runner._voice_mode.get(voice_key, "off")
             labels = {
                 "off": t("gateway.voice.label_off"),
                 "voice_only": t("gateway.voice.label_voice_only"),
                 "all": t("gateway.voice.label_all"),
             }
             # Append voice channel info if connected
-            adapter = self.adapters.get(event.source.platform)
-            guild_id = self._get_guild_id(event)
+            adapter = runner.adapters.get(event.source.platform)
+            guild_id = self.get_guild_id(event)
             if guild_id and hasattr(adapter, "get_voice_channel_info"):
                 info = adapter.get_voice_channel_info(guild_id)
                 if info:
@@ -209,27 +217,28 @@ class GatewayVoiceMixin:
             return t("gateway.voice.status_mode", label=labels.get(mode, mode))
         else:
             # Toggle: off → on, on/all → off
-            current = self._voice_mode.get(voice_key, "off")
+            current = runner._voice_mode.get(voice_key, "off")
             if current == "off":
-                self._voice_mode[voice_key] = "voice_only"
-                self._save_voice_modes()
+                runner._voice_mode[voice_key] = "voice_only"
+                self.save_voice_modes()
                 if adapter:
-                    self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+                    self.set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
                 return t("gateway.voice.enabled_short")
             else:
-                self._voice_mode[voice_key] = "off"
-                self._save_voice_modes()
+                runner._voice_mode[voice_key] = "off"
+                self.save_voice_modes()
                 if adapter:
-                    self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+                    self.set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
                 return t("gateway.voice.disabled_short")
 
-    async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
+    async def handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
-        adapter = self.adapters.get(event.source.platform)
+        runner = self._runner
+        adapter = runner.adapters.get(event.source.platform)
         if not hasattr(adapter, "join_voice_channel"):
             return "Voice channels are not supported on this platform."
 
-        guild_id = self._get_guild_id(event)
+        guild_id = self.get_guild_id(event)
         if not guild_id:
             return "This command only works in a Discord server."
 
@@ -242,9 +251,9 @@ class GatewayVoiceMixin:
         # Wire callbacks BEFORE join so voice input arriving immediately
         # after connection is not lost.
         if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = self._handle_voice_channel_input
+            adapter._voice_input_callback = self.handle_voice_channel_input
         if hasattr(adapter, "_on_voice_disconnect"):
-            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
+            adapter._on_voice_disconnect = self.handle_voice_timeout_cleanup
 
         try:
             success = await adapter.join_voice_channel(voice_channel)
@@ -263,9 +272,9 @@ class GatewayVoiceMixin:
             adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
             if hasattr(adapter, "_voice_sources"):
                 adapter._voice_sources[guild_id] = event.source.to_dict()
-            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "all"
-            self._save_voice_modes()
-            self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
+            runner._voice_mode[self.voice_key(event.source.platform, event.source.chat_id)] = "all"
+            self.save_voice_modes()
+            self.set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
                 f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
@@ -274,10 +283,11 @@ class GatewayVoiceMixin:
         adapter._voice_input_callback = None
         return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
 
-    async def _handle_voice_channel_leave(self, event: MessageEvent) -> str:
+    async def handle_voice_channel_leave(self, event: MessageEvent) -> str:
         """Leave the Discord voice channel."""
-        adapter = self.adapters.get(event.source.platform)
-        guild_id = self._get_guild_id(event)
+        runner = self._runner
+        adapter = runner.adapters.get(event.source.platform)
+        guild_id = self.get_guild_id(event)
 
         if not guild_id or not hasattr(adapter, "leave_voice_channel"):
             return "Not in a voice channel."
@@ -290,24 +300,25 @@ class GatewayVoiceMixin:
         except Exception as e:
             logger.warning("Error leaving voice channel: %s", e)
         # Always clean up state even if leave raised an exception
-        self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "off"
-        self._save_voice_modes()
-        self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
+        runner._voice_mode[self.voice_key(event.source.platform, event.source.chat_id)] = "off"
+        self.save_voice_modes()
+        self.set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = None
         return "Left voice channel."
 
-    def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
+    def handle_voice_timeout_cleanup(self, chat_id: str) -> None:
         """Called by the adapter when a voice channel times out.
 
         Cleans up runner-side voice_mode state that the adapter cannot reach.
         """
-        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
-        self._save_voice_modes()
-        adapter = self.adapters.get(Platform.DISCORD)
-        self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+        runner = self._runner
+        runner._voice_mode[self.voice_key(Platform.DISCORD, chat_id)] = "off"
+        self.save_voice_modes()
+        adapter = runner.adapters.get(Platform.DISCORD)
+        self.set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
 
-    def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
+    def is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
         """Suppress repeated STT outputs for the same recent utterance.
 
         Voice capture can occasionally emit the same utterance twice a few
@@ -325,10 +336,11 @@ class GatewayVoiceMixin:
         now = time.monotonic()
         window_seconds = 12.0
         key = (guild_id, user_id)
-        recent_store = getattr(self, "_recent_voice_transcripts", None)
+        runner = self._runner
+        recent_store = getattr(runner, "_recent_voice_transcripts", None)
         if not isinstance(recent_store, dict):
             recent_store = {}
-            self._recent_voice_transcripts = recent_store
+            runner._recent_voice_transcripts = recent_store
         recent = [
             (ts, txt)
             for ts, txt in recent_store.get(key, [])
@@ -348,7 +360,7 @@ class GatewayVoiceMixin:
         recent_store[key] = recent[-5:]
         return False
 
-    async def _handle_voice_channel_input(
+    async def handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str
     ):
         """Handle transcribed voice from a user in a voice channel.
@@ -356,7 +368,8 @@ class GatewayVoiceMixin:
         Creates a synthetic MessageEvent and processes it through the
         adapter's full message pipeline (session, typing, agent, TTS reply).
         """
-        adapter = self.adapters.get(Platform.DISCORD)
+        runner = self._runner
+        adapter = runner.adapters.get(Platform.DISCORD)
         if not adapter:
             return
 
@@ -381,11 +394,11 @@ class GatewayVoiceMixin:
             )
 
         # Check authorization before processing voice input
-        if not self._is_user_authorized(source):
+        if not runner._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return
 
-        if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
+        if self.is_duplicate_voice_transcript(guild_id, user_id, transcript):
             logger.info(
                 "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
                 guild_id,
@@ -404,8 +417,8 @@ class GatewayVoiceMixin:
             pass
 
         # Build a synthetic MessageEvent and feed through the normal pipeline
-        # Use SimpleNamespace as raw_message so _get_guild_id() can extract
-        # guild_id and _send_voice_reply() plays audio in the voice channel.
+        # Use SimpleNamespace as raw_message so get_guild_id() can extract
+        # guild_id and send_voice_reply() plays audio in the voice channel.
         from types import SimpleNamespace
         event = MessageEvent(
             source=source,
@@ -416,7 +429,7 @@ class GatewayVoiceMixin:
 
         await adapter.handle_message(event)
 
-    def _should_send_voice_reply(
+    def should_send_voice_reply(
         self,
         event: MessageEvent,
         response: str,
@@ -438,7 +451,10 @@ class GatewayVoiceMixin:
             return False
 
         chat_id = event.source.chat_id
-        voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
+        voice_mode = self._runner._voice_mode.get(
+            self.voice_key(event.source.platform, chat_id),
+            "off",
+        )
         is_voice_input = (event.message_type == MessageType.VOICE)
 
         should = (
@@ -470,7 +486,7 @@ class GatewayVoiceMixin:
 
         return True
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
+    async def send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
         import uuid as _uuid
         audio_path = None
@@ -505,18 +521,19 @@ class GatewayVoiceMixin:
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
                 return
 
-            adapter = self.adapters.get(event.source.platform)
+            runner = self._runner
+            adapter = runner.adapters.get(event.source.platform)
 
             # If connected to a voice channel, play there instead of sending a file
-            guild_id = self._get_guild_id(event)
+            guild_id = self.get_guild_id(event)
             if (guild_id
                     and hasattr(adapter, "play_in_voice_channel")
                     and hasattr(adapter, "is_in_voice_channel")
                     and adapter.is_in_voice_channel(guild_id)):
                 await adapter.play_in_voice_channel(guild_id, actual_path)
             elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+                reply_anchor = runner._reply_anchor_for_event(event)
+                thread_meta = runner._thread_metadata_for_source(event.source, reply_anchor)
                 # Mark the auto voice reply as notify-worthy.  Mirrors the
                 # final-text path in gateway/platforms/base.py which sets
                 # ``notify=True`` so platform adapters that gate push
@@ -544,3 +561,12 @@ class GatewayVoiceMixin:
                     os.unlink(p)
                 except OSError:
                     pass
+
+
+def voice_runtime_for(runner) -> GatewayVoiceService:
+    service = getattr(runner, "voice_runtime", None)
+    if isinstance(service, GatewayVoiceService):
+        return service
+    service = GatewayVoiceService(runner)
+    runner.voice_runtime = service
+    return service

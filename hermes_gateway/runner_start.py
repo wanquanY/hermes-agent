@@ -317,7 +317,9 @@ async def start_gateway_runner(runner) -> bool:
             success = await self._connect_adapter_with_timeout(adapter, platform)
             if success:
                 self.adapters[platform] = adapter
-                self._sync_voice_mode_state_to_adapter(adapter)
+                from hermes_gateway.voice_runtime import voice_runtime_for
+
+                voice_runtime_for(self).sync_voice_mode_state_to_adapter(adapter)
                 connected_count += 1
                 runtime_status_for(self).update_platform_runtime_status(
                     platform.value,

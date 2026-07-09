@@ -96,7 +96,7 @@ from hermes_gateway.title_command import GatewayTitleCommandMixin
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
 from hermes_gateway.usage_command import GatewayUsageCommandMixin
 from hermes_gateway.verbose_command import GatewayVerboseCommandMixin
-from hermes_gateway.voice_runtime import GatewayVoiceMixin
+from hermes_gateway.voice_runtime import voice_runtime_for
 from hermes_gateway.yolo_command import GatewayYoloCommandMixin
 from hermes_gateway.reset_command import GatewayResetCommandMixin
 from hermes_gateway.response_normalization import (
@@ -533,7 +533,6 @@ class GatewayRunner(
     GatewayUpdateRestartMixin,
     GatewayUsageCommandMixin,
     GatewayVerboseCommandMixin,
-    GatewayVoiceMixin,
     GatewayYoloCommandMixin,
 ):
     """
@@ -741,7 +740,7 @@ class GatewayRunner(
         self.hooks = HookRegistry()
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
-        self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        self._voice_mode: Dict[str, str] = voice_runtime_for(self).load_voice_modes()
         # Recent voice transcripts per (guild,user) for duplicate suppression.
         # Protects against the same utterance being emitted twice by the voice
         # capture / STT pipeline, which otherwise produces a second delayed reply.
@@ -2132,7 +2131,7 @@ class GatewayRunner(
             return await goal_command_for(self).handle_subgoal_command(event)
 
         if canonical == "voice":
-            return await self._handle_voice_command(event)
+            return await voice_runtime_for(self).handle_voice_command(event)
 
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
@@ -2963,7 +2962,7 @@ class GatewayRunner(
         # -----------------------------------------------------------------
         if source.platform == Platform.DISCORD:
             adapter = self.adapters.get(Platform.DISCORD)
-            guild_id = self._get_guild_id(event)
+            guild_id = voice_runtime_for(self).get_guild_id(event)
             if guild_id and adapter and hasattr(adapter, "get_voice_channel_context"):
                 vc_context = adapter.get_voice_channel_context(guild_id)
                 if vc_context:
@@ -3352,8 +3351,13 @@ class GatewayRunner(
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
-                await self._send_voice_reply(event, response)
+            if voice_runtime_for(self).should_send_voice_reply(
+                event,
+                response,
+                agent_messages,
+                already_sent=_already_sent,
+            ):
+                await voice_runtime_for(self).send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming

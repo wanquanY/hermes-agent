@@ -24,6 +24,7 @@ import pytest
 import gateway.run as gateway_run
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import GatewayConfig, Platform
+from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource
 from hermes_gateway.session_runtime_state import session_runtime_state_for
@@ -54,8 +55,8 @@ def _bootstrap(monkeypatch, tmp_path):
     runtime_state.is_session_run_current = lambda _key, _gen: True
     runtime_state.begin_session_run_generation = lambda _key: 1
     runner._reply_anchor_for_event = lambda _event: None
-    runner._get_guild_id = lambda _event: None
-    runner._should_send_voice_reply = lambda *_a, **_kw: False
+    voice_runtime_for(runner).get_guild_id = lambda _event: None
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
 

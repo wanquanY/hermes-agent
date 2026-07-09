@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -80,7 +81,7 @@ def _make_runner():
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
     # Use the real _session_key_for_source binding so the key matches what
     # the agent-loop consumer will look up later.
     from gateway.run import GatewayRunner as _GR
