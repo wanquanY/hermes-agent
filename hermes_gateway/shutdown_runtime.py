@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from hermes_gateway.config import Platform
+from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.session_key import parse_session_key
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ class GatewayShutdownRuntimeMixin:
             now = asyncio.get_running_loop().time()
             active_count = self._running_agent_count()
             if force or active_count != last_active_count or (now - last_status_at) >= 1.0:
-                self._update_runtime_status("draining")
+                runtime_status_for(self).update_runtime_status("draining")
                 last_active_count = active_count
                 last_status_at = now
 

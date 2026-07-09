@@ -91,8 +91,6 @@ class TestStartupPlatformIsolation:
         runner.hooks.loaded_hooks = []
         runner.hooks.emit = AsyncMock()
         runner._suspend_stuck_loop_sessions = MagicMock(return_value=0)
-        runner._update_runtime_status = MagicMock()
-        runner._update_platform_runtime_status = MagicMock()
         runner._sync_voice_mode_state_to_adapter = MagicMock()
         runner._send_update_notification = AsyncMock(return_value=True)
         runner._send_restart_notification = AsyncMock()

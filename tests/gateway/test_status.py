@@ -1035,7 +1035,7 @@ class TestActiveAgentsTurnBoundaryWrite:
         rec = status.read_runtime_status()
         assert rec["active_agents"] == 2
         # The state must survive the per-turn write — this is what makes the
-        # _persist_active_agents helper safe to call on every turn.
+        # RuntimeStatusService.persist_active_agents safe to call on every turn.
         assert rec["gateway_state"] == "running"
 
     def test_active_agents_only_write_preserves_draining_state(self, tmp_path, monkeypatch):

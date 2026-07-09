@@ -92,7 +92,6 @@ def _make_runner():
     runner._session_run_generation = {}
     runner._pending_messages = {}
     runner._draining = False
-    runner._update_runtime_status = MagicMock()
     return runner
 
 
@@ -396,4 +395,3 @@ class TestOldTaskCannotClobberNewerGuard:
         # default path) still work.
         adapter._release_session_guard(sk)
         assert sk not in adapter._active_sessions
-

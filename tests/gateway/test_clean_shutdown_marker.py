@@ -95,6 +95,7 @@ class TestCleanShutdownMarker:
     def test_marker_written_on_graceful_stop(self, tmp_path, monkeypatch):
         """stop() should write .clean_shutdown marker."""
         monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+        monkeypatch.setattr("hermes_gateway.runner_stop._hermes_home", tmp_path)
         marker = tmp_path / ".clean_shutdown"
         assert not marker.exists()
 
@@ -122,7 +123,6 @@ class TestCleanShutdownMarker:
         # Mock heavy dependencies
         with patch("gateway.run.GatewayRunner._drain_active_agents", new_callable=AsyncMock, return_value=([], False)), \
              patch("gateway.run.GatewayRunner._finalize_shutdown_agents"), \
-             patch("gateway.run.GatewayRunner._update_runtime_status"), \
              patch("channels.runtime_status.remove_pid_file"), \
              patch("tools.process_registry.process_registry") as mock_proc_reg, \
              patch("tools.terminal_tool.cleanup_all_environments"), \
@@ -191,6 +191,7 @@ class TestCleanShutdownMarker:
     def test_marker_written_on_restart_stop(self, tmp_path, monkeypatch):
         """stop(restart=True) should also write the marker."""
         monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+        monkeypatch.setattr("hermes_gateway.runner_stop._hermes_home", tmp_path)
         marker = tmp_path / ".clean_shutdown"
 
         from gateway.run import GatewayRunner
@@ -215,7 +216,6 @@ class TestCleanShutdownMarker:
 
         with patch("gateway.run.GatewayRunner._drain_active_agents", new_callable=AsyncMock, return_value=([], False)), \
              patch("gateway.run.GatewayRunner._finalize_shutdown_agents"), \
-             patch("gateway.run.GatewayRunner._update_runtime_status"), \
              patch("channels.runtime_status.remove_pid_file"), \
              patch("tools.process_registry.process_registry") as mock_proc_reg, \
              patch("tools.terminal_tool.cleanup_all_environments"), \

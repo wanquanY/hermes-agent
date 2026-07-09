@@ -12,6 +12,7 @@ from channels.platforms.base import MessageEvent, MessageType
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.freshness import auto_continue_freshness_window
+from hermes_gateway.runtime_status_writer import runtime_status_for
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class GatewaySessionRecoveryRuntimeMixin:
 
             self._running_agents[entry.session_key] = AGENT_PENDING_SENTINEL
             self._running_agents_ts[entry.session_key] = time.time()
-            self._persist_active_agents()
+            runtime_status_for(self).persist_active_agents()
 
             event = MessageEvent(
                 text="",

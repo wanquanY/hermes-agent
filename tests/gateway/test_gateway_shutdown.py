@@ -5,6 +5,7 @@ import pytest
 
 from channels.platforms.base import MessageEvent
 from hermes_gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from hermes_gateway.runtime_status_writer import GatewayRuntimeStatusService
 from hermes_gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
@@ -145,7 +146,6 @@ async def test_gateway_stop_service_restart_sets_named_exit_code():
 @pytest.mark.asyncio
 async def test_drain_active_agents_throttles_status_updates():
     runner, _adapter = make_restart_runner()
-    runner._update_runtime_status = MagicMock()
 
     runner._running_agents = {"a": MagicMock(), "b": MagicMock()}
 
@@ -155,13 +155,14 @@ async def test_drain_active_agents_throttles_status_updates():
         await asyncio.sleep(0.12)
         runner._running_agents.clear()
 
-    task = asyncio.create_task(finish_agents())
-    await runner._drain_active_agents(1.0)
-    await task
+    with patch.object(GatewayRuntimeStatusService, "update_runtime_status") as update_status:
+        task = asyncio.create_task(finish_agents())
+        await runner._drain_active_agents(1.0)
+        await task
 
     # Start, one count-change update, and final update. Allow one extra update
     # if the loop observes the zero-agent state before exiting.
-    assert 3 <= runner._update_runtime_status.call_count <= 4
+    assert 3 <= update_status.call_count <= 4
 
 
 @pytest.mark.asyncio

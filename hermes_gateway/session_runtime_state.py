@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from hermes_gateway.runtime_status_writer import runtime_status_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +28,7 @@ class GatewaySessionRuntimeStateMixin:
         self._running_agents_ts.pop(session_key, None)
         if hasattr(self, "_busy_ack_ts"):
             self._busy_ack_ts.pop(session_key, None)
-        self._persist_active_agents()
+        runtime_status_for(self).persist_active_agents()
         return True
 
     def _clear_session_boundary_security_state(self, session_key: str) -> None:

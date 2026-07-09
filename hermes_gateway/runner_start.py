@@ -10,6 +10,7 @@ import time
 from hermes_constants import get_hermes_home
 from hermes_gateway.bootstrap import restart_notification_pending as _restart_notification_pending_for_home
 from hermes_gateway.config import Platform
+from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
@@ -301,7 +302,7 @@ async def start_gateway_runner(runner) -> bool:
 
         # Try to connect
         logger.info("Connecting to %s...", platform.value)
-        self._update_platform_runtime_status(
+        runtime_status_for(self).update_platform_runtime_status(
             platform.value,
             platform_state="connecting",
             error_code=None,
@@ -313,7 +314,7 @@ async def start_gateway_runner(runner) -> bool:
                 self.adapters[platform] = adapter
                 self._sync_voice_mode_state_to_adapter(adapter)
                 connected_count += 1
-                self._update_platform_runtime_status(
+                runtime_status_for(self).update_platform_runtime_status(
                     platform.value,
                     platform_state="connected",
                     error_code=None,
@@ -332,7 +333,7 @@ async def start_gateway_runner(runner) -> bool:
                 # partial-init state.
                 await self._safe_adapter_disconnect(adapter, platform)
                 if adapter.has_fatal_error:
-                    self._update_platform_runtime_status(
+                    runtime_status_for(self).update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying" if adapter.fatal_error_retryable else "fatal",
                         error_code=adapter.fatal_error_code,
@@ -354,7 +355,7 @@ async def start_gateway_runner(runner) -> bool:
                             "next_retry": time.monotonic() + 30,
                         }
                 else:
-                    self._update_platform_runtime_status(
+                    runtime_status_for(self).update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",
                         error_code=None,
@@ -375,7 +376,7 @@ async def start_gateway_runner(runner) -> bool:
             # that raised mid-connect may still have a live
             # aiohttp.ClientSession or child subprocess.
             await self._safe_adapter_disconnect(adapter, platform)
-            self._update_platform_runtime_status(
+            runtime_status_for(self).update_platform_runtime_status(
                 platform.value,
                 platform_state="retrying",
                 error_code=None,
@@ -447,7 +448,7 @@ async def start_gateway_runner(runner) -> bool:
     self._wire_teams_pipeline_runtime()
 
     self._running = True
-    self._update_runtime_status("running")
+    runtime_status_for(self).update_runtime_status("running")
 
     # Emit gateway:startup hook
     hook_count = len(self.hooks.loaded_hooks)

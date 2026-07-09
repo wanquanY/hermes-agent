@@ -106,7 +106,7 @@ from hermes_gateway.response_normalization import (
     normalize_empty_agent_response as _normalize_empty_agent_response,
 )
 from hermes_gateway.runtime_status_command import GatewayRuntimeStatusCommandMixin
-from hermes_gateway.runtime_status_writer import GatewayRuntimeStatusWriterMixin
+from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.resume_pending import (
     preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
@@ -537,7 +537,6 @@ class GatewayRunner(
     GatewayResetCommandMixin,
     GatewayRollbackCommandMixin,
     GatewayRuntimeStatusCommandMixin,
-    GatewayRuntimeStatusWriterMixin,
     GatewaySessionNavigationCommandMixin,
     GatewaySessionExpiryRuntimeMixin,
     GatewaySessionHandoffRuntimeMixin,
@@ -2333,7 +2332,7 @@ class GatewayRunner(
         # same session — corrupting the transcript.
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
         self._running_agents_ts[_quick_key] = time.time()
-        self._persist_active_agents()
+        runtime_status_for(self).persist_active_agents()
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
@@ -5344,7 +5343,7 @@ class GatewayRunner(
                 return
             self._running_agents[session_key] = agent_holder[0]
             if self._draining:
-                self._update_runtime_status("draining")
+                runtime_status_for(self).update_runtime_status("draining")
         
         tracking_task = asyncio.create_task(track_agent())
         
@@ -5915,7 +5914,7 @@ class GatewayRunner(
                     session_key, run_generation=run_generation
                 )
             if self._draining:
-                self._update_runtime_status("draining")
+                runtime_status_for(self).update_runtime_status("draining")
             
             # Wait for cancelled tasks
             for task in [progress_task, interrupt_monitor, tracking_task, _notify_task]:

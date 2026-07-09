@@ -13,6 +13,7 @@ from hermes_gateway.interrupt_control import (
     INTERRUPT_REASON_GATEWAY_SHUTDOWN as _INTERRUPT_REASON_GATEWAY_SHUTDOWN,
 )
 from hermes_gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
@@ -190,7 +191,7 @@ async def stop_gateway_runner(
             )
             interrupt_deadline = asyncio.get_running_loop().time() + 5.0
             while self._running_agents and asyncio.get_running_loop().time() < interrupt_deadline:
-                self._update_runtime_status("draining")
+                runtime_status_for(self).update_runtime_status("draining")
                 await asyncio.sleep(0.1)
 
             # Kill lingering tool subprocesses NOW, before we spend more
@@ -353,7 +354,7 @@ async def stop_gateway_runner(
             self._exit_reason = self._exit_reason or "Gateway restart requested"
 
         self._draining = False
-        self._update_runtime_status("stopped", self._exit_reason)
+        runtime_status_for(self).update_runtime_status("stopped", self._exit_reason)
         logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
 
     self._stop_task = asyncio.create_task(_stop_impl())

@@ -7,6 +7,7 @@ import logging
 import time
 
 from channels.platforms.base import BasePlatformAdapter
+from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class GatewayPlatformRuntimeMixin:
             adapter.fatal_error_code or "unknown",
             adapter.fatal_error_message or "unknown error",
         )
-        self._update_platform_runtime_status(
+        runtime_status_for(self).update_platform_runtime_status(
             adapter.platform.value,
             platform_state="retrying" if adapter.fatal_error_retryable else "fatal",
             error_code=adapter.fatal_error_code,
@@ -85,7 +86,7 @@ class GatewayPlatformRuntimeMixin:
         # by a stale code path, the watcher won't fire on it.
         info["next_retry"] = float("inf")
         try:
-            self._update_platform_runtime_status(
+            runtime_status_for(self).update_platform_runtime_status(
                 platform.value,
                 platform_state="paused",
                 error_code=None,
@@ -112,7 +113,7 @@ class GatewayPlatformRuntimeMixin:
         info["attempts"] = 0
         info["next_retry"] = time.monotonic()
         try:
-            self._update_platform_runtime_status(
+            runtime_status_for(self).update_platform_runtime_status(
                 platform.value,
                 platform_state="retrying",
                 error_code=None,
@@ -172,7 +173,7 @@ class GatewayPlatformRuntimeMixin:
                         self._sync_voice_mode_state_to_adapter(adapter)
                         self.delivery_router.adapters = self.adapters
                         del self._failed_platforms[platform]
-                        self._update_platform_runtime_status(
+                        runtime_status_for(self).update_platform_runtime_status(
                             platform.value,
                             platform_state="connected",
                             error_code=None,
@@ -187,7 +188,7 @@ class GatewayPlatformRuntimeMixin:
                         except Exception:
                             pass
                     elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
-                        self._update_platform_runtime_status(
+                        runtime_status_for(self).update_platform_runtime_status(
                             platform.value,
                             platform_state="fatal",
                             error_code=adapter.fatal_error_code,
@@ -199,7 +200,7 @@ class GatewayPlatformRuntimeMixin:
                         )
                         del self._failed_platforms[platform]
                     else:
-                        self._update_platform_runtime_status(
+                        runtime_status_for(self).update_platform_runtime_status(
                             platform.value,
                             platform_state="retrying",
                             error_code=adapter.fatal_error_code,
@@ -218,7 +219,7 @@ class GatewayPlatformRuntimeMixin:
                                 reason=adapter.fatal_error_message or "failed to reconnect",
                             )
                 except Exception as exc:
-                    self._update_platform_runtime_status(
+                    runtime_status_for(self).update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",
                         error_code=None,
