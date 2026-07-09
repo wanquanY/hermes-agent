@@ -83,7 +83,7 @@ def _explode_runtime_resolution():
 
 
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
@@ -128,7 +128,7 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_background_task_prefers_session_override_over_global_runtime(monkeypatch):
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -184,6 +184,8 @@ fallback_providers:
 """.lstrip(),
         encoding="utf-8",
     )
+    import gateway.run as gateway_run
+
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     def fake_resolve_runtime_provider(*, requested=None, explicit_base_url=None, explicit_api_key=None):
@@ -217,4 +219,3 @@ fallback_providers:
     assert model == "minimax/minimax-m2.7"
     assert runtime_kwargs["provider"] == "openrouter"
     assert runtime_kwargs["api_key"] == "sk-openrouter"
-

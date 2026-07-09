@@ -92,7 +92,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     # The picker-setup path calls list_picker_providers, which otherwise hits
     # the network (OpenRouter model catalog). Stub it to a minimal list — these
