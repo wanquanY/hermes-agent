@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.runtime_status_command import runtime_status_command_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -136,7 +137,7 @@ async def test_unknown_slash_command_underscored_form_also_guarded(monkeypatch):
 async def test_known_slash_command_not_flagged_as_unknown(monkeypatch):
     """A real built-in like /status must NOT hit the unknown-command guard."""
     runner = _make_runner()
-    # Make _handle_status_command exist via the normal path by running a real
+    # Make status handling exist via the normal path by running a real
     # dispatch. If the guard fires, the return string will mention "Unknown".
     runner._running_agents[build_session_key(_make_source())] = MagicMock()
 
@@ -183,7 +184,7 @@ async def test_command_hook_can_deny_before_dispatch(monkeypatch):
     runner._run_agent = AsyncMock(
         side_effect=AssertionError("denied slash command leaked to the agent")
     )
-    runner._handle_status_command = AsyncMock(
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
         side_effect=AssertionError("denied slash command reached its handler")
     )
     runner.hooks.emit_collect = AsyncMock(
@@ -209,7 +210,7 @@ async def test_command_hook_deny_without_message_uses_default(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._handle_status_command = AsyncMock(
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
         side_effect=AssertionError("denied slash command reached its handler")
     )
     runner.hooks.emit_collect = AsyncMock(return_value=[{"decision": "deny"}])
@@ -230,7 +231,7 @@ async def test_command_hook_can_mark_command_as_handled(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._handle_status_command = AsyncMock(
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
         side_effect=AssertionError("handled slash command reached its handler")
     )
     runner.hooks.emit_collect = AsyncMock(
@@ -252,7 +253,9 @@ async def test_command_hook_allow_decision_is_passthrough(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._handle_status_command = AsyncMock(return_value="status: ok")
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
+        return_value="status: ok"
+    )
     runner.hooks.emit_collect = AsyncMock(
         return_value=[{"decision": "allow"}]
     )
@@ -264,7 +267,7 @@ async def test_command_hook_allow_decision_is_passthrough(monkeypatch):
     result = await runner._handle_message(_make_event("/status"))
 
     assert result == "status: ok"
-    runner._handle_status_command.assert_awaited_once()
+    runtime_status_command_for(runner).handle_status_command.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -273,7 +276,9 @@ async def test_command_hook_non_dict_return_values_ignored(monkeypatch):
     import gateway.run as gateway_run
 
     runner = _make_runner()
-    runner._handle_status_command = AsyncMock(return_value="status: ok")
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
+        return_value="status: ok"
+    )
     runner.hooks.emit_collect = AsyncMock(
         return_value=["some string", 42, None, {}]
     )

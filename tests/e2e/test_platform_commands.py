@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import Platform
+from hermes_gateway.runtime_status_command import runtime_status_command_for
 from channels.platforms.base import SendResult
 from tests.e2e.conftest import make_event, send_and_capture
 
@@ -150,14 +151,16 @@ class TestSlashCommands:
             assert event.get_command_args() == "extra-arg"
             return "status via alias"
 
-        runner._handle_status_command = AsyncMock(side_effect=_handle_status)
+        runtime_status_command_for(runner).handle_status_command = AsyncMock(
+            side_effect=_handle_status
+        )
 
         send = await send_and_capture(adapter, "/s", platform)
 
         send.assert_called_once()
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         assert response_text == "status via alias"
-        runner._handle_status_command.assert_awaited_once()
+        runtime_status_command_for(runner).handle_status_command.assert_awaited_once()
         runner._handle_message_with_agent.assert_not_awaited()
 
 

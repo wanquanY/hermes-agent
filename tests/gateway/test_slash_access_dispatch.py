@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.runtime_status_command import runtime_status_command_for
 from channels.platforms.base import MessageEvent
 from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -388,7 +389,9 @@ async def test_running_agent_fastpath_status_always_works():
     sk = build_session_key(src)
     runner._running_agents[sk] = MagicMock()
     runner._running_agents_ts[sk] = 0
-    runner._handle_status_command = AsyncMock(return_value="status-handled")
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
+        return_value="status-handled"
+    )
 
     result = await runner._handle_message(_make_event("/status", src))
     assert result == "status-handled"

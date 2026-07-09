@@ -103,7 +103,7 @@ from hermes_gateway.response_normalization import (
     is_dovie_runtime_auth_failure as _is_dovie_runtime_auth_failure,
     normalize_empty_agent_response as _normalize_empty_agent_response,
 )
-from hermes_gateway.runtime_status_command import GatewayRuntimeStatusCommandMixin
+from hermes_gateway.runtime_status_command import runtime_status_command_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.resume_pending import (
     preserve_queued_followup_history_offset as _preserve_queued_followup_history_offset,
@@ -527,7 +527,6 @@ class GatewayRunner(
     GatewayReloadSkillsCommandMixin,
     GatewayResetCommandMixin,
     GatewayRollbackCommandMixin,
-    GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
     GatewaySessionRecoveryRuntimeMixin,
     GatewayShutdownRuntimeMixin,
@@ -1526,7 +1525,7 @@ class GatewayRunner(
 
         if _quick_key in self._running_agents:
             if event.get_command() == "status":
-                return await self._handle_status_command(event)
+                return await runtime_status_command_for(self).handle_status_command(event)
 
             # Resolve the command once for all early-intercept checks below.
             from hermes_cli.commands import (
@@ -1680,7 +1679,7 @@ class GatewayRunner(
 
             # /agents (/tasks alias) should be query-only and never interrupt.
             if _cmd_def_inner and _cmd_def_inner.name == "agents":
-                return await self._handle_agents_command(event)
+                return await runtime_status_command_for(self).handle_agents_command(event)
 
             # /background must bypass the running-agent guard — it starts a
             # parallel task and must never interrupt the active conversation.
@@ -1997,10 +1996,10 @@ class GatewayRunner(
             return await handle_whoami_command(gateway_config=self.config, event=event)
 
         if canonical == "status":
-            return await self._handle_status_command(event)
+            return await runtime_status_command_for(self).handle_status_command(event)
 
         if canonical == "agents":
-            return await self._handle_agents_command(event)
+            return await runtime_status_command_for(self).handle_agents_command(event)
 
         if canonical == "platform":
             return await self._handle_platform_command(event)
@@ -2009,7 +2008,7 @@ class GatewayRunner(
             return await self._handle_restart_command(event)
         
         if canonical == "stop":
-            return await self._handle_stop_command(event)
+            return await runtime_status_command_for(self).handle_stop_command(event)
         
         if canonical == "reasoning":
             return await self._handle_reasoning_command(event)
