@@ -113,6 +113,7 @@ from hermes_gateway.resume_pending import (
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
 from hermes_gateway.session_navigation_commands import GatewaySessionNavigationCommandMixin
+from hermes_gateway.session_recovery_runtime import GatewaySessionRecoveryRuntimeMixin
 from hermes_gateway.session_runtime_state import GatewaySessionRuntimeStateMixin
 from hermes_gateway.shutdown_runtime import GatewayShutdownRuntimeMixin
 from hermes_gateway.skill_hint import (
@@ -533,6 +534,7 @@ class GatewayRunner(
     GatewayRollbackCommandMixin,
     GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
+    GatewaySessionRecoveryRuntimeMixin,
     GatewaySessionRuntimeStateMixin,
     GatewayShutdownRuntimeMixin,
     GatewayTitleCommandMixin,
@@ -1869,105 +1871,9 @@ class GatewayRunner(
         return True
 
 
-    _STUCK_LOOP_THRESHOLD = 3  # restarts while active before auto-suspend
-    _STUCK_LOOP_FILE = ".restart_failure_counts"
 
-    def _increment_restart_failure_counts(self, active_session_keys: set) -> None:
-        """Increment restart-failure counters for sessions active at shutdown.
 
-        Persists to a JSON file so counters survive across restarts.
-        Sessions NOT in active_session_keys are removed (they completed
-        successfully, so the loop is broken).
-        """
-        import json
 
-        path = _hermes_home / self._STUCK_LOOP_FILE
-        try:
-            counts = json.loads(path.read_text()) if path.exists() else {}
-        except Exception:
-            counts = {}
-
-        # Increment active sessions, remove inactive ones (loop broken)
-        new_counts = {}
-        for key in active_session_keys:
-            new_counts[key] = counts.get(key, 0) + 1
-        # Keep any entries that are still above 0 even if not active now
-        # (they might become active again next restart)
-
-        try:
-            atomic_json_write(path, new_counts, indent=None)
-        except Exception:
-            pass
-
-    def _suspend_stuck_loop_sessions(self) -> int:
-        """Suspend sessions that have been active across too many restarts.
-
-        Returns the number of sessions suspended.  Called on gateway startup
-        AFTER suspend_recently_active() to catch the stuck-loop pattern:
-        session loads → agent gets stuck → gateway restarts → repeat.
-        """
-        import json
-
-        path = _hermes_home / self._STUCK_LOOP_FILE
-        if not path.exists():
-            return 0
-
-        try:
-            counts = json.loads(path.read_text())
-        except Exception:
-            return 0
-
-        suspended = 0
-        stuck_keys = [k for k, v in counts.items() if v >= self._STUCK_LOOP_THRESHOLD]
-
-        for session_key in stuck_keys:
-            try:
-                entry = self.session_store._entries.get(session_key)
-                if entry and not entry.suspended:
-                    entry.suspended = True
-                    suspended += 1
-                    logger.warning(
-                        "Auto-suspended stuck session %s (active across %d "
-                        "consecutive restarts — likely a stuck loop)",
-                        session_key, counts[session_key],
-                    )
-            except Exception:
-                pass
-
-        if suspended:
-            try:
-                self.session_store._save()
-            except Exception:
-                pass
-
-        # Clear the file — counters start fresh after suspension
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-        return suspended
-
-    def _clear_restart_failure_count(self, session_key: str) -> None:
-        """Clear the restart-failure counter for a session that completed OK.
-
-        Called after a successful agent turn to signal the loop is broken.
-        """
-        import json
-
-        path = _hermes_home / self._STUCK_LOOP_FILE
-        if not path.exists():
-            return
-        try:
-            counts = json.loads(path.read_text())
-            if session_key in counts:
-                del counts[session_key]
-                if counts:
-                    atomic_json_write(path, counts, indent=None)
-                else:
-                    path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
     def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
@@ -1992,86 +1898,7 @@ class GatewayRunner(
     # SessionStore.suspend_recently_active() on crash recovery (no
     # .clean_shutdown marker).  All three mean "the agent was mid-turn and
     # we killed it" — eligible for startup auto-resume.
-    _AUTO_RESUME_REASONS = frozenset(
-        {"restart_timeout", "shutdown_timeout", "restart_interrupted"}
-    )
 
-    def _schedule_resume_pending_sessions(self) -> int:
-        """Auto-continue fresh restart-interrupted sessions after startup.
-
-        ``resume_pending`` already preserves the transcript AND the existing
-        ``_is_resume_pending`` branch in ``_handle_message_with_agent``
-        injects a reason-aware recovery system note on the next turn.  This
-        method closes the UX gap by synthesizing that next turn once
-        adapters are back online — the event text is empty so the existing
-        injection path owns the wording and we never double up.
-
-        Adapters that are not yet ready (adapter missing from
-        ``self.adapters``) are skipped silently; their sessions stay
-        ``resume_pending`` and will auto-resume on the next real user
-        message, or on the next gateway startup.
-        """
-        window = _auto_continue_freshness_window()
-        try:
-            with self.session_store._lock:  # noqa: SLF001 — snapshot under lock
-                self.session_store._ensure_loaded_locked()  # noqa: SLF001
-                candidates = [
-                    entry for entry in self.session_store._entries.values()  # noqa: SLF001
-                    if entry.resume_pending
-                    and not entry.suspended
-                    and entry.origin is not None
-                    and entry.resume_reason in self._AUTO_RESUME_REASONS
-                ]
-        except Exception as exc:
-            logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
-            return 0
-
-        now = datetime.now()
-        scheduled = 0
-        for entry in candidates:
-            marker = entry.last_resume_marked_at or entry.updated_at
-            if marker is not None and (now - marker).total_seconds() > window:
-                continue
-
-            source = entry.origin
-            adapter = self.adapters.get(source.platform)
-            if adapter is None:
-                logger.debug(
-                    "Skipping auto-resume for %s: adapter not ready for %s",
-                    entry.session_key,
-                    getattr(source.platform, "value", source.platform),
-                )
-                continue
-
-            # Claim the session slot *before* spawning the task so that an
-            # inbound message arriving between task creation and the task's
-            # first await (where _process_message_background sets the real
-            # sentinel) sees the slot as occupied and queues behind it
-            # instead of spinning up a duplicate AIAgent (#45456).
-            self._running_agents[entry.session_key] = _AGENT_PENDING_SENTINEL
-            self._running_agents_ts[entry.session_key] = time.time()
-            self._persist_active_agents()
-
-            # Empty-text internal event — the _is_resume_pending branch in
-            # _handle_message_with_agent prepends the proper reason-aware
-            # system note before the turn runs.
-            event = MessageEvent(
-                text="",
-                message_type=MessageType.TEXT,
-                source=source,
-                internal=True,
-            )
-            task = asyncio.create_task(adapter.handle_message(event))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-            scheduled += 1
-
-        if scheduled:
-            logger.info(
-                "Scheduled auto-resume for %d restart-interrupted session(s)",
-                scheduled,
-            )
-        return scheduled
 
     async def start(self) -> bool:
         """
