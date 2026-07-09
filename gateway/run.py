@@ -85,6 +85,7 @@ from hermes_gateway.media_context import (
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.insights_command import GatewayInsightsCommandMixin
 from hermes_gateway.pending_events import dequeue_pending_event as _dequeue_pending_event
+from hermes_gateway.profile_home_commands import GatewayProfileHomeCommandMixin
 from hermes_gateway.process_notifications import (
     drain_gateway_watch_events as _drain_gateway_watch_events,
     format_gateway_process_notification as _format_gateway_process_notification,
@@ -509,6 +510,7 @@ class GatewayRunner(
     GatewayAgentCacheMixin,
     GatewayPersonalityCommandMixin,
     GatewayPlatformCommandMixin,
+    GatewayProfileHomeCommandMixin,
     GatewayProcessWatcherMixin,
     GatewayProxyModeMixin,
     GatewayInboundMediaMixin,
@@ -8126,20 +8128,6 @@ class GatewayRunner(
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
 
-    async def _handle_profile_command(self, event: MessageEvent) -> str:
-        """Handle /profile — show active profile name and home directory."""
-        from hermes_constants import display_hermes_home
-        from hermes_cli.profiles import get_active_profile_name
-
-        display = display_hermes_home()
-        profile_name = get_active_profile_name()
-
-        lines = [
-            t("gateway.profile.header", profile=profile_name),
-            t("gateway.profile.home", home=display),
-        ]
-
-        return "\n".join(lines)
 
 
 
@@ -8837,42 +8825,6 @@ class GatewayRunner(
             logger.debug("goal continuation: enqueue failed: %s", exc)
 
 
-    async def _handle_set_home_command(self, event: MessageEvent) -> str:
-        """Handle /sethome command -- set the current chat as the platform's home channel."""
-        source = event.source
-        platform_name = source.platform.value if source.platform else "unknown"
-        chat_id = source.chat_id
-        chat_name = source.chat_name or chat_id
-
-        env_key = _home_target_env_var(platform_name)
-        thread_env_key = _home_thread_env_var(platform_name)
-        thread_id = source.thread_id
-
-        # Save to .env so it persists across restarts
-        try:
-            from hermes_cli.config import save_env_value
-            save_env_value(env_key, str(chat_id))
-            # Keep thread/topic routing explicit and clear stale values when
-            # /sethome is run from the parent chat instead of a thread.
-            save_env_value(thread_env_key, str(thread_id or ""))
-        except Exception as e:
-            return t("gateway.set_home.save_failed", error=e)
-
-        # Keep the running gateway config in sync too. The pre-restart
-        # notification path reads self.config before the process reloads env.
-        if source.platform:
-            platform_config = self.config.platforms.setdefault(
-                source.platform,
-                PlatformConfig(enabled=True),
-            )
-            platform_config.home_channel = HomeChannel(
-                platform=source.platform,
-                chat_id=str(chat_id),
-                name=chat_name,
-                thread_id=str(thread_id) if thread_id else None,
-            )
-
-        return t("gateway.set_home.success", name=chat_name, chat_id=chat_id)
 
 
 
