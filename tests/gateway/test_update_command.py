@@ -700,7 +700,7 @@ class TestUpdateInHelp:
         """The /update command is in the help text (proxy for _known_commands)."""
         # _known_commands is local to _handle_message, so we verify by
         # checking the help output includes it.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.message_command_runtime import GatewayMessageCommandService
         import inspect
-        source = inspect.getsource(GatewayRunner._handle_message)
+        source = inspect.getsource(GatewayMessageCommandService.dispatch)
         assert '"update"' in source

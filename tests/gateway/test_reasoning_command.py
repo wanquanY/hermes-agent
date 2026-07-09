@@ -81,7 +81,9 @@ class TestReasoningCommand:
         assert "/reasoning [level|show|hide]" in result
 
     def test_reasoning_is_known_command(self):
-        source = inspect.getsource(gateway_run.GatewayRunner._handle_message)
+        from hermes_gateway.message_command_runtime import GatewayMessageCommandService
+
+        source = inspect.getsource(GatewayMessageCommandService.dispatch)
         assert '"reasoning"' in source
 
     def test_parse_reasoning_command_args_accepts_ascii_and_smart_global_flags(self):

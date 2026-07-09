@@ -85,7 +85,7 @@ def _make_runner():
 async def test_unknown_slash_command_returns_guidance(monkeypatch):
     """A genuinely unknown /foobar should return user-facing guidance, not
     silently drop through to the LLM."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_command_runtime
 
     runner = _make_runner()
     # If the LLM were called, this would fail: the guard must short-circuit
@@ -94,10 +94,6 @@ async def test_unknown_slash_command_returns_guidance(monkeypatch):
         side_effect=AssertionError(
             "unknown slash command leaked through to the agent"
         )
-    )
-
-    monkeypatch.setattr(
-        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
 
     result = await runner._handle_message(_make_event("/definitely-not-a-command"))
@@ -152,7 +148,7 @@ async def test_known_slash_command_not_flagged_as_unknown(monkeypatch):
 async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch):
     """Telegram autocomplete sends /reload_mcp for the /reload-mcp built-in.
     That must NOT be flagged as unknown."""
-    import gateway.run as gateway_run
+    import hermes_gateway.message_command_runtime as message_command_runtime
 
     runner = _make_runner()
     # Prevent real MCP work; we only care that the unknown guard doesn't fire.
@@ -163,10 +159,7 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
     )()
 
     monkeypatch.setattr(
-        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
-    )
-    monkeypatch.setattr(
-        gateway_run, "reload_mcp_command_for", lambda _runner: reload_service
+        message_command_runtime, "reload_mcp_command_for", lambda _runner: reload_service
     )
 
     result = await runner._handle_message(_make_event("/reload_mcp"))
