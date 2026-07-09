@@ -156,7 +156,6 @@ from hermes_gateway.output_policy import (
     sanitize_gateway_final_response as _sanitize_gateway_final_response,
     telegramize_command_mentions as _telegramize_command_mentions,
 )
-from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.platform_authorization import GatewayPlatformAuthorizationMixin
 from hermes_gateway.platform_notice import platform_notice_for
 from hermes_gateway.platform_runtime import platform_runtime_for
@@ -168,10 +167,6 @@ from hermes_gateway.replay import (
     ASSISTANT_REPLAY_FIELDS as _ASSISTANT_REPLAY_FIELDS,
     build_replay_entry as _build_replay_entry,
 )
-
-_PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
-_ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
-
 
 def _redact_approval_command(cmd: "str | None") -> str:
     """Redact credentials from a command before it enters an approval prompt."""
@@ -573,76 +568,16 @@ class GatewayRunner(
 
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
-        """Call adapter.disconnect() defensively, swallowing any error.
-
-        Used when adapter.connect() failed or raised — the adapter may
-        have allocated partial resources (aiohttp.ClientSession, poll
-        tasks, child subprocesses) that would otherwise leak and surface
-        as "Unclosed client session" warnings at process exit.
-
-        Must tolerate partial-init state and never raise, since callers
-        use it inside error-handling blocks.
-        """
-        timeout = self._adapter_disconnect_timeout_secs()
-        try:
-            if timeout <= 0:
-                await adapter.disconnect()
-            else:
-                await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
-                timeout,
-                platform.value if platform is not None else "adapter",
-            )
-        except Exception as e:
-            logger.debug(
-                "Defensive %s disconnect after failed connect raised: %s",
-                platform.value if platform is not None else "adapter",
-                e,
-            )
+        await platform_runtime_for(self).safe_adapter_disconnect(adapter, platform)
 
     def _adapter_disconnect_timeout_secs(self) -> float:
-        """Return the per-adapter disconnect timeout used during shutdown."""
-        raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
-        if raw:
-            try:
-                timeout = float(raw)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT=%r",
-                    raw,
-                )
-            else:
-                return max(0.0, timeout)
-        return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+        return platform_runtime_for(self).adapter_disconnect_timeout_secs()
 
     def _platform_connect_timeout_secs(self) -> float:
-        """Return the per-platform connect timeout used during startup/retry."""
-        raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
-        if raw:
-            try:
-                timeout = float(raw)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT=%r",
-                    raw,
-                )
-            else:
-                return max(0.0, timeout)
-        return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
+        return platform_runtime_for(self).platform_connect_timeout_secs()
 
     async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
-        """Connect an adapter without allowing one platform to block others."""
-        timeout = self._platform_connect_timeout_secs()
-        if timeout <= 0:
-            return await adapter.connect()
-        try:
-            return await asyncio.wait_for(adapter.connect(), timeout=timeout)
-        except asyncio.TimeoutError as exc:
-            raise TimeoutError(
-                f"{platform.value} connect timed out after {timeout:g}s"
-            ) from exc
+        return await platform_runtime_for(self).connect_adapter_with_timeout(adapter, platform)
 
     @property
     def should_exit_cleanly(self) -> bool:
@@ -915,14 +850,7 @@ class GatewayRunner(
         platform: Platform,
         config: Any,
     ) -> Optional[BasePlatformAdapter]:
-        return create_platform_adapter(
-            platform,
-            config,
-            group_sessions_per_user=self.config.group_sessions_per_user,
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
-            gateway_runner=self,
-            load_user_config=_load_gateway_config,
-        )
+        return platform_runtime_for(self).create_adapter(platform, config)
 
 
 

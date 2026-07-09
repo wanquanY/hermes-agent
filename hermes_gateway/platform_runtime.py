@@ -4,18 +4,98 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 import time
+from typing import Any, Optional
 
 from channels.platforms.base import BasePlatformAdapter
+from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
+from hermes_constants import get_hermes_home
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
+from hermes_gateway.platform_adapter_factory import create_platform_adapter
 from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
+_PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
+_ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 
 
 class GatewayPlatformRuntimeService:
     def __init__(self, runner):
         self._runner = runner
+
+    def create_adapter(self, platform, config: Any) -> Optional[BasePlatformAdapter]:
+        runner = self._runner
+        return create_platform_adapter(
+            platform,
+            config,
+            group_sessions_per_user=runner.config.group_sessions_per_user,
+            thread_sessions_per_user=getattr(runner.config, "thread_sessions_per_user", False),
+            gateway_runner=runner,
+            load_user_config=_load_gateway_config,
+        )
+
+    async def connect_adapter_with_timeout(self, adapter, platform) -> bool:
+        timeout = self.platform_connect_timeout_secs()
+        if timeout <= 0:
+            return await adapter.connect()
+        try:
+            return await asyncio.wait_for(adapter.connect(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"{platform.value} connect timed out after {timeout:g}s"
+            ) from exc
+
+    async def safe_adapter_disconnect(self, adapter, platform) -> None:
+        timeout = self.adapter_disconnect_timeout_secs()
+        try:
+            if timeout <= 0:
+                await adapter.disconnect()
+            else:
+                await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
+                timeout,
+                platform.value if platform is not None else "adapter",
+            )
+        except Exception as exc:
+            logger.debug(
+                "Defensive %s disconnect after failed connect raised: %s",
+                platform.value if platform is not None else "adapter",
+                exc,
+            )
+
+    @staticmethod
+    def adapter_disconnect_timeout_secs() -> float:
+        raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = float(raw)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT=%r",
+                    raw,
+                )
+            else:
+                return max(0.0, timeout)
+        return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+
+    @staticmethod
+    def platform_connect_timeout_secs() -> float:
+        raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = float(raw)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT=%r",
+                    raw,
+                )
+            else:
+                return max(0.0, timeout)
+        return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
 
     async def handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
@@ -258,3 +338,11 @@ def platform_runtime_for(runner) -> GatewayPlatformRuntimeService:
     service = GatewayPlatformRuntimeService(runner)
     runner.platform_runtime = service
     return service
+
+
+def _load_gateway_config() -> dict:
+    legacy = sys.modules.get("gateway.run")
+    patched = getattr(legacy, "_load_gateway_config", None) if legacy is not None else None
+    if callable(patched):
+        return patched()
+    return load_gateway_runtime_config(get_hermes_home())
