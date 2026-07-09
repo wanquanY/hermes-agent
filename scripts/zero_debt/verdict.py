@@ -195,6 +195,8 @@ _P2_HERMES_STATE_STORE_MAX_METHODS = 0
 _GOD_OBJECT_MAX_CLASS_METHODS = 80
 _GOD_OBJECT_BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
 _GOD_OBJECT_EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
+_COMPOSED_GOD_OBJECT_EXCLUDE_TREES = ("channels/",)
+_COMPOSED_GOD_OBJECT_ALLOWLIST_CLASSES = frozenset({"HermesStateStore"})
 
 _P3_LEGACY_METHOD_TOKENS = ("METHOD_MODULES",)
 _P3_LEGACY_OVERRIDE_TOKENS = ("DOVIE_GATEWAY_METHOD_OVERRIDES",)
@@ -526,6 +528,116 @@ def _god_object_offenders() -> list[str]:
                 )
                 if methods > _GOD_OBJECT_MAX_CLASS_METHODS:
                     offenders.append(f"{rel}::{node.name}: {methods} methods")
+    return sorted(offenders)
+
+
+def _composition_index_files():
+    for tree_name in _GOD_OBJECT_BLESSED_TREES:
+        root = REPO_ROOT / tree_name
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if any(rel.startswith(prefix) for prefix in _GOD_OBJECT_EXCLUDE_PREFIXES):
+                continue
+            yield path, rel
+    legacy_gateway_root = REPO_ROOT / "gateway" / "run.py"
+    if legacy_gateway_root.exists():
+        yield legacy_gateway_root, legacy_gateway_root.relative_to(REPO_ROOT).as_posix()
+
+
+def _local_class_index() -> dict[str, list[tuple[str, list[str], list[str]]]]:
+    index: dict[str, list[tuple[str, list[str], list[str]]]] = {}
+    for path, rel in _composition_index_files():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            method_names = [
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            base_names: list[str] = []
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    base_names.append(base.id)
+                elif isinstance(base, ast.Attribute):
+                    base_names.append(base.attr)
+            index.setdefault(node.name, []).append((rel, method_names, base_names))
+    return index
+
+
+def _composed_method_surface(
+    class_name: str,
+    index: dict[str, list[tuple[str, list[str], list[str]]]],
+    seen: set[str] | None = None,
+) -> set[str]:
+    if seen is None:
+        seen = set()
+    if class_name in seen:
+        return set()
+    seen.add(class_name)
+    names: set[str] = set()
+    for _rel, method_names, base_names in index.get(class_name, []):
+        names.update(method_names)
+        for base_name in base_names:
+            names |= _composed_method_surface(base_name, index, seen)
+    return names
+
+
+def _class_production_instantiations(class_name: str) -> list[str]:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = None
+            if isinstance(func, ast.Name):
+                called = func.id
+            elif isinstance(func, ast.Attribute):
+                called = func.attr
+            if called == class_name:
+                offenders.append(f"{rel}:{getattr(node, 'lineno', 0)}")
+    return offenders
+
+
+def _mixin_recomposed_god_object_offenders() -> list[str]:
+    index = _local_class_index()
+    offenders: list[str] = []
+    for class_name, defs in index.items():
+        rel = defs[0][0]
+        if any(rel.startswith(tree) for tree in _COMPOSED_GOD_OBJECT_EXCLUDE_TREES):
+            continue
+        if class_name in _COMPOSED_GOD_OBJECT_ALLOWLIST_CLASSES:
+            continue
+        composes_local = any(
+            any(base_name in index for base_name in base_names)
+            for _rel, _method_names, base_names in defs
+        )
+        if not composes_local:
+            continue
+        surface = _composed_method_surface(class_name, index)
+        if len(surface) <= _GOD_OBJECT_MAX_CLASS_METHODS:
+            continue
+        instantiations = _class_production_instantiations(class_name)
+        if not instantiations:
+            continue
+        offenders.append(
+            f"{rel}::{class_name}: {len(surface)} composed methods; "
+            f"production instantiation(s): {', '.join(instantiations[:5])}"
+        )
     return sorted(offenders)
 
 
@@ -957,6 +1069,7 @@ def _p5_gateway_checks() -> list[Check]:
     gateway_dir = REPO_ROOT / "gateway"
     legacy_gateway_imports = _legacy_gateway_import_offenders()
     god_object_offenders = _god_object_offenders()
+    recomposed_god_object_offenders = _mixin_recomposed_god_object_offenders()
     gateway_run_lines = len(_read(REPO_ROOT / _P5_GATEWAY_RUN_PATH).splitlines())
     target_monoliths: list[str] = []
     for root_name in ("hermes_gateway", "hermes_agent/gateway"):
@@ -990,6 +1103,15 @@ def _p5_gateway_checks() -> list[Check]:
                 "no gateway god-object class was relocated into blessed trees"
                 if not god_object_offenders
                 else "\n".join(god_object_offenders[:30])
+            ),
+        ),
+        Check(
+            id="p5:no_mixin_recomposed_gateway_monolith",
+            ok=not recomposed_god_object_offenders,
+            message=(
+                "no production gateway god-object is recomposed through local mixins"
+                if not recomposed_god_object_offenders
+                else "\n".join(recomposed_god_object_offenders[:30])
             ),
         ),
         Check(
