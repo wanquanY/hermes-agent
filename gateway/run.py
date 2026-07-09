@@ -78,7 +78,7 @@ from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import GatewayDebugCommandMixin
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
 from hermes_gateway.interrupt_control import is_control_interrupt_message as _is_control_interrupt_message
-from hermes_gateway.media_delivery import GatewayMediaDeliveryMixin
+from hermes_gateway.media_delivery import media_delivery_for
 from hermes_gateway.model_command import GatewayModelCommandMixin
 from hermes_gateway.media_context import build_media_placeholder as _build_media_placeholder
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
@@ -526,7 +526,6 @@ class GatewayRunner(
     GatewayInboundMessagePreparationMixin,
     GatewayKanbanWatcherMixin,
     GatewayInsightsCommandMixin,
-    GatewayMediaDeliveryMixin,
     GatewayModelCommandMixin,
     GatewayReasoningCommandMixin,
     GatewayReloadMcpCommandMixin,
@@ -3379,7 +3378,7 @@ class GatewayRunner(
                 if response:
                     _media_adapter = self.adapters.get(source.platform)
                     if _media_adapter:
-                        await self._deliver_media_from_response(
+                        await media_delivery_for(self).deliver_media_from_response(
                             response, event, _media_adapter,
                         )
                 # Streaming already delivered the body text, but the footer was

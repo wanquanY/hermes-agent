@@ -9,8 +9,11 @@ from channels.platforms.base import MessageEvent
 logger = logging.getLogger(__name__)
 
 
-class GatewayMediaDeliveryMixin:
-    async def _deliver_media_from_response(
+class GatewayMediaDeliveryService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    async def deliver_media_from_response(
         self,
         response: str,
         event: MessageEvent,
@@ -22,6 +25,7 @@ class GatewayMediaDeliveryMixin:
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
         """
+        runner = self._runner
         from pathlib import Path
         from urllib.parse import quote as _quote
 
@@ -40,7 +44,10 @@ class GatewayMediaDeliveryMixin:
             local_files, _ = adapter.extract_local_files(cleaned)
             local_files = BasePlatformAdapter.filter_local_delivery_paths(local_files)
 
-            _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
+            _thread_meta = runner._thread_metadata_for_source(
+                event.source,
+                runner._reply_anchor_for_event(event),
+            )
 
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
             _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
@@ -123,3 +130,12 @@ class GatewayMediaDeliveryMixin:
 
         except Exception as e:
             logger.warning("Post-stream media extraction failed: %s", e)
+
+
+def media_delivery_for(runner) -> GatewayMediaDeliveryService:
+    service = getattr(runner, "media_delivery", None)
+    if isinstance(service, GatewayMediaDeliveryService):
+        return service
+    service = GatewayMediaDeliveryService(runner)
+    runner.media_delivery = service
+    return service
