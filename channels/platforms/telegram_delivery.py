@@ -186,32 +186,44 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 for _send_attempt in range(3):
                     try:
                         # Try Markdown first, fall back to plain text if it fails
-                        try:
+                        if ParseMode is None:
+                            plain_chunk = _strip_mdv2(chunk)
                             msg = await self._bot.send_message(
                                 chat_id=int(chat_id),
-                                text=chunk,
-                                parse_mode=ParseMode.MARKDOWN_V2,
+                                text=plain_chunk,
+                                parse_mode=None,
                                 reply_to_message_id=reply_to_id,
                                 **thread_kwargs,
                                 **self._link_preview_kwargs(),
                                 **self._notification_kwargs(metadata),
                             )
-                        except Exception as md_error:
-                            # Markdown parsing failed, try plain text
-                            if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
-                                logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
-                                plain_chunk = _strip_mdv2(chunk)
+                        else:
+                            try:
                                 msg = await self._bot.send_message(
                                     chat_id=int(chat_id),
-                                    text=plain_chunk,
-                                    parse_mode=None,
+                                    text=chunk,
+                                    parse_mode=ParseMode.MARKDOWN_V2,
                                     reply_to_message_id=reply_to_id,
                                     **thread_kwargs,
                                     **self._link_preview_kwargs(),
                                     **self._notification_kwargs(metadata),
                                 )
-                            else:
-                                raise
+                            except Exception as md_error:
+                                # Markdown parsing failed, try plain text
+                                if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
+                                    logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
+                                    plain_chunk = _strip_mdv2(chunk)
+                                    msg = await self._bot.send_message(
+                                        chat_id=int(chat_id),
+                                        text=plain_chunk,
+                                        parse_mode=None,
+                                        reply_to_message_id=reply_to_id,
+                                        **thread_kwargs,
+                                        **self._link_preview_kwargs(),
+                                        **self._notification_kwargs(metadata),
+                                    )
+                                else:
+                                    raise
                         break  # success
                     except _NetErr as send_err:
                         # BadRequest is a subclass of NetworkError in
