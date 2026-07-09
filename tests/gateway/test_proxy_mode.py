@@ -10,6 +10,7 @@ import pytest
 from hermes_gateway.config import Platform, StreamingConfig
 from channels.platforms.base import resolve_proxy_url
 from gateway.run import GatewayRunner
+from hermes_gateway.proxy_mode import proxy_mode_for
 from hermes_gateway.session import SessionSource
 
 
@@ -24,6 +25,12 @@ def _make_runner(proxy_url=None):
     runner._session_model_overrides = {}
     runner._agent_cache = {}
     runner._agent_cache_lock = None
+    runner._thread_metadata_for_source = GatewayRunner._thread_metadata_for_source.__get__(
+        runner, GatewayRunner
+    )
+    runner._is_session_run_current = GatewayRunner._is_session_run_current.__get__(
+        runner, GatewayRunner
+    )
     return runner
 
 
@@ -95,43 +102,43 @@ def _patch_aiohttp(session):
 
 
 class TestGetProxyUrl:
-    """Test _get_proxy_url() config resolution."""
+    """Test proxy URL config resolution."""
 
     def test_returns_none_when_not_configured(self, monkeypatch):
         monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
         runner = _make_runner()
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
-            assert runner._get_proxy_url() is None
+            assert proxy_mode_for(runner).get_proxy_url() is None
 
     def test_reads_from_env_var(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://192.168.1.100:8642")
         runner = _make_runner()
-        assert runner._get_proxy_url() == "http://192.168.1.100:8642"
+        assert proxy_mode_for(runner).get_proxy_url() == "http://192.168.1.100:8642"
 
     def test_strips_trailing_slash(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642/")
         runner = _make_runner()
-        assert runner._get_proxy_url() == "http://host:8642"
+        assert proxy_mode_for(runner).get_proxy_url() == "http://host:8642"
 
     def test_reads_from_config_yaml(self, monkeypatch):
         monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
         runner = _make_runner()
         cfg = {"gateway": {"proxy_url": "http://10.0.0.1:8642"}}
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value=cfg):
-            assert runner._get_proxy_url() == "http://10.0.0.1:8642"
+            assert proxy_mode_for(runner).get_proxy_url() == "http://10.0.0.1:8642"
 
     def test_env_var_overrides_config(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://env-host:8642")
         runner = _make_runner()
         cfg = {"gateway": {"proxy_url": "http://config-host:8642"}}
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value=cfg):
-            assert runner._get_proxy_url() == "http://env-host:8642"
+            assert proxy_mode_for(runner).get_proxy_url() == "http://env-host:8642"
 
     def test_empty_string_treated_as_unset(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "  ")
         runner = _make_runner()
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
-            assert runner._get_proxy_url() is None
+            assert proxy_mode_for(runner).get_proxy_url() is None
 
 
 class TestResolveProxyUrl:
@@ -189,42 +196,46 @@ class TestRunAgentProxyDispatch:
             "tools": [],
         }
 
-        runner._run_agent_via_proxy = AsyncMock(return_value=expected_result)
+        proxy_mode = proxy_mode_for(runner)
+        proxy_run = AsyncMock(return_value=expected_result)
 
-        result = await runner._run_agent(
-            message="hi",
-            context_prompt="",
-            history=[],
-            source=source,
-            session_id="test-session-123",
-            session_key="test-key",
-            run_generation=7,
-        )
+        with patch.object(proxy_mode, "run_agent_via_proxy", proxy_run):
+            result = await runner._run_agent(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="test-session-123",
+                session_key="test-key",
+                run_generation=7,
+            )
 
         assert result["final_response"] == "Hello from remote!"
-        runner._run_agent_via_proxy.assert_called_once()
-        assert runner._run_agent_via_proxy.call_args.kwargs["run_generation"] == 7
+        proxy_run.assert_called_once()
+        assert proxy_run.call_args.kwargs["run_generation"] == 7
 
     @pytest.mark.asyncio
     async def test_run_agent_skips_proxy_when_not_configured(self, monkeypatch):
         monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
         runner = _make_runner()
 
-        runner._run_agent_via_proxy = AsyncMock()
+        proxy_mode = proxy_mode_for(runner)
+        proxy_run = AsyncMock()
 
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
-            try:
-                await runner._run_agent(
-                    message="hi",
-                    context_prompt="",
-                    history=[],
-                    source=_make_source(),
-                    session_id="test-session",
-                )
-            except Exception:
-                pass  # Expected — bare runner can't create a real agent
+            with patch.object(proxy_mode, "run_agent_via_proxy", proxy_run):
+                try:
+                    await runner._run_agent(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="test-session",
+                    )
+                except Exception:
+                    pass  # Expected — bare runner can't create a real agent
 
-        runner._run_agent_via_proxy.assert_not_called()
+        proxy_run.assert_not_called()
 
 
 class TestRunAgentViaProxy:
@@ -250,7 +261,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await proxy_mode_for(runner).run_agent_via_proxy(
                         message="How are you?",
                         context_prompt="You are helpful.",
                         history=[
@@ -296,7 +307,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -327,7 +338,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with patch("aiohttp.ClientSession", return_value=_ErrorSession()):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -360,7 +371,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await proxy_mode_for(runner).run_agent_via_proxy(
                         message="tell me more",
                         context_prompt="",
                         history=history,
@@ -391,7 +402,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hi",
                         context_prompt="",
                         history=[{"role": "user", "content": "prev"}, {"role": "assistant", "content": "ok"}],
@@ -430,7 +441,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    result = await runner._run_agent_via_proxy(
+                    result = await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -460,7 +471,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hi",
                         context_prompt="",
                         history=[],
@@ -486,7 +497,7 @@ class TestRunAgentViaProxy:
         with patch("hermes_gateway.proxy_mode.load_gateway_proxy_config", return_value={}):
             with _patch_aiohttp(session):
                 with patch("aiohttp.ClientTimeout"):
-                    await runner._run_agent_via_proxy(
+                    await proxy_mode_for(runner).run_agent_via_proxy(
                         message="hello",
                         context_prompt="",
                         history=[],

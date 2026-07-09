@@ -93,7 +93,7 @@ from hermes_gateway.process_notifications import (
 from hermes_gateway.personality_command import GatewayPersonalityCommandMixin
 from hermes_gateway.platform_command import GatewayPlatformCommandMixin
 from hermes_gateway.process_watcher import process_watcher_for
-from hermes_gateway.proxy_mode import GatewayProxyModeMixin
+from hermes_gateway.proxy_mode import proxy_mode_for
 from hermes_gateway.title_command import GatewayTitleCommandMixin
 from hermes_gateway.update_restart import GatewayUpdateRestartMixin
 from hermes_gateway.usage_command import GatewayUsageCommandMixin
@@ -521,7 +521,6 @@ class GatewayRunner(
     GatewayPlatformCommandMixin,
     GatewayPlatformAuthorizationMixin,
     GatewayProfileHomeCommandMixin,
-    GatewayProxyModeMixin,
     GatewayInboundMediaMixin,
     GatewayInboundMessagePreparationMixin,
     GatewayKanbanWatcherMixin,
@@ -3812,8 +3811,9 @@ class GatewayRunner(
         Supports interruption via new messages.
         """
         # ---- Proxy mode: delegate to remote API server ----
-        if self._get_proxy_url():
-            return await self._run_agent_via_proxy(
+        proxy_mode = proxy_mode_for(self)
+        if proxy_mode.get_proxy_url():
+            return await proxy_mode.run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
                 history=history,

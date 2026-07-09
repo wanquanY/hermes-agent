@@ -28,8 +28,11 @@ def platform_config_key(platform: Platform) -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
-class GatewayProxyModeMixin:
-    def _get_proxy_url(self) -> Optional[str]:
+class GatewayProxyModeService:
+    def __init__(self, runner):
+        self._runner = runner
+
+    def get_proxy_url(self) -> Optional[str]:
         """Return the proxy URL if proxy mode is configured, else None.
 
         Checks GATEWAY_PROXY_URL env var first (convenient for Docker),
@@ -44,7 +47,7 @@ class GatewayProxyModeMixin:
             return url.rstrip("/")
         return None
 
-    async def _run_agent_via_proxy(
+    async def run_agent_via_proxy(
         self,
         message: str,
         context_prompt: str,
@@ -67,6 +70,7 @@ class GatewayProxyModeMixin:
         agent runs on the host with full access to local files, memory,
         skills, and a unified session store.
         """
+        runner = self._runner
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
         except ImportError:
@@ -77,7 +81,7 @@ class GatewayProxyModeMixin:
                 "tools": [],
             }
 
-        proxy_url = self._get_proxy_url()
+        proxy_url = self.get_proxy_url()
         if not proxy_url:
             return {
                 "final_response": "⚠️ Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)",
@@ -91,7 +95,7 @@ class GatewayProxyModeMixin:
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
                 return True
-            return self._is_session_run_current(session_key, run_generation)
+            return runner._is_session_run_current(session_key, run_generation)
 
         # Build messages in OpenAI chat format --------------------------
         #
@@ -132,7 +136,7 @@ class GatewayProxyModeMixin:
 
         # Set up platform streaming if available -------------------------
         _stream_consumer = None
-        _scfg = getattr(getattr(self, "config", None), "streaming", None)
+        _scfg = getattr(getattr(runner, "config", None), "streaming", None)
         if _scfg is None:
             from hermes_gateway.config import StreamingConfig
             _scfg = StreamingConfig()
@@ -149,12 +153,12 @@ class GatewayProxyModeMixin:
             else bool(_plat_streaming)
         )
 
-        _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
+        _thread_metadata: Optional[Dict[str, Any]] = runner._thread_metadata_for_source(source, event_message_id)
 
         if _streaming_enabled:
             try:
                 from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                _adapter = self.adapters.get(source.platform)
+                _adapter = runner.adapters.get(source.platform)
                 if _adapter:
                     _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
@@ -196,12 +200,12 @@ class GatewayProxyModeMixin:
             stream_task = asyncio.create_task(_stream_consumer.run())
 
         # Send typing indicator
-        _adapter = self.adapters.get(source.platform)
+        _adapter = runner.adapters.get(source.platform)
         if _adapter:
             try:
                 await _adapter.send_typing(source.chat_id, metadata=_thread_metadata)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Proxy: typing indicator failed for %s: %s", source.chat_id, exc)
 
         # Make the HTTP request with SSE streaming -----------------------
         full_response = ""
@@ -269,8 +273,8 @@ class GatewayProxyModeMixin:
                                             full_response += content
                                             if _stream_consumer:
                                                 _stream_consumer.on_delta(content)
-                                except json.JSONDecodeError:
-                                    pass
+                                except json.JSONDecodeError as exc:
+                                    logger.debug("Proxy: ignored malformed SSE data line: %s", exc)
 
         except asyncio.CancelledError:
             raise
@@ -327,3 +331,12 @@ class GatewayProxyModeMixin:
             "session_id": session_id,
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }
+
+
+def proxy_mode_for(runner) -> GatewayProxyModeService:
+    service = getattr(runner, "proxy_mode", None)
+    if isinstance(service, GatewayProxyModeService):
+        return service
+    service = GatewayProxyModeService(runner)
+    runner.proxy_mode = service
+    return service
