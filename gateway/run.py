@@ -113,8 +113,8 @@ from hermes_gateway.resume_pending import (
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
 from hermes_gateway.session_navigation_commands import GatewaySessionNavigationCommandMixin
-from hermes_gateway.session_key import parse_session_key as _parse_session_key
 from hermes_gateway.session_runtime_state import GatewaySessionRuntimeStateMixin
+from hermes_gateway.shutdown_runtime import GatewayShutdownRuntimeMixin
 from hermes_gateway.skill_hint import (
     check_unavailable_skill as _check_unavailable_skill_for_repo,
     skill_slug_from_frontmatter as _skill_slug_from_frontmatter,
@@ -534,6 +534,7 @@ class GatewayRunner(
     GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
     GatewaySessionRuntimeStateMixin,
+    GatewayShutdownRuntimeMixin,
     GatewayTitleCommandMixin,
     GatewayUpdateRestartMixin,
     GatewayUsageCommandMixin,
@@ -1833,35 +1834,6 @@ class GatewayRunner(
 
         return True
 
-    async def _drain_active_agents(self, timeout: float) -> tuple[Dict[str, Any], bool]:
-        snapshot = self._snapshot_running_agents()
-        last_active_count = self._running_agent_count()
-        last_status_at = 0.0
-
-        def _maybe_update_status(force: bool = False) -> None:
-            nonlocal last_active_count, last_status_at
-            now = asyncio.get_running_loop().time()
-            active_count = self._running_agent_count()
-            if force or active_count != last_active_count or (now - last_status_at) >= 1.0:
-                self._update_runtime_status("draining")
-                last_active_count = active_count
-                last_status_at = now
-
-        if not self._running_agents:
-            _maybe_update_status(force=True)
-            return snapshot, False
-
-        _maybe_update_status(force=True)
-        if timeout <= 0:
-            return snapshot, True
-
-        deadline = asyncio.get_running_loop().time() + timeout
-        while self._running_agents and asyncio.get_running_loop().time() < deadline:
-            _maybe_update_status()
-            await asyncio.sleep(0.1)
-        timed_out = bool(self._running_agents)
-        _maybe_update_status(force=True)
-        return snapshot, timed_out
 
     def _interrupt_running_agents(self, reason: str) -> None:
         for session_key, agent in list(self._running_agents.items()):
@@ -1873,199 +1845,7 @@ class GatewayRunner(
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
 
-    async def _notify_active_sessions_of_shutdown(self) -> None:
-        """Send shutdown/restart notifications to active chats and home channels.
 
-        Called at the very start of stop() — adapters are still connected so
-        messages can be delivered. Best-effort: individual send failures are
-        logged and swallowed so they never block the shutdown sequence.
-        """
-        active = self._snapshot_running_agents()
-
-        action = "restarting" if self._restart_requested else "shutting down"
-        hint = (
-            "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
-            if self._restart_requested
-            else "Your current task will be interrupted."
-        )
-        msg = f"⚠️ Gateway {action} — {hint}"
-
-        notified: set[tuple[str, str, Optional[str]]] = set()
-        for session_key in active:
-            source = None
-            try:
-                if getattr(self, "session_store", None) is not None:
-                    self.session_store._ensure_loaded()
-                    entry = self.session_store._entries.get(session_key)
-                    source = getattr(entry, "origin", None) if entry else None
-            except Exception as e:
-                logger.debug(
-                    "Failed to load session origin for shutdown notification %s: %s",
-                    session_key,
-                    e,
-                )
-
-            if source is None:
-                source = self._get_cached_session_source(session_key)
-
-            if source is not None:
-                platform_str = source.platform.value
-                chat_id = str(source.chat_id)
-                thread_id = source.thread_id
-            else:
-                # Fall back to parsing the session key when no persisted
-                # origin is available (legacy sessions/tests).
-                _parsed = _parse_session_key(session_key)
-                if not _parsed:
-                    continue
-                platform_str = _parsed["platform"]
-                chat_id = _parsed["chat_id"]
-                thread_id = _parsed.get("thread_id")
-
-            # Deduplicate only identical delivery targets. Thread/topic-aware
-            # platforms can share a parent chat while still routing to distinct
-            # destinations via metadata.
-            dedup_key = (platform_str, chat_id, str(thread_id) if thread_id else None)
-            if dedup_key in notified:
-                continue
-
-            try:
-                platform = Platform(platform_str)
-                adapter = self.adapters.get(platform)
-                if not adapter:
-                    continue
-
-                platform_cfg = self.config.platforms.get(platform)
-                if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
-                    logger.info(
-                        "Shutdown notification suppressed for active session: %s has gateway_restart_notification=false",
-                        platform_str,
-                    )
-                    continue
-
-                # Include thread_id if present so the message lands in the
-                # correct forum topic / thread.
-                metadata = {"thread_id": thread_id} if thread_id else None
-
-                result = await adapter.send(chat_id, msg, metadata=metadata)
-                if result is not None and getattr(result, "success", True) is False:
-                    logger.debug(
-                        "Failed to send shutdown notification to %s:%s: %s",
-                        platform_str,
-                        chat_id,
-                        getattr(result, "error", "send returned success=False"),
-                    )
-                    continue
-
-                notified.add(dedup_key)
-                logger.info(
-                    "Sent shutdown notification to active chat %s:%s",
-                    platform_str, chat_id,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Failed to send shutdown notification to %s:%s: %s",
-                    platform_str, chat_id, e,
-                )
-
-        # Snapshot adapters up front: adapter.send() can hit a fatal error
-        # path that pops the adapter from self.adapters (see _handle_fatal
-        # elsewhere), which would otherwise trigger
-        # ``RuntimeError: dictionary changed size during iteration`` —
-        # observed in a user report during gateway shutdown.
-        for platform, adapter in list(self.adapters.items()):
-            home = self.config.get_home_channel(platform)
-            if not home or not home.chat_id:
-                continue
-
-            platform_cfg = self.config.platforms.get(platform)
-            if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
-                logger.info(
-                    "Shutdown notification suppressed for home channel: %s has gateway_restart_notification=false",
-                    platform.value,
-                )
-                continue
-
-            dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
-            if dedup_key in notified:
-                continue
-
-            try:
-                metadata = {"thread_id": home.thread_id} if home.thread_id else None
-                if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
-                else:
-                    result = await adapter.send(str(home.chat_id), msg)
-                if result is not None and getattr(result, "success", True) is False:
-                    logger.debug(
-                        "Failed to send shutdown notification to home channel %s:%s: %s",
-                        platform.value,
-                        home.chat_id,
-                        getattr(result, "error", "send returned success=False"),
-                    )
-                    continue
-
-                notified.add(dedup_key)
-                logger.info(
-                    "Sent shutdown notification to home channel %s:%s",
-                    platform.value,
-                    home.chat_id,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Failed to send shutdown notification to home channel %s:%s: %s",
-                    platform.value,
-                    home.chat_id,
-                    e,
-                )
-
-    def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
-        for agent in active_agents.values():
-            # Persist any in-flight transcript to the SQLite session store
-            # before teardown (#13121).  An agent forcibly interrupted by the
-            # drain-timeout escalation may never reach
-            # ``turn_finalizer.finalize_turn`` (the only place that flushes the
-            # turn to state.db) — e.g. it was blocked in a tool call that did
-            # not abort within the post-interrupt grace window.  Its in-flight
-            # tool rounds live only in the in-memory ``_session_messages``
-            # (refreshed per tool round in ``conversation_loop`` but never
-            # written to SQLite mid-turn), so the immediate pre-restart turn is
-            # silently dropped from ``load_transcript()`` on resume.  Flushing
-            # here closes that gap; the resume_pending / fresh-tool-tail
-            # branches in ``_handle_message_with_agent`` already expect a
-            # transcript whose tail may be a pending tool result.  The flush is
-            # idempotent (identity-tracked in ``_flush_messages_to_session_db``),
-            # so agents that DID finish gracefully re-flush nothing.
-            try:
-                _flush = getattr(agent, "_flush_messages_to_session_db", None)
-                _session_messages = getattr(agent, "_session_messages", None)
-                if callable(_flush) and isinstance(_session_messages, list) and _session_messages:
-                    # Strip private empty-response retry scaffolding from the
-                    # tail first, mirroring the graceful ``_persist_session``
-                    # path, so a resumed turn doesn't replay synthetic recovery
-                    # nudges.
-                    _strip = getattr(
-                        agent, "_drop_trailing_empty_response_scaffolding", None
-                    )
-                    if callable(_strip):
-                        try:
-                            _strip(_session_messages)
-                        except Exception:
-                            pass
-                    _flush(_session_messages)
-            except Exception as _e:
-                logger.debug("Shutdown transcript flush failed: %s", _e)
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "on_session_finalize",
-                    session_id=getattr(agent, "session_id", None),
-                    platform="gateway",
-                )
-            except Exception:
-                pass
-            self._cleanup_agent_resources(agent)
 
     def _should_emit_long_running_notification(
         self,
@@ -2088,46 +1868,6 @@ class GatewayRunner(
             return False
         return True
 
-    def _cleanup_agent_resources(self, agent: Any) -> None:
-        """Best-effort cleanup for temporary or cached agent instances."""
-        if agent is None:
-            return
-        try:
-            if hasattr(agent, "shutdown_memory_provider"):
-                # Pass the agent's own conversation transcript so memory
-                # providers' ``on_session_end`` hooks see the real messages
-                # instead of the empty default (#15165). ``_session_messages``
-                # is set on ``AIAgent`` (run_agent.py:1518) and refreshed at
-                # the end of every ``run_conversation`` turn via
-                # ``_persist_session``; on an agent built through
-                # ``object.__new__`` (test stubs) the attribute may be
-                # absent, so ``getattr`` with a ``None`` default keeps the
-                # call signature-compatible with the pre-fix behaviour
-                # (``shutdown_memory_provider(messages=None)``).
-                session_messages = getattr(agent, "_session_messages", None)
-                if isinstance(session_messages, list):
-                    agent.shutdown_memory_provider(session_messages)
-                else:
-                    agent.shutdown_memory_provider()
-        except Exception:
-            pass
-        # Close tool resources (terminal sandboxes, browser daemons,
-        # background processes, httpx clients) to prevent zombie
-        # process accumulation.
-        try:
-            if hasattr(agent, "close"):
-                agent.close()
-        except Exception:
-            pass
-        # Auxiliary async clients (session_search/web/vision/etc.) live in a
-        # process-global cache and are created inside worker threads. Clean up
-        # any entries whose event loop is now dead so their httpx transports do
-        # not accumulate across gateway turns.
-        try:
-            from agent.auxiliary_client import cleanup_stale_async_clients
-            cleanup_stale_async_clients()
-        except Exception:
-            pass
 
     _STUCK_LOOP_THRESHOLD = 3  # restarts while active before auto-suspend
     _STUCK_LOOP_FILE = ".restart_failure_counts"

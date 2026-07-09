@@ -470,7 +470,7 @@ async def test_send_restart_notification_logs_warning_on_sendresult_failure(
         return_value=SendResult(success=False, error="Chat not found"),
     )
 
-    with caplog.at_level("DEBUG", logger="gateway.run"):
+    with caplog.at_level("DEBUG", logger="hermes_gateway.restart_lifecycle"):
         delivered_target = await runner._send_restart_notification()
 
     success_lines = [
@@ -590,7 +590,7 @@ async def test_send_restart_notification_logs_info_on_sendresult_success(
     runner, adapter = make_restart_runner()
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m-1"))
 
-    with caplog.at_level("DEBUG", logger="gateway.run"):
+    with caplog.at_level("DEBUG", logger="hermes_gateway.restart_lifecycle"):
         delivered_target = await runner._send_restart_notification()
 
     success_lines = [
