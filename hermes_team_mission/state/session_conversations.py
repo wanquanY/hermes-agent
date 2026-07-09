@@ -7,7 +7,6 @@ from hermes_team_mission.state.conversation_status_event import (
 )
 from hermes_agent.domain.participants import leader_participant_id, member_participant_id
 
-
 def _team_mission_leader_report_status(
     result: Dict[str, Any] | None,
     mission_status: str = "",
@@ -27,7 +26,6 @@ def _team_mission_leader_report_status(
     if _is_terminal_mission_status(mission_status) or _is_terminal_mission_status(result_status):
         return "pending"
     return ""
-
 
 class TeamMissionConversationMixin:
     _PROJECTED_ACTIVE_MISSION_ID_SQL = """
@@ -1069,7 +1067,7 @@ class TeamMissionConversationMixin:
             conversation["running"] = _text(conversation.get("conversation_id")) in active_conversation_ids
         return conversations
 
-    def list_team_mission_conversation_execution_session_ids(
+    def list_team_mission_conversation_runtime_session_ids(
         self,
         *,
         team_id: str = "",

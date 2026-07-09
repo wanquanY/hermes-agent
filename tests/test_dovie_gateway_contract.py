@@ -108,7 +108,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in response["result"]["methods"]
     assert "team_mission.conversation.list" in response["result"]["methods"]
     assert "team_mission.conversation.participants" in response["result"]["methods"]
-    assert "team_mission.conversation.execution_session_ids" in response["result"]["methods"]
+    assert "team_mission.conversation.runtime_session_ids" in response["result"]["methods"]
     assert "team_mission.conversation.rename" in response["result"]["methods"]
     assert "team_mission.conversation.delete" in response["result"]["methods"]
     assert "team_mission.message.submit" in response["result"]["methods"]
@@ -164,7 +164,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in server._methods
     assert "team_mission.conversation.list" in server._methods
     assert "team_mission.conversation.participants" in server._methods
-    assert "team_mission.conversation.execution_session_ids" in server._methods
+    assert "team_mission.conversation.runtime_session_ids" in server._methods
     assert "team_mission.conversation.rename" in server._methods
     assert "team_mission.conversation.delete" in server._methods
     assert "team_mission.message.submit" in server._methods
@@ -226,7 +226,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.conversation.render": "tui_gateway.methods.conversation_render_snapshot",
         "team_mission.conversation.list": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.participants": "hermes_team_mission.gateway.conversation_methods",
-        "team_mission.conversation.execution_session_ids": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.runtime_session_ids": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.rename": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.delete": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",

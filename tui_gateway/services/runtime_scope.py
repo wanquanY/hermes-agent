@@ -54,7 +54,7 @@ _CONTROL_PLANE_METHODS = frozenset(
         "team_mission.conversation.rename",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",
-        "team_mission.conversation.execution_session_ids",
+        "team_mission.conversation.runtime_session_ids",
         "team_mission.create",
         "team_mission.events",
         "team_mission.graph",

@@ -71,7 +71,7 @@ def _team_task_brief(label: str = "deliverable") -> dict:
     }
 
 
-def test_team_mission_conversation_execution_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
+def test_team_mission_conversation_runtime_session_ids_gateway_is_lightweight(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_state import SessionDB
@@ -109,14 +109,14 @@ def test_team_mission_conversation_execution_session_ids_gateway_is_lightweight(
         role="worker",
     )
 
-    response = server._methods["team_mission.conversation.execution_session_ids"](
+    response = server._methods["team_mission.conversation.runtime_session_ids"](
         1,
         {"team_id": "team-1", "workspace_id": "workspace-1", "mission_id": "mission-1"},
     )
 
     assert "error" not in response
     assert response["result"]["session_ids"] == ["team-session-1", "worker-session-1", "runtime-worker-1"]
-    assert response["result"]["execution_session_ids"] == response["result"]["session_ids"]
+    assert response["result"]["runtime_session_ids"] == response["result"]["session_ids"]
     assert "conversations" not in response["result"]
 
 
@@ -1266,6 +1266,106 @@ def test_team_conversation_detail_returns_registry_team_members(monkeypatch, tmp
     assert resolve_response["result"]["graph"]["team"]["members"] == resolved_team["members"]
     assert "error" not in render_response
     assert render_response["result"]["team"]["members"] == resolved_team["members"]
+
+
+def test_team_conversation_render_uses_native_store_message_codec(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_agent.repositories.message_repo import MessageRepository
+    from hermes_agent.repositories.session_repo import SessionRepoImpl
+    from hermes_team_mission.state.store import open_team_mission_state_store
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    session_history = importlib.import_module("tui_gateway.methods.session_history")
+    team_mission = team_mission_gateway()
+    db = open_team_mission_state_store(tmp_path / "state.db")
+    try:
+        workspace = _workspace_payload(tmp_path)
+        db.upsert_agent_team(
+            team_id="team-1",
+            name="Native Team",
+            description="Team rendered from the native Team Mission store.",
+            lead_agent_profile_id="profile-leader",
+            default_mode="supervised_mission",
+            policy={"planApproval": "always"},
+        )
+        db.upsert_agent_team_member(
+            member_id="member-leader",
+            team_id="team-1",
+            agent_profile_id="profile-leader",
+            agent_profile_version_id="version-leader",
+            role="lead",
+            profile_name="小多",
+            profile_avatar="dovie-avatar://system/bot/XiaoDuo",
+            capability_tags=["planning"],
+        )
+        db.upsert_agent_team_member(
+            member_id="member-builder",
+            team_id="team-1",
+            agent_profile_id="profile-builder",
+            agent_profile_version_id="version-builder",
+            role="builder",
+            profile_name="Builder",
+            profile_avatar="dovie-avatar://system/bot/Builder",
+            capability_tags=["engineering"],
+        )
+        db.ensure_team_mission_conversation(
+            conversation_id="conversation-1",
+            conversation_session_id="team-session-1",
+            team_id="team-1",
+            title="团队会话",
+            objective="协作",
+            workspace_id=workspace["workspace_id"],
+            workspace_path=workspace["workspace_path"],
+        )
+        db.create_session("team-session-1", source="team_mission", transient=False)
+        db.upsert_conversation_participant(
+            conversation_session_id="team-session-1",
+            participant_id="leader:conversation-1",
+            role="leader",
+            member_id="member-leader",
+            agent_profile_id="profile-leader",
+            agent_profile_version_id="version-leader",
+            runtime_scope_key="team:conversation-1:leader-conversation",
+            display_name="小多",
+            avatar="dovie-avatar://system/bot/XiaoDuo",
+        )
+        MessageRepository(db._conn, SessionRepoImpl(db._conn)).append_conversation_message(
+            "team-session-1",
+            {
+                "role": "user",
+                "content": "请开始团队协作",
+                "metadata": {},
+            },
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda *args, **kwargs: db)
+        monkeypatch.setattr(session_history, "_get_db", lambda: db)
+        monkeypatch.setattr(team_mission, "_get_db", lambda *args, **kwargs: db)
+
+        response = server._methods["team_mission.conversation.render"](
+            2,
+            {"identifier": "conversation-1"},
+        )
+
+        assert "error" not in response
+        assert response["result"]["conversation_session_id"] == "team-session-1"
+        assert response["result"]["messages"][0]["text"] == "请开始团队协作"
+        assert response["result"]["team"]["name"] == "Native Team"
+        assert [member["member_id"] for member in response["result"]["team"]["members"]] == [
+            "member-leader",
+            "member-builder",
+        ]
+        participants = {
+            participant["participant_id"]: participant
+            for participant in response["result"]["participants"]
+        }
+        assert participants["leader:conversation-1"]["display_name"] == "小多"
+        assert participants["leader:conversation-1"]["avatar"] == "dovie-avatar://system/bot/XiaoDuo"
+    finally:
+        db.close()
 
 
 def test_team_mission_node_create_requires_existing_mission(monkeypatch, tmp_path: Path):

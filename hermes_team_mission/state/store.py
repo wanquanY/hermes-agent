@@ -9,13 +9,15 @@ onto. It deliberately does not import the legacy ``hermes_state`` facade.
 from __future__ import annotations
 
 import logging
-import json
 import random
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from hermes_agent.domain.seq_allocator import backfill_seq_counter
+from hermes_agent.repositories.conversation_participant_repo import ConversationParticipantRepo
+from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
 from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
@@ -23,6 +25,7 @@ from hermes_constants import get_hermes_home
 from hermes_team_mission.state.activity_projection import TeamMissionActivityProjectionMixin
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
 from hermes_team_mission.state.schema import team_mission_schema_sql
@@ -58,6 +61,8 @@ class TeamMissionStateStore(TeamMissionActivityProjectionMixin, TeamMissionState
         self._conn.row_factory = sqlite3.Row
         self._lock = lock_for_connection(self._conn)
         self._write_count = 0
+        self._participants = ConversationParticipantRepo(self._conn, self._execute_write, self._lock)
+        self._teams = TeamRegistryRepo(self._conn, self._execute_write, self._lock)
         apply_wal_with_fallback(self._conn, db_label=str(self.db_path))
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -127,33 +132,147 @@ class TeamMissionStateStore(TeamMissionActivityProjectionMixin, TeamMissionState
 
         return self._execute_write(_do)
 
+    def upsert_agent_team(self, **kwargs: Any) -> dict[str, Any]:
+        return self._teams.upsert_agent_team(**kwargs)
+
+    def get_agent_team(self, team_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team(team_id)
+
+    def list_agent_teams(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        return self._teams.list_agent_teams(include_archived=include_archived)
+
+    def list_agent_team_summaries(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        return self._teams.list_agent_team_summaries(include_archived=include_archived)
+
+    def archive_agent_team(self, team_id: str) -> dict[str, Any]:
+        return self._teams.archive_agent_team(team_id)
+
+    def upsert_agent_team_member(self, **kwargs: Any) -> dict[str, Any]:
+        return self._teams.upsert_agent_team_member(**kwargs)
+
+    def get_agent_team_member(self, member_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team_member(member_id)
+
     def list_agent_team_members(self, team_id: str) -> list[dict[str, Any]]:
-        stable = str(team_id or "").strip()
-        if not stable:
-            return []
-        try:
-            rows = self._conn.execute(
-                """
-                SELECT *
-                FROM agent_team_members
-                WHERE team_id = ?
-                ORDER BY
-                    CASE role WHEN 'lead' THEN 0 ELSE 1 END,
-                    created_at ASC,
-                    id ASC
-                """,
-                (stable,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        return [dict(row) for row in rows]
+        return self._teams.list_agent_team_members(team_id)
+
+    def delete_agent_team_member(self, member_id: str) -> dict[str, Any]:
+        return self._teams.delete_agent_team_member(member_id)
+
+    def get_agent_team_with_members(self, team_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team_with_members(team_id)
+
+    def ensure_participant(
+        self,
+        conversation_session_id: str,
+        *,
+        participant_id: str,
+        role: str,
+        member_id: str = "",
+        agent_profile_id: str = "",
+        agent_profile_version_id: str = "",
+        runtime_scope_key: str = "",
+        display_name: str = "",
+        avatar: str = "",
+        metadata_json: str = "",
+    ) -> dict[str, Any]:
+        return self._participants.ensure_participant(
+            conversation_session_id,
+            participant_id=participant_id,
+            role=role,
+            member_id=member_id,
+            agent_profile_id=agent_profile_id,
+            agent_profile_version_id=agent_profile_version_id,
+            runtime_scope_key=runtime_scope_key,
+            display_name=display_name,
+            avatar=avatar,
+            metadata_json=metadata_json,
+        )
+
+    def get_participant(self, conversation_session_id: str, participant_id: str) -> dict[str, Any] | None:
+        return self._participants.get_participant(conversation_session_id, participant_id)
+
+    def list_conversation_participants(self, conversation_session_id: str) -> list[dict[str, Any]]:
+        return self._participants.list_conversation_participants(conversation_session_id)
+
+    def update_participant_display(
+        self,
+        conversation_session_id: str,
+        participant_id: str,
+        *,
+        display_name: str | None = None,
+        avatar: str | None = None,
+        metadata_json: str | None = None,
+    ) -> bool:
+        return self._participants.update_participant_display(
+            conversation_session_id,
+            participant_id,
+            display_name=display_name,
+            avatar=avatar,
+            metadata_json=metadata_json,
+        )
+
+    def delete_participant(self, conversation_session_id: str, participant_id: str) -> bool:
+        return self._participants.delete_participant(conversation_session_id, participant_id)
+
+    def ensure_user_participant(self, conversation_session_id: str, user_id: str = "default") -> dict[str, Any]:
+        return self._participants.ensure_user_participant(conversation_session_id, user_id)
+
+    def ensure_leader_participant(
+        self,
+        conversation_session_id: str,
+        *,
+        team_id: str,
+        leader_profile_id: str = "",
+        display_name: str = "",
+        avatar: str = "",
+    ) -> dict[str, Any]:
+        return self._participants.ensure_leader_participant(
+            conversation_session_id,
+            team_id=team_id,
+            leader_profile_id=leader_profile_id,
+            display_name=display_name,
+            avatar=avatar,
+        )
+
+    def ensure_member_participant(
+        self,
+        conversation_session_id: str,
+        *,
+        member_id: str,
+        agent_profile_id: str = "",
+        display_name: str = "",
+        avatar: str = "",
+    ) -> dict[str, Any]:
+        return self._participants.ensure_member_participant(
+            conversation_session_id,
+            member_id=member_id,
+            agent_profile_id=agent_profile_id,
+            display_name=display_name,
+            avatar=avatar,
+        )
+
+    def ensure_agent_participant(
+        self,
+        conversation_session_id: str,
+        *,
+        agent_profile_id: str,
+        display_name: str = "",
+        avatar: str = "",
+    ) -> dict[str, Any]:
+        return self._participants.ensure_agent_participant(
+            conversation_session_id,
+            agent_profile_id=agent_profile_id,
+            display_name=display_name,
+            avatar=avatar,
+        )
 
     def upsert_conversation_participant(
         self,
         *,
         conversation_session_id: str,
         participant_id: str,
-        role: str = "member",
+        role: str,
         member_id: str = "",
         agent_profile_id: str = "",
         agent_profile_version_id: str = "",
@@ -162,64 +281,63 @@ class TeamMissionStateStore(TeamMissionActivityProjectionMixin, TeamMissionState
         avatar: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        session_id = str(conversation_session_id or "").strip()
-        participant = str(participant_id or "").strip()
-        if not session_id or not participant:
-            return {}
-        now = time.time()
+        return self._participants.upsert_conversation_participant(
+            conversation_session_id=conversation_session_id,
+            participant_id=participant_id,
+            role=role,
+            member_id=member_id,
+            agent_profile_id=agent_profile_id,
+            agent_profile_version_id=agent_profile_version_id,
+            runtime_scope_key=runtime_scope_key,
+            display_name=display_name,
+            avatar=avatar,
+            metadata=metadata,
+        )
 
-        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
-            conn.execute(
-                """
-                INSERT INTO conversation_participants (
-                    conversation_session_id, participant_id, role, member_id,
-                    agent_profile_id, agent_profile_version_id, runtime_scope_key,
-                    display_name, avatar, metadata_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(conversation_session_id, participant_id) DO UPDATE SET
-                    role = excluded.role,
-                    member_id = excluded.member_id,
-                    agent_profile_id = excluded.agent_profile_id,
-                    agent_profile_version_id = excluded.agent_profile_version_id,
-                    runtime_scope_key = excluded.runtime_scope_key,
-                    display_name = excluded.display_name,
-                    avatar = excluded.avatar,
-                    metadata_json = excluded.metadata_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    session_id,
-                    participant,
-                    str(role or "member"),
-                    str(member_id or ""),
-                    str(agent_profile_id or ""),
-                    str(agent_profile_version_id or ""),
-                    str(runtime_scope_key or ""),
-                    str(display_name or ""),
-                    str(avatar or ""),
-                    "{}" if metadata is None else json.dumps(metadata, ensure_ascii=False),
-                    now,
-                    now,
-                ),
-            )
-            row = conn.execute(
-                """
-                SELECT *
-                FROM conversation_participants
-                WHERE conversation_session_id = ? AND participant_id = ?
-                """,
-                (session_id, participant),
-            ).fetchone()
-            return dict(row) if row else {}
+    def get_conversation_participant(
+        self,
+        conversation_session_id: str,
+        participant_id: str,
+    ) -> dict[str, Any]:
+        return self._participants.get_conversation_participant(conversation_session_id, participant_id)
 
-        return self._execute_write(_do)
+    def resolve_participant_id(
+        self,
+        *,
+        conversation_session_id: str,
+        agent_profile_id: str = "",
+        member_id: str = "",
+        runtime_scope_key: str = "",
+    ) -> str:
+        return self._participants.resolve_participant_id(
+            conversation_session_id=conversation_session_id,
+            agent_profile_id=agent_profile_id,
+            member_id=member_id,
+            runtime_scope_key=runtime_scope_key,
+        )
+
+    def resolve_participant_id_for_run(
+        self,
+        conversation_session_id: str,
+        *,
+        runtime_scope_key: str = "",
+        agent_profile_id: str = "",
+        member_id: str = "",
+    ) -> str:
+        return self._participants.resolve_participant_id_for_run(
+            conversation_session_id,
+            runtime_scope_key=runtime_scope_key,
+            agent_profile_id=agent_profile_id,
+            member_id=member_id,
+        )
 
     def _init_schema(self) -> None:
         cursor = self._conn.cursor()
         ensure_session_repository_schema(self._conn)
         cursor.executescript(_TEAM_MISSION_RUNTIME_SQL)
+        backfill_seq_counter(self._conn, updated_at=time.time())
         cursor.executescript(team_mission_schema_sql())
+        migrate_team_mission_conversation_session_id(cursor)
         reconcile_team_mission_node_primary_key(cursor)
         migrate_active_mission_id_to_conversation_missions(cursor)
         try:

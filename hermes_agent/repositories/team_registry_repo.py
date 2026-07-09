@@ -564,3 +564,93 @@ class TeamRegistryRepo:
             **team,
             "members": self.list_agent_team_members(team["id"]),
         }
+
+
+def ensure_team_registry_repository_schema(conn: sqlite3.Connection) -> None:
+    """Create or upgrade the TeamRegistryRepo-owned table family."""
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agent_teams (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            avatar_json TEXT,
+            description TEXT,
+            lead_agent_profile_id TEXT,
+            default_mode TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_team_members (
+            id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL REFERENCES agent_teams(id) ON DELETE CASCADE,
+            agent_profile_id TEXT NOT NULL,
+            agent_profile_version_id TEXT,
+            profile_name TEXT,
+            profile_avatar TEXT,
+            role TEXT NOT NULL,
+            capability_tags_json TEXT NOT NULL,
+            auto_assignable INTEGER NOT NULL,
+            max_concurrent_nodes INTEGER NOT NULL,
+            permission_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(team_id, agent_profile_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_teams_status_updated
+            ON agent_teams(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_team_members_team_id
+            ON agent_team_members(team_id, role, created_at ASC);
+        """
+    )
+    _ensure_columns(
+        conn,
+        "agent_teams",
+        {
+            "avatar_json": "TEXT",
+            "description": "TEXT",
+            "lead_agent_profile_id": "TEXT",
+            "default_mode": "TEXT NOT NULL DEFAULT 'supervised_mission'",
+            "policy_json": "TEXT NOT NULL DEFAULT '{}'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "created_at": "REAL NOT NULL DEFAULT 0",
+            "updated_at": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "agent_team_members",
+        {
+            "agent_profile_version_id": "TEXT",
+            "profile_name": "TEXT",
+            "profile_avatar": "TEXT",
+            "capability_tags_json": "TEXT NOT NULL DEFAULT '[]'",
+            "auto_assignable": "INTEGER NOT NULL DEFAULT 1",
+            "max_concurrent_nodes": "INTEGER NOT NULL DEFAULT 1",
+            "permission_mode": "TEXT NOT NULL DEFAULT 'inherit_profile'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "created_at": "REAL NOT NULL DEFAULT 0",
+            "updated_at": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: dict[str, str],
+) -> None:
+    existing = _table_columns(conn, table)
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}

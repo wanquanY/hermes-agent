@@ -15,6 +15,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from agent.memory_manager import sanitize_context
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_agent.repositories.message_content_codec import encode_message_content
 from hermes_agent.repositories.session_repo import (
     SessionMessageAppendProjection,
     SessionMessageSnapshotProjection,
@@ -22,8 +24,6 @@ from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
 )
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
-
-_CONTENT_JSON_PREFIX = "\x00json:"
 
 
 class PageDirection(str, Enum):
@@ -1167,21 +1167,11 @@ def _row_to_message(row: Any) -> Message:
 
 
 def _encode_content(content: Any) -> Any:
-    if content is None or isinstance(content, (str, bytes, int, float)):
-        return content
-    try:
-        return _CONTENT_JSON_PREFIX + json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
+    return encode_message_content(content)
 
 
 def _decode_content(content: Any) -> Any:
-    if isinstance(content, str) and content.startswith(_CONTENT_JSON_PREFIX):
-        try:
-            return json.loads(content[len(_CONTENT_JSON_PREFIX):])
-        except (json.JSONDecodeError, TypeError):
-            return content
-    return content
+    return decode_message_content(content)
 
 
 def _row_metadata(row: Any) -> dict[str, Any]:

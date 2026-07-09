@@ -355,6 +355,48 @@ def reconcile_team_mission_node_primary_key(cursor: sqlite3.Cursor) -> None:
     cursor.execute("PRAGMA foreign_keys=ON")
 
 
+def migrate_team_mission_conversation_session_id(cursor: sqlite3.Cursor) -> None:
+    """Backfill the canonical conversation_session_id column on legacy tables."""
+
+    try:
+        rows = cursor.execute('PRAGMA table_info("team_mission_conversations")').fetchall()
+    except sqlite3.OperationalError:
+        return
+    columns = {
+        str(_row_value(row, "name", 1, "") or "")
+        for row in rows
+        if str(_row_value(row, "name", 1, "") or "")
+    }
+    if not columns:
+        return
+    if "conversation_session_id" not in columns:
+        cursor.execute("ALTER TABLE team_mission_conversations ADD COLUMN conversation_session_id TEXT")
+        columns.add("conversation_session_id")
+    if "stable_session_id" in columns:
+        cursor.execute(
+            """
+            UPDATE team_mission_conversations
+               SET conversation_session_id = stable_session_id
+             WHERE COALESCE(conversation_session_id, '') = ''
+               AND COALESCE(stable_session_id, '') != ''
+            """
+        )
+    cursor.execute(
+        """
+        UPDATE team_mission_conversations
+           SET conversation_session_id = conversation_id
+         WHERE COALESCE(conversation_session_id, '') = ''
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_team_mission_conversations_session_id
+            ON team_mission_conversations(conversation_session_id)
+            WHERE COALESCE(conversation_session_id, '') != ''
+        """
+    )
+
+
 def migrate_active_mission_id_to_conversation_missions(cursor: sqlite3.Cursor) -> None:
     """Backfill the P3 conversation-mission join table from legacy 1:1 rows."""
 

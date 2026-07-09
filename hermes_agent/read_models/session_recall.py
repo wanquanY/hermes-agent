@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hermes_agent.repositories.message_content_codec import decode_message_content
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
@@ -720,13 +721,7 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _decode_content(raw: Any) -> Any:
-    if not isinstance(raw, str):
-        return raw
-    try:
-        decoded = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
-    return decoded
+    return decode_message_content(raw, allow_legacy_json=True)
 
 
 def _preview_text(value: Any, limit: int) -> str:

@@ -5,6 +5,7 @@ from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_agent.domain.run_event_codec import decode_run_event_row
+from hermes_agent.repositories.message_content_codec import decode_message_content
 from hermes_team_mission.runtime.team_transcript_writer import is_node_transcript_message
 
 
@@ -177,13 +178,7 @@ def _resolve_graph(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any]
 
 
 def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
-    content = _row_value(row, "content", "")
-    decoder = getattr(db, "_decode_content", None)
-    if callable(decoder):
-        try:
-            content = decoder(content)
-        except Exception:
-            pass
+    content = decode_message_content(_row_value(row, "content", ""))
     role = _text(_row_value(row, "role", "assistant"))
     if role not in {"assistant", "system", "tool", "user"}:
         role = "assistant"

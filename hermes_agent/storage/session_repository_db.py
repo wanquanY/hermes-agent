@@ -1,9 +1,9 @@
-"""SQLite bootstrap for the SessionRepo-owned table family.
+"""SQLite bootstrap for the repo-owned state.db table family.
 
-This module is intentionally narrow: it opens ``state.db`` and guarantees the
-tables/columns required by ``SessionRepoImpl`` without importing the legacy
-state facade. Broader schema ownership remains with the migration system until
-each P2 data-plane slice moves to its target repository.
+This module opens ``state.db`` for the repository-backed runtime path. It
+guarantees the write tables owned by repository slices and the compatibility
+tables required by gateway read models, without importing the legacy state
+facade.
 """
 
 from __future__ import annotations
@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
+from hermes_agent.domain.seq_allocator import ensure_seq_counter_table
 from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
+from hermes_agent.repositories.team_registry_repo import ensure_team_registry_repository_schema
+from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
+from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
+from hermes_team_mission.state.schema import team_mission_deferred_index_sql
+from hermes_team_mission.state.schema import team_mission_schema_sql
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +236,70 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
         },
     )
     ensure_agent_profile_repository_schema(conn)
+    ensure_seq_counter_table(conn)
+    ensure_team_registry_repository_schema(conn)
+    ensure_session_index_read_side_schema(conn)
+
+
+def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
+    """Ensure cross-domain tables required by the session_index read model."""
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_participants (
+            conversation_session_id TEXT NOT NULL,
+            participant_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            member_id TEXT NOT NULL DEFAULT '',
+            agent_profile_id TEXT NOT NULL DEFAULT '',
+            agent_profile_version_id TEXT NOT NULL DEFAULT '',
+            runtime_scope_key TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            avatar TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (conversation_session_id, participant_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS activities (
+            activity_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            parent_activity_id TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('chat', 'agent_dispatch', 'team_dispatch', 'member_chat', 'mission')),
+            target_profile_id TEXT,
+            target_team_id TEXT,
+            target_mission_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+            prompt_summary TEXT,
+            result_summary TEXT,
+            result_json TEXT,
+            started_at REAL,
+            completed_at REAL,
+            notify_parent INTEGER NOT NULL DEFAULT 1,
+            read_at REAL,
+            created_at REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_activities_conv
+            ON activities(conversation_id, status);
+        CREATE INDEX IF NOT EXISTS idx_activities_parent
+            ON activities(parent_activity_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_activities_mission
+            ON activities(target_mission_id)
+            WHERE kind = 'mission' AND COALESCE(target_mission_id, '') != '';
+        """
+    )
+    cursor = conn.cursor()
+    cursor.executescript(team_mission_schema_sql())
+    migrate_team_mission_conversation_session_id(cursor)
+    reconcile_team_mission_node_primary_key(cursor)
+    migrate_active_mission_id_to_conversation_missions(cursor)
+    try:
+        cursor.executescript(team_mission_deferred_index_sql())
+    except sqlite3.OperationalError:
+        logger.debug("session index read-side deferred indexes skipped", exc_info=True)
 
 
 def _ensure_columns(

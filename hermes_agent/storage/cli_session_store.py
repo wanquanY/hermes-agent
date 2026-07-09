@@ -21,12 +21,15 @@ from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
+from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_agent.repositories.message_content_codec import encode_message_content
 from hermes_agent.repositories.message_repo import MessageRepository
 from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
     SessionSpec,
     sanitize_session_title,
 )
+from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
@@ -45,6 +48,7 @@ class CliSessionStore:
         self._lock = lock_for_connection(conn)
         self._sessions = SessionRepoImpl(conn)
         self._profiles = AgentProfileRepoImpl(conn)
+        self._teams = TeamRegistryRepo(conn, self._execute_write, self._lock)
         self._session_deletion = SessionDeletionService(conn)
         self._message_writer = MessageRepository(conn, self._sessions)
         self._messages = MessageHistoryReadModel(conn)
@@ -60,6 +64,16 @@ class CliSessionStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def _execute_write(self, fn):
+        with self._lock:
+            try:
+                result = fn(self._conn)
+                self._conn.commit()
+                return result
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def create_session(self, session_id: str, source: str, **kwargs: Any) -> str:
         self._sessions.create(
@@ -226,6 +240,36 @@ class CliSessionStore:
     def discard_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
         with self._lock:
             return self._profiles.discard_agent_profile_draft(draft_id)
+
+    def upsert_agent_team(self, **kwargs: Any) -> dict[str, Any]:
+        return self._teams.upsert_agent_team(**kwargs)
+
+    def get_agent_team(self, team_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team(team_id)
+
+    def list_agent_teams(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        return self._teams.list_agent_teams(include_archived=include_archived)
+
+    def list_agent_team_summaries(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        return self._teams.list_agent_team_summaries(include_archived=include_archived)
+
+    def archive_agent_team(self, team_id: str) -> dict[str, Any]:
+        return self._teams.archive_agent_team(team_id)
+
+    def upsert_agent_team_member(self, **kwargs: Any) -> dict[str, Any]:
+        return self._teams.upsert_agent_team_member(**kwargs)
+
+    def get_agent_team_member(self, member_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team_member(member_id)
+
+    def list_agent_team_members(self, team_id: str) -> list[dict[str, Any]]:
+        return self._teams.list_agent_team_members(team_id)
+
+    def delete_agent_team_member(self, member_id: str) -> dict[str, Any]:
+        return self._teams.delete_agent_team_member(member_id)
+
+    def get_agent_team_with_members(self, team_id: str) -> dict[str, Any]:
+        return self._teams.get_agent_team_with_members(team_id)
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
         match = re.match(r"^(.*?) #(\d+)$", str(base_title or ""))
@@ -777,21 +821,12 @@ def _message_row(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
-def _encode_content(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False)
+def _encode_content(value: Any) -> Any:
+    return encode_message_content(value)
 
 
 def _decode_content(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return value
+    return decode_message_content(value, allow_legacy_json=True)
 
 
 def _json_or_none(value: Any) -> str | None:

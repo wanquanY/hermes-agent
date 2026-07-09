@@ -217,6 +217,52 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert archived_member_delete_response["error"]["message"] == "team archived: team-1"
 
 
+def test_team_registry_gateway_detail_list_works_with_cli_session_store(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from tui_gateway import server
+
+    team_registry = importlib.import_module("tui_gateway.methods.team_registry")
+    db = open_cli_session_store(tmp_path / "state.db")
+    monkeypatch.setattr(team_registry, "_get_db", lambda: db)
+    db.upsert_agent_profile(
+        profile_id="profile-leader",
+        slug="leader",
+        name="Leader v1",
+        avatar="https://example.test/leader-v1.png",
+        hermes_profile_name="leader",
+        hermes_home_path=str(tmp_path / "profiles" / "leader"),
+        current_version_id="snapshot-leader",
+        current_version_number=1,
+    )
+    db.upsert_agent_team(
+        team_id="team-1",
+        name="Engineering Team",
+        description="Build and verify.",
+        default_mode="supervised_mission",
+        policy={"planApproval": "always"},
+    )
+    db.upsert_agent_team_member(
+        member_id="member-leader",
+        team_id="team-1",
+        agent_profile_id="profile-leader",
+        role="lead",
+        capability_tags=["planning"],
+    )
+
+    response = server._methods["team_registry.team.list"](
+        1,
+        {"include_members": True, "projection": "detail"},
+    )
+
+    assert "error" not in response
+    assert [team["id"] for team in response["result"]["teams"]] == ["team-1"]
+    assert response["result"]["teams"][0]["projection"] == "detail"
+    assert response["result"]["teams"][0]["members"][0]["id"] == "member-leader"
+    assert response["result"]["teams"][0]["members"][0]["profileAvatar"] == "https://example.test/leader-v1.png"
+
+
 def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_path: Path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)

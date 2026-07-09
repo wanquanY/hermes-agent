@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.memory_manager import sanitize_context
-from hermes_agent.repositories.message_repo import _decode_content as _decode_stored_content
+from hermes_agent.repositories.message_content_codec import decode_message_content
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
@@ -406,7 +406,7 @@ def _is_duplicate_replayed_user_message(messages: list[dict[str, Any]], message:
 
 
 def _decode_content(value: Any) -> Any:
-    return _decode_stored_content(value)
+    return decode_message_content(value)
 
 
 def _message_preview(value: Any, limit: int) -> str:

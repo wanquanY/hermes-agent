@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
 from .session_common import *
+from hermes_agent.repositories.message_content_codec import decode_message_content
 
 
 class TeamMissionRowsMixin:
@@ -321,7 +322,7 @@ class TeamMissionRowsMixin:
             return {}
         message = dict(row)
         if "content" in message:
-            message["content"] = self._decode_content(message["content"])
+            message["content"] = decode_message_content(message["content"])
         if message.get("metadata_json"):
             metadata = _json_loads(message.get("metadata_json"), None)
             if isinstance(metadata, dict):

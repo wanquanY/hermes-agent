@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict
 
 from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.repositories.message_content_codec import decode_message_content
 from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
@@ -151,8 +152,7 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
 
 
 def _message_title(db: Any, content: Any) -> str:
-    decoder = getattr(db, "_decode_content", None)
-    decoded = decoder(content) if callable(decoder) else content
+    decoded = decode_message_content(content)
     if isinstance(decoded, list):
         parts: list[str] = []
         for item in decoded:

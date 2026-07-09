@@ -1,5 +1,7 @@
 import json
+import sqlite3
 
+from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
@@ -194,3 +196,120 @@ def test_cli_session_store_exposes_agent_profile_registry(tmp_path):
     assert store.get_agent_profile_draft(draft["id"])["draftKind"] == "revision"
     assert store.list_agent_profile_drafts(source_session_id="session-1")[0]["id"] == "draft-1"
     assert store.discard_agent_profile_draft("draft-1")["status"] == "discarded"
+
+
+def test_cli_session_store_exposes_team_registry(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+
+    store.upsert_agent_profile(
+        profile_id="agent-leader",
+        slug="leader",
+        name="Leader",
+        avatar="dovie-avatar://leader",
+        hermes_profile_name="leader",
+        hermes_home_path=str(tmp_path / "profiles" / "leader"),
+        current_version_id="snapshot-leader",
+        current_version_number=1,
+    )
+    team = store.upsert_agent_team(
+        team_id="team-1",
+        name="Research Team",
+        description="Research and verify.",
+        default_mode="supervised_mission",
+        policy={"planApproval": "always"},
+    )
+    member = store.upsert_agent_team_member(
+        member_id="member-leader",
+        team_id=team["id"],
+        agent_profile_id="agent-leader",
+        role="lead",
+        capability_tags=["planning"],
+    )
+
+    teams = store.list_agent_teams()
+    members = store.list_agent_team_members(team["id"])
+    detail = store.get_agent_team_with_members(team["id"])
+    summaries = store.list_agent_team_summaries()
+
+    assert [item["id"] for item in teams] == ["team-1"]
+    assert members[0]["id"] == member["id"]
+    assert members[0]["profileName"] == "Leader"
+    assert detail["members"][0]["capability_tags"] == ["planning"]
+    assert summaries[0]["member_count"] == 1
+    assert summaries[0]["leaderMember"]["profileAvatar"] == "dovie-avatar://leader"
+
+    archived = store.archive_agent_team(team["id"])
+    assert archived["status"] == "archived"
+    assert store.list_agent_teams() == []
+    assert [item["id"] for item in store.list_agent_teams(include_archived=True)] == ["team-1"]
+
+
+def test_cli_session_store_session_index_bootstraps_cross_read_tables(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+
+    result = SessionIndexReadModel(store._conn).list(SessionIndexQuery(limit=10))
+
+    assert result["sessions"] == []
+
+
+def test_cli_session_store_migrates_legacy_team_conversation_session_column(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE team_mission_conversations (
+                conversation_id TEXT PRIMARY KEY,
+                team_id TEXT,
+                stable_session_id TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                objective TEXT,
+                workspace_id TEXT,
+                workspace_path TEXT,
+                status TEXT NOT NULL,
+                active_mission_id TEXT,
+                created_by_user_id TEXT,
+                metadata_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            INSERT INTO team_mission_conversations (
+                conversation_id, team_id, stable_session_id, title, objective,
+                workspace_id, workspace_path, status, active_mission_id,
+                created_by_user_id, metadata_json, created_at, updated_at
+            )
+            VALUES (
+                'conversation-1', 'team-1', 'team-session-1', 'Legacy Team',
+                'objective', 'workspace-1', '/tmp/workspace', 'active',
+                '', '', '{}', 1, 1
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    store = open_cli_session_store(db_path)
+    store.create_session("team-session-1", "team_mission", title="Legacy Team")
+    store._conn.execute(
+        """
+        UPDATE session_index
+           SET conversation_kind = 'team',
+               conversation_id = 'conversation-1',
+               team_id = 'team-1',
+               started_at = 1,
+               updated_at = 1
+         WHERE session_id = 'team-session-1'
+        """
+    )
+    store._conn.commit()
+
+    columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(team_mission_conversations)").fetchall()}
+    row = store._conn.execute(
+        "SELECT conversation_session_id FROM team_mission_conversations WHERE conversation_id = ?",
+        ("conversation-1",),
+    ).fetchone()
+    result = SessionIndexReadModel(store._conn).list(SessionIndexQuery(limit=10))
+
+    assert "conversation_session_id" in columns
+    assert row["conversation_session_id"] == "team-session-1"
+    assert result["sessions"][0]["session_id"] == "team-session-1"
