@@ -3,6 +3,8 @@ import pytest
 from unittest.mock import MagicMock, patch, mock_open
 import yaml
 
+import hermes_gateway.personality_command as personality_command
+
 
 # ── CLI tests ──────────────────────────────────────────────────────────────
 
@@ -98,7 +100,7 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("none")
             result = await runner._handle_personality_command(event)
 
@@ -112,7 +114,7 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("default")
             result = await runner._handle_personality_command(event)
 
@@ -125,7 +127,7 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("")
             result = await runner._handle_personality_command(event)
 
@@ -138,7 +140,7 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("nonexistent")
             result = await runner._handle_personality_command(event)
 
@@ -149,7 +151,7 @@ class TestGatewayPersonalityNone:
         runner = self._make_runner(personalities={})
         (tmp_path / "config.yaml").write_text(yaml.dump({"agent": {"personalities": {}}}))
 
-        with patch("gateway.run._hermes_home", tmp_path), \
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path), \
              patch("hermes_constants.display_hermes_home", return_value="~/.hermes/profiles/coder"):
             event = self._make_event("")
             result = await runner._handle_personality_command(event)
