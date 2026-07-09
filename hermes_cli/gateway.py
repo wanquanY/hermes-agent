@@ -3203,7 +3203,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
         except Exception:
             pass  # best-effort; don't block gateway startup
     
-    from gateway.run import start_gateway
+    from hermes_gateway.runner import start_gateway
     
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ⚕ Hermes Gateway Starting...                 │")

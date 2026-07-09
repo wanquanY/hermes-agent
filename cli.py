@@ -14519,7 +14519,7 @@ def main(
     # Handle gateway mode (messaging + cron)
     if gateway:
         import asyncio
-        from gateway.run import start_gateway
+        from hermes_gateway.runner import start_gateway
         print("Starting Hermes Gateway (messaging platforms)...")
         asyncio.run(start_gateway())
         return
