@@ -55,6 +55,7 @@ from hermes_gateway.agent_run_supervision import agent_run_supervisor_for
 from hermes_gateway.agent_streaming_runtime import agent_streaming_for
 from hermes_gateway.agent_interaction_callbacks import agent_interaction_callbacks_for
 from hermes_gateway.agent_input_preparation import agent_input_preparation_for
+from hermes_gateway.agent_result_finalizer import agent_result_finalizer_for
 from hermes_gateway.agent_cache import (
     AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL,
     agent_cache_for,
@@ -1946,164 +1947,16 @@ class GatewayRunner(
             # Signal the stream consumer that the agent is done
             if stream_consumer_holder[0] is not None:
                 stream_consumer_holder[0].finish()
-            
-            # Return final response, or a message if something went wrong
-            final_response = result.get("final_response")
-
-            # Extract actual token counts from the agent instance used for this run
-            _last_prompt_toks = 0
-            _input_toks = 0
-            _output_toks = 0
-            _context_length = 0
-            _agent = agent_holder[0]
-            if _agent and hasattr(_agent, "context_compressor"):
-                _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
-                _input_toks = getattr(_agent, "session_prompt_tokens", 0)
-                _output_toks = getattr(_agent, "session_completion_tokens", 0)
-                _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
-            _resolved_model = getattr(_agent, "model", None) if _agent else None
-
-            if not final_response:
-                error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
-                return {
-                    "final_response": error_msg,
-                    "messages": result.get("messages", []),
-                    "api_calls": result.get("api_calls", 0),
-                    "failed": result.get("failed", False),
-                    "partial": result.get("partial", False),
-                    "completed": result.get("completed"),
-                    "interrupted": result.get("interrupted", False),
-                    "interrupt_message": result.get("interrupt_message"),
-                    "error": result.get("error"),
-                    "compression_exhausted": result.get("compression_exhausted", False),
-                    "tools": tools_holder[0] or [],
-                    "history_offset": len(agent_history),
-                    "last_prompt_tokens": _last_prompt_toks,
-                    "input_tokens": _input_toks,
-                    "output_tokens": _output_toks,
-                    "model": _resolved_model,
-                    "context_length": _context_length,
-                }
-            
-            # Scan tool results for MEDIA:<path> tags that need to be delivered
-            # as native audio/file attachments.  The TTS tool embeds MEDIA: tags
-            # in its JSON response, but the model's final text reply usually
-            # doesn't include them.  We collect unique tags from tool results and
-            # append any that aren't already present in the final response, so the
-            # adapter's extract_media() can find and deliver the files exactly once.
-            #
-            # Uses path-based deduplication against _history_media_paths (collected
-            # before run_conversation) instead of index slicing. This is safe even
-            # when context compression shrinks the message list. (Fixes #160)
-            if "MEDIA:" not in final_response:
-                media_tags = []
-                has_voice_directive = False
-                for msg in result.get("messages", []):
-                    if msg.get("role") in {"tool", "function"}:
-                        content = msg.get("content", "")
-                        if "MEDIA:" in content:
-                            _TOOL_MEDIA_RE = re.compile(
-                                r'MEDIA:((?:/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
-                                r'mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|'
-                                r'flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|'
-                                r'txt|csv|apk|ipa))',
-                                re.IGNORECASE
-                            )
-                            for match in _TOOL_MEDIA_RE.finditer(content):
-                                path = match.group(1).strip().rstrip('",}')
-                                if path and path not in _history_media_paths:
-                                    media_tags.append(f"MEDIA:{path}")
-                            if "[[audio_as_voice]]" in content:
-                                has_voice_directive = True
-                
-                if media_tags:
-                    seen = set()
-                    unique_tags = []
-                    for tag in media_tags:
-                        if tag not in seen:
-                            seen.add(tag)
-                            unique_tags.append(tag)
-                    if has_voice_directive:
-                        unique_tags.insert(0, "[[audio_as_voice]]")
-                    final_response = final_response + "\n" + "\n".join(unique_tags)
-            
-            # Sync session_id: the agent may have created a new session during
-            # mid-run context compression (_compress_context splits sessions).
-            # If so, update the session store entry so the NEXT message loads
-            # the compressed transcript, not the stale pre-compression one.
-            agent = agent_holder[0]
-            _session_was_split = False
-            if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
-                _session_was_split = True
-                logger.info(
-                    "Session split detected: %s → %s (compression)",
-                    session_id, agent.session_id,
-                )
-                entry = self.session_store._entries.get(session_key)
-                if entry:
-                    entry.session_id = agent.session_id
-                    self.session_store._save()
-
-                # If this is a Telegram DM and source.thread_id was lost during
-                # the session split (synthetic / recovered event), restore it
-                # from the binding so _thread_metadata_for_source produces the
-                # correct message_thread_id instead of routing to the General
-                # thread.  Failure here is non-fatal — we log and continue;
-                # worst case the message lands in General, which is the
-                # pre-fix behaviour.
-                if (
-                    getattr(source, "platform", None) == Platform.TELEGRAM
-                    and getattr(source, "chat_type", None) == "dm"
-                    and getattr(source, "thread_id", None) is None
-                    and self._session_db is not None
-                ):
-                    try:
-                        _binding = self._session_db.get_telegram_topic_binding_by_session(
-                            session_id=agent.session_id,
-                        )
-                        if _binding and _binding.get("thread_id"):
-                            source.thread_id = str(_binding["thread_id"])
-                            logger.debug(
-                                "Restored source.thread_id=%s from binding after session split %s → %s",
-                                source.thread_id,
-                                session_id,
-                                agent.session_id,
-                            )
-                    except Exception:
-                        logger.debug(
-                            "Failed to restore thread_id from binding after session split",
-                            exc_info=True,
-                        )
-
-            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
-
-            # When compression created a new session, the messages list was
-            # shortened.  Using the original history offset would produce an
-            # empty new_messages slice, causing the gateway to write only a
-            # user/assistant pair — losing the compressed summary and tail.
-            # Reset to 0 so the gateway writes ALL compressed messages.
-            _effective_history_offset = 0 if _session_was_split else len(agent_history)
-
-            return {
-                "final_response": final_response,
-                "last_reasoning": result.get("last_reasoning"),
-                "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
-                "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
-                "completed": result_holder[0].get("completed") if result_holder[0] else None,
-                "interrupted": result_holder[0].get("interrupted", False) if result_holder[0] else False,
-                "partial": result_holder[0].get("partial", False) if result_holder[0] else False,
-                "error": result_holder[0].get("error") if result_holder[0] else None,
-                "interrupt_message": result_holder[0].get("interrupt_message") if result_holder[0] else None,
-                "tools": tools_holder[0] or [],
-                "history_offset": _effective_history_offset,
-                "last_prompt_tokens": _last_prompt_toks,
-                "input_tokens": _input_toks,
-                "output_tokens": _output_toks,
-                "model": _resolved_model,
-                "context_length": _context_length,
-                "session_id": effective_session_id,
-                "response_previewed": result.get("response_previewed", False),
-            }
+            return agent_result_finalizer_for(
+                session_store=getattr(self, "session_store", None),
+                session_db=self._session_db,
+                source=source,
+                session_id=session_id,
+                session_key=session_key,
+                tools=tools_holder[0],
+                history_offset=len(agent_history),
+                history_media_paths=_history_media_paths,
+            ).finalize(result, agent_holder[0])
         
         # Start progress message sender if enabled
         progress_task = None

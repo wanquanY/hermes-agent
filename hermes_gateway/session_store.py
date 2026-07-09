@@ -393,6 +393,21 @@ class SessionStore:
             self._ensure_loaded_locked()
             return self._entries.get(session_key)
 
+    def update_entry_session_id(self, session_key: str, session_id: str) -> bool:
+        """Update the transcript session id for a known gateway session key."""
+        if not session_key or not session_id:
+            return False
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            if entry.session_id == session_id:
+                return True
+            entry.session_id = session_id
+            self._save()
+            return True
+
     def clear_resume_pending(self, session_key: str) -> bool:
         """Clear the resume-pending flag after a successful resumed turn.
 
@@ -657,4 +672,3 @@ class SessionStore:
         except Exception as e:
             logger.debug("Could not load messages from repository: %s", e)
             return []
-
