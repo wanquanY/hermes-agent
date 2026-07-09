@@ -82,7 +82,6 @@ from hermes_gateway.bootstrap import (
     restart_notification_pending as _restart_notification_pending_for_home,
 )
 from hermes_gateway.bundles_command import GatewayBundlesCommandMixin
-from hermes_gateway.busy_message_runtime import busy_message_for
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.codex_runtime_command import GatewayCodexRuntimeCommandMixin
 from hermes_gateway.command_listing import GatewayCommandListingMixin
@@ -91,8 +90,7 @@ from hermes_gateway.compress_command import GatewayCompressCommandMixin
 from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.kanban_watchers import GatewayKanbanWatcherMixin
 from hermes_gateway.media_delivery import media_delivery_for
-from hermes_gateway.message_ingress import message_ingress_for
-from hermes_gateway.message_command_runtime import message_command_for
+from hermes_gateway.message_runtime import message_runtime_for
 from hermes_gateway.model_command import model_command_for
 from hermes_gateway.inbound_media import GatewayInboundMediaMixin
 from hermes_gateway.inbound_message_preparation import GatewayInboundMessagePreparationMixin
@@ -122,7 +120,6 @@ from hermes_gateway.response_normalization import (
 )
 from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 from hermes_gateway.runtime_status_command import runtime_status_command_for
-from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.resume_pending import (
     should_clear_resume_pending_after_turn as _should_clear_resume_pending_after_turn,
 )
@@ -138,7 +135,6 @@ from hermes_gateway.skill_hint import (
 )
 from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.footer_command import footer_command_for
-from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.freshness import (
     auto_continue_freshness_window as _auto_continue_freshness_window,
     coerce_gateway_timestamp as _coerce_gateway_timestamp,
@@ -1011,91 +1007,7 @@ class GatewayRunner(
 
 
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
-        """
-        Handle an incoming message from any platform.
-        
-        This is the core message processing pipeline:
-        1. Check user authorization
-        2. Check for commands (/new, /reset, etc.)
-        3. Check for running agent and interrupt if needed
-        4. Get or create session
-        5. Build context for agent
-        6. Run agent conversation
-        7. Return response
-        """
-        ingress = await message_ingress_for(self).preprocess(event, hermes_home=_hermes_home)
-        if ingress.action == "respond":
-            return ingress.response
-        event = ingress.event
-        source = ingress.source
-        _quick_key = ingress.session_key
-
-        # PRIORITY handling when an agent is already running for this session.
-        # Default behavior is to interrupt immediately so user text/stop messages
-        # are handled with minimal latency.
-        #
-        # Special case: Telegram/photo bursts often arrive as multiple near-
-        # simultaneous updates. Do NOT interrupt for photo-only follow-ups here;
-        # let the adapter-level batching/queueing logic absorb them.
-
-        busy_result = await busy_message_for(self).handle_if_busy(event, source, _quick_key)
-        if busy_result.handled:
-            return busy_result.response
-
-        command_result = await message_command_for(self).dispatch(event, source, _quick_key)
-        if getattr(command_result, "handled", True):
-            return getattr(command_result, "response", command_result)
-
-        # ── Claim this session before any await ───────────────────────
-        # Between here and _run_agent registering the real AIAgent, there
-        # are numerous await points (hooks, vision enrichment, STT,
-        # session hygiene compression).  Without this sentinel a second
-        # message arriving during any of those yields would pass the
-        # "already running" guard and spin up a duplicate agent for the
-        # same session — corrupting the transcript.
-        self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
-        self._running_agents_ts[_quick_key] = time.time()
-        runtime_status_for(self).persist_active_agents()
-        _run_generation = session_runtime_state_for(self).begin_session_run_generation(_quick_key)
-
-        try:
-            _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
-            # Goal continuation: after the agent returns a final response
-            # for this turn, check any standing /goal — the judge will
-            # either mark it done, pause it (budget), or enqueue a
-            # continuation prompt back through the adapter FIFO so the
-            # next turn makes more progress. Wrapped in try/except so a
-            # broken judge never breaks normal message handling.
-            try:
-                _final_text = ""
-                if isinstance(_agent_result, dict):
-                    _final_text = str(_agent_result.get("final_response") or "")
-                elif isinstance(_agent_result, str):
-                    _final_text = _agent_result
-                # Skip for empty responses (interrupted / errored) — the
-                # judge would almost always say "continue" and we'd loop
-                # on error. Let the user drive the next turn.
-                if _final_text.strip():
-                    try:
-                        session_entry = self.session_store.get_or_create_session(source)
-                    except Exception:
-                        session_entry = None
-                    if session_entry is not None:
-                        await goal_command_for(self).post_turn_goal_continuation(
-                            session_entry=session_entry,
-                            source=source,
-                            final_response=_final_text,
-                        )
-            except Exception as _goal_exc:
-                logger.debug("goal continuation hook failed: %s", _goal_exc)
-            return _agent_result
-        finally:
-            # Idempotently clear the slot on every exit path.  A session reset
-            # can bump the run generation while this turn is still unwinding;
-            # the generation-guarded release inside _run_agent then refuses to
-            # clear the old agent, so a sentinel-only cleanup would leave a
-            # zombie busy slot until gateway restart.
-            session_runtime_state_for(self).release_running_agent_state(_quick_key)
+        return await message_runtime_for(self).handle_message(event)
 
     def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
