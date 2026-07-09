@@ -1,0 +1,67 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p5:gateway_directory_removed",
+      "message": "gateway/ is removed",
+      "ok": true
+    },
+    {
+      "id": "p5:no_legacy_gateway_imports",
+      "message": "production code has no legacy gateway imports",
+      "ok": true
+    },
+    {
+      "id": "p5:no_relocated_gateway_monolith",
+      "message": "no gateway god-object class was relocated into blessed trees",
+      "ok": true
+    },
+    {
+      "id": "p5:no_mixin_recomposed_gateway_monolith",
+      "message": "no production gateway god-object is recomposed through local mixins",
+      "ok": true
+    },
+    {
+      "id": "p5:gateway_run_decomposed",
+      "message": "gateway/run.py is gone and target gateway files are below monolith threshold",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p5_human_signoff.md",
+  "phase": "P5",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/gateway tests/tui_gateway -q",
+    "python scripts/zero_debt/phase_closure.py --phase P5 --json"
+  ],
+  "status": "pass",
+  "warnings": []
+}

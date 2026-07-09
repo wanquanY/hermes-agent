@@ -1,0 +1,57 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p4:worker_services_decomposed",
+      "message": "legacy worker services total lines 0 <= 100",
+      "ok": true
+    },
+    {
+      "id": "p4:no_relocated_worker_monolith",
+      "message": "no god-object class in blessed runtime trees",
+      "ok": true
+    },
+    {
+      "id": "p4:worker_single_owner",
+      "message": "worker runtime has a single target owner",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p4_human_signoff.md",
+  "phase": "P4",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/tui_gateway tests/gateway -q",
+    "python scripts/zero_debt/phase_closure.py --phase P4 --json"
+  ],
+  "status": "pass",
+  "warnings": []
+}
