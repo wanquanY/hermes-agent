@@ -114,6 +114,7 @@ from hermes_gateway.resume_pending import (
 )
 from hermes_gateway.session_navigation_commands import GatewaySessionNavigationCommandMixin
 from hermes_gateway.session_key import parse_session_key as _parse_session_key
+from hermes_gateway.session_runtime_state import GatewaySessionRuntimeStateMixin
 from hermes_gateway.skill_hint import (
     check_unavailable_skill as _check_unavailable_skill_for_repo,
     skill_slug_from_frontmatter as _skill_slug_from_frontmatter,
@@ -532,6 +533,7 @@ class GatewayRunner(
     GatewayRollbackCommandMixin,
     GatewayRuntimeStatusCommandMixin,
     GatewaySessionNavigationCommandMixin,
+    GatewaySessionRuntimeStateMixin,
     GatewayTitleCommandMixin,
     GatewayUpdateRestartMixin,
     GatewayUsageCommandMixin,
@@ -6462,151 +6464,11 @@ class GatewayRunner(
 
 
 
-    def _release_running_agent_state(
-        self,
-        session_key: str,
-        *,
-        run_generation: Optional[int] = None,
-    ) -> bool:
-        """Pop ALL per-running-agent state entries for ``session_key``.
 
-        Replaces ad-hoc ``del self._running_agents[key]`` calls scattered
-        across the gateway.  Those sites had drifted: some popped only
-        ``_running_agents``; some also ``_running_agents_ts``; only one
-        path also cleared ``_busy_ack_ts``.  Each missed entry was a
-        small, persistent leak — a (str_key → float) tuple per session
-        per gateway lifetime.
 
-        Use this at every site that ends a running turn, regardless of
-        cause (normal completion, /stop, /reset, /resume, sentinel
-        cleanup, stale-eviction).  Per-session state that PERSISTS
-        across turns (``_session_model_overrides``, ``_voice_mode``,
-        ``_pending_approvals``, ``_update_prompt_pending``) is NOT
-        touched here — those have their own lifecycles.
 
-        When ``run_generation`` is provided, only clear the slot if that
-        generation is still current for the session.  This prevents an
-        older async run whose generation was bumped by /stop or /new from
-        clobbering a newer run's state during its own unwind.  Returns
-        True when the slot was cleared, False when an ownership guard
-        blocked it.
-        """
-        if not session_key:
-            return False
-        if run_generation is not None and not self._is_session_run_current(
-            session_key, run_generation
-        ):
-            return False
-        self._running_agents.pop(session_key, None)
-        self._running_agents_ts.pop(session_key, None)
-        if hasattr(self, "_busy_ack_ts"):
-            self._busy_ack_ts.pop(session_key, None)
-        # Turn boundary: a running-agent slot was just released.  Persist the
-        # new (lower) in-flight count so the dashboard readout stays current
-        # between lifecycle transitions.  Preserves gateway_state (see
-        # _persist_active_agents).
-        self._persist_active_agents()
-        return True
 
-    def _clear_session_boundary_security_state(self, session_key: str) -> None:
-        """Clear per-session control state that must not survive a boundary switch."""
-        if not session_key:
-            return
 
-        pending_skills_reload_notes = getattr(
-            self, "_pending_skills_reload_notes", None
-        )
-        if isinstance(pending_skills_reload_notes, dict):
-            pending_skills_reload_notes.pop(session_key, None)
-
-        pending_approvals = getattr(self, "_pending_approvals", None)
-        if isinstance(pending_approvals, dict):
-            pending_approvals.pop(session_key, None)
-
-        update_prompt_pending = getattr(self, "_update_prompt_pending", None)
-        if isinstance(update_prompt_pending, dict):
-            update_prompt_pending.pop(session_key, None)
-
-        try:
-            from tools import slash_confirm as _slash_confirm_mod
-        except Exception:
-            _slash_confirm_mod = None
-        if _slash_confirm_mod is not None:
-            try:
-                _slash_confirm_mod.clear(session_key)
-            except Exception as e:
-                logger.debug(
-                    "Failed to clear slash-confirm state for session boundary %s: %s",
-                    session_key,
-                    e,
-                )
-
-        try:
-            from tools.approval import clear_session as _clear_approval_session
-        except Exception:
-            return
-
-        try:
-            _clear_approval_session(session_key)
-        except Exception as e:
-            logger.debug(
-                "Failed to clear approval state for session boundary %s: %s",
-                session_key,
-                e,
-            )
-
-    def _begin_session_run_generation(self, session_key: str) -> int:
-        """Claim a fresh run generation token for ``session_key``.
-
-        Every top-level gateway turn gets a monotonically increasing token.
-        If a later command like /stop or /new invalidates that token while the
-        old worker is still unwinding, the late result can be recognized and
-        dropped instead of bleeding into the fresh session.
-        """
-        if not session_key:
-            return 0
-        generations = self.__dict__.get("_session_run_generation")
-        if generations is None:
-            generations = {}
-            self._session_run_generation = generations
-        next_generation = int(generations.get(session_key, 0)) + 1
-        generations[session_key] = next_generation
-        return next_generation
-
-    def _invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
-        """Invalidate any in-flight run token for ``session_key``."""
-        generation = self._begin_session_run_generation(session_key)
-        if reason:
-            logger.info(
-                "Invalidated run generation for %s → %d (%s)",
-                session_key,
-                generation,
-                reason,
-            )
-        return generation
-
-    def _is_session_run_current(self, session_key: str, generation: int) -> bool:
-        """Return True when ``generation`` is still current for ``session_key``."""
-        if not session_key:
-            return True
-        generations = self.__dict__.get("_session_run_generation") or {}
-        return int(generations.get(session_key, 0)) == int(generation)
-
-    def _bind_adapter_run_generation(
-        self,
-        adapter: Any,
-        session_key: str,
-        generation: int | None,
-    ) -> None:
-        """Bind a gateway run generation to the adapter's active-session event."""
-        if not adapter or not session_key or generation is None:
-            return
-        try:
-            interrupt_event = getattr(adapter, "_active_sessions", {}).get(session_key)
-            if interrupt_event is not None:
-                setattr(interrupt_event, "_hermes_run_generation", int(generation))
-        except Exception:
-            pass
 
     async def _interrupt_and_clear_session(
         self,
