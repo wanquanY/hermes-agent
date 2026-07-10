@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import sqlite3
+import threading
 import time
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Callable
 
 from hermes_agent.domain.run_event_retention_service import RunEventRetentionService
 from hermes_agent.domain.run_lifecycle import (
@@ -20,6 +23,9 @@ from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionRunProjection
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunService:
@@ -37,6 +43,8 @@ class RunService:
         self._repository = RunRepoImpl(conn)
         self._events = RunEventReadModel(conn)
         self.retention = RunEventRetentionService(conn, unit_of_work)
+        self._event_listener_lock = threading.RLock()
+        self._event_listeners: dict[str, Callable[[dict[str, Any]], None]] = {}
 
     def append_event(
         self,
@@ -75,7 +83,44 @@ class RunService:
             seq=int((saved or {}).get("seq") or 0),
             terminal_status=persisted_run.status if persisted_run is not None else None,
         )
+        self._notify_event_appended(saved)
         return saved
+
+    def register_event_listener(
+        self,
+        listener_id: str,
+        listener: Callable[[dict[str, Any]], None],
+    ) -> None:
+        stable = str(listener_id or "").strip()
+        if not stable:
+            raise ValueError("listener_id is required")
+        if not callable(listener):
+            raise TypeError("listener must be callable")
+        with self._event_listener_lock:
+            self._event_listeners[stable] = listener
+
+    def unregister_event_listener(self, listener_id: str) -> bool:
+        stable = str(listener_id or "").strip()
+        if not stable:
+            return False
+        with self._event_listener_lock:
+            return self._event_listeners.pop(stable, None) is not None
+
+    def _notify_event_appended(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict) or not event:
+            return
+        with self._event_listener_lock:
+            listeners = tuple(self._event_listeners.items())
+        for listener_id, listener in listeners:
+            try:
+                listener(copy.deepcopy(event))
+            except Exception:
+                logger.exception(
+                    "run event listener failed listener_id=%s session_id=%s seq=%s",
+                    listener_id,
+                    event.get("session_id"),
+                    event.get("seq"),
+                )
 
     def upsert(
         self,
