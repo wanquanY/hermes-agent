@@ -112,7 +112,7 @@ class APIServerSessionsMixin:
         db = self._ensure_session_db()
         if db is None:
             return None, web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
-        session = db.get_session(session_id)
+        session = db.sessions.get(session_id)
         if not session:
             return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
         return session, None
@@ -122,7 +122,7 @@ class APIServerSessionsMixin:
         if db is None:
             return []
         try:
-            return db.get_messages_as_conversation(session_id)
+            return db.messages.all_as_conversation(session_id)
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
@@ -141,7 +141,7 @@ class APIServerSessionsMixin:
         offset = self._parse_nonnegative_int(request.query.get("offset"), default=0, maximum=1_000_000)
         source = request.query.get("source") or None
         include_children = _coerce_request_bool(request.query.get("include_children"), default=False)
-        sessions = db.list_sessions_rich(
+        sessions = db.sessions.list_rich(
             source=source,
             limit=limit,
             offset=offset,
@@ -175,22 +175,22 @@ class APIServerSessionsMixin:
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
         if len(session_id) > self._MAX_SESSION_HEADER_LEN:
             return web.json_response(_openai_error("Session ID too long", code="invalid_session_id"), status=400)
-        if db.get_session(session_id):
+        if db.sessions.get(session_id):
             return web.json_response(_openai_error(f"Session already exists: {session_id}", code="session_exists"), status=409)
 
         model = body.get("model") or self._model_name
         system_prompt = body.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
-        db.create_session(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt)
+        db.sessions.create(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt)
         title = body.get("title")
         if title is not None:
             try:
-                db.set_session_title(session_id, str(title))
+                db.sessions.set_title(session_id, str(title))
             except ValueError as exc:
-                db.delete_session(session_id)
+                db.sessions.delete(session_id)
                 return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        session = db.get_session(session_id) or {"id": session_id, "source": "api_server", "model": model, "title": title}
+        session = db.sessions.get(session_id) or {"id": session_id, "source": "api_server", "model": model, "title": title}
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)}, status=201)
 
     async def _handle_get_session(self, request: "web.Request") -> "web.Response":
@@ -223,12 +223,12 @@ class APIServerSessionsMixin:
         db = self._ensure_session_db()
         if "title" in body:
             try:
-                db.set_session_title(session_id, "" if body["title"] is None else str(body["title"]))
+                db.sessions.set_title(session_id, "" if body["title"] is None else str(body["title"]))
             except ValueError as exc:
                 return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
         if body.get("end_reason"):
-            db.end_session(session_id, str(body["end_reason"]))
-        session = db.get_session(session_id) or session
+            db.sessions.end(session_id, str(body["end_reason"]))
+        session = db.sessions.get(session_id) or session
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
     async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
@@ -241,8 +241,12 @@ class APIServerSessionsMixin:
         if err:
             return err
         db = self._ensure_session_db()
-        deleted = db.delete_session(session_id)
-        return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
+        result = db.sessions.delete(session_id)
+        return web.json_response({
+            "object": "hermes.session.deleted",
+            "id": session_id,
+            "deleted": result.session_deleted,
+        })
 
     async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
         """GET /api/sessions/{session_id}/messages."""
@@ -254,8 +258,8 @@ class APIServerSessionsMixin:
         if err:
             return err
         db = self._ensure_session_db()
-        resolved_id = db.resolve_resume_session_id(session_id)
-        messages = db.get_messages(resolved_id)
+        resolved_id = db.sessions.resolve_resume_id(session_id)
+        messages = db.messages.list(resolved_id)
         return web.json_response({
             "object": "list",
             "session_id": resolved_id,
@@ -278,34 +282,23 @@ class APIServerSessionsMixin:
         fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
         if not fork_id or re.search(r'[\r\n\x00]', fork_id):
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
-        if db.get_session(fork_id):
+        if db.sessions.get(fork_id):
             return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)
 
-        # Match the CLI /branch semantics: mark the original as branched, then
-        # create a child session that carries the transcript forward using the
-        # repository-owned parent_session_id/end_reason visibility model.
-        db.end_session(source_id, "branched")
-        db.create_session(
-            fork_id,
-            "api_server",
-            model=source.get("model"),
-            system_prompt=source.get("system_prompt"),
-            parent_session_id=source_id,
-        )
-        messages = db.get_messages(source_id)
-        db.replace_messages(fork_id, messages)
         title = body.get("title")
-        if title is None:
-            base = source.get("title") or "fork"
-            try:
-                title = db.get_next_title_in_lineage(base)
-            except Exception:
-                title = f"{base} fork"
         try:
-            db.set_session_title(fork_id, str(title))
+            branch = db.branches.branch_session(
+                source_session_id=source_id,
+                new_session_id=fork_id,
+                scope="full_conversation",
+                title=str(title) if title is not None else None,
+                branch_origin="api_session_fork",
+            )
         except ValueError as exc:
-            return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        fork = db.get_session(fork_id) or {"id": fork_id, "parent_session_id": source_id}
+            return web.json_response(_openai_error(str(exc), code="invalid_branch"), status=400)
+        fork = db.sessions.get(fork_id) or {"id": fork_id}
+        fork["parent_session_id"] = branch["parent_session_id"]
+        fork["_lineage_root_id"] = branch["root_session_id"]
         return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
 
     async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
