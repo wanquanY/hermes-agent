@@ -11,7 +11,7 @@ from dovie_extension.display_transcript import (
 )
 from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
-from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.repositories.session_repo import SessionRepoImpl
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services import run_control
@@ -1031,20 +1031,15 @@ def _(rid, params: dict) -> dict:
             codex_row_config["provider"] = _prov
     if db is not None:
         try:
-            repo = _session_repo_for_db(db)
-            if repo is None:
-                return _err(rid, 5000, "session repository unavailable")
-            repo.create(
-                SessionSpec(
-                    session_id=key,
-                    source="tui",
-                    model=model,
-                    model_config=codex_row_config or None,
-                    transient=transient,
-                    runtime_scope_key=runtime_scope_key,
-                    session_kind="hermes_session",
-                    conversation_kind="direct",
-                )
+            db.sessions.create(
+                key,
+                "tui",
+                model=model,
+                model_config=codex_row_config or None,
+                transient=transient,
+                runtime_scope_key=runtime_scope_key,
+                session_kind="hermes_session",
+                conversation_kind="direct",
             )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")

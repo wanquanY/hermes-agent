@@ -61,3 +61,40 @@ def test_session_index_route_reads_through_index_component(tmp_path, monkeypatch
     assert [row["id"] for row in response["result"]["sessions"]] == [
         "indexed-session"
     ]
+
+
+def test_session_create_route_writes_through_session_component(
+    tmp_path,
+    monkeypatch,
+):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        monkeypatch.setattr(
+            session_methods,
+            "_db_for_session_request",
+            lambda _params, _session_id="": db,
+        )
+        monkeypatch.setattr(
+            session_methods,
+            "_bind_session_workspace",
+            lambda **_options: {},
+        )
+        monkeypatch.setattr(session_methods, "_new_session_key", lambda: "created-session")
+        monkeypatch.setattr(session_methods, "_resolve_model", lambda: "test-model")
+
+        response = server.handle_request(
+            {
+                "id": "create",
+                "method": "session.create",
+                "params": {"control_plane_only": True},
+            }
+        )
+        stored = db.sessions.get("created-session")
+    finally:
+        db.close()
+
+    assert "error" not in response, response
+    assert response["result"]["session_id"] == "created-session"
+    assert stored is not None
+    assert stored["source"] == "tui"
+    assert stored["model"] == "test-model"
