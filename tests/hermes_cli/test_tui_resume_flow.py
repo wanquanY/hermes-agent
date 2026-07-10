@@ -877,7 +877,12 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
     import hermes_cli.main as main_mod
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             assert session_id == "20260409_000001_abc123"
             return {
                 "message_count": 2,
@@ -888,15 +893,13 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
                 "reasoning_tokens": 1,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "demo title"
 
         def close(self):
             return None
 
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("20260409_000001_abc123")
     out = capsys.readouterr().out
@@ -915,7 +918,12 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
     seen = []
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             seen.append(session_id)
             return {
                 "message_count": 1,
@@ -926,7 +934,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
                 "reasoning_tokens": 0,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "actual"
 
         def close(self):
@@ -934,9 +942,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
 
     active = tmp_path / "active.json"
     active.write_text('{"session_id":"actual_session"}', encoding="utf-8")
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("startup_resume", str(active))
     out = capsys.readouterr().out

@@ -782,7 +782,7 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
     db = None
     try:
         db = open_cli_session_store()
-        sessions = db.search_sessions(source=source, limit=1)
+        sessions = db.sessions.search(source=source, limit=1)
         return sessions[0]["id"] if sessions else None
     except Exception:
         pass
@@ -922,19 +922,19 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
         db = open_cli_session_store()
 
         # Try as exact session ID first
-        session = db.get_session(name_or_id)
+        session = db.sessions.get(name_or_id)
         resolved_id: Optional[str] = None
         if session:
             resolved_id = session["id"]
         else:
             # Try as title (with auto-latest for lineage)
-            resolved_id = db.resolve_session_by_title(name_or_id)
+            resolved_id = db.sessions.resolve_by_title(name_or_id)
 
         if resolved_id:
             # Project forward through compression chain so resumes land on
             # the live tip instead of a dead compressed parent.
             try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
+                resolved_id = db.sessions.compression_tip(resolved_id) or resolved_id
             except Exception:
                 pass
 
@@ -976,11 +976,11 @@ def _print_tui_exit_summary(
     db = None
     try:
         db = open_cli_session_store()
-        session = db.get_session(target)
+        session = db.sessions.get(target)
         if not session:
             return
 
-        title = db.get_session_title(target)
+        title = db.sessions.get_title(target)
         message_count = int(session.get("message_count") or 0)
         if message_count == 0:
             return  # No real conversation — don't show resume info
@@ -12878,7 +12878,7 @@ Examples:
         _exclude = None if _source else ["tool"]
 
         if action == "list":
-            sessions = db.list_sessions_rich(
+            sessions = db.sessions.list_rich(
                 source=args.source, exclude_sources=_exclude, limit=args.limit
             )
             if not sessions:
@@ -12908,11 +12908,11 @@ Examples:
 
         elif action == "export":
             if args.session_id:
-                resolved_session_id = db.resolve_session_id(args.session_id)
+                resolved_session_id = db.sessions.resolve_id(args.session_id)
                 if not resolved_session_id:
                     print(f"Session '{args.session_id}' not found.")
                     return
-                data = db.export_session(resolved_session_id)
+                data = db.sessions.export(resolved_session_id)
                 if not data:
                     print(f"Session '{args.session_id}' not found.")
                     return
@@ -12925,7 +12925,7 @@ Examples:
                         f.write(line)
                     print(f"Exported 1 session to {args.output}")
             else:
-                sessions = db.export_all(source=args.source)
+                sessions = db.sessions.export_all(source=args.source)
                 if args.output == "-":
 
                     for s in sessions:
@@ -12937,7 +12937,7 @@ Examples:
                     print(f"Exported {len(sessions)} sessions to {args.output}")
 
         elif action == "delete":
-            resolved_session_id = db.resolve_session_id(args.session_id)
+            resolved_session_id = db.sessions.resolve_id(args.session_id)
             if not resolved_session_id:
                 print(f"Session '{args.session_id}' not found.")
                 return
@@ -12948,7 +12948,11 @@ Examples:
                     print("Cancelled.")
                     return
             sessions_dir = get_hermes_home() / "sessions"
-            if db.delete_session(resolved_session_id, sessions_dir=sessions_dir):
+            deletion = db.sessions.delete(
+                resolved_session_id,
+                sessions_dir=sessions_dir,
+            )
+            if deletion.session_deleted:
                 print(f"Deleted session '{resolved_session_id}'.")
             else:
                 print(f"Session '{args.session_id}' not found.")
@@ -12963,19 +12967,19 @@ Examples:
                     print("Cancelled.")
                     return
             sessions_dir = get_hermes_home() / "sessions"
-            count = db.prune_sessions(
+            count = db.maintenance.prune_sessions(
                 older_than_days=days, source=args.source, sessions_dir=sessions_dir
             )
             print(f"Pruned {count} session(s).")
 
         elif action == "rename":
-            resolved_session_id = db.resolve_session_id(args.session_id)
+            resolved_session_id = db.sessions.resolve_id(args.session_id)
             if not resolved_session_id:
                 print(f"Session '{args.session_id}' not found.")
                 return
             title = " ".join(args.title)
             try:
-                if db.set_session_title(resolved_session_id, title):
+                if db.sessions.set_title(resolved_session_id, title):
                     print(f"Session '{resolved_session_id}' renamed to: {title}")
                 else:
                     print(f"Session '{args.session_id}' not found.")
@@ -12986,7 +12990,7 @@ Examples:
             limit = getattr(args, "limit", 500) or 500
             source = getattr(args, "source", None)
             _browse_exclude = None if source else ["tool"]
-            sessions = db.list_sessions_rich(
+            sessions = db.sessions.list_rich(
                 source=source, exclude_sources=_browse_exclude, limit=limit
             )
             db.close()
@@ -13007,12 +13011,12 @@ Examples:
             return  # won't reach here after execvp
 
         elif action == "stats":
-            total = db.session_count()
-            msgs = db.message_count()
+            total = db.sessions.count()
+            msgs = db.messages.count()
             print(f"Total sessions: {total}")
             print(f"Total messages: {msgs}")
             for src in ["cli", "telegram", "discord", "whatsapp", "slack"]:
-                c = db.session_count(source=src)
+                c = db.sessions.count(source=src)
                 if c > 0:
                     print(f"  {src}: {c} sessions")
             db_path = db.db_path

@@ -244,7 +244,7 @@ def load_goal(session_id: str) -> Optional[GoalState]:
     if store is None:
         return None
     try:
-        raw = store.get_meta(_meta_key(session_id))
+        raw = store.metadata.get(_meta_key(session_id))
     except Exception as exc:
         logger.debug("GoalManager: get_meta failed: %s", exc)
         return None
@@ -265,7 +265,7 @@ def save_goal(session_id: str, state: GoalState) -> None:
     if store is None:
         return
     try:
-        store.set_meta(_meta_key(session_id), state.to_json())
+        store.metadata.set(_meta_key(session_id), state.to_json())
     except Exception as exc:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 

@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 
 def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
@@ -7,13 +8,18 @@ def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
     captured = {}
 
     class FakeDB:
-        def resolve_session_id(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def resolve_id(self, session_id):
             captured["resolved_from"] = session_id
             return "20260315_092437_c9a6ff"
 
-        def delete_session(self, session_id, **kwargs):
+        def delete(self, session_id, **kwargs):
             captured["deleted"] = session_id
-            return True
+            return SimpleNamespace(session_deleted=True)
 
         def close(self):
             captured["closed"] = True
@@ -40,11 +46,16 @@ def test_sessions_delete_reports_not_found_when_prefix_is_unknown(monkeypatch, c
     import hermes_cli.main as main_mod
 
     class FakeDB:
-        def resolve_session_id(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def resolve_id(self, session_id):
             return None
 
-        def delete_session(self, session_id, **kwargs):
-            raise AssertionError("delete_session should not be called when resolution fails")
+        def delete(self, session_id, **kwargs):
+            raise AssertionError("delete should not be called when resolution fails")
 
         def close(self):
             pass
@@ -67,11 +78,16 @@ def test_sessions_delete_handles_eoferror_on_confirm(monkeypatch, capsys):
     import hermes_cli.main as main_mod
 
     class FakeDB:
-        def resolve_session_id(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def resolve_id(self, session_id):
             return "20260315_092437_c9a6ff"
 
-        def delete_session(self, session_id, **kwargs):
-            raise AssertionError("delete_session should not be called when cancelled")
+        def delete(self, session_id, **kwargs):
+            raise AssertionError("delete should not be called when cancelled")
 
         def close(self):
             pass

@@ -12,8 +12,9 @@ class _FakeDB:
     def __init__(self, rows):
         self._rows = rows
         self.closed = False
+        self.sessions = self
 
-    def search_sessions(self, source=None, limit=20, **_kw):
+    def search(self, source=None, limit=20, **_kw):
         rows = [r for r in self._rows if r.get("source") == source] if source else list(self._rows)
         rows.sort(
             key=lambda r: float(r.get("last_active") or r.get("started_at") or 0),
@@ -56,8 +57,8 @@ def test_search_sessions_exposes_last_active_column(tmp_path, monkeypatch):
 
     db = open_cli_session_store(Path(tmp_path / "state.db"))
     try:
-        db.create_session("s_started_later", source="cli")
-        db.create_session("s_active_later", source="cli")
+        db.sessions.create("s_started_later", source="cli")
+        db.sessions.create("s_active_later", source="cli")
         # Force started_at ordering so the test is deterministic regardless
         # of how quickly the two inserts land.
         with db._lock:
@@ -71,7 +72,7 @@ def test_search_sessions_exposes_last_active_column(tmp_path, monkeypatch):
             )
             db._conn.commit()
 
-        db.append_message("s_active_later", role="user", content="hi")
+        db.messages.append("s_active_later", role="user", content="hi")
         with db._lock:
             db._conn.execute(
                 "UPDATE messages SET timestamp=? WHERE session_id=?",
@@ -83,7 +84,7 @@ def test_search_sessions_exposes_last_active_column(tmp_path, monkeypatch):
             )
             db._conn.commit()
 
-        rows = db.search_sessions(source="cli", limit=5)
+        rows = db.sessions.search(source="cli", limit=5)
         ids = {r["id"]: r.get("last_active") for r in rows}
 
         assert ids["s_started_later"] == 2000.0
@@ -102,8 +103,9 @@ def test_resolve_last_session_closes_db_on_search_error(monkeypatch):
     class _FailingDB:
         def __init__(self):
             self.closed = False
+            self.sessions = self
 
-        def search_sessions(self, source=None, limit=20, **_kw):
+        def search(self, source=None, limit=20, **_kw):
             raise RuntimeError("boom")
 
         def close(self):
@@ -138,7 +140,7 @@ def test_resolve_last_session_not_limited_to_newest_started_20(tmp_path, monkeyp
     try:
         for i in range(25):
             sid = f"s_{i:02d}"
-            db.create_session(sid, source="cli")
+            db.sessions.create(sid, source="cli")
             with db._lock:
                 db._conn.execute(
                     "UPDATE sessions SET started_at=? WHERE id=?",
@@ -147,7 +149,7 @@ def test_resolve_last_session_not_limited_to_newest_started_20(tmp_path, monkeyp
                 db._conn.commit()
 
         target = "s_24"
-        db.append_message(target, role="user", content="latest activity")
+        db.messages.append(target, role="user", content="latest activity")
         with db._lock:
             db._conn.execute(
                 "UPDATE messages SET timestamp=? WHERE session_id=?",
