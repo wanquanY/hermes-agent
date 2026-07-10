@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 from .common import *
 from hermes_team_mission.read_model import build_team_mission_read_model
 
@@ -21,32 +20,11 @@ def _mission_id_from_activity_id(activity_id: str) -> str:
     return activity_id[len(prefix):].strip() if activity_id.startswith(prefix) else ""
 
 
-def _event_seq_value(event: dict[str, Any]) -> int:
-    for key in ("seq", "team_mission_event_seq", "teamMissionEventSeq"):
-        try:
-            value = int(event.get(key) or 0)
-        except (TypeError, ValueError):
-            value = 0
-        if value > 0:
-            return value
-    return 0
-
-
 def _latest_team_mission_event_seq(db: Any, mission_id: str) -> int:
-    if hasattr(db, "_lock") and hasattr(db, "_conn"):
-        try:
-            with db._lock:
-                return TeamMissionAuditLog(db._conn).latest_seq(mission_id)
-        except Exception:
-            pass
-    lister = getattr(db, "list_team_mission_events", None)
-    if callable(lister):
-        try:
-            events = lister(mission_id, limit=10000)
-        except Exception:
-            events = []
-        return max((_event_seq_value(event) for event in events if isinstance(event, dict)), default=0)
-    return 0
+    try:
+        return db.team_mission_audit.latest_seq(mission_id)
+    except Exception:
+        return 0
 
 
 def _result_for_graph(db: Any, mission_id: str, graph: dict[str, Any]) -> dict[str, Any]:

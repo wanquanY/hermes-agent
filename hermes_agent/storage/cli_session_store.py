@@ -26,6 +26,8 @@ from hermes_agent.domain.session_service import SessionService
 from hermes_agent.domain.state_metadata_service import StateMetadataService
 from hermes_agent.domain.storage_maintenance_service import StorageMaintenanceService
 from hermes_agent.domain.team_capability_service import TeamCapabilityService
+from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
+from hermes_agent.domain.team_mission_audit_service import TeamMissionAuditService
 from hermes_agent.domain.team_mission_maintenance_service import (
     TeamMissionMaintenanceService,
 )
@@ -86,6 +88,11 @@ class CliSessionStore(TeamMissionStateMixin):
         self.team_mission_maintenance = TeamMissionMaintenanceService(
             activity_repository,
             self._unit_of_work,
+        )
+        self.team_mission_audit = TeamMissionAuditService(
+            TeamMissionAuditLog(conn),
+            self._unit_of_work,
+            self._lock,
         )
         self.team_missions = TeamMissionReadModel(conn)
         self._session_deletion = SessionDeletionService(

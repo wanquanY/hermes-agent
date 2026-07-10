@@ -6,7 +6,6 @@ import logging
 import time
 from typing import Any, Dict, List
 
-from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 
@@ -695,19 +694,18 @@ def append_team_mission_event(
         or source_event.get("session_id")
     )
     source_seq = int(payload.get("source_seq") or payload.get("sourceSeq") or event_seq(source_event) or 0)
-    with db._lock:
-        result = TeamMissionAuditLog(db._conn).append(
-            mission_id=mission_id,
-            dedupe_key=dedupe_key,
-            event=event,
-            event_type=event_type,
-            source_event_type=source_type,
-            source_run_id=source_run_id,
-            source_session_id=source_session_id,
-            source_seq=source_seq,
-            timestamp=float(event.get("timestamp") or now),
-            now=now,
-        )
+    result = db.team_mission_audit.append(
+        mission_id=mission_id,
+        dedupe_key=dedupe_key,
+        event=event,
+        event_type=event_type,
+        source_event_type=source_type,
+        source_run_id=source_run_id,
+        source_session_id=source_session_id,
+        source_seq=source_seq,
+        timestamp=float(event.get("timestamp") or now),
+        now=now,
+    )
     return result.event
 
 
@@ -1025,9 +1023,8 @@ def list_team_mission_events(
     mission_id = text(mission_id)
     if not mission_id:
         return []
-    with db._lock:
-        return TeamMissionAuditLog(db._conn).list(
-            mission_id,
-            after_seq=int(after_seq or 0),
-            limit=limit,
-        )
+    return db.team_mission_audit.list(
+        mission_id,
+        after_seq=int(after_seq or 0),
+        limit=limit,
+    )

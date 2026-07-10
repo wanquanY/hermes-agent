@@ -7,7 +7,6 @@ from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_
 from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 
 from .session_common import *
-from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
 
 
 class TeamMissionGraphMixin:
@@ -1385,13 +1384,10 @@ class TeamMissionGraphMixin:
                 return 0
             if not _is_terminal_mission_status(_row_value(mission_row, "status", "")):
                 return 0
-        def _do(conn: sqlite3.Connection) -> int:
-            return TeamMissionAuditLog(conn).prune_source_event_types(
-                mission_id=mission_id,
-                source_event_types=_TEAM_MISSION_PRUNABLE_SOURCE_TYPES,
-            )
-
-        return self._execute_write(_do)
+        return self.team_mission_audit.prune_source_event_types(
+            mission_id=mission_id,
+            source_event_types=_TEAM_MISSION_PRUNABLE_SOURCE_TYPES,
+        )
 
     def _prune_team_mission_events_if_terminal(self, mission_id: str) -> int:
         try:
