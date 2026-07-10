@@ -275,6 +275,19 @@ class RunService:
             include_internal=include_internal,
         )
 
+    def list_tool_events(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        return self._events.list_tool_events(
+            session_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+
     def list_events_by_mission_activity(
         self,
         mission_id: str,
