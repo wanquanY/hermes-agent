@@ -1,10 +1,19 @@
 import asyncio
+from types import SimpleNamespace
 
 from hermes_cli import web_server
 
 
 class _FakeSessionStore:
     closed = False
+
+    def __init__(self):
+        self.sessions = SimpleNamespace(
+            search_by_id=self.search_sessions_by_id,
+            get=self.get_session,
+            compression_tip=self.get_compression_tip,
+        )
+        self.messages = SimpleNamespace(search=self.search_messages)
 
     def search_sessions_by_id(self, query, limit=20):
         assert query == "20260603"

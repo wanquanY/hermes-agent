@@ -951,7 +951,7 @@ async def get_status():
     try:
         store = open_cli_session_store()
         try:
-            sessions = store.list_sessions_rich(limit=50)
+            sessions = store.sessions.list_rich(limit=50)
             now = time.time()
             active_sessions = sum(
                 1 for s in sessions
@@ -1197,14 +1197,14 @@ async def get_sessions(
         order_filter = _normalize_session_order(order)
         store = open_cli_session_store()
         try:
-            sessions = store.list_sessions_rich(
+            sessions = store.sessions.list_rich(
                 limit=limit,
                 offset=offset,
                 min_message_count=min_messages,
                 archived=archived_filter,
                 order_by_last_active=order_filter == "recent",
             )
-            total = store.session_count(
+            total = store.sessions.count(
                 min_message_count=min_messages,
                 archived=archived_filter,
             )
@@ -1242,14 +1242,14 @@ async def get_profile_sessions(
     try:
         store = open_cli_session_store()
         try:
-            sessions = store.list_sessions_rich(
+            sessions = store.sessions.list_rich(
                 limit=limit,
                 offset=offset,
                 min_message_count=min_messages,
                 archived=archived_filter,
                 order_by_last_active=order_filter == "recent",
             )
-            total = store.session_count(
+            total = store.sessions.count(
                 min_message_count=min_messages,
                 archived=archived_filter,
             )
@@ -1303,7 +1303,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                         root = root_cache[cur]
                         break
                     try:
-                        session = store.get_session(cur)
+                        session = store.sessions.get(cur)
                     except Exception:
                         session = None
                     if not session:
@@ -1314,7 +1314,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                         root = cur
                         break
                     try:
-                        parent_session = store.get_session(parent)
+                        parent_session = store.sessions.get(parent)
                     except Exception:
                         parent_session = None
                     if not parent_session:
@@ -1343,7 +1343,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                     return tip_cache[root_id]
                 tip = root_id
                 try:
-                    resolved = store.get_compression_tip(root_id)
+                    resolved = store.sessions.compression_tip(root_id)
                     if resolved:
                         tip = resolved
                 except Exception:
@@ -1364,7 +1364,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 payload["lineage_root"] = root
                 seen[root] = payload
 
-            for row in store.search_sessions_by_id(q, limit=safe_limit):
+            for row in store.sessions.search_by_id(q, limit=safe_limit):
                 sid = row.get("id")
                 preview = (row.get("preview") or "").strip()
                 snippet = preview or f"Session ID: {sid}"
@@ -1391,7 +1391,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                     terms.append(token + "*")
             prefix_query = " ".join(terms)
             fetch_limit = max(safe_limit * 5, 50)
-            matches = store.search_messages(query=prefix_query, limit=fetch_limit)
+            matches = store.messages.search(query=prefix_query, limit=fetch_limit)
             for m in matches:
                 if len(seen) >= safe_limit:
                     break
@@ -3132,7 +3132,7 @@ def _session_latest_descendant(session_id: str):
     """
     store = open_cli_session_store()
     try:
-        return store.latest_descendant(session_id)
+        return store.sessions.latest_descendant(session_id)
     finally:
         store.close()
 
@@ -3140,8 +3140,8 @@ def _session_latest_descendant(session_id: str):
 async def get_session_detail(session_id: str):
     store = open_cli_session_store()
     try:
-        sid = store.resolve_session_id(session_id)
-        session = store.get_session(sid) if sid else None
+        sid = store.sessions.resolve_id(session_id)
+        session = store.sessions.get(sid) if sid else None
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         return session
@@ -3166,11 +3166,11 @@ async def get_session_latest_descendant(session_id: str):
 async def get_session_messages(session_id: str):
     store = open_cli_session_store()
     try:
-        sid = store.resolve_session_id(session_id)
+        sid = store.sessions.resolve_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        sid = store.resolve_resume_session_id(sid)
-        messages = store.get_messages(sid)
+        sid = store.sessions.resolve_resume_id(sid)
+        messages = store.messages.list(sid)
         return {"session_id": sid, "messages": messages}
     finally:
         store.close()
@@ -3180,7 +3180,7 @@ async def get_session_messages(session_id: str):
 async def delete_session_endpoint(session_id: str):
     store = open_cli_session_store()
     try:
-        if not store.delete_session(session_id):
+        if not store.maintenance.delete_session(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"ok": True}
     finally:
@@ -3191,17 +3191,17 @@ async def delete_session_endpoint(session_id: str):
 async def patch_session_endpoint(session_id: str, body: SessionPatch):
     store = open_cli_session_store()
     try:
-        if not store.get_session(session_id):
+        if not store.sessions.get(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         touched = False
         response: dict[str, Any] = {"ok": True}
         if body.title is not None:
-            if not store.set_session_title(session_id, body.title):
+            if not store.sessions.set_title(session_id, body.title):
                 raise HTTPException(status_code=404, detail="Session not found")
             response["title"] = body.title
             touched = True
         if body.archived is not None:
-            if not store.set_session_archived(session_id, body.archived):
+            if not store.sessions.set_archived(session_id, body.archived):
                 raise HTTPException(status_code=404, detail="Session not found")
             response["archived"] = bool(body.archived)
             touched = True
@@ -5310,7 +5310,7 @@ async def update_config_raw(body: RawConfigUpdate):
 async def get_usage_analytics(days: int = 30):
     store = open_cli_session_store()
     try:
-        return store.usage_analytics(days=days)
+        return store.analytics.usage(days=days)
     finally:
         store.close()
 
@@ -5325,7 +5325,7 @@ async def get_models_analytics(days: int = 30):
     store = open_cli_session_store()
     try:
         models = []
-        analytics = store.model_analytics(days=days)
+        analytics = store.analytics.models(days=days)
         for row in analytics["rows"]:
             provider = row.get("billing_provider") or ""
             model_name = row["model"]

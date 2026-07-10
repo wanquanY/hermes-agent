@@ -246,13 +246,13 @@ class TestWebServerEndpoints:
         /api/sessions should reflect per-session DB state, not process/global
         cwd settings, so workspace grouping stays stable and deterministic.
         """
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         monkeypatch.setenv("TERMINAL_CWD", "/tmp/global-default")
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="session-no-cwd", source="cli")
+            db.sessions.create(session_id="session-no-cwd", source="cli")
         finally:
             db.close()
 
@@ -273,11 +273,14 @@ class TestWebServerEndpoints:
         captured = {}
 
         class _FakeStore:
-            def list_sessions_rich(self, limit, offset, min_message_count=0, **kwargs):
+            def __init__(self):
+                self.sessions = self
+
+            def list_rich(self, limit, offset, min_message_count=0, **kwargs):
                 captured["list"] = min_message_count
                 return []
 
-            def session_count(self, min_message_count=0, **kwargs):
+            def count(self, min_message_count=0, **kwargs):
                 captured["count"] = min_message_count
                 return 0
 
@@ -294,11 +297,11 @@ class TestWebServerEndpoints:
     def test_rename_session_updates_title(self):
         """PATCH /api/sessions/{id} renames a session (regression: the route
         was missing entirely, so the desktop rename dialog got a 405)."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="rename-me", source="cli")
+            db.sessions.create(session_id="rename-me", source="cli")
         finally:
             db.close()
 
@@ -306,19 +309,19 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json() == {"ok": True, "title": "My Chat"}
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            assert db.get_session_title("rename-me") == "My Chat"
+            assert db.sessions.get_title("rename-me") == "My Chat"
         finally:
             db.close()
 
     def test_rename_session_clears_title_when_empty(self):
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="clear-me", source="cli")
-            db.set_session_title("clear-me", "Has A Title")
+            db.sessions.create(session_id="clear-me", source="cli")
+            db.sessions.set_title("clear-me", "Has A Title")
         finally:
             db.close()
 
@@ -326,9 +329,9 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json() == {"ok": True, "title": ""}
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            assert db.get_session_title("clear-me") is None
+            assert db.sessions.get_title("clear-me") is None
         finally:
             db.close()
 
@@ -338,12 +341,12 @@ class TestWebServerEndpoints:
 
     def test_archive_session_via_patch(self):
         """PATCH archived=true soft-hides a session; archived=false restores it."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="arch-me", source="cli")
-            db.append_message(session_id="arch-me", role="user", content="hi")
+            db.sessions.create(session_id="arch-me", source="cli")
+            db.messages.append(session_id="arch-me", role="user", content="hi")
         finally:
             db.close()
 
@@ -364,11 +367,11 @@ class TestWebServerEndpoints:
 
     def test_patch_session_without_fields_is_400(self):
         """An existing session + empty body is a bad request, not a 404."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="no-fields", source="cli")
+            db.sessions.create(session_id="no-fields", source="cli")
         finally:
             db.close()
 
@@ -378,12 +381,12 @@ class TestWebServerEndpoints:
     def test_profiles_sessions_tags_default_profile(self):
         """The cross-profile aggregator returns the default profile's rows
         tagged profile="default" (single-profile parity with /api/sessions)."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="agg-me", source="cli")
-            db.append_message(session_id="agg-me", role="user", content="hi")
+            db.sessions.create(session_id="agg-me", source="cli")
+            db.messages.append(session_id="agg-me", role="user", content="hi")
         finally:
             db.close()
 
@@ -412,28 +415,28 @@ class TestWebServerEndpoints:
         first page by recency, listed under its live continuation id."""
         import time as _time
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
             old = _time.time() - 86_400
             # Old conversation that later compresses into a fresh continuation.
             # The continuation must start at/after the parent's ended_at to be
             # recognised as a compression tip (not a sub-agent/branch).
-            db.create_session(session_id="root-old", source="cli")
-            db.append_message(session_id="root-old", role="user", content="kickoff")
-            db.end_session("root-old", "compression")
+            db.sessions.create(session_id="root-old", source="cli")
+            db.messages.append(session_id="root-old", role="user", content="kickoff")
+            db.sessions.end("root-old", "compression")
             db._conn.execute(
                 "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
                 (old, old + 10, "root-old"),
             )
-            db.create_session(session_id="tip-new", source="cli", parent_session_id="root-old")
+            db.sessions.create(session_id="tip-new", source="cli", parent_session_id="root-old")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (old + 10, "tip-new"))
-            db.append_message(session_id="tip-new", role="user", content="continued just now")
+            db.messages.append(session_id="tip-new", role="user", content="continued just now")
             # A brand-new unrelated session started after the root but before now.
-            db.create_session(session_id="mid", source="cli")
+            db.sessions.create(session_id="mid", source="cli")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (_time.time() - 3600, "mid"))
-            db.append_message(session_id="mid", role="user", content="hello")
+            db.messages.append(session_id="mid", role="user", content="hello")
             db._conn.commit()
         finally:
             db.close()
@@ -453,21 +456,21 @@ class TestWebServerEndpoints:
         so the sidebar stops showing the same chat several times."""
         import time as _time
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="search-root", source="cli")
-            db.append_message(session_id="search-root", role="user", content="distinctneedle in the root")
-            db.end_session("search-root", "compression")
+            db.sessions.create(session_id="search-root", source="cli")
+            db.messages.append(session_id="search-root", role="user", content="distinctneedle in the root")
+            db.sessions.end("search-root", "compression")
             now = _time.time()
             db._conn.execute(
                 "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
                 (now - 100, now - 90, "search-root"),
             )
-            db.create_session(session_id="search-tip", source="cli", parent_session_id="search-root")
+            db.sessions.create(session_id="search-tip", source="cli", parent_session_id="search-root")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 90, "search-tip"))
-            db.append_message(session_id="search-tip", role="user", content="distinctneedle again in the tip")
+            db.messages.append(session_id="search-tip", role="user", content="distinctneedle again in the tip")
             db._conn.commit()
         finally:
             db.close()
@@ -490,21 +493,21 @@ class TestWebServerEndpoints:
         branch instead of being collapsed back to the parent/root."""
         import time as _time
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
             now = _time.time()
-            db.create_session(session_id="branch-parent", source="cli")
-            db.append_message(session_id="branch-parent", role="user", content="ancestor context")
-            db.end_session("branch-parent", "branched")
+            db.sessions.create(session_id="branch-parent", source="cli")
+            db.messages.append(session_id="branch-parent", role="user", content="ancestor context")
+            db.sessions.end("branch-parent", "branched")
             db._conn.execute(
                 "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
                 (now - 100, now - 90, "branch-parent"),
             )
-            db.create_session(session_id="branch-child", source="cli", parent_session_id="branch-parent")
+            db.sessions.create(session_id="branch-child", source="cli", parent_session_id="branch-parent")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 80, "branch-child"))
-            db.append_message(session_id="branch-child", role="user", content="branchspecificneedle only here")
+            db.messages.append(session_id="branch-child", role="user", content="branchspecificneedle only here")
             db._conn.commit()
         finally:
             db.close()
@@ -523,22 +526,22 @@ class TestWebServerEndpoints:
         live continuation, matching /resume behavior."""
         import time as _time
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="desktop-root", source="cli")
-            db.append_message(session_id="desktop-root", role="user", content="before compression")
-            db.end_session("desktop-root", "compression")
+            db.sessions.create(session_id="desktop-root", source="cli")
+            db.messages.append(session_id="desktop-root", role="user", content="before compression")
+            db.sessions.end("desktop-root", "compression")
             now = _time.time()
             db._conn.execute(
                 "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
                 (now - 10, now - 5, "desktop-root"),
             )
-            db.create_session(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
+            db.sessions.create(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "desktop-tip"))
-            db.replace_messages("desktop-root", [])
-            db.append_message(session_id="desktop-tip", role="user", content="after compression")
+            db.messages.replace("desktop-root", [])
+            db.messages.append(session_id="desktop-tip", role="user", content="after compression")
             db._conn.commit()
         finally:
             db.close()
@@ -550,12 +553,12 @@ class TestWebServerEndpoints:
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
 
     def test_get_sessions_archived_is_boolean(self):
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="bool-arch", source="cli")
-            db.append_message(session_id="bool-arch", role="user", content="hi")
+            db.sessions.create(session_id="bool-arch", source="cli")
+            db.messages.append(session_id="bool-arch", role="user", content="hi")
         finally:
             db.close()
 
@@ -564,11 +567,11 @@ class TestWebServerEndpoints:
 
     def test_rename_response_omits_archived_when_not_set(self):
         """Title-only PATCH keeps its legacy {ok, title} response shape."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(session_id="title-only", source="cli")
+            db.sessions.create(session_id="title-only", source="cli")
         finally:
             db.close()
 
@@ -2159,21 +2162,21 @@ class TestNewEndpoints:
         }
 
     def test_analytics_usage_includes_skill_breakdown(self):
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB()
+        db = open_cli_session_store()
         try:
-            db.create_session(
+            db.sessions.create(
                 session_id="skills-analytics-test",
                 source="cli",
                 model="anthropic/claude-sonnet-4",
             )
-            db.update_token_counts(
+            db.sessions.update_token_counts(
                 "skills-analytics-test",
                 input_tokens=120,
                 output_tokens=45,
             )
-            db.append_message(
+            db.messages.append(
                 "skills-analytics-test",
                 role="assistant",
                 content="Loading and updating skills.",
