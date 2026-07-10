@@ -4,24 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hermes_agent.read_models.message_history import MessageHistoryReadModel
-from hermes_agent.repositories.message_repo import MessageRepository
-
-
-def message_history_read_model_for_db(db: Any) -> MessageHistoryReadModel | None:
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return MessageHistoryReadModel(conn)
-
-
-def message_repository_for_db(db: Any) -> MessageRepository | None:
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return MessageRepository(conn)
-
-
 def load_conversation_history(
     db: Any,
     session_id: str,
@@ -40,6 +22,4 @@ def load_conversation_history(
 
 __all__ = [
     "load_conversation_history",
-    "message_history_read_model_for_db",
-    "message_repository_for_db",
 ]

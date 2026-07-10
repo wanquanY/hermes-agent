@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dovie_extension.display_transcript import sanitize_transcript_messages
-from hermes_agent.read_models.message_history import MessagePageQuery
 from tui_gateway.methods import session as _session_methods
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
@@ -12,11 +11,7 @@ from tui_gateway.methods.session import (
     _message_page_info,
     _requested_runtime_scope_key,
 )
-from tui_gateway.services.message_history import (
-    load_conversation_history,
-    message_history_read_model_for_db,
-    message_repository_for_db,
-)
+from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services.run_events import list_runtime_events, list_tool_events
 
 _server = bind_server_globals(globals())
@@ -109,19 +104,14 @@ def _(rid, params: dict) -> dict:
         cursor_id = int(cursor_id) if cursor_id is not None else None
     except (TypeError, ValueError):
         cursor_id = None
-    message_history = message_history_read_model_for_db(db)
-    if message_history is None:
-        return _err(rid, 5000, "message history read model unavailable")
     try:
-        page = message_history.page_as_conversation(
+        page = db.messages.page_as_conversation(
             target,
-            MessagePageQuery(
-                direction=str(params.get("direction") or "tail"),
-                cursor_id=cursor_id,
-                limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
-                include_ancestors=bool(
-                    params.get("include_ancestors", params.get("includeAncestors", True))
-                ),
+            direction=str(params.get("direction") or "tail"),
+            cursor_id=cursor_id,
+            limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
+            include_ancestors=bool(
+                params.get("include_ancestors", params.get("includeAncestors", True))
             ),
         )
     except Exception as exc:
@@ -265,11 +255,8 @@ def _(rid, params: dict) -> dict:
     target, resolve_err = _resolve_session_row_id(rid, db, target)
     if resolve_err:
         return resolve_err
-    message_repo = message_repository_for_db(db)
-    if message_repo is None:
-        return _err(rid, 5000, "message metadata merge is not available")
     try:
-        message = message_repo.merge_metadata(
+        message = db.messages.merge_metadata(
             target,
             metadata,
             message_id=params.get("message_id") or params.get("messageId"),
@@ -419,9 +406,7 @@ def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> N
     session_key = str(session.get("session_key") or "")
     db = _get_db()
     if db is not None and session_key:
-        message_repo = message_repository_for_db(db)
-        if message_repo is not None:
-            message_repo.replace_conversation(session_key, history)
+        db.messages.replace(session_key, history)
     session["history"] = history
     session["history_version"] = int(session.get("history_version", 0)) + 1
     agent = session.get("agent")
@@ -487,10 +472,7 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
         if recalled is None:
             return _err(rid, 4019, "turn not found or already recalled")
         next_history, draft, removed = recalled
-        message_repo = message_repository_for_db(db)
-        if message_repo is None:
-            return _err(rid, 5036, "message repository unavailable")
-        message_repo.replace_conversation(session_key, next_history)
+        db.messages.replace(session_key, next_history)
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
     except Exception as exc:
         return _err(rid, 5036, f"recall failed: {exc}")

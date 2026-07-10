@@ -10,16 +10,12 @@ from dovie_extension.display_transcript import (
     sanitize_transcript_messages,
 )
 from hermes_agent.domain.session_deletion import SessionDeletionService
-from hermes_agent.read_models.message_history import MessagePageQuery
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
-from tui_gateway.services.message_history import (
-    load_conversation_history,
-    message_history_read_model_for_db,
-)
+from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services import run_control
 from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
 from tui_gateway.services.workspace import (
@@ -857,12 +853,11 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             "totalCount": 0,
         }
     if mode == "tail":
-        read_model = message_history_read_model_for_db(db)
-        if read_model is None:
-            return [], _message_page_info({})
-        page = read_model.page_as_conversation(
+        page = db.messages.page_as_conversation(
             session_id,
-            MessagePageQuery(direction="tail", limit=limit, include_ancestors=True),
+            direction="tail",
+            limit=limit,
+            include_ancestors=True,
         )
         return (
             sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),

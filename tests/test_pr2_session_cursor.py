@@ -2,7 +2,7 @@
 
 These tests exercise the run_events-dimension cursor (``after_seq`` /
 ``before_seq`` / ``maxSeq``) added to ``session.messages`` and the new
-lightweight ``session.events`` reader.  They construct a real ``SessionDB``
+lightweight ``session.events`` reader.  They construct a real ``CliSessionStore``
 against ``tmp_path``, seed run_events via ``append_run_event`` (which
 auto-assigns authoritative ``seq`` values), and invoke the JSON-RPC handlers
 through ``server._methods`` exactly as the gateway dispatcher does.
@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 
 
@@ -24,10 +24,10 @@ from tui_gateway import server
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
-    """Build a real SessionDB and route ``_get_db`` in session_history to it."""
+def _install_db(monkeypatch: Any, tmp_path: Path) -> CliSessionStore:
+    """Build a real CliSessionStore and route ``_get_db`` in session_history to it."""
     session_history = importlib.import_module("tui_gateway.methods.session_history")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(session_history, "_get_db", lambda: db)
     return db
 
@@ -51,15 +51,15 @@ def _frame(
     }
 
 
-def _seed_events(db: SessionDB, conversation_session_id: str = "sess-1", n: int = 5) -> list[int]:
+def _seed_events(db: CliSessionStore, conversation_session_id: str = "sess-1", n: int = 5) -> list[int]:
     """Append ``n`` run_events; return the list of assigned seq values."""
     seqs: list[int] = []
     for i in range(n):
-        db.append_run_event(
+        db.runs.append_event(
             conversation_session_id,
             _frame(run_id=f"run-{i + 1}", text=f"event-{i + 1}"),
         )
-    for event in db.list_run_events(conversation_session_id):
+    for event in db.runs.list_events(conversation_session_id):
         seqs.append(int(event["seq"]))
     return seqs
 
@@ -85,7 +85,7 @@ def test_session_messages_after_seq_filters_to_seq_greater_than_cursor(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         seqs = _seed_events(db)
         assert seqs == [1, 2, 3, 4, 5]
 
@@ -106,7 +106,7 @@ def test_session_messages_before_seq_filters_to_seq_less_than_cursor(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_messages(
@@ -127,7 +127,7 @@ def test_session_messages_before_seq_with_after_seq_window(
     """after_seq + before_seq together define a half-open (after, before) window."""
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_messages(
@@ -151,7 +151,7 @@ def test_session_messages_response_includes_max_seq(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_messages(
@@ -169,7 +169,7 @@ def test_session_messages_max_seq_zero_when_no_run_events(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
 
         result = _call_messages(
             "max-seq-empty",
@@ -187,7 +187,7 @@ def test_session_messages_legacy_full_window_emits_deprecation_warning(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         # No after_seq / before_seq → legacy full window + warning.
@@ -208,7 +208,7 @@ def test_session_messages_cursor_window_has_no_deprecation_warning(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_messages(
@@ -230,7 +230,7 @@ def test_session_events_returns_events_max_seq_and_has_more(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_events("events-basic", {"session_id": "sess-1"})
@@ -249,7 +249,7 @@ def test_session_events_after_seq_filters(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db)
 
         result = _call_events(
@@ -269,7 +269,7 @@ def test_session_events_limit_caps_result_and_sets_has_more(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db, n=5)
 
         result = _call_events(
@@ -291,7 +291,7 @@ def test_session_events_limit_then_after_seq_paginates(
     """Cursor chain: page 1 (limit 3) → page 2 (after_seq = maxSeq of page 1)."""
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
         _seed_events(db, n=5)
 
         page1 = _call_events("events-page1", {"session_id": "sess-1", "limit": 3})
@@ -316,7 +316,7 @@ def test_session_events_empty_session_returns_empty(
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("sess-1", source="test")
+        db.sessions.create("sess-1", source="test")
 
         result = _call_events("events-empty", {"session_id": "sess-1"})
 

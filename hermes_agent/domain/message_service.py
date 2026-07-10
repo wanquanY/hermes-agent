@@ -281,6 +281,27 @@ class MessageService:
             raise ValueError("session_id is required")
         self._writer.replace_conversation(stable, messages)
 
+    def merge_metadata(
+        self,
+        session_id: str,
+        metadata: dict[str, Any],
+        *,
+        message_id: str | int | None = None,
+        role: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        client_message_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self._writer.merge_metadata(
+            session_id,
+            metadata,
+            message_id=message_id,
+            role=role,
+            run_id=run_id,
+            turn_id=turn_id,
+            client_message_id=client_message_id,
+        )
+
     def upsert_team_message(
         self,
         *,
