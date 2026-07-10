@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import logging
 import os
 import sqlite3
@@ -69,19 +68,6 @@ def _sqlite_free_page_ratio(path: Path | None) -> dict[str, Any]:
         return {"free_pages": 0, "page_count": 0, "free_ratio": 0.0}
     ratio = (free_pages / page_count) if page_count > 0 else 0.0
     return {"free_pages": free_pages, "page_count": page_count, "free_ratio": ratio}
-
-
-def _method_accepts_keyword(method: Any, keyword: str) -> bool:
-    try:
-        signature = inspect.signature(method)
-    except (TypeError, ValueError):
-        return False
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return True
-        if parameter.name == keyword:
-            return True
-    return False
 
 
 @dataclass(frozen=True)
@@ -190,13 +176,10 @@ class StorageMaintenanceService:
     def run_startup_cycle(self, db: Any) -> dict[str, Any]:
         if storage_maintenance_disabled():
             return {"skipped": True, "reason": "disabled"}
-        method = getattr(db, "maybe_auto_compact_run_events", None)
-        if not callable(method):
-            return {"skipped": True, "reason": "method_missing"}
         started = time.monotonic()
         compaction_result: dict[str, Any] = {}
         try:
-            result = self._call_startup_compaction(method)
+            result = db.run_event_maintenance.maybe_auto_compact(vacuum=False)
             compaction_result = result if isinstance(result, dict) else {"result": result}
             record = MaintenanceTaskRecord(
                 task="startup_run_event_compaction",
@@ -383,17 +366,9 @@ class StorageMaintenanceService:
             self._last_task_runs[(target_key, task)] = now
 
     def _call_db_task(self, db: Any, method_name: str) -> MaintenanceTaskRecord:
-        method = getattr(db, method_name, None)
-        if not callable(method):
-            return MaintenanceTaskRecord(
-                task=method_name,
-                status="skipped",
-                duration_s=0.0,
-                result={"reason": "method_missing"},
-            )
         started = time.monotonic()
         try:
-            result = method()
+            result = self._execute_db_task(db, method_name)
             if not isinstance(result, dict):
                 result = {"result": result}
             return MaintenanceTaskRecord(
@@ -411,16 +386,22 @@ class StorageMaintenanceService:
                 error=str(exc),
             )
 
+    @staticmethod
+    def _execute_db_task(db: Any, task: str) -> Any:
+        if task == "compact_run_events":
+            return db.run_event_maintenance.compact()
+        if task == "prune_duplicate_session_info_events":
+            return db.run_event_maintenance.prune_duplicate_session_info()
+        if task == "backfill_run_event_frame_blobs":
+            return db.run_event_maintenance.backfill_frames()
+        if task == "reference_run_event_payloads":
+            return db.run_event_maintenance.reference_payloads()
+        if task == "prune_run_events":
+            return db.runs.retention.prune()
+        raise ValueError(f"unknown storage maintenance task: {task}")
+
     def _maybe_vacuum(self, db: Any) -> MaintenanceTaskRecord:
         started = time.monotonic()
-        vacuum = getattr(db, "vacuum", None)
-        if not callable(vacuum):
-            return MaintenanceTaskRecord(
-                task="vacuum",
-                status="skipped",
-                duration_s=0.0,
-                result={"reason": "method_missing"},
-            )
         if self._has_active_runs(db):
             return MaintenanceTaskRecord(
                 task="vacuum",
@@ -437,7 +418,7 @@ class StorageMaintenanceService:
                 result={"reason": "below_threshold", **page_stats},
             )
         try:
-            vacuum()
+            db.maintenance.vacuum()
             return MaintenanceTaskRecord(
                 task="vacuum",
                 status="completed",
@@ -455,9 +436,7 @@ class StorageMaintenanceService:
             )
 
     def _has_active_runs(self, db: Any) -> bool:
-        method = getattr(db, "list_runs", None)
-        if not callable(method):
-            return False
+        method = db.runs.list
         try:
             rows = method(statuses=list(_ACTIVE_RUN_STATUSES), limit=1)
         except TypeError:
@@ -471,12 +450,6 @@ class StorageMaintenanceService:
         with self._lock:
             self._last_results.append(payload)
             self._last_results = self._last_results[-100:]
-
-    def _call_startup_compaction(self, method: Any) -> Any:
-        if _method_accepts_keyword(method, "vacuum"):
-            return method(vacuum=False)
-        return method()
-
 
 _SERVICE: StorageMaintenanceService | None = None
 _SERVICE_LOCK = threading.RLock()

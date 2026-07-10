@@ -10,38 +10,62 @@ class _FakeSessionDB:
         self.active_runs = active_runs or []
         self.calls: list[str] = []
         self.startup_vacuum_values: list[bool] = []
+        self.run_event_maintenance = _FakeRunEventMaintenance(self)
+        self.runs = _FakeRuns(self)
+        self.maintenance = _FakeStorageMaintenance(self)
 
-    def maybe_auto_compact_run_events(self, *, vacuum: bool = True) -> dict[str, int | bool]:
-        self.calls.append("maybe_auto_compact_run_events")
-        self.startup_vacuum_values.append(vacuum)
+
+class _FakeRunEventMaintenance:
+    def __init__(self, owner: _FakeSessionDB) -> None:
+        self.owner = owner
+
+    def maybe_auto_compact(self, *, vacuum: bool = True) -> dict[str, int | bool]:
+        self.owner.calls.append("maybe_auto_compact")
+        self.owner.startup_vacuum_values.append(vacuum)
         return {"skipped": False, "deleted_events": 3}
 
-    def compact_run_events(self) -> dict[str, int]:
-        self.calls.append("compact_run_events")
+    def compact(self) -> dict[str, int]:
+        self.owner.calls.append("compact_run_events")
         return {"deleted_events": 2, "compacted_segments": 1}
 
-    def prune_duplicate_session_info_events(self) -> dict[str, int]:
-        self.calls.append("prune_duplicate_session_info_events")
+    def prune_duplicate_session_info(self) -> dict[str, int]:
+        self.owner.calls.append("prune_duplicate_session_info_events")
         return {"deleted_events": 1}
 
-    def backfill_run_event_frame_blobs(self) -> dict[str, int]:
-        self.calls.append("backfill_run_event_frame_blobs")
+    def backfill_frames(self) -> dict[str, int]:
+        self.owner.calls.append("backfill_run_event_frame_blobs")
         return {"updated_events": 1, "remaining_events": 0}
 
-    def reference_run_event_payloads(self) -> dict[str, int]:
-        self.calls.append("reference_run_event_payloads")
+    def reference_payloads(self) -> dict[str, int]:
+        self.owner.calls.append("reference_run_event_payloads")
         return {"referenced_events": 1, "skipped_events": 0}
 
-    def prune_run_events(self) -> dict[str, int]:
-        self.calls.append("prune_run_events")
+
+class _FakeRunRetention:
+    def __init__(self, owner: _FakeSessionDB) -> None:
+        self.owner = owner
+
+    def prune(self) -> dict[str, int]:
+        self.owner.calls.append("prune_run_events")
         return {"deleted_events": 1}
 
-    def list_runs(self, *, statuses: list[str], limit: int) -> list[dict[str, str]]:
-        self.calls.append(f"list_runs:{limit}:{','.join(statuses)}")
-        return self.active_runs[:limit]
+
+class _FakeRuns:
+    def __init__(self, owner: _FakeSessionDB) -> None:
+        self.owner = owner
+        self.retention = _FakeRunRetention(owner)
+
+    def list(self, *, statuses: list[str], limit: int) -> list[dict[str, str]]:
+        self.owner.calls.append(f"list_runs:{limit}:{','.join(statuses)}")
+        return self.owner.active_runs[:limit]
+
+
+class _FakeStorageMaintenance:
+    def __init__(self, owner: _FakeSessionDB) -> None:
+        self.owner = owner
 
     def vacuum(self) -> None:
-        self.calls.append("vacuum")
+        self.owner.calls.append("vacuum")
 
 
 def test_storage_maintenance_runs_registered_db_tasks_in_order(tmp_path):
@@ -116,7 +140,7 @@ def test_storage_maintenance_startup_cycle_uses_existing_compaction_hook():
     result = service.run_startup_cycle(db)
 
     assert result == {"skipped": False, "deleted_events": 3}
-    assert db.calls == ["maybe_auto_compact_run_events"]
+    assert db.calls == ["maybe_auto_compact"]
     assert db.startup_vacuum_values == [False]
 
 
