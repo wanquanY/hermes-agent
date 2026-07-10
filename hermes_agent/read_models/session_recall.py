@@ -418,6 +418,17 @@ class SessionRecallReadModel:
             "messages_after": len(after_rows),
         }
 
+    def session_id_for_message(self, message_id: int) -> str | None:
+        stable_message_id = _to_int(message_id, 0)
+        if stable_message_id <= 0 or not self._table_exists("messages"):
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_id FROM messages WHERE id = ?",
+                (stable_message_id,),
+            ).fetchone()
+        return str(row["session_id"] or "") if row else None
+
     def get_anchored_view(
         self,
         session_id: str,

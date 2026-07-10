@@ -102,6 +102,41 @@ class MessageService:
             ).fetchall()
         return [_message_row(row) for row in rows]
 
+    def window_around(
+        self,
+        session_id: str,
+        message_id: int,
+        *,
+        window: int = 5,
+        include_inactive: bool = False,
+    ) -> dict[str, Any]:
+        return self._recall.get_messages_around(
+            session_id,
+            message_id,
+            window=window,
+            include_inactive=include_inactive,
+        )
+
+    def anchored_view(
+        self,
+        session_id: str,
+        message_id: int,
+        *,
+        window: int = 5,
+        bookend: int = 3,
+        include_inactive: bool = False,
+    ) -> dict[str, Any]:
+        return self._recall.get_anchored_view(
+            session_id,
+            message_id,
+            window=window,
+            bookend=bookend,
+            include_inactive=include_inactive,
+        )
+
+    def owning_session_id(self, message_id: int) -> str | None:
+        return self._recall.session_id_for_message(message_id)
+
     def all_as_conversation(
         self,
         session_id: str,
