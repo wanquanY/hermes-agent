@@ -18,18 +18,20 @@ by column reconciliation alone.
 ## Baseline
 
 `0001_declarative_baseline.py` is special. It runs only when no
-`schema_version` row exists, and it applies `SCHEMA_SQL` plus
-`_reconcile_columns()` through the runner owner. Existing databases skip it.
+`schema_version` row exists, and it applies `SCHEMA_SQL` plus declarative
+column reconciliation. Existing databases skip it.
 
 ## Declaration Forms
 
-A migration module may expose one of three forms:
+A migration module may expose one of two forms:
 
-- `create_migration(context)`: use this when the migration needs the runner
-  owner, e.g. a `SessionDB` helper method. Use `require_owner(context, name)`.
 - `migration`: an object with `version`, `description`, and `apply(cursor)`.
 - `apply(cursor)`: a module-level function. The loader wraps it in a migration
   object using the module `version` and `description`.
+
+Migration code must be owner-independent. Shared operations live in
+`hermes_agent.storage.migration_operations`; migration execution must not
+depend on `SessionDB`, `CliSessionStore`, or a facade instance.
 
 ## Checklist
 

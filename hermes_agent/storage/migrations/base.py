@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 
 _logger = logging.getLogger(__name__)
@@ -38,13 +38,6 @@ class Migration(Protocol):
 
 
 @dataclass(frozen=True)
-class MigrationContext:
-    """Context available to migration factories."""
-
-    owner: Any | None = None
-
-
-@dataclass(frozen=True)
 class MigrationRecord:
     """Loaded migration metadata."""
 
@@ -62,14 +55,6 @@ class _FunctionMigration:
 
     def apply(self, cursor: sqlite3.Cursor) -> None:
         self._apply(cursor)
-
-
-def require_owner(context: MigrationContext, migration_name: str) -> Any:
-    """Return the runner owner or raise a migration-specific error."""
-
-    if context.owner is None:
-        raise MigrationLoadError(f"{migration_name} requires a migration owner")
-    return context.owner
 
 
 def _default_migrations_dir() -> Path:
@@ -141,25 +126,20 @@ def _description(module: ModuleType, path: Path) -> str:
 def _coerce_migration(
     module: ModuleType,
     path: Path,
-    context: MigrationContext,
 ) -> Migration:
-    factory = getattr(module, "create_migration", None)
-    if callable(factory):
-        migration = factory(context)
-    else:
-        migration = getattr(module, "migration", None)
-        if migration is None:
-            apply_fn = getattr(module, "apply", None)
-            if callable(apply_fn):
-                migration = _FunctionMigration(
-                    version=getattr(module, "version"),
-                    description=getattr(module, "description"),
-                    _apply=apply_fn,
-                )
+    migration = getattr(module, "migration", None)
+    if migration is None:
+        apply_fn = getattr(module, "apply", None)
+        if callable(apply_fn):
+            migration = _FunctionMigration(
+                version=getattr(module, "version"),
+                description=getattr(module, "description"),
+                _apply=apply_fn,
+            )
 
     if migration is None:
         raise MigrationLoadError(
-            f"{path.name} must expose create_migration(), migration, or apply()"
+            f"{path.name} must expose migration or apply()"
         )
     if getattr(migration, "version", None) != getattr(module, "version"):
         raise MigrationLoadError(f"{path.name} migration.version mismatch")
@@ -172,13 +152,10 @@ def _coerce_migration(
 
 def load_migrations(
     directory: Path | str | None = None,
-    *,
-    context: MigrationContext | None = None,
 ) -> list[MigrationRecord]:
     """Load migration modules from a directory sorted by filename prefix."""
 
     migrations_dir = Path(directory) if directory is not None else _default_migrations_dir()
-    migration_context = context or MigrationContext()
     records: list[MigrationRecord] = []
     seen_versions: dict[int, Path] = {}
 
@@ -194,7 +171,7 @@ def load_migrations(
         module = _load_module(path)
         declared = _declared_version(module, path)
         description = _description(module, path)
-        migration = _coerce_migration(module, path, migration_context)
+        migration = _coerce_migration(module, path)
         records.append(
             MigrationRecord(
                 version=declared,
@@ -213,12 +190,10 @@ class MigrationRunner:
     def __init__(
         self,
         cursor: sqlite3.Cursor,
-        owner: Any | None = None,
         *,
         migrations_dir: Path | str | None = None,
     ) -> None:
         self._cursor = cursor
-        self._owner = owner
         self._migrations_dir = (
             Path(migrations_dir) if migrations_dir is not None else _default_migrations_dir()
         )
@@ -232,8 +207,7 @@ class MigrationRunner:
         target ``schema_version`` bump. Real errors continue to abort.
         """
 
-        context = MigrationContext(owner=self._owner)
-        migrations = load_migrations(self._migrations_dir, context=context)
+        migrations = load_migrations(self._migrations_dir)
         current_version = self._read_schema_version()
         applied_versions: list[int] = []
 
@@ -292,4 +266,3 @@ class MigrationRunner:
                 "UPDATE schema_version SET version = ?",
                 (version,),
             )
-

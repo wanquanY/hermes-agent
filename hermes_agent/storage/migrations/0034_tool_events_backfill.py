@@ -3,27 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
-from typing import Any
 
-from hermes_agent.storage.migrations.base import MigrationContext
-from hermes_agent.storage.migrations.base import require_owner
+from hermes_agent.storage.migration_operations import backfill_tool_events
 
 version = 34
 description = "tool events backfill"
 
 
-@dataclass(frozen=True)
-class _ToolEventsBackfill:
-    owner: Any
-    version: int = version
-    description: str = description
-
-    def apply(self, cursor: sqlite3.Cursor) -> None:
-        self.owner._backfill_tool_events(cursor)
-
-
-def create_migration(context: MigrationContext) -> _ToolEventsBackfill:
-    return _ToolEventsBackfill(
-        owner=require_owner(context, "0034_tool_events_backfill")
-    )
+def apply(cursor: sqlite3.Cursor) -> None:
+    backfill_tool_events(cursor)

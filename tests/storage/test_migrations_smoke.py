@@ -3,8 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from hermes_state import SCHEMA_VERSION
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
 
 
 def _table_names(db_path: Path) -> set[str]:
@@ -33,7 +33,7 @@ def _schema_version(db_path: Path) -> int:
 def test_empty_database_init_applies_all_migrations(tmp_path: Path):
     db_path = tmp_path / "state.db"
 
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.close()
 
     tables = _table_names(db_path)
@@ -47,12 +47,11 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
         "v3_activities",
         "activity_commands",
     }.issubset(tables)
-    assert _schema_version(db_path) == SCHEMA_VERSION
+    assert _schema_version(db_path) == CURRENT_SCHEMA_VERSION
 
 
 def test_half_upgraded_database_runs_pending_owner_migrations(
     tmp_path: Path,
-    monkeypatch,
 ):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
@@ -63,47 +62,25 @@ def test_half_upgraded_database_runs_pending_owner_migrations(
     finally:
         conn.close()
 
-    calls: list[str] = []
-
-    def _wrap(name: str) -> None:
-        original = getattr(SessionDB, name)
-
-        def wrapped(self, cursor):
-            calls.append(name)
-            return original(self, cursor)
-
-        monkeypatch.setattr(SessionDB, name, wrapped)
-
-    for method_name in (
-        "_backfill_session_list_summaries",
-        "_migrate_agent_profile_versions_to_latest_profiles",
-        "_migrate_run_events_participant_id",
-        "_migrate_activities_kind_mission_check",
-        "_migrate_messages_participant_id",
-        "_migrate_session_system_prompts",
-        "_backfill_session_runtime_state",
-        "_backfill_tool_events",
-        "_backfill_run_event_frame_indexes",
-        "_migrate_run_events_activity_id",
-        "_migrate_activity_commands",
-    ):
-        _wrap(method_name)
-
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.close()
 
-    assert _schema_version(db_path) == SCHEMA_VERSION
-    assert calls == [
-        "_migrate_activities_kind_mission_check",
-        "_backfill_session_list_summaries",
-        "_migrate_agent_profile_versions_to_latest_profiles",
-        "_migrate_run_events_participant_id",
-        "_migrate_activities_kind_mission_check",
-        "_migrate_messages_participant_id",
-        "_migrate_session_system_prompts",
-        "_backfill_session_runtime_state",
-        "_backfill_tool_events",
-        "_backfill_run_event_frame_indexes",
-        "_migrate_run_events_activity_id",
-        "_migrate_activity_commands",
-    ]
+    assert _schema_version(db_path) == CURRENT_SCHEMA_VERSION
+    conn = sqlite3.connect(db_path)
+    try:
+        run_event_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("run_events")').fetchall()
+        }
+        message_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("messages")').fetchall()
+        }
+        assert {"participant_id", "activity_id", "frame_blob"}.issubset(run_event_columns)
+        assert "participant_id" in message_columns
+        assert {
+            "session_system_prompts",
+            "session_runtime_state",
+            "tool_events",
+            "activity_commands",
+        }.issubset(_table_names(db_path))
+    finally:
+        conn.close()
