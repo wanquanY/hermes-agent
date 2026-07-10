@@ -22,6 +22,10 @@ from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPol
 
 logger = logging.getLogger(__name__)
 _RETENTION_POLICY = RunEventRetentionPolicy()
+_REQUIRED_COLUMN_MIGRATION_TYPES = {
+    ("sessions", "source"): "TEXT NOT NULL DEFAULT 'unknown'",
+    ("sessions", "started_at"): "REAL NOT NULL DEFAULT 0",
+}
 
 
 def reconcile_declared_columns(cursor: sqlite3.Cursor) -> None:
@@ -36,9 +40,13 @@ def reconcile_declared_columns(cursor: sqlite3.Cursor) -> None:
             if column_name in live_columns:
                 continue
             safe_name = column_name.replace('"', '""')
+            migration_type = _REQUIRED_COLUMN_MIGRATION_TYPES.get(
+                (table_name, column_name),
+                column_type,
+            )
             try:
                 cursor.execute(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN "{safe_name}" {column_type}'
+                    f'ALTER TABLE "{table_name}" ADD COLUMN "{safe_name}" {migration_type}'
                 )
             except sqlite3.OperationalError as exc:
                 logger.debug(

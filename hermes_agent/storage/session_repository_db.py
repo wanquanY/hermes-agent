@@ -25,6 +25,7 @@ from hermes_agent.storage.execution_session_migration import (
     reconcile_team_mission_session_classification,
 )
 from hermes_agent.storage.fts_schema import ensure_message_fts
+from hermes_agent.storage.migration_operations import reconcile_declared_columns
 from hermes_agent.storage.migrations import MigrationRunner
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
@@ -70,6 +71,7 @@ def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.
     _configure_connection(conn, db_label=str(path))
     ensure_session_repository_schema(conn)
     MigrationRunner(conn.cursor()).run_all()
+    reconcile_session_repository_data(conn)
     ensure_message_fts(conn)
     return conn
 
@@ -237,43 +239,20 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             ON messages(session_id, id);
         """
     )
-    _ensure_columns(
-        conn,
-        "sessions",
-        {
-            "updated_at": "REAL NOT NULL DEFAULT 0",
-            "session_kind": "TEXT NOT NULL DEFAULT 'hermes_session'",
-            "conversation_kind": "TEXT NOT NULL DEFAULT 'direct'",
-            "cwd": "TEXT",
-            "archived": "INTEGER NOT NULL DEFAULT 0",
-        },
-    )
-    _ensure_columns(
-        conn,
-        "session_index",
-        {
-            "transient": "INTEGER NOT NULL DEFAULT 0",
-            "team_id": "TEXT NOT NULL DEFAULT ''",
-            "mission_id": "TEXT NOT NULL DEFAULT ''",
-            "conversation_id": "TEXT NOT NULL DEFAULT ''",
-        },
-    )
-    _ensure_columns(
-        conn,
-        "messages",
-        {
-            "participant_id": "TEXT NOT NULL DEFAULT ''",
-            "conversation_message_id": "TEXT NOT NULL DEFAULT ''",
-            "metadata_json": "TEXT",
-            "active": "INTEGER NOT NULL DEFAULT 1",
-        },
-    )
+    # Existing tables are not changed by CREATE TABLE IF NOT EXISTS. Reconcile
+    # every declarative column before creating indexes or running read models.
+    reconcile_declared_columns(conn.cursor())
     ensure_session_lineage_repository_schema(conn)
     ensure_runtime_repository_schema(conn)
     ensure_agent_profile_repository_schema(conn)
     ensure_seq_counter_table(conn)
     ensure_team_registry_repository_schema(conn)
     ensure_session_index_read_side_schema(conn)
+
+
+def reconcile_session_repository_data(conn: sqlite3.Connection) -> None:
+    """Run data reconciliations only after all versioned migrations complete."""
+
     classification = reconcile_team_mission_session_classification(conn)
     if any(classification.values()):
         logger.info(
@@ -365,20 +344,6 @@ def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
         logger.debug("session index read-side deferred indexes skipped", exc_info=True)
 
 
-def _ensure_columns(
-    conn: sqlite3.Connection,
-    table: str,
-    columns: dict[str, str],
-) -> None:
-    existing = {
-        str(row["name"])
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-    for name, ddl in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
-
-
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {
         str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
@@ -388,6 +353,7 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 __all__ = [
     "connect_session_repository_db",
+    "reconcile_session_repository_data",
     "ensure_runtime_repository_schema",
     "ensure_session_repository_schema",
 ]
