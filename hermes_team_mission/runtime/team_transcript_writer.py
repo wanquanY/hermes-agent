@@ -14,20 +14,18 @@ from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_team_mission.context.artifact_refs import artifact_refs_from_event
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
+from hermes_team_mission.domain.transcript_visibility import (
+    MAIN_TRANSCRIPT_ACTIVITY_KINDS,
+    MISSION_NODE_TRANSCRIPT_ACTIVITY_KIND,
+    is_main_transcript_message,
+    is_node_transcript_message,
+    main_transcript_activity_kind,
+    main_transcript_message_decision,
+)
 
 
 logger = logging.getLogger(__name__)
 
-MAIN_TRANSCRIPT_ACTIVITY_KINDS = frozenset({
-    "leader_chat",
-    "member_direct_chat",
-    "team_dispatch",
-    "mission_start",
-    "mission_summary",
-    "mission_report",
-})
-
-MISSION_NODE_TRANSCRIPT_ACTIVITY_KIND = "mission_node"
 TERMINAL_MISSION_SUMMARY_OUTCOMES = frozenset({
     "completed",
     "failed",
@@ -830,62 +828,6 @@ def _project_reconstructed_assistant_segments_locked(
         )
         reconstructed.append(saved)
     return reconstructed
-
-
-def main_transcript_activity_kind(message: dict[str, Any]) -> str:
-    metadata = _mapping(message.get("metadata"))
-    return _text(
-        metadata.get("transcript_activity_kind")
-        or metadata.get("transcriptActivityKind")
-        or metadata.get("activity_kind")
-        or metadata.get("activityKind")
-    )
-
-
-def main_transcript_message_decision(message: dict[str, Any]) -> dict[str, Any]:
-    metadata = _mapping(message.get("metadata"))
-    kind = main_transcript_activity_kind(message)
-    if kind:
-        include = kind in MAIN_TRANSCRIPT_ACTIVITY_KINDS
-        return {
-            "include": include,
-            "reason": "activity_kind_allowlist" if include else "activity_kind_excluded",
-            "transcript_activity_kind": kind,
-            "activity_kind": _text(metadata.get("activity_kind") or metadata.get("activityKind")),
-        }
-    activity_id = _text(metadata.get("activity_id") or metadata.get("activityId"))
-    if activity_id.startswith("act-node:"):
-        return {
-            "include": False,
-            "reason": "activity_id_node",
-            "transcript_activity_kind": MISSION_NODE_TRANSCRIPT_ACTIVITY_KIND,
-            "activity_kind": _text(metadata.get("activity_kind") or metadata.get("activityKind")),
-        }
-    team = _mapping(metadata.get("team_mission") or metadata.get("teamMission"))
-    if team.get("team_mission_conversation_mirror") or metadata.get("team_mission_conversation_mirror"):
-        return {
-            "include": False,
-            "reason": "legacy_conversation_mirror",
-            "transcript_activity_kind": "",
-            "activity_kind": _text(metadata.get("activity_kind") or metadata.get("activityKind")),
-        }
-    # Legacy pre-allowlist rows are preserved in main render. They are audited
-    # separately so the read path does not guess and hide user-visible history.
-    return {
-        "include": True,
-        "reason": "legacy_no_activity_kind",
-        "transcript_activity_kind": "",
-        "activity_kind": _text(metadata.get("activity_kind") or metadata.get("activityKind")),
-    }
-
-
-def is_main_transcript_message(message: dict[str, Any]) -> bool:
-    return bool(main_transcript_message_decision(message).get("include"))
-
-
-def is_node_transcript_message(message: dict[str, Any]) -> bool:
-    decision = main_transcript_message_decision(message)
-    return not bool(decision.get("include"))
 
 
 def _upsert_team_message_by_id(
