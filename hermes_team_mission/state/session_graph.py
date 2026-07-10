@@ -935,13 +935,12 @@ class TeamMissionGraphMixin:
             bound_run_id = _text(binding.get("run_id"))
             if not bound_run_id or bound_run_id in active_run_ids:
                 continue
-            run = self.get_run(bound_run_id) if hasattr(self, "get_run") else None
+            run = self.runs.get(bound_run_id)
             run_status = _text((run or {}).get("status")).lower()
             if run and run_status not in _TERMINAL_RUN_STATUSES:
                 active_run_ids.add(bound_run_id)
                 cancel_run_bindings.append(binding)
-                if hasattr(self, "upsert_run"):
-                    self.upsert_run(
+                self.runs.upsert(
                         run_id=bound_run_id,
                         session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                         runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
@@ -955,7 +954,7 @@ class TeamMissionGraphMixin:
                             "cancelled_mission_id": mission_id,
                             "cancelled_via": "plan.reject",
                         },
-                    )
+                )
         # BUG FIX(2026-07-06): 之前这里写 status="draft" 与 link 表的 "cancelled"
         # 不一致。desktop `selectActiveConversationMission` 用主表 status 判 terminal;
         # "draft" ∉ TERMINAL_MISSION_STATUSES → 前端一直认为这个 mission 还是
@@ -1068,17 +1067,16 @@ class TeamMissionGraphMixin:
             run_id = _text(binding.get("run_id"))
             if not run_id or run_id in active_run_ids:
                 continue
-            run = self.get_run(run_id) if hasattr(self, "get_run") else None
+            run = self.runs.get(run_id)
             run_status = _text((run or {}).get("status")).lower()
             if run and run_status not in _TERMINAL_RUN_STATUSES:
                 active_run_ids.add(run_id)
                 cancel_run_bindings.append(binding)
-                if hasattr(self, "upsert_run"):
-                    # Reap the run to a terminal status so the control-plane DB
-                    # can never report it as 'running' after a cancel. The
-                    # gateway still issues run.cancel for live worker
-                    # termination; this is the durable backstop.
-                    self.upsert_run(
+                # Reap the run to a terminal status so the control-plane DB
+                # can never report it as 'running' after a cancel. The
+                # gateway still issues run.cancel for live worker
+                # termination; this is the durable backstop.
+                self.runs.upsert(
                         run_id=run_id,
                         session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                         runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
@@ -1091,7 +1089,7 @@ class TeamMissionGraphMixin:
                             "cancel_reason": _text(reason),
                             "cancelled_mission_id": mission_id,
                         },
-                    )
+                )
 
         if _is_terminal_mission_status(mission_status):
             # Mission is already terminal, but we still return (and have just
@@ -1165,13 +1163,13 @@ class TeamMissionGraphMixin:
             if run_id in active_run_ids or node_id in canceled_node_ids:
                 if not any(_text(item.get("run_id")) == run_id for item in cancel_run_bindings):
                     cancel_run_bindings.append(binding)
-                if run_id not in active_run_ids and hasattr(self, "get_run") and hasattr(self, "upsert_run"):
+                if run_id not in active_run_ids:
                     # Reap runs surfaced only via a cancelled node (not seen in
                     # the first status sweep) so they cannot stay non-terminal.
-                    run = self.get_run(run_id)
+                    run = self.runs.get(run_id)
                     if run and _text(run.get("status")).lower() not in _TERMINAL_RUN_STATUSES:
                         active_run_ids.add(run_id)
-                        self.upsert_run(
+                        self.runs.upsert(
                             run_id=run_id,
                             session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                             runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
@@ -1253,8 +1251,6 @@ class TeamMissionGraphMixin:
         existing callers; the decision is per run.
         """
         trigger_mission_id = _text(mission_id)
-        if not hasattr(self, "upsert_run"):
-            return 0
         now = time.time()
         with self._lock:
             rows = self._conn.execute(
@@ -1346,7 +1342,7 @@ class TeamMissionGraphMixin:
                     continue
                 reap_reason = f"legacy_run_without_mission:{stale_decision}"
                 error = "runtime run reaped: no active mission owns stale legacy run"
-            self.upsert_run(
+            self.runs.upsert(
                 run_id=run_id,
                 session_id=_text(run.get("session_id")) or _text(_row_value(row, "binding_session_id", "")),
                 runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "binding_runtime_scope_key", "")),

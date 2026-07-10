@@ -52,8 +52,7 @@ class TeamMissionConversationMissionMixin:
         normalized_status = _conversation_mission_status(status)
         activity_conversation_id = self._activity_conversation_id_for_mission_on_conn(conn, conversation_id)
         if normalized_status == "active":
-            self._ensure_mission_activity_on_conn(
-                conn,
+            self.activities.ensure_mission(
                 conversation_id=activity_conversation_id,
                 mission_id=mission_id,
                 status="running",
@@ -61,8 +60,7 @@ class TeamMissionConversationMissionMixin:
             )
             return
         activity_status = "cancelled" if normalized_status == "cancelled" else normalized_status
-        self._mark_mission_activity_terminal_on_conn(
-            conn,
+        self.activities.mark_mission_terminal(
             mission_id=mission_id,
             status=activity_status,
             result_summary=f"Mission {activity_status}",

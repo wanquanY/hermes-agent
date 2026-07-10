@@ -287,7 +287,7 @@ class TeamMissionEventMixin:
         # explicit path performs the canonical projection itself below.
         self._team_mission_projecting = True
         try:
-            saved = self.append_run_event(str(binding["session_id"] or ""), frame)
+            saved = self.runs.append_event(str(binding["session_id"] or ""), frame)
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
@@ -310,16 +310,13 @@ class TeamMissionEventMixin:
                 _text(source_event.get("type")),
                 source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {},
             )
-            if terminal_status and hasattr(self, "_maintain_run_events_after_append"):
-                try:
-                    self._maintain_run_events_after_append(
-                        session_id=str(binding["session_id"] or ""),
-                        run_id=run_id,
-                        seq=_event_seq(source_event),
-                        terminal_status=terminal_status,
-                    )
-                except Exception:
-                    pass
+            if terminal_status:
+                self.runs.retention.maintain_after_append(
+                    session_id=str(binding["session_id"] or ""),
+                    run_id=run_id,
+                    seq=_event_seq(source_event),
+                    terminal_status=terminal_status,
+                )
                 self._prune_team_mission_events_if_terminal(mission_id)
             return saved
         finally:

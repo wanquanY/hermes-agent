@@ -7,6 +7,8 @@ from typing import Any, Dict
 
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_agent.repositories.message_repo import MessageRepoImpl
+from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
@@ -99,10 +101,10 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
     # 比 sessions 行活得久 —— 团队会话删除曾清了正式表却漏清索引,导致侧栏一直显示
     # 一个删不掉的「幽灵会话」,点开还报 "did not return canonical conversation id"。
     # 所以无条件按 session_id 清索引,即使 sessions 表里已经没有对应行。
-    conn.execute(
-        f"DELETE FROM session_index WHERE session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
+    session_repo = SessionRepoImpl(conn)
+    message_repo = MessageRepoImpl(conn)
+    for session_id in ordered_ids:
+        session_repo.delete_index(session_id)
     existing_ids = {
         _text(row["id"])
         for row in conn.execute(
@@ -113,26 +115,9 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
     }
     if not existing_ids:
         return []
-    conn.execute(
-        f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
-    conn.execute(
-        f"UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
-    conn.execute(
-        f"""
-        DELETE FROM session_branch_requests
-        WHERE source_session_id IN ({placeholders})
-           OR result_session_id IN ({placeholders})
-        """,
-        tuple(ordered_ids + ordered_ids),
-    )
-    conn.execute(
-        f"DELETE FROM session_lineage WHERE session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
+    for session_id in ordered_ids:
+        session_repo.orphan_child_references(session_id)
+        session_repo.delete_branch_references(session_id)
     EventLedger(conn).delete_sessions(ordered_ids)
     conn.execute(
         f"DELETE FROM run_event_archives WHERE session_id IN ({placeholders})",
@@ -146,8 +131,9 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
         """,
         tuple(ordered_ids + ordered_ids),
     )
-    conn.execute("DELETE FROM messages WHERE session_id IN ({})".format(placeholders), tuple(ordered_ids))
-    conn.execute("DELETE FROM sessions WHERE id IN ({})".format(placeholders), tuple(ordered_ids))
+    for session_id in ordered_ids:
+        message_repo.delete_by_session(session_id)
+        session_repo.delete_row(session_id)
     return [session_id for session_id in ordered_ids if session_id in existing_ids]
 
 
@@ -169,7 +155,7 @@ def _message_title(db: Any, content: Any) -> str:
     if not text:
         return ""
     try:
-        return db.sanitize_title(text[:100]) or ""
+        return db.sessions.sanitize_title(text[:100]) or ""
     except Exception:
         return ""
 
@@ -241,7 +227,7 @@ def team_mission_conversation_message_page(
             "pageInfo": _message_page_info({}),
         }
     try:
-        page = db.get_messages_page_as_conversation(
+        page = db.messages.page_as_conversation(
             conversation_session_id,
             direction="tail",
             limit=limit,
@@ -289,7 +275,7 @@ def normalize_team_mission_conversation_session(
     )
     if not conversation_id:
         return {}
-    existing_session = db.get_session(conversation_session_id) or {}
+    existing_session = db.sessions.get(conversation_session_id) or {}
     conversation = db.ensure_team_mission_conversation(
         conversation_id=conversation_id,
         conversation_session_id=conversation_session_id,
@@ -522,11 +508,11 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
     if not conversation_id:
         return {}
     conversation_session_id = _text(conversation.get("conversation_session_id"))
-    cleaned_title = db.sanitize_title(title)
+    cleaned_title = db.sessions.sanitize_title(title)
     if not cleaned_title:
         return {}
-    if conversation_session_id and not db.get_session(conversation_session_id):
-        db.create_session(conversation_session_id, source="team_mission", transient=False)
+    if conversation_session_id and not db.sessions.get(conversation_session_id):
+        db.sessions.create(conversation_session_id, source="team_mission", transient=False)
 
     updated_at = time.time()
 

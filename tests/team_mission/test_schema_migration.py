@@ -3,8 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from hermes_state import SessionDB
-from hermes_team_mission.state.store import open_team_mission_state_store
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 TEAM_MISSION_TABLES = {
@@ -43,7 +42,7 @@ TEAM_MISSION_INDEXES = {
 }
 
 
-def _names(db: SessionDB, *, object_type: str) -> set[str]:
+def _names(db: CliSessionStore, *, object_type: str) -> set[str]:
     rows = db._conn.execute(  # noqa: SLF001 - schema contract assertion.
         "SELECT name FROM sqlite_master WHERE type = ?",
         (object_type,),
@@ -51,7 +50,7 @@ def _names(db: SessionDB, *, object_type: str) -> set[str]:
     return {str(row["name"]) for row in rows}
 
 
-def _team_mission_node_pk(db: SessionDB) -> list[str]:
+def _team_mission_node_pk(db: CliSessionStore) -> list[str]:
     rows = db._conn.execute(  # noqa: SLF001 - schema contract assertion.
         'PRAGMA table_info("team_mission_nodes")'
     ).fetchall()
@@ -63,7 +62,7 @@ def _team_mission_node_pk(db: SessionDB) -> list[str]:
 
 
 def test_team_mission_schema_is_created_for_empty_database(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     assert TEAM_MISSION_TABLES <= _names(db, object_type="table")
     assert TEAM_MISSION_INDEXES <= _names(db, object_type="index")
@@ -113,7 +112,7 @@ def test_team_mission_schema_migrates_legacy_global_node_primary_key(tmp_path: P
     conn.commit()
     conn.close()
 
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     row = db._conn.execute(  # noqa: SLF001 - schema migration assertion.
         """
         SELECT mission_id, node_id, kind, title, status, position_x, position_y
@@ -229,7 +228,7 @@ def test_team_mission_schema_preserves_canonical_execution_session_columns(tmp_p
     conn.commit()
     conn.close()
 
-    db = open_team_mission_state_store(db_path)
+    db = open_cli_session_store(db_path)
     try:
         node_row = db._conn.execute(  # noqa: SLF001 - schema migration assertion.
             """
@@ -297,7 +296,7 @@ def test_team_mission_schema_rebuilds_canonical_conversation_session_id(tmp_path
     conn.commit()
     conn.close()
 
-    db = open_team_mission_state_store(db_path)
+    db = open_cli_session_store(db_path)
     try:
         rows = db._conn.execute(  # noqa: SLF001 - schema migration assertion.
             'PRAGMA table_info("team_mission_conversations")'

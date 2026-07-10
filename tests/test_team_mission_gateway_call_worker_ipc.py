@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hermes_team_mission.runtime import profile_scope
-from hermes_team_mission.state.store import TeamMissionStateStore
+from hermes_agent.storage.cli_session_store import CliSessionStore
 from hermes_agent.orchestration.worker_supervisor import DB_RPC_ALLOWED_METHODS
 from hermes_agent.orchestration.worker_rpc_proxy import set_default_worker_rpc_proxy
 
@@ -76,20 +76,20 @@ def test_team_mission_control_db_keeps_control_home_for_direct_profile_db(monkey
 
     result = profile_scope.team_mission_control_db(SimpleNamespace(_session_db=_DirectDBSentinel()))
     try:
-        assert isinstance(result, TeamMissionStateStore)
+        assert isinstance(result, CliSessionStore)
         assert str(result.db_path) == str(control_home / "state.db")
     finally:
         result.close()
 
 
-def test_team_mission_control_db_writes_through_team_mission_store(monkeypatch, tmp_path):
+def test_team_mission_control_db_writes_through_cli_session_store(monkeypatch, tmp_path):
     control_home = tmp_path / "control"
     control_home.mkdir()
     monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
 
     db = profile_scope.team_mission_control_db()
     try:
-        assert isinstance(db, TeamMissionStateStore)
+        assert isinstance(db, CliSessionStore)
         conversation = db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
             conversation_session_id="session-1",

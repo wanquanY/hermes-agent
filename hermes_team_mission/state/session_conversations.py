@@ -831,8 +831,8 @@ class TeamMissionConversationMixin:
                 )
 
             self._execute_write(_bind)
-        if resolved_conversation_session_id and not self.get_session(resolved_conversation_session_id):
-            self.create_session(resolved_conversation_session_id, source="team_mission", transient=False)
+        if resolved_conversation_session_id and not self.sessions.get(resolved_conversation_session_id):
+            self.sessions.create(resolved_conversation_session_id, source="team_mission", transient=False)
         self._populate_team_conversation_participants(
             conversation_session_id=resolved_conversation_session_id,
             team_id=_text(team_id or mission.get("team_id")),
@@ -858,7 +858,7 @@ class TeamMissionConversationMixin:
             if leader_scope_subject
             else ""
         )
-        members = self.list_agent_team_members(team_id) if team_id else []
+        members = self.teams.list_agent_team_members(team_id) if team_id else []
         leader_upserted = False
         for member in members:
             if not isinstance(member, dict):
@@ -869,7 +869,7 @@ class TeamMissionConversationMixin:
             display_name = str(member.get("name") or member.get("profile_name") or "").strip()
             avatar = str(member.get("avatar") or member.get("profile_avatar") or "").strip()
             if role == "lead":
-                self.upsert_conversation_participant(
+                self.participants.upsert_conversation_participant(
                     conversation_session_id=conversation_session_id,
                     participant_id=leader_id,
                     role="leader",
@@ -888,7 +888,7 @@ class TeamMissionConversationMixin:
                 str(member.get("runtime_scope_key") or "").strip()
                 or f"member-chat:{conversation_id or mission_id}:{member_id}"
             )
-            self.upsert_conversation_participant(
+            self.participants.upsert_conversation_participant(
                 conversation_session_id=conversation_session_id,
                 participant_id=member_participant_id(member_id),
                 role="member",
@@ -900,7 +900,7 @@ class TeamMissionConversationMixin:
                 avatar=avatar,
             )
         if not leader_upserted:
-            self.upsert_conversation_participant(
+            self.participants.upsert_conversation_participant(
                 conversation_session_id=conversation_session_id,
                 participant_id=leader_id,
                 role="leader",
@@ -1734,10 +1734,9 @@ class TeamMissionConversationMixin:
                 """,
                 (conversation_session_id, *sorted(_ACTIVE_RUN_STATUSES)),
             ).fetchone()
-        try:
-            return self._run_from_row(row) or {}
-        except Exception:
+        if row is None:
             return {}
+        return self.runs.get(str(row["run_id"] or "")) or {}
 
     def _team_mission_active_node_run_from_bindings(
         self,
@@ -1750,7 +1749,7 @@ class TeamMissionConversationMixin:
             run_id = _text(binding.get("run_id") or binding.get("runId"))
             if not run_id:
                 continue
-            run = self.get_run(run_id) if hasattr(self, "get_run") else None
+            run = self.runs.get(run_id)
             if _text((run or {}).get("status")).lower() not in _ACTIVE_RUN_STATUSES:
                 continue
             merged_run = {

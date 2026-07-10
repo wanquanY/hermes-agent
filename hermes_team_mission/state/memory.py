@@ -418,7 +418,7 @@ def list_team_mission_memory_edges(
 
 
 def team_mission_binding_events(db: Any, binding: Dict[str, Any], *, limit: int = 2000) -> List[Dict[str, Any]]:
-    events = db.list_run_events(
+    events = db.runs.list_events(
         text(binding.get("session_id")),
         runtime_scope_key=text(binding.get("runtime_scope_key")),
         limit=limit,
@@ -459,7 +459,7 @@ def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *,
 
 def team_mission_binding_message_excerpt(db: Any, binding: Dict[str, Any]) -> str:
     try:
-        messages = db.get_messages(text(binding.get("session_id")))
+        messages = db.messages.list(text(binding.get("session_id")))
     except Exception:
         messages = []
     parts: list[str] = []

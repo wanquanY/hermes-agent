@@ -824,19 +824,13 @@ def _ensure_activity_session(db: Any, session_id: str) -> None:
     stable = text(session_id)
     if not stable:
         return
-    creator = getattr(db, "create_session", None)
-    if not callable(creator):
+    sessions = db.sessions
+    if sessions.get(stable):
         return
-    getter = getattr(db, "get_session", None)
     try:
-        if callable(getter) and getter(stable):
-            return
-    except Exception:
-        pass
-    try:
-        creator(stable, "team_mission", transient=True)
+        sessions.create(stable, "team_mission", transient=True)
     except TypeError:
-        creator(stable, "team_mission")
+        sessions.create(stable, "team_mission")
 
 
 def _append_mission_activity_run_event(
@@ -846,9 +840,7 @@ def _append_mission_activity_run_event(
     event: Dict[str, Any],
     identity: Dict[str, str] | None = None,
 ) -> None:
-    appender = getattr(db, "append_run_event", None)
-    if not callable(appender):
-        return
+    appender = db.runs.append_event
     stable_mission = text(mission_id)
     session_id = _mission_activity_session_id(db, stable_mission, event, identity)
     if not stable_mission or not session_id:
@@ -858,8 +850,10 @@ def _append_mission_activity_run_event(
     payload = dict(event_payload(frame))
     frame["activity_id"] = activity_id
     frame["activityId"] = activity_id
+    frame["session_id"] = session_id
     frame["conversation_session_id"] = session_id
-    frame.setdefault("session_id", frame.get("execution_session_id") or session_id)
+    payload["session_id"] = session_id
+    payload["conversation_session_id"] = session_id
     payload["activity_id"] = activity_id
     payload["activityId"] = activity_id
     frame["payload"] = payload
