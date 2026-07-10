@@ -269,7 +269,7 @@ class TestHistoryDisplay:
         cli = _make_cli()
         cli.session_id = "current"
         cli._session_db = MagicMock()
-        cli._session_db.list_sessions_rich.return_value = [
+        cli._session_db.sessions.list_rich.return_value = [
             {
                 "id": "current",
                 "title": "Current",
@@ -297,7 +297,7 @@ class TestHistoryDisplay:
         cli = _make_cli()
         cli.session_id = "current"
         cli._session_db = MagicMock()
-        cli._session_db.list_sessions_rich.return_value = [
+        cli._session_db.sessions.list_rich.return_value = [
             {
                 "id": "current",
                 "title": "Current",
@@ -330,7 +330,7 @@ class TestHistoryDisplay:
         cli = _make_cli()
         cli.session_id = "current"
         cli._session_db = MagicMock()
-        cli._session_db.list_sessions_rich.return_value = [
+        cli._session_db.sessions.list_rich.return_value = [
             {
                 "id": "20260401_201329_d85961",
                 "title": "Checking Running Hermes Agent",
@@ -354,7 +354,7 @@ class TestHistoryDisplay:
         cli = _make_cli()
         cli.session_id = "current"
         cli._session_db = MagicMock()
-        cli._session_db.list_sessions_rich.return_value = [
+        cli._session_db.sessions.list_rich.return_value = [
             {
                 "id": "20260401_201329_d85961",
                 "title": "Checking Running Hermes Agent",
