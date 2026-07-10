@@ -137,6 +137,16 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
         );
 
+        CREATE TABLE IF NOT EXISTS session_compression_leases (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            holder TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_compression_leases_expiry
+            ON session_compression_leases(expires_at);
+
         CREATE TABLE IF NOT EXISTS session_index (
             session_id TEXT PRIMARY KEY,
             owner_agent_profile_id TEXT NOT NULL DEFAULT '',

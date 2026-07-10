@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS session_compression_leases (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    holder TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_compression_leases_expiry
+    ON session_compression_leases(expires_at);
+
 -- Control-plane denormalized session index. One row per user-visible session.
 -- Status fields are a WRITE-TIME projection so the sidebar read path is a single
 -- indexed query (no recursive CTE / live merge / per-session approval / per-profile
