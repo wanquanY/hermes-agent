@@ -234,6 +234,8 @@ class SessionRepo(Protocol):
 
     def request_handoff(self, session_id: str, platform: str) -> bool: ...
 
+    def list_pending_handoffs(self) -> list[dict[str, Any]]: ...
+
     def claim_handoff(self, session_id: str) -> bool: ...
 
     def complete_handoff(self, session_id: str) -> None: ...
@@ -810,6 +812,16 @@ class SessionRepoImpl:
             (str(platform or ""), time.time(), stable),
         )
         return int(cursor.rowcount or 0) > 0
+
+    def list_pending_handoffs(self) -> list[dict[str, Any]]:
+        if "handoff_state" not in self._session_columns:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM sessions "
+            "WHERE handoff_state = 'pending' "
+            "ORDER BY updated_at ASC, started_at ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def fail_handoff(self, session_id: str, error: str) -> bool:
         stable = str(session_id or "").strip()

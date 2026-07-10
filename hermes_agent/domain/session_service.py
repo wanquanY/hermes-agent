@@ -266,6 +266,16 @@ class SessionService:
     def request_handoff(self, session_id: str, platform: str) -> bool:
         return self._unit_of_work.execute(lambda _conn: self._repo.request_handoff(session_id, platform))
 
+    def list_pending_handoffs(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._repo.list_pending_handoffs()
+
+    def claim_handoff(self, session_id: str) -> bool:
+        return self._unit_of_work.execute(lambda _conn: self._repo.claim_handoff(session_id))
+
+    def complete_handoff(self, session_id: str) -> None:
+        self._unit_of_work.execute(lambda _conn: self._repo.complete_handoff(session_id))
+
     def handoff_state(self, session_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
@@ -277,7 +287,8 @@ class SessionService:
         return {"state": row["handoff_state"], "platform": row["handoff_platform"], "error": row["handoff_error"]}
 
     def fail_handoff(self, session_id: str, error: str) -> None:
-        self._unit_of_work.execute(lambda _conn: self._repo.fail_handoff(session_id, error))
+        reason = str(error or "")[:500]
+        self._unit_of_work.execute(lambda _conn: self._repo.fail_handoff(session_id, reason))
 
 
 def _resolve_session_classification(
