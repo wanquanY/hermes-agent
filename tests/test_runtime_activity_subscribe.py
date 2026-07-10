@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from tui_gateway import server
 from tui_gateway.services import run_control
@@ -28,9 +28,20 @@ class _CaptureTransport:
         return None
 
 
+class _ToggleTransport(_CaptureTransport):
+    def __init__(self, *, failing: bool) -> None:
+        super().__init__()
+        self.failing = failing
+
+    def write(self, obj: dict[str, Any]) -> bool:
+        if self.failing:
+            return False
+        return super().write(obj)
+
+
 @pytest.fixture
-def db(tmp_path: Path) -> Iterator[SessionDB]:
-    state = SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> Iterator[CliSessionStore]:
+    state = open_cli_session_store(tmp_path / "state.db")
     try:
         yield state
     finally:
@@ -38,7 +49,7 @@ def db(tmp_path: Path) -> Iterator[SessionDB]:
 
 
 @pytest.fixture(autouse=True)
-def gateway_state(db: SessionDB) -> Iterator[None]:
+def gateway_state(db: CliSessionStore) -> Iterator[None]:
     previous_db = server._db
     previous_db_error = server._db_error
     previous_db_by_home = dict(server._db_by_home)
@@ -91,7 +102,7 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _record_activity_event(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     activity_id: str = "act-test-1",
     conversation_session_id: str = "session-activity-1",
@@ -164,7 +175,7 @@ def test_unsubscribe_returns_zero_when_subscription_missing() -> None:
     assert result == {"removed": 0}
 
 
-def test_subscribe_returns_events_for_activity_id(db: SessionDB) -> None:
+def test_subscribe_returns_events_for_activity_id(db: CliSessionStore) -> None:
     _record_activity_event(db, activity_id="act-test-replay", command_id="cmd-replay-1")
 
     result = _assert_ok(
@@ -176,7 +187,7 @@ def test_subscribe_returns_events_for_activity_id(db: SessionDB) -> None:
     assert result["after_seq"] == result["events"][-1]["seq"]
 
 
-def test_subscribe_returns_events_for_team_conversation_activity_id(db: SessionDB) -> None:
+def test_subscribe_returns_events_for_team_conversation_activity_id(db: CliSessionStore) -> None:
     _record_activity_event(
         db,
         activity_id="team-conversation:conversation-1",
@@ -196,7 +207,7 @@ def test_subscribe_returns_events_for_team_conversation_activity_id(db: SessionD
     ]
 
 
-def test_team_dispatch_activity_waits_for_mission_event_log_binding(db: SessionDB) -> None:
+def test_team_dispatch_activity_waits_for_mission_event_log_binding(db: CliSessionStore) -> None:
     """Activity-first team dispatch subscriptions must not mix run_events and mission event seqs."""
     activity_id = "act-team_dispatch-subscribe-e2e"
     _record_activity_event(
@@ -220,7 +231,7 @@ def test_team_dispatch_activity_waits_for_mission_event_log_binding(db: SessionD
         leader_session_id="team-session-dispatch-subscribe",
         metadata={"task_id": "task-dispatch-subscribe"},
     )
-    db.bind_activity_to_mission(
+    db.activities.bind_to_mission(
         activity_id=activity_id,
         conversation_id="team-session-dispatch-subscribe",
         mission_id="mission-dispatch-subscribe",
@@ -253,7 +264,7 @@ def test_team_dispatch_activity_waits_for_mission_event_log_binding(db: SessionD
     assert rebound["events"][0]["payload"]["source_event_type"] == "mission.node.created"
 
 
-def test_subscribe_after_seq_filters_correctly(db: SessionDB) -> None:
+def test_subscribe_after_seq_filters_correctly(db: CliSessionStore) -> None:
     first = _record_activity_event(db, activity_id="act-test-after", command_id="cmd-after-1")
     _record_activity_event(db, activity_id="act-test-after", command_id="cmd-after-2")
 
@@ -267,7 +278,7 @@ def test_subscribe_after_seq_filters_correctly(db: SessionDB) -> None:
     assert [event["payload"]["command_id"] for event in result["events"]] == ["cmd-after-2"]
 
 
-def test_subscribe_limit_caps_replay_size(db: SessionDB) -> None:
+def test_subscribe_limit_caps_replay_size(db: CliSessionStore) -> None:
     for index in range(3):
         _record_activity_event(
             db,
@@ -282,7 +293,7 @@ def test_subscribe_limit_caps_replay_size(db: SessionDB) -> None:
     assert len(result["events"]) == 2
 
 
-def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: SessionDB) -> None:
+def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-subscribe",
         conversation_id="conversation-terminal-subscribe",
@@ -324,7 +335,7 @@ def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: SessionDB) 
     assert subscription["cursor_only"] is True
 
 
-def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: SessionDB) -> None:
+def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-debug",
         conversation_id="conversation-terminal-debug",
@@ -362,7 +373,7 @@ def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: SessionDB
     assert result["events"][0]["activity_id"] == "mission:mission-terminal-debug"
 
 
-def test_subscribe_returns_unique_subscription_id(db: SessionDB) -> None:
+def test_subscribe_returns_unique_subscription_id(db: CliSessionStore) -> None:
     _record_activity_event(db, activity_id="act-test-unique")
 
     first = _assert_ok(
@@ -375,7 +386,7 @@ def test_subscribe_returns_unique_subscription_id(db: SessionDB) -> None:
     assert first["subscription_id"] != second["subscription_id"]
 
 
-def test_subscribe_then_unsubscribe_removes_registration(db: SessionDB) -> None:
+def test_subscribe_then_unsubscribe_removes_registration(db: CliSessionStore) -> None:
     _record_activity_event(db, activity_id="act-test-lifecycle")
     result = _assert_ok(
         _call(
@@ -395,7 +406,7 @@ def test_subscribe_then_unsubscribe_removes_registration(db: SessionDB) -> None:
     assert subscription_id not in run_control._subscription_ids_by_activity["act-test-lifecycle"]
 
 
-def test_record_event_pushes_to_activity_subscribers(db: SessionDB) -> None:
+def test_record_event_pushes_to_activity_subscribers(db: CliSessionStore) -> None:
     _record_activity_event(db, activity_id="act-test-live")
     transport = _CaptureTransport()
     _assert_ok(
@@ -417,7 +428,42 @@ def test_record_event_pushes_to_activity_subscribers(db: SessionDB) -> None:
     assert [event["payload"]["command_id"] for event in delivered] == ["cmd-live-2"]
 
 
-def test_future_activity_subscription_receives_first_event(db: SessionDB) -> None:
+def test_failed_activity_delivery_remains_replayable(db: CliSessionStore) -> None:
+    transport = _ToggleTransport(failing=True)
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "act-test-retry"},
+            transport=transport,
+        )
+    )
+    subscription_id = result["subscription_id"]
+
+    _record_activity_event(
+        db,
+        activity_id="act-test-retry",
+        command_id="cmd-retry-1",
+        publish=True,
+    )
+
+    assert subscription_id not in run_control._subscriptions_by_id
+    persisted = db.runs.list_events_by_activity("act-test-retry")
+    assert len(persisted) == 1
+
+    replay_transport = _CaptureTransport()
+    replay = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "act-test-retry"},
+            transport=replay_transport,
+        )
+    )
+    assert [event["payload"]["command_id"] for event in replay["events"]] == [
+        "cmd-retry-1"
+    ]
+
+
+def test_future_activity_subscription_receives_first_event(db: CliSessionStore) -> None:
     transport = _CaptureTransport()
     result = _assert_ok(
         _call(
@@ -440,14 +486,8 @@ def test_future_activity_subscription_receives_first_event(db: SessionDB) -> Non
 
 
 def test_future_team_mission_activity_subscription_receives_first_event_after_graph_created(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
-    from hermes_team_mission.state import event_log
-
-    with event_log._listener_lock:
-        event_log._event_listeners.clear()
-    run_control._team_mission_event_listener_registered = False
-
     transport = _CaptureTransport()
     result = _assert_ok(
         _call(
@@ -457,7 +497,6 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
         )
     )
     assert result["events"] == []
-    assert run_control._team_mission_event_listener_registered is True
 
     db.initialize_team_mission_from_strategy(
         mission_id="mission-future",
@@ -466,7 +505,7 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
         mode="supervised_mission",
     )
     root_node_id = db.get_team_mission_graph("mission-future")["nodes"][0]["node_id"]
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-future",
         session_id="team:mission-future:node:root",
         runtime_scope_key="team:mission-future:node:root",
@@ -506,14 +545,8 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
 
 
 def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
-    from hermes_team_mission.state import event_log
-
-    with event_log._listener_lock:
-        event_log._event_listeners.clear()
-    run_control._team_mission_event_listener_registered = False
-
     activity_id = "act-team_dispatch-client-turn-1"
     transport = _CaptureTransport()
     result = _assert_ok(
@@ -554,7 +587,7 @@ def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
         leader_session_id="team-session-live",
         metadata={"task_id": "task-live-graph"},
     )
-    db.bind_activity_to_mission(
+    db.activities.bind_to_mission(
         activity_id=activity_id,
         conversation_id="team-session-live",
         mission_id="mission-live-graph",
@@ -589,7 +622,7 @@ def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
 
 
 def test_record_event_does_not_double_push_when_transport_subscribed_by_session_and_activity(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
     conversation_session_id = "session-double-subscribe"
     activity_id = "act-test-double"
@@ -620,8 +653,8 @@ def test_record_event_does_not_double_push_when_transport_subscribed_by_session_
     assert [event["payload"]["command_id"] for event in delivered] == ["cmd-double-live"]
 
 
-def test_subscribe_picks_up_events_emitted_by_reconciler(db: SessionDB) -> None:
-    db.insert_activity_command(
+def test_subscribe_picks_up_events_emitted_by_reconciler(db: CliSessionStore) -> None:
+    db.activities.insert_command(
         command_id="cmd-reconciler-create",
         activity_id="act-test-reconciler",
         kind="create",
@@ -642,7 +675,7 @@ def test_subscribe_picks_up_events_emitted_by_reconciler(db: SessionDB) -> None:
 
 
 def test_subscribe_picks_up_events_for_team_mission_create_via_legacy_bridge(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
     command_id = record_legacy_activity_command(
         db,
@@ -665,7 +698,7 @@ def test_subscribe_picks_up_events_for_team_mission_create_via_legacy_bridge(
     assert [event["payload"]["command_id"] for event in result["events"]] == [command_id]
 
 
-def test_subscribe_activity_id_filter_isolates_different_activities(db: SessionDB) -> None:
+def test_subscribe_activity_id_filter_isolates_different_activities(db: CliSessionStore) -> None:
     _record_activity_event(db, activity_id="act-test-isolated-a", command_id="cmd-a")
     _record_activity_event(db, activity_id="act-test-isolated-b", command_id="cmd-b")
 
@@ -676,7 +709,7 @@ def test_subscribe_activity_id_filter_isolates_different_activities(db: SessionD
     assert [event["payload"]["command_id"] for event in result["events"]] == ["cmd-a"]
 
 
-def test_list_run_events_by_activity_returns_only_matching_rows(db: SessionDB) -> None:
+def test_list_run_events_by_activity_returns_only_matching_rows(db: CliSessionStore) -> None:
     _record_activity_event(
         db,
         activity_id="act-test-dao",
@@ -696,11 +729,11 @@ def test_list_run_events_by_activity_returns_only_matching_rows(db: SessionDB) -
         command_id="cmd-other",
     )
 
-    events = db.list_run_events_by_activity("act-test-dao")
+    events = db.runs.list_events_by_activity("act-test-dao")
 
     assert [event["payload"]["command_id"] for event in events] == ["cmd-dao-a", "cmd-dao-b"]
     assert {event["conversation_session_id"] for event in events} == {"session-dao-a", "session-dao-b"}
 
 
-def test_list_run_events_by_activity_returns_empty_for_unknown(db: SessionDB) -> None:
-    assert db.list_run_events_by_activity("act-test-unknown") == []
+def test_list_run_events_by_activity_returns_empty_for_unknown(db: CliSessionStore) -> None:
+    assert db.runs.list_events_by_activity("act-test-unknown") == []

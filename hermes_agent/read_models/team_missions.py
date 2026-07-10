@@ -36,5 +36,20 @@ class TeamMissionReadModel:
             ).fetchone()
         return str(row["status"] or "").strip().lower() if row is not None else ""
 
+    def mission_id_for_run(self, run_id: str) -> str:
+        stable = str(run_id or "").strip()
+        if not stable:
+            return ""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mission_id
+                  FROM team_mission_run_bindings
+                 WHERE run_id = ?
+                """,
+                (stable,),
+            ).fetchone()
+        return str(row["mission_id"] or "").strip() if row is not None else ""
+
 
 __all__ = ["TeamMissionReadModel"]

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 import time
 from typing import Any, Dict, List
 
@@ -16,26 +15,6 @@ TEAM_MISSION_EVENT_PROTOCOL = "team_mission.event.v1"
 TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
 logger = logging.getLogger(__name__)
-_listener_lock = threading.RLock()
-_event_listeners: list[Any] = []
-
-
-def register_team_mission_event_listener(callback: Any) -> None:
-    if not callable(callback):
-        return
-    with _listener_lock:
-        if callback not in _event_listeners:
-            _event_listeners.append(callback)
-
-
-def notify_team_mission_event_listeners(mission_id: str, event: Dict[str, Any]) -> None:
-    with _listener_lock:
-        listeners = list(_event_listeners)
-    for listener in listeners:
-        try:
-            listener(mission_id, event)
-        except Exception:
-            logger.debug("failed to notify Team Mission event listener", exc_info=True)
 
 
 def text(value: Any) -> str:
@@ -729,10 +708,7 @@ def append_team_mission_event(
             timestamp=float(event.get("timestamp") or now),
             now=now,
         )
-    stored = result.event
-    if result.inserted:
-        notify_team_mission_event_listeners(mission_id, stored)
-    return stored
+    return result.event
 
 
 def append_team_mission_runtime_event(

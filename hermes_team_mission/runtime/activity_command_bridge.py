@@ -35,11 +35,8 @@ def record_legacy_activity_command(
     if not activity_id or kind not in ACTIVITY_COMMAND_KINDS:
         return ""
     command_id = f"legacy-{kind}-{uuid.uuid4().hex}"
-    insert = getattr(db, "insert_activity_command", None)
-    if not callable(insert):
-        return ""
     try:
-        insert(
+        db.activities.insert_command(
             command_id=command_id,
             activity_id=activity_id,
             kind=kind,

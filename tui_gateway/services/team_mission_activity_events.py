@@ -219,6 +219,36 @@ def mission_id_for_activity(activity_id: str, db: Any = None) -> str:
     return mission_id(activity_id) or _activity_target_mission_id(activity_id, db=db)
 
 
+def mission_id_for_run_event(event: dict[str, Any], db: Any = None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    activity_id = text(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+    )
+    direct = text(
+        event.get("mission_id")
+        or event.get("missionId")
+        or payload.get("mission_id")
+        or payload.get("missionId")
+    )
+    if direct:
+        return direct
+    encoded = mission_id(activity_id)
+    if encoded:
+        return encoded
+    run_id = text(event.get("run_id") or event.get("runId") or payload.get("run_id"))
+    if not run_id or db is None:
+        return ""
+    try:
+        return db.team_missions.mission_id_for_run(run_id)
+    except Exception:
+        return ""
+
+
 def session_id_for_activity(activity_id: str) -> str:
     normalized = text(activity_id)
     if normalized.startswith("chat:"):
@@ -848,11 +878,8 @@ def deliver_appended_event(
     lock: Any,
     subscription_ids_by_activity: dict[str, set[str]],
     subscriptions_by_id: dict[str, dict[str, Any]],
-    delta_event_for_subscription: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None],
-    reserve_subscription_delivery: Callable[[dict[str, Any], dict[str, Any]], bool],
     live_status_event_for_subscription: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
-    write_event: Callable[[Any, dict[str, Any]], bool],
-    remember_transport_delivery: Callable[[Any, dict[str, Any]], None],
+    deliver_subscription_event: Callable[[str, Any, dict[str, Any]], bool],
 ) -> None:
     normalized_mission_id = str(mission_id_value or "").strip()
     if not normalized_mission_id or not isinstance(event, dict):
@@ -897,56 +924,26 @@ def deliver_appended_event(
         transport = subscription.get("transport")
         if transport is None:
             continue
-        event_for_transport = event_for_subscription(event, activity_id)
-        event_for_transport = delta_event_for_subscription(subscription, event_for_transport)
-        if event_for_transport is None:
-            reserve_subscription_delivery(subscription, event_for_subscription(event, activity_id))
-            _emit_activity_diagnostic(
-                "deliver-appended-event-skip-delta-dedup",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event),
-            )
-            _terminal_activity_log(
-                "deliver-skip-delta-dedup",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event),
-            )
-            continue
+        event_for_transport = _project_run_event_for_subscription(
+            event,
+            activity_id,
+            mission_id_value=normalized_mission_id,
+        )
         event_for_transport = live_status_event_for_subscription(subscription, event_for_transport)
-        if not reserve_subscription_delivery(subscription, event_for_transport):
-            _emit_activity_diagnostic(
-                "deliver-appended-event-skip-reserved",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event_for_transport),
-            )
-            _terminal_activity_log(
-                "deliver-skip-reserved",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event_for_transport),
-            )
-            continue
-        if write_event(transport, event_for_transport):
-            remember_transport_delivery(transport, event_for_transport)
+        subscription_id = text(subscription.get("id"))
+        if deliver_subscription_event(subscription_id, transport, event_for_transport):
             _emit_activity_diagnostic(
                 "deliver-appended-event-written",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )
             _terminal_activity_log(
                 "deliver-written",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )
         else:
@@ -954,6 +951,6 @@ def deliver_appended_event(
                 "deliver-write-failed",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )

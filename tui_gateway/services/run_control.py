@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from hermes_team_mission.domain.run_context import RunContext
 
 _MAX_EVENTS_PER_SESSION = 2000
+_LOCK_TYPE = type(threading.Lock())
 _POLL_INTERVAL_SECONDS = 0.25
 _TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 _TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
@@ -139,7 +140,6 @@ _run_ids_by_session: dict[str, list[str]] = defaultdict(list)
 _last_seq_by_session: dict[str, int] = defaultdict(int)
 _subscription_poller_thread: threading.Thread | None = None
 _team_mission_ready_scheduler: Any = None
-_team_mission_event_listener_registered = False
 
 
 def _reset_for_tests() -> None:
@@ -159,6 +159,13 @@ def _db_method(db: Any, name: str):
     if db is None or db.__class__.__module__.startswith("unittest.mock"):
         return None
     method = getattr(db, name, None)
+    return method if callable(method) else None
+
+
+def _run_method(db: Any, name: str):
+    if db is None or db.__class__.__module__.startswith("unittest.mock"):
+        return None
+    method = getattr(db.runs, name, None)
     return method if callable(method) else None
 
 
@@ -259,7 +266,7 @@ def _recover_orphaned_active_runs(
     from tui_gateway.process_role import is_worker_process
     if is_worker_process():
         return 0
-    method = _db_method(db, "fail_orphaned_active_runs")
+    method = _run_method(db, "fail_orphaned")
     if method is None:
         return 0
     try:
@@ -466,10 +473,13 @@ def _team_mission_runtime_event_allows_conversation_status(
     return node_kind != "synthesis"
 
 
-def _on_team_mission_event_appended(mission_id: str, event: dict[str, Any]) -> None:
+def _on_run_event_appended(db: Any, event: dict[str, Any]) -> None:
+    mission_id = _team_activity_events.mission_id_for_run_event(event, db=db)
+    if not mission_id:
+        return
     _team_activity_terminal_log(
-        "event-log-appended",
-        mission_id=str(mission_id or "").strip(),
+        "run-event-appended",
+        mission_id=mission_id,
         event_type=str(event.get("type") or "") if isinstance(event, dict) else "",
         seq=event.get("seq") if isinstance(event, dict) else None,
         subscription_activity_count=len(_subscription_ids_by_activity),
@@ -480,52 +490,26 @@ def _on_team_mission_event_appended(mission_id: str, event: dict[str, Any]) -> N
         lock=_lock,
         subscription_ids_by_activity=_subscription_ids_by_activity,
         subscriptions_by_id=_subscriptions_by_id,
-        delta_event_for_subscription=_delta_event_for_subscription,
-        reserve_subscription_delivery=_reserve_subscription_delivery,
         live_status_event_for_subscription=_team_mission_live_status_event_for_subscription,
-        write_event=_write_event,
-        remember_transport_delivery=lambda transport, projected: remember_transport_delivery(
-            transport,
-            projected,
-            direct=False,
-        ),
+        deliver_subscription_event=_deliver_subscription_event,
     )
 
 
-def _ensure_team_mission_event_listener_registered() -> None:
-    global _team_mission_event_listener_registered
-    if _team_mission_event_listener_registered:
-        return
+def _ensure_run_event_listener_registered(db: Any) -> bool:
+    if db is None:
+        return False
     try:
-        from hermes_team_mission.state.event_log import register_team_mission_event_listener
+        db.runs.register_event_listener(
+            "runtime.activity.subscribe",
+            lambda event: _on_run_event_appended(db, event),
+        )
     except Exception as exc:
         _team_activity_terminal_log(
             "listener-register-failed",
             error=f"{type(exc).__name__}: {exc}",
         )
-        return
-    register_team_mission_event_listener(_on_team_mission_event_appended)
-    _team_mission_event_listener_registered = True
-    _team_activity_terminal_log("listener-registered")
-
-
-def _reserve_subscription_delivery(
-    subscription: dict[str, Any],
-    event: dict[str, Any],
-) -> bool:
-    cursor_field, seq = _subscription_event_cursor(subscription, event)
-    if seq <= 0:
-        return True
-    subscription_id = str(subscription.get("id") or "").strip()
-    if not subscription_id:
-        return True
-    with _lock:
-        current = _subscriptions_by_id.get(subscription_id)
-        if current is None:
-            return False
-        if seq <= int(current.get(cursor_field) or 0):
-            return False
-        current[cursor_field] = seq
+        return False
+    _team_activity_terminal_log("listener-registered", source="run_events")
     return True
 
 
@@ -559,20 +543,70 @@ def remember_transport_delivery(
             _remember_subscription_delivery(subscription, event, direct=direct)
 
 
-def _event_for_live_subscription_delivery(
+def _subscription_delivery_lock(subscription_id: str) -> threading.Lock | None:
+    with _lock:
+        subscription = _subscriptions_by_id.get(subscription_id)
+        if subscription is None:
+            return None
+        delivery_lock = subscription.get("delivery_lock")
+        if not isinstance(delivery_lock, _LOCK_TYPE):
+            delivery_lock = threading.Lock()
+            subscription["delivery_lock"] = delivery_lock
+        return delivery_lock
+
+
+def _deliver_subscription_event(
+    subscription_id: str,
     transport: Transport,
     event: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Project a persisted event back to the live subscription ABI."""
+) -> bool:
+    """Serialize write and cursor advancement for one subscription."""
+    delivery_lock = _subscription_delivery_lock(subscription_id)
+    if delivery_lock is None:
+        return False
+    with delivery_lock:
+        with _lock:
+            subscription = _subscriptions_by_id.get(subscription_id)
+            if subscription is None or subscription.get("transport") is not transport:
+                return False
+            event_for_transport = _delta_event_for_subscription(subscription, event)
+            if event_for_transport is None:
+                cursor_field, seq = _subscription_event_cursor(subscription, event)
+                if seq > int(subscription.get(cursor_field) or 0):
+                    subscription[cursor_field] = seq
+                return True
+            cursor_field, seq = _subscription_event_cursor(
+                subscription,
+                event_for_transport,
+            )
+            if seq > 0 and seq <= int(subscription.get(cursor_field) or 0):
+                return True
+        if not _write_event(transport, event_for_transport):
+            return False
+        with _lock:
+            current = _subscriptions_by_id.get(subscription_id)
+            if current is not None and current.get("transport") is transport:
+                _remember_subscription_delivery(
+                    current,
+                    event_for_transport,
+                    direct=False,
+                )
+        return True
+
+
+def _deliver_live_subscription_event(
+    transport: Transport,
+    event: dict[str, Any],
+) -> bool:
+    """Project and atomically deliver a persisted live event."""
     if transport is None or not isinstance(event, dict):
-        return event
+        return False
     stable = _conversation_session_id(event)
     with _lock:
-        subscriptions = [
-            _subscriptions_by_id.get(subscription_id)
-            for subscription_id in list(_subscription_ids_by_transport.get(transport, set()))
-        ]
-    for subscription in subscriptions:
+        subscription_ids = list(_subscription_ids_by_transport.get(transport, set()))
+    for subscription_id in subscription_ids:
+        with _lock:
+            subscription = _subscriptions_by_id.get(subscription_id)
         if not isinstance(subscription, dict):
             continue
         if subscription.get("transport") is not transport:
@@ -588,15 +622,16 @@ def _event_for_live_subscription_delivery(
                 continue
         else:
             continue
-        event_for_transport = _delta_event_for_subscription(subscription, event)
-        if event_for_transport is None:
-            _reserve_subscription_delivery(subscription, event)
-            return None
-        event_for_transport = _team_mission_live_status_event_for_subscription(subscription, event_for_transport)
-        if not _reserve_subscription_delivery(subscription, event_for_transport):
-            return None
-        return event_for_transport
-    return event
+        projected = _team_mission_live_status_event_for_subscription(
+            subscription,
+            event,
+        )
+        return _deliver_subscription_event(
+            subscription_id,
+            transport,
+            projected,
+        )
+    return _write_event(transport, event)
 
 
 def _is_team_mission_runtime_event(event: dict[str, Any]) -> bool:
@@ -644,7 +679,7 @@ def _team_mission_live_status_event_for_subscription(
     binding = binding_getter(source_run_id) if binding_getter is not None else {}
     if not isinstance(binding, dict) or not binding:
         return event
-    run_getter = _db_method(subscription.get("db"), "get_run")
+    run_getter = _run_method(subscription.get("db"), "get")
     run = run_getter(source_run_id) if run_getter is not None else {}
     run = run if isinstance(run, dict) else {}
 
@@ -912,7 +947,7 @@ _sync_canonical_frame_seq = _sync_canonical_frame_identity
 
 def _active_run_ids_for_session(stable: str, db: Any = None) -> set[str]:
     active_ids: set[str] = set()
-    if method := _db_method(db, "list_runs"):
+    if method := _run_method(db, "list"):
         try:
             for run in method(
                 stable,
@@ -1113,33 +1148,7 @@ def _poll_subscription_events() -> None:
                 seq = int(event.get("seq") or 0)
                 if seq <= delivered_seq:
                     continue
-                event_for_transport = _delta_event_for_subscription(subscription, event)
-                if event_for_transport is None:
-                    _reserve_subscription_delivery(subscription, event)
-                    event_type = str(event.get("type") or "")
-                    if event_type in _STREAM_TRACE_EVENT_TYPES:
-                        _trace_stream_route(
-                            "subscription-poll-skip-direct-stream",
-                            event_type=event_type,
-                            subscription_id=str(subscription.get("id") or ""),
-                            subscription_kind=subscription_kind,
-                            conversation_session_id=stable,
-                            mission_id="",
-                            activity_id=activity_id,
-                            run_id=_event_run_id(event),
-                            turn_id=_event_turn_id(event),
-                            runtime_scope_key=_event_runtime_scope_key(event),
-                            seq=seq,
-                            previous_delivered_seq=delivered_seq,
-                            transport=_transport_debug_id(transport),
-                            **_stream_trace_summary(event),
-                        )
-                    delivered_seq = seq
-                    continue
-                if not _reserve_subscription_delivery(subscription, event_for_transport):
-                    delivered_seq = max(delivered_seq, seq)
-                    continue
-                event_type = str(event_for_transport.get("type") or "")
+                event_type = str(event.get("type") or "")
                 if event_type in _STREAM_TRACE_EVENT_TYPES:
                     _trace_stream_route(
                         "subscription-poll-delivery",
@@ -1149,15 +1158,19 @@ def _poll_subscription_events() -> None:
                         conversation_session_id=stable,
                         mission_id="",
                         activity_id=activity_id,
-                        run_id=_event_run_id(event_for_transport),
-                        turn_id=_event_turn_id(event_for_transport),
-                        runtime_scope_key=_event_runtime_scope_key(event_for_transport),
+                        run_id=_event_run_id(event),
+                        turn_id=_event_turn_id(event),
+                        runtime_scope_key=_event_runtime_scope_key(event),
                         seq=seq,
                         previous_delivered_seq=delivered_seq,
                         transport=_transport_debug_id(transport),
-                        **_stream_trace_summary(event_for_transport),
+                        **_stream_trace_summary(event),
                     )
-                if not _write_event(transport, event_for_transport):
+                if not _deliver_subscription_event(
+                    str(subscription.get("id") or ""),
+                    transport,
+                    event,
+                ):
                     break
                 delivered_seq = seq
             with _lock:
@@ -1246,7 +1259,7 @@ def mark_run_started(
         state["status"] = "running"
         state["error"] = ""
         snapshot = dict(state)
-    if method := _db_method(db, "upsert_run"):
+    if method := _run_method(db, "upsert"):
         try:
             persisted = method(
                 run_id=normalized_run_id,
@@ -1283,7 +1296,7 @@ def create_run_if_session_idle(
     if not stable or not normalized_run_id:
         return {"run": None, "conflict": None}
 
-    if method := _db_method(db, "create_run_if_session_idle"):
+    if method := _run_method(db, "reserve_if_idle"):
         _recover_orphaned_active_runs(
             db,
             current_gateway_instance_id=_gateway_instance_id_from_metadata(metadata),
@@ -1405,7 +1418,7 @@ def next_event_seq(conversation_session_id: str, fallback_seq: int = 0, db: Any 
     if not stable:
         return int(fallback_seq or 0)
     persisted_next = 0
-    if method := _db_method(db, "next_run_event_seq"):
+    if method := _run_method(db, "next_event_seq"):
         try:
             persisted_next = int(method(stable, fallback_seq=fallback_seq) or 0)
         except Exception:
@@ -1687,7 +1700,7 @@ def record_event(
     # Worker processes skip the stamp: their frames re-enter record_event
     # on the main side, which is the authority on whether they persist.
     will_persist = bool(
-        persist and stable and _db_method(db, "append_run_event") is not None
+        persist and stable and _run_method(db, "append_event") is not None
     )
     if not worker_process and not will_persist:
         frame["transient"] = True
@@ -1703,7 +1716,7 @@ def record_event(
         and terminal_event is None
         and _event_opens_active_run(event_type)
     ):
-        if getter := _db_method(db, "get_run"):
+        if getter := _run_method(db, "get"):
             persisted_run_checked = True
             try:
                 persisted_run = getter(run_id)
@@ -1826,7 +1839,7 @@ def record_event(
                 subscriber_delivery_count=len(result),
                 **_stream_trace_summary(frame),
             )
-    if persist and stable and (method := _db_method(db, "append_run_event")):
+    if persist and stable and (method := _run_method(db, "append_event")):
         prev_projecting = getattr(db, "_team_mission_projecting", False)
         try:
             # record_event performs the team mission event-domain reduce + mirror
@@ -2236,12 +2249,7 @@ def publish_recorded_event(
         before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
-        event_for_transport = _event_for_live_subscription_delivery(transport, publish_params)
-        if event_for_transport is None:
-            delivered.append(transport)
-            continue
-        if _write_event(transport, event_for_transport):
-            remember_transport_delivery(transport, event_for_transport, direct=False)
+        if _deliver_live_subscription_event(transport, publish_params):
             delivered.append(transport)
     return delivered
 
@@ -2549,8 +2557,11 @@ def subscribe_activity(
         node_selector=_team_activity_events.node_selector(normalized_activity_id),
         has_transport=transport is not None,
     )
-    if is_team_mission_activity:
-        _ensure_team_mission_event_listener_registered()
+    listener_registered = (
+        _ensure_run_event_listener_registered(db)
+        if is_team_mission_activity
+        else False
+    )
     with _lock:
         duplicate_subscription_count = 0
         if transport is not None:
@@ -2590,7 +2601,7 @@ def subscribe_activity(
             activity_id=normalized_activity_id,
             subscription_id=normalized_subscription_id,
             duplicate_subscription_count=duplicate_subscription_count,
-            listener_registered=_team_mission_event_listener_registered,
+            listener_registered=listener_registered,
             active_subscription_count=len(_subscription_ids_by_activity.get(normalized_activity_id, set())),
             has_transport=transport is not None,
             poller_alive=bool(_subscription_poller_thread and _subscription_poller_thread.is_alive()),
@@ -2845,7 +2856,7 @@ def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:
     if not normalized:
         return None
     persisted = None
-    if method := _db_method(db, "get_run"):
+    if method := _run_method(db, "get"):
         try:
             persisted = method(normalized)
         except Exception:
@@ -2887,7 +2898,7 @@ def list_runs(
     if not stable and not scope and not normalized_statuses:
         return []
     persisted: list[dict[str, Any]] = []
-    if method := _db_method(db, "list_runs"):
+    if method := _run_method(db, "list"):
         try:
             persisted = method(
                 stable,
@@ -2944,7 +2955,7 @@ def session_status(
         current_gateway_instance_id=current_gateway_instance_id,
     )
     persisted_status = None
-    if method := _db_method(db, "get_session_run_status"):
+    if method := _run_method(db, "session_status"):
         try:
             persisted_status = method(conversation_session_id)
         except Exception:

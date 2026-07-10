@@ -122,10 +122,10 @@ class ActivityReconciler:
 
     def _process_pending_commands_once(self) -> dict[str, Any]:
         summary = {"processed": 0, "satisfied": 0, "failed": 0, "skipped": 0}
-        list_pending = getattr(self._db, "list_pending_activity_commands", None)
-        if not callable(list_pending):
-            return summary
-        commands = list_pending(states=("accepted", "dispatched"), limit=self._batch_size)
+        commands = self._db.activities.list_pending_commands(
+            states=("accepted", "dispatched"),
+            limit=self._batch_size,
+        )
         for original in commands:
             if not isinstance(original, dict):
                 summary["skipped"] += 1
@@ -195,10 +195,7 @@ class ActivityReconciler:
             raise ValueError("activity_id required")
         activity = self._get_activity(activity_id)
         if not activity:
-            create_activity = getattr(self._db, "create_activity", None)
-            if not callable(create_activity):
-                raise RuntimeError("db.create_activity unavailable")
-            create_activity(
+            self._db.activities.create(
                 activity_id=activity_id,
                 conversation_id=_text(payload.get("conversation_id"))
                 or conversation_session_id,
@@ -253,10 +250,7 @@ class ActivityReconciler:
             raise ValueError(f"activity row missing: {activity_id}")
         status = _text((activity or {}).get("status"))
         if status not in {"completed", "failed", "cancelled"}:
-            mark_cancelled = getattr(self._db, "mark_activity_cancelled", None)
-            if not callable(mark_cancelled):
-                raise RuntimeError("db.mark_activity_cancelled unavailable")
-            updated = mark_cancelled(
+            updated = self._db.activities.mark_cancelled(
                 activity_id,
                 result_summary=_text(payload.get("reason")) or None,
             )
@@ -282,11 +276,8 @@ class ActivityReconciler:
             raise ValueError(f"activity row missing: {activity_id}")
         result = payload.get("result") if isinstance(payload.get("result"), dict) else None
         now = time.time()
-        update_status = getattr(self._db, "update_activity_status", None)
-        if not callable(update_status):
-            raise RuntimeError("db.update_activity_status unavailable")
         if _text(activity.get("status")) != "completed":
-            updated = update_status(
+            updated = self._db.activities.update_status(
                 activity_id,
                 "completed",
                 completed_at=now,
@@ -358,10 +349,9 @@ class ActivityReconciler:
         return {"state": "failed", "error_reason": message}
 
     def _current_command(self, command_id: str) -> dict[str, Any]:
-        get_command = getattr(self._db, "get_activity_command", None)
-        if not command_id or not callable(get_command):
+        if not command_id:
             return {}
-        current = get_command(command_id)
+        current = self._db.activities.get_command(command_id)
         return current if isinstance(current, dict) else {}
 
     def _update_command_state(
@@ -371,10 +361,7 @@ class ActivityReconciler:
         next_state: str,
         error_reason: str = "",
     ) -> dict[str, Any]:
-        update_state = getattr(self._db, "update_activity_command_state", None)
-        if not callable(update_state):
-            return {}
-        updated = update_state(
+        updated = self._db.activities.update_command_state(
             command_id,
             next_state=next_state,
             error_reason=error_reason,
@@ -382,10 +369,9 @@ class ActivityReconciler:
         return updated if isinstance(updated, dict) else {}
 
     def _get_activity(self, activity_id: str) -> dict[str, Any]:
-        get_activity = getattr(self._db, "get_activity", None)
-        if not activity_id or not callable(get_activity):
+        if not activity_id:
             return {}
-        activity = get_activity(activity_id)
+        activity = self._db.activities.get(activity_id)
         return activity if isinstance(activity, dict) else {}
 
     def _conversation_session_id_for_command(self, command: dict[str, Any]) -> str:
