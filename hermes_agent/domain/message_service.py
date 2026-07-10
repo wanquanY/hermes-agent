@@ -22,9 +22,10 @@ from hermes_agent.read_models.visible_transcript import (
     VisibleConversationTranscriptReadModel,
 )
 from hermes_agent.repositories.message_content_codec import decode_message_content
-from hermes_agent.repositories.message_repo import MessageRepository
+from hermes_agent.repositories.message_repo import MessageRepoImpl, MessageRepository
 from hermes_agent.repositories.session_repo import SessionRepo, SessionSpec
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 
 
 class MessageService:
@@ -35,12 +36,15 @@ class MessageService:
         conn: sqlite3.Connection,
         sessions: SessionRepo,
         *,
+        unit_of_work: SqliteUnitOfWork | None = None,
         visibility_policies: Mapping[str, TranscriptVisibilityPolicy] | None = None,
     ) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
         self._sessions = sessions
         self._writer = MessageRepository(conn, sessions)
+        self._message_repo = MessageRepoImpl(conn)
+        self._unit_of_work = unit_of_work or SqliteUnitOfWork(conn, self._lock)
         self._history = MessageHistoryReadModel(conn)
         self._visible_histories = {
             str(conversation_kind or "")
@@ -136,6 +140,63 @@ class MessageService:
 
     def owning_session_id(self, message_id: int) -> str | None:
         return self._recall.session_id_for_message(message_id)
+
+    def recent_user_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self._history.list_recent_user_messages(
+            session_id,
+            limit=limit,
+            include_inactive=include_inactive,
+        )
+
+    def rewind(self, session_id: str, target_message_id: int) -> dict[str, Any]:
+        rewind_session_id = str(session_id or "").strip()
+        stable_message_id = int(target_message_id or 0)
+        if not rewind_session_id or stable_message_id <= 0:
+            raise ValueError("session_id and target_message_id are required")
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ? AND session_id = ?",
+                (stable_message_id, rewind_session_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"message {stable_message_id} not found in session {rewind_session_id}"
+            )
+        target_message = _message_row(row)
+        if target_message.get("role") != "user":
+            raise ValueError(
+                "rewind target must be a 'user' message "
+                f"(got role={target_message.get('role')!r}, id={stable_message_id})"
+            )
+
+        def _rewind(_conn: sqlite3.Connection) -> list[int]:
+            rewound_ids = self._message_repo.deactivate_from(
+                rewind_session_id,
+                stable_message_id,
+            )
+            self._sessions.increment_rewind_count(rewind_session_id)
+            self._writer.rebuild_session_projection(rewind_session_id)
+            return rewound_ids
+
+        rewound_ids = self._unit_of_work.execute(_rewind)
+        with self._lock:
+            head = self._conn.execute(
+                "SELECT MAX(id) AS id FROM messages "
+                "WHERE session_id = ? AND active = 1",
+                (rewind_session_id,),
+            ).fetchone()
+        return {
+            "rewound_count": len(rewound_ids),
+            "target_message": target_message,
+            "new_head_id": int(head["id"]) if head and head["id"] is not None else None,
+        }
 
     def all_as_conversation(
         self,

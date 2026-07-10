@@ -97,6 +97,7 @@ class CliSessionStore(TeamMissionStateMixin):
         self.messages = MessageService(
             conn,
             self._session_repo,
+            unit_of_work=self._unit_of_work,
             visibility_policies={"team": TeamMissionTranscriptVisibilityPolicy()},
         )
         self._recall = SessionRecallReadModel(conn)

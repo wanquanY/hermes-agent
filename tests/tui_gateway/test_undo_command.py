@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 @pytest.fixture()
@@ -45,7 +45,7 @@ def server(hermes_home):
 
 @pytest.fixture()
 def db(hermes_home):
-    session_db = SessionDB(db_path=hermes_home / "state.db")
+    session_db = open_cli_session_store(db_path=hermes_home / "state.db")
     yield session_db
     session_db.close()
 
@@ -54,11 +54,11 @@ def db(hermes_home):
 def session_with_history(server, db):
     sid = "sid-undo"
     session_key = "tui-undo-1"
-    db.create_session(session_key, source="tui")
+    db.sessions.create(session_key, source="tui")
     for i in range(1, 4):
-        db.append_message(session_key, "user", f"question {i}")
-        db.append_message(session_key, "assistant", f"answer {i}")
-    history = db.get_messages_as_conversation(session_key)
+        db.messages.append(session_key, "user", f"question {i}")
+        db.messages.append(session_key, "assistant", f"answer {i}")
+    history = db.messages.all_as_conversation(session_key)
     agent = MagicMock()
     agent._memory_manager = MagicMock()
     agent._last_flushed_db_idx = len(history)
@@ -102,9 +102,9 @@ def test_undo_truncates_in_memory_and_db_history(server, session_with_history, d
         "answer 2",
     ]
     assert session["history_version"] == 1
-    all_rows = db.get_messages(session_key, include_inactive=True)
+    all_rows = db.messages.list(session_key, include_inactive=True)
     assert [row["active"] for row in all_rows] == [1, 1, 1, 1, 0, 0]
-    assert db.get_session(session_key)["rewind_count"] == 1
+    assert db.sessions.get(session_key)["rewind_count"] == 1
 
 
 def test_undo_n_backs_up_multiple_user_turns(server, session_with_history):

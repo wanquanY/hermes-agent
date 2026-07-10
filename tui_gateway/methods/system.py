@@ -663,7 +663,10 @@ def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> 
     count = max(count, 1)
 
     try:
-        recents = db.list_recent_user_messages(session_key, limit=max(count, 10))
+        recents = db.messages.recent_user_messages(
+            session_key,
+            limit=max(count, 10),
+        )
     except Exception as exc:
         return _err(rid, 5008, f"{label}: failed to load history: {exc}")
     if not recents:
@@ -672,14 +675,14 @@ def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> 
     target_index = min(count - 1, len(recents) - 1)
     target_id = recents[target_index]["id"]
     try:
-        result = db.rewind_to_message(session_key, target_id)
+        result = db.messages.rewind(session_key, target_id)
     except ValueError as exc:
         return _err(rid, 4004, f"{label}: {exc}")
     except Exception as exc:
         return _err(rid, 5008, f"{label}: {exc}")
 
     try:
-        active_history = db.get_messages_as_conversation(
+        active_history = db.messages.all_as_conversation(
             session_key,
             include_ancestors=False,
         )
