@@ -95,9 +95,14 @@ def test_unreferenced_top_level_state_facade_modules_are_absent() -> None:
         "hermes_state_agent_profiles.py",
         "hermes_state_branch.py",
         "hermes_state_member_chat.py",
+        "hermes_state_run_event_codec.py",
+        "hermes_state_run_event_index.py",
+        "hermes_state_run_event_reference.py",
         "hermes_state_runs.py",
+        "hermes_state_runtime.py",
         "hermes_state_team_capabilities.py",
         "hermes_state_team_registry.py",
+        "hermes_state_tool_events.py",
     }
     assert not {path.name for path in REPO_ROOT.iterdir()} & retired_modules
 
