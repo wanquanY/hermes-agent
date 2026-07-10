@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_state import SessionDB
 
 
@@ -3543,7 +3544,7 @@ class TestSchemaInit:
         )
         conn.close()
 
-        db = SessionDB(db_path=old_db)
+        db = open_cli_session_store(db_path=old_db)
         cursor = db._conn.execute("PRAGMA table_info(sessions)")
         columns = {row[1] for row in cursor.fetchall()}
         assert {"chat_id", "chat_type", "thread_id", "session_key"}.isdisjoint(columns)
@@ -3610,8 +3611,8 @@ class TestSchemaInit:
         )
         conn.close()
 
-        db = SessionDB(db_path=old_db)
-        db.apply_telegram_topic_migration()
+        db = open_cli_session_store(db_path=old_db)
+        db.telegram_topics.apply_telegram_topic_migration()
 
         tables = {
             row[0]
@@ -3621,20 +3622,20 @@ class TestSchemaInit:
         }
         assert "telegram_dm_topic_mode" in tables
         assert "telegram_dm_topic_bindings" in tables
-        assert db.get_meta("telegram_dm_topic_schema_version") == "2"
+        assert db.metadata.get("telegram_dm_topic_schema_version") == "2"
         db.close()
 
     def test_telegram_topic_binding_roundtrip_requires_explicit_schema(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session(
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create(
             session_id="topic-session",
             source="telegram",
             user_id="208214988",
         )
 
-        assert db.get_telegram_topic_binding(chat_id="208214988", thread_id="17585") is None
+        assert db.telegram_topics.get_telegram_topic_binding(chat_id="208214988", thread_id="17585") is None
 
-        db.bind_telegram_topic(
+        db.telegram_topics.bind_telegram_topic(
             chat_id="208214988",
             thread_id="17585",
             user_id="208214988",
@@ -3642,24 +3643,24 @@ class TestSchemaInit:
             session_id="topic-session",
         )
 
-        binding = db.get_telegram_topic_binding(chat_id="208214988", thread_id="17585")
+        binding = db.telegram_topics.get_telegram_topic_binding(chat_id="208214988", thread_id="17585")
         assert binding is not None
         assert binding["chat_id"] == "208214988"
         assert binding["thread_id"] == "17585"
         assert binding["user_id"] == "208214988"
         assert binding["session_key"] == "telegram:dm:208214988:thread:17585"
         assert binding["session_id"] == "topic-session"
-        assert db.get_meta("telegram_dm_topic_schema_version") == "2"
+        assert db.metadata.get("telegram_dm_topic_schema_version") == "2"
         db.close()
 
     def test_telegram_topic_binding_refuses_to_relink_session_to_another_topic(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session(
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create(
             session_id="topic-session",
             source="telegram",
             user_id="208214988",
         )
-        db.bind_telegram_topic(
+        db.telegram_topics.bind_telegram_topic(
             chat_id="208214988",
             thread_id="17585",
             user_id="208214988",
@@ -3668,7 +3669,7 @@ class TestSchemaInit:
         )
 
         with pytest.raises(ValueError, match="already linked"):
-            db.bind_telegram_topic(
+            db.telegram_topics.bind_telegram_topic(
                 chat_id="208214988",
                 thread_id="99999",
                 user_id="208214988",
@@ -3678,33 +3679,33 @@ class TestSchemaInit:
         db.close()
 
     def test_list_unlinked_telegram_sessions_for_user_excludes_bound_and_other_users(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session(
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create(
             session_id="old-unlinked",
             source="telegram",
             user_id="208214988",
         )
-        db.set_session_title("old-unlinked", "Old research")
-        db.append_message("old-unlinked", "user", "first prompt")
-        db.create_session(
+        db.sessions.set_title("old-unlinked", "Old research")
+        db.messages.append("old-unlinked", "user", "first prompt")
+        db.sessions.create(
             session_id="already-linked",
             source="telegram",
             user_id="208214988",
         )
-        db.bind_telegram_topic(
+        db.telegram_topics.bind_telegram_topic(
             chat_id="208214988",
             thread_id="17585",
             user_id="208214988",
             session_key="key-17585",
             session_id="already-linked",
         )
-        db.create_session(
+        db.sessions.create(
             session_id="other-user",
             source="telegram",
             user_id="someone-else",
         )
 
-        sessions = db.list_unlinked_telegram_sessions_for_user(
+        sessions = db.telegram_topics.list_unlinked_telegram_sessions_for_user(
             chat_id="208214988",
             user_id="208214988",
         )

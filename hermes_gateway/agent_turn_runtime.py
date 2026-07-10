@@ -101,7 +101,7 @@ class GatewayAgentTurnRuntime:
         runner._cache_session_source(session_key, source)
         if session_navigation_for(runner).is_telegram_topic_lane(source):
             try:
-                binding = runner._session_db.get_telegram_topic_binding(
+                binding = runner._session_db.telegram_topics.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
                     thread_id=str(source.thread_id),
                 ) if runner._session_db else None

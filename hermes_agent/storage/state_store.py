@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-from channels.platforms.telegram_topic_store import TelegramTopicStateMixin
 from hermes_agent.application.state_facade.activity_facade import ActivitiesMixin
 from hermes_agent.application.state_facade.agent_profile_facade import AgentProfileStateMixin
 from hermes_agent.application.state_facade.branch_facade import BranchStateMixin
@@ -43,7 +42,6 @@ class HermesStateStore(
     MessageStateFacadeMixin,
     RunStateMixin,
     BranchStateMixin,
-    TelegramTopicStateMixin,
     StateMaintenanceMixin,
     SessionHandoffStateMixin,
 ):

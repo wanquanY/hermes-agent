@@ -175,7 +175,7 @@ class AgentResultFinalizer:
         ):
             return
         try:
-            binding = self._session_db.get_telegram_topic_binding_by_session(
+            binding = self._session_db.telegram_topics.get_telegram_topic_binding_by_session(
                 session_id=session_id,
             )
             if binding and binding.get("thread_id"):

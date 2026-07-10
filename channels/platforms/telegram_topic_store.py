@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional
 
 
-class TelegramTopicStateMixin:
+class TelegramTopicStore:
+    """Own Telegram DM topic-mode persistence for one state database."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        execute_write: Callable[[Callable[[sqlite3.Connection], Any]], Any],
+        lock: Any,
+    ) -> None:
+        self._conn = conn
+        self._execute_write = execute_write
+        self._lock = lock
+
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.
 
@@ -22,7 +35,7 @@ class TelegramTopicStateMixin:
                automatically clears bindings.
         """
         def _do(conn):
-            conn.executescript(
+            schema_statements = (
                 """
                 CREATE TABLE IF NOT EXISTS telegram_dm_topic_mode (
                     chat_id TEXT PRIMARY KEY,
@@ -35,8 +48,9 @@ class TelegramTopicStateMixin:
                     capability_checked_at REAL,
                     intro_message_id TEXT,
                     pinned_message_id TEXT
-                );
-
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS telegram_dm_topic_bindings (
                     chat_id TEXT NOT NULL,
                     thread_id TEXT NOT NULL,
@@ -47,15 +61,19 @@ class TelegramTopicStateMixin:
                     linked_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (chat_id, thread_id)
-                );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
-                ON telegram_dm_topic_bindings(session_id);
-
-                CREATE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_user
-                ON telegram_dm_topic_bindings(user_id, chat_id);
+                )
+                """,
                 """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_session
+                ON telegram_dm_topic_bindings(session_id)
+                """,
+                """
+                CREATE INDEX IF NOT EXISTS idx_telegram_dm_topic_bindings_user
+                ON telegram_dm_topic_bindings(user_id, chat_id)
+                """,
             )
+            for statement in schema_statements:
+                conn.execute(statement)
 
             # v1 → v2: rebuild telegram_dm_topic_bindings if its session_id FK
             # lacks ON DELETE CASCADE. SQLite can't ALTER a foreign key, so we
@@ -74,7 +92,7 @@ class TelegramTopicStateMixin:
                     for row in fk_rows
                 )
                 if needs_rebuild:
-                    conn.executescript(
+                    rebuild_statements = (
                         """
                         CREATE TABLE telegram_dm_topic_bindings_new (
                             chat_id TEXT NOT NULL,
@@ -86,20 +104,30 @@ class TelegramTopicStateMixin:
                             linked_at REAL NOT NULL,
                             updated_at REAL NOT NULL,
                             PRIMARY KEY (chat_id, thread_id)
-                        );
+                        )
+                        """,
+                        """
                         INSERT INTO telegram_dm_topic_bindings_new
                             SELECT chat_id, thread_id, user_id, session_key,
                                    session_id, managed_mode, linked_at, updated_at
-                            FROM telegram_dm_topic_bindings;
-                        DROP TABLE telegram_dm_topic_bindings;
-                        ALTER TABLE telegram_dm_topic_bindings_new
-                            RENAME TO telegram_dm_topic_bindings;
-                        CREATE UNIQUE INDEX idx_telegram_dm_topic_bindings_session
-                            ON telegram_dm_topic_bindings(session_id);
-                        CREATE INDEX idx_telegram_dm_topic_bindings_user
-                            ON telegram_dm_topic_bindings(user_id, chat_id);
+                            FROM telegram_dm_topic_bindings
+                        """,
+                        "DROP TABLE telegram_dm_topic_bindings",
                         """
+                        ALTER TABLE telegram_dm_topic_bindings_new
+                            RENAME TO telegram_dm_topic_bindings
+                        """,
+                        """
+                        CREATE UNIQUE INDEX idx_telegram_dm_topic_bindings_session
+                            ON telegram_dm_topic_bindings(session_id)
+                        """,
+                        """
+                        CREATE INDEX idx_telegram_dm_topic_bindings_user
+                            ON telegram_dm_topic_bindings(user_id, chat_id)
+                        """,
                     )
+                    for statement in rebuild_statements:
+                        conn.execute(statement)
 
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
@@ -419,3 +447,6 @@ class TelegramTopicStateMixin:
             )
             sessions.append(session)
         return sessions
+
+
+__all__ = ["TelegramTopicStore"]

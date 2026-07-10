@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from channels.platforms.telegram_topic_store import TelegramTopicStore
 from hermes_agent.domain.activity_service import ActivityService
 from hermes_agent.domain.compression_lease_service import CompressionLeaseService
 from hermes_agent.domain.message_service import MessageService
@@ -55,6 +56,11 @@ class CliSessionStore(TeamMissionStateMixin):
         self._lock = lock_for_connection(conn)
         self._unit_of_work = SqliteUnitOfWork(conn, self._lock)
         self._session_repo = SessionRepoImpl(conn)
+        self.telegram_topics = TelegramTopicStore(
+            conn,
+            self._execute_write,
+            self._lock,
+        )
         self.compression_leases = CompressionLeaseService(
             CompressionLeaseRepository(conn),
             self._unit_of_work,

@@ -32,7 +32,7 @@ class GatewaySessionNavigationCommandService:
         if session_db is None:
             return False
         try:
-            raw = session_db.is_telegram_topic_mode_enabled(
+            raw = session_db.telegram_topics.is_telegram_topic_mode_enabled(
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
             )
@@ -114,7 +114,7 @@ class GatewaySessionNavigationCommandService:
         session_db = getattr(self._runner, "_session_db", None)
         if session_db is None or not source.chat_id or not source.thread_id:
             return
-        session_db.bind_telegram_topic(
+        session_db.telegram_topics.bind_telegram_topic(
             chat_id=str(source.chat_id),
             thread_id=str(source.thread_id),
             user_id=str(source.user_id or ""),
@@ -139,7 +139,7 @@ class GatewaySessionNavigationCommandService:
         if session_db is None:
             return None
         try:
-            bindings = session_db.list_telegram_topic_bindings_for_chat(
+            bindings = session_db.telegram_topics.list_telegram_topic_bindings_for_chat(
                 chat_id=str(source.chat_id),
             )
         except Exception:
@@ -298,7 +298,7 @@ class GatewaySessionNavigationCommandService:
             return "Could not determine chat ID."
         # No-op if never enabled.
         try:
-            currently_enabled = self._runner._session_db.is_telegram_topic_mode_enabled(
+            currently_enabled = self._runner._session_db.telegram_topics.is_telegram_topic_mode_enabled(
                 chat_id=chat_id,
                 user_id=str(source.user_id or ""),
             )
@@ -307,7 +307,7 @@ class GatewaySessionNavigationCommandService:
         if not currently_enabled:
             return "Multi-session topic mode is not currently enabled for this chat."
         try:
-            self._runner._session_db.disable_telegram_topic_mode(chat_id=chat_id)
+            self._runner._session_db.telegram_topics.disable_telegram_topic_mode(chat_id=chat_id)
         except Exception as exc:
             logger.exception("Failed to disable Telegram topic mode")
             return f"Failed to disable topic mode: {exc}"
@@ -373,7 +373,7 @@ class GatewaySessionNavigationCommandService:
                 return t("gateway.topic.topics_user_disallowed")
 
         try:
-            self._runner._session_db.enable_telegram_topic_mode(
+            self._runner._session_db.telegram_topics.enable_telegram_topic_mode(
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
                 has_topics_enabled=capabilities.get("has_topics_enabled"),
@@ -388,7 +388,7 @@ class GatewaySessionNavigationCommandService:
 
         if source.thread_id:
             try:
-                binding = self._runner._session_db.get_telegram_topic_binding(
+                binding = self._runner._session_db.telegram_topics.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
                     thread_id=str(source.thread_id),
                 )
@@ -399,7 +399,7 @@ class GatewaySessionNavigationCommandService:
                 session_id = str(binding.get("session_id") or "")
                 title = None
                 try:
-                    title = self._runner._session_db.get_session_title(session_id)
+                    title = self._runner._session_db.sessions.get_title(session_id)
                 except Exception:
                     title = None
                 session_label = title or t("gateway.topic.untitled_session")
@@ -422,7 +422,7 @@ class GatewaySessionNavigationCommandService:
             "",
         ]
         try:
-            sessions = self._runner._session_db.list_unlinked_telegram_sessions_for_user(
+            sessions = self._runner._session_db.telegram_topics.list_unlinked_telegram_sessions_for_user(
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
                 limit=10,
@@ -461,11 +461,11 @@ class GatewaySessionNavigationCommandService:
     async def restore_telegram_topic_session(self, event: MessageEvent, raw_session_id: str) -> str:
         """Restore an existing Telegram-owned Hermes session into this topic."""
         source = event.source
-        session_id = self._runner._session_db.resolve_session_id(raw_session_id.strip())
+        session_id = self._runner._session_db.sessions.resolve_id(raw_session_id.strip())
         if not session_id:
             return f"Session not found: {raw_session_id.strip()}"
 
-        session = self._runner._session_db.get_session(session_id)
+        session = self._runner._session_db.sessions.get(session_id)
         if not session:
             return f"Session not found: {raw_session_id.strip()}"
         if str(session.get("source") or "") != "telegram":
@@ -473,8 +473,8 @@ class GatewaySessionNavigationCommandService:
         if str(session.get("user_id") or "") != str(source.user_id):
             return "That session does not belong to this Telegram user."
 
-        linked = self._runner._session_db.is_telegram_session_linked_to_topic(session_id=session_id)
-        current_binding = self._runner._session_db.get_telegram_topic_binding(
+        linked = self._runner._session_db.telegram_topics.is_telegram_session_linked_to_topic(session_id=session_id)
+        current_binding = self._runner._session_db.telegram_topics.get_telegram_topic_binding(
             chat_id=str(source.chat_id),
             thread_id=str(source.thread_id),
         )
@@ -484,7 +484,7 @@ class GatewaySessionNavigationCommandService:
 
         session_key = self._runner._session_key_for_source(source)
         try:
-            self._runner._session_db.bind_telegram_topic(
+            self._runner._session_db.telegram_topics.bind_telegram_topic(
                 chat_id=str(source.chat_id),
                 thread_id=str(source.thread_id),
                 user_id=str(source.user_id),
@@ -497,10 +497,10 @@ class GatewaySessionNavigationCommandService:
                 return "That session is already linked to another Telegram topic."
             raise
 
-        title = self._runner._session_db.get_session_title(session_id) or session_id
+        title = self._runner._session_db.sessions.get_title(session_id) or session_id
         last_assistant = None
         try:
-            for message in reversed(self._runner._session_db.get_messages(session_id)):
+            for message in reversed(self._runner._session_db.messages.list(session_id)):
                 if message.get("role") == "assistant" and message.get("content"):
                     last_assistant = str(message.get("content"))
                     break
@@ -525,7 +525,7 @@ class GatewaySessionNavigationCommandService:
             # List recent titled sessions for this user/platform
             try:
                 user_source = source.platform.value if source.platform else None
-                sessions = self._runner._session_db.list_sessions_rich(
+                sessions = self._runner._session_db.sessions.list_rich(
                     source=user_source, limit=10
                 )
                 titled = [s for s in sessions if s.get("title")]
@@ -544,13 +544,13 @@ class GatewaySessionNavigationCommandService:
                 return t("gateway.resume.list_failed", error=e)
 
         # Resolve the name to a session ID.
-        target_id = self._runner._session_db.resolve_session_by_title(name)
+        target_id = self._runner._session_db.sessions.resolve_by_title(name)
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
-            target_id = self._runner._session_db.resolve_resume_session_id(target_id)
+            target_id = self._runner._session_db.sessions.resolve_resume_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
@@ -576,7 +576,7 @@ class GatewaySessionNavigationCommandService:
         agent_cache_for(self._runner).evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._runner._session_db.get_session_title(target_id) or name
+        title = self._runner._session_db.sessions.get_title(target_id) or name
 
         # Count messages for context
         history = self._runner.session_store.load_transcript(target_id)
@@ -621,15 +621,15 @@ class GatewaySessionNavigationCommandService:
         if branch_name:
             branch_title = branch_name
         else:
-            current_title = self._runner._session_db.get_session_title(current_entry.session_id)
+            current_title = self._runner._session_db.sessions.get_title(current_entry.session_id)
             base = current_title or "branch"
-            branch_title = self._runner._session_db.get_next_title_in_lineage(base)
+            branch_title = self._runner._session_db.sessions.next_title_in_lineage(base)
 
         parent_session_id = current_entry.session_id
 
         # Create the new session with parent link
         try:
-            self._runner._session_db.create_session(
+            self._runner._session_db.sessions.create(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self._runner.config.get("model", {}) or {}).get("default") if isinstance(self._runner.config, dict) else None,
@@ -642,7 +642,7 @@ class GatewaySessionNavigationCommandService:
         # Copy conversation history to the new session
         for msg in history:
             try:
-                self._runner._session_db.append_message(
+                self._runner._session_db.messages.append(
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -661,7 +661,7 @@ class GatewaySessionNavigationCommandService:
 
         # Set title
         try:
-            self._runner._session_db.set_session_title(new_session_id, branch_title)
+            self._runner._session_db.sessions.set_title(new_session_id, branch_title)
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
