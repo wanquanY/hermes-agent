@@ -669,6 +669,59 @@ class EventLedger:
             ordered.reverse()
         return ordered
 
+    def list_run_rows(
+        self,
+        run_ids: Iterable[str],
+        *,
+        limit_per_run: int = 2000,
+        include_internal: bool = False,
+    ) -> list[Any]:
+        """Return canonical rows for multiple runs, bounded per run."""
+        normalized_run_ids = list(
+            dict.fromkeys(
+                str(run_id or "").strip()
+                for run_id in run_ids
+                if str(run_id or "").strip()
+            )
+        )
+        if not normalized_run_ids:
+            return []
+        bounded_limit = max(1, min(int(limit_per_run or 2000), 5000))
+        rows: list[Any] = []
+        for start in range(0, len(normalized_run_ids), 250):
+            chunk = normalized_run_ids[start:start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            internal_clause = "" if include_internal else "AND event_type NOT LIKE '_internal.%'"
+            rows.extend(
+                self._conn.execute(
+                    f"""
+                    WITH ranked AS (
+                        SELECT *,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY run_id
+                                   ORDER BY seq ASC, id ASC
+                               ) AS run_row_number
+                          FROM run_events
+                         WHERE run_id IN ({placeholders})
+                           {internal_clause}
+                    )
+                    SELECT *
+                      FROM ranked
+                     WHERE run_row_number <= ?
+                     ORDER BY run_id ASC, seq ASC, id ASC
+                    """,
+                    (*chunk, bounded_limit),
+                ).fetchall()
+            )
+        rows.sort(
+            key=lambda row: (
+                str(row["run_id"] or ""),
+                int(row["seq"] or 0),
+                int(row["id"] or 0),
+            )
+        )
+        return rows
+
     def list_activity_rows(
         self,
         activity_id: str,

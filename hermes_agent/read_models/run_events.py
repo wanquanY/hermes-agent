@@ -62,6 +62,41 @@ class RunEventReadModel:
                 raise
             return self._decode_rows(rows)
 
+    def list_by_run_ids(
+        self,
+        run_ids: list[str],
+        *,
+        limit_per_run: int = 2000,
+        include_internal: bool = False,
+    ) -> dict[str, list[dict[str, Any]]]:
+        normalized_run_ids = list(
+            dict.fromkeys(
+                str(run_id or "").strip()
+                for run_id in run_ids
+                if str(run_id or "").strip()
+            )
+        )
+        if not normalized_run_ids:
+            return {}
+        with self._lock:
+            try:
+                rows = EventLedger(self._conn).list_run_rows(
+                    normalized_run_ids,
+                    limit_per_run=limit_per_run,
+                    include_internal=include_internal,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table: run_events" in str(exc):
+                    return {run_id: [] for run_id in normalized_run_ids}
+                raise
+            events = self._decode_rows(rows)
+        result = {run_id: [] for run_id in normalized_run_ids}
+        for event in events:
+            run_id = str(event.get("run_id") or "").strip()
+            if run_id in result:
+                result[run_id].append(event)
+        return result
+
     def list_filtered(
         self,
         session_id: str,

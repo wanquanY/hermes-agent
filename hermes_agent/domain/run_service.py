@@ -278,6 +278,19 @@ class RunService:
             include_internal=include_internal,
         )
 
+    def list_events_by_run_ids(
+        self,
+        run_ids: list[str],
+        *,
+        limit_per_run: int = 2000,
+        include_internal: bool = False,
+    ) -> dict[str, list[dict[str, Any]]]:
+        return self._events.list_by_run_ids(
+            run_ids,
+            limit_per_run=limit_per_run,
+            include_internal=include_internal,
+        )
+
     def list_filtered_events(
         self,
         session_id: str,

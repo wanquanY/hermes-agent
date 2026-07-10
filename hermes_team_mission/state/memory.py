@@ -5,7 +5,6 @@ import sqlite3
 import time
 from typing import Any, Dict, List
 
-from hermes_agent.domain.run_event_codec import decode_run_event_row
 from hermes_team_mission.domain.utils import MEMORY_COMMITTED_STATUS
 from hermes_team_mission.domain.utils import MEMORY_TERMINAL_STATUSES
 from hermes_team_mission.domain.utils import MEMORY_VISIBLE_TO_WORKER
@@ -432,29 +431,12 @@ def team_mission_binding_events(db: Any, binding: Dict[str, Any], *, limit: int 
 
 def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *, limit_per_run: int = 2000) -> Dict[str, List[Dict[str, Any]]]:
     run_ids = dedupe_text([binding.get("run_id") for binding in bindings if isinstance(binding, dict)])
-    if not run_ids or not getattr(db, "_conn", None):
+    if not run_ids:
         return {}
-    placeholders = ",".join("?" for _ in run_ids)
-    bounded_limit = max(1, min(int(limit_per_run or 2000), 5000))
-    with db._lock:
-        rows = db._conn.execute(
-            f"""
-            SELECT *
-              FROM run_events
-             WHERE run_id IN ({placeholders})
-             ORDER BY run_id ASC, seq ASC, id ASC
-            """,
-            tuple(run_ids),
-        ).fetchall()
-    result: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
-    for row in rows:
-        run_id = text(_row_value(row, "run_id"))
-        if not run_id or len(result.setdefault(run_id, [])) >= bounded_limit:
-            continue
-        event = decode_run_event_row(row)
-        if isinstance(event, dict):
-            result[run_id].append(event)
-    return result
+    return db.runs.list_events_by_run_ids(
+        run_ids,
+        limit_per_run=limit_per_run,
+    )
 
 
 def team_mission_binding_message_excerpt(db: Any, binding: Dict[str, Any]) -> str:
