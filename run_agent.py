@@ -1642,11 +1642,8 @@ class AIAgent:
             return True
         if not session_id or not self._session_db or not messages or prefix_len > len(messages):
             return False
-        get_messages = getattr(self._session_db, "get_messages", None)
-        if not callable(get_messages):
-            return False
         try:
-            rows = get_messages(session_id)
+            rows = self._session_db.messages.list(session_id)
         except Exception:
             return False
         if len(rows or []) < prefix_len:

@@ -809,8 +809,7 @@ def _run_prompt_submit(
         if db is None:
             return
         try:
-            get_run = getattr(db, "get_run", None)
-            state = get_run(turn_run_id) if callable(get_run) else {}
+            state = db.runs.get(turn_run_id) or {}
         except Exception as exc:
             logger.warning(
                 "[dovie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
