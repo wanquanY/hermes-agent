@@ -375,60 +375,30 @@ def compress_context(
     # and our caller's auto-compress loop sees ``len(returned) == len(input)``
     # and stops retrying for this cycle. The session is NOT corrupted —
     # we just sit out this round and let the winner finish.
-    _lock_db = getattr(agent, "_session_db", None)
-    _lock_sid = agent.session_id or ""
-    _lock_holder: Optional[str] = None
-    # Probe whether the lock subsystem is actually available on this
-    # session-store instance. A process running mismatched module versions
-    # (e.g. ``conversation_compression.py`` reloaded after a pull but the
-    # long-lived storage class still bound to the
-    # pre-#34351 version in memory) has the call site but not the method.
-    # In that case ``try_acquire_compression_lock`` raises AttributeError —
-    # NOT a ``sqlite3.Error`` — so the method's own fail-open guard never
-    # runs and the exception propagates to the outer agent loop, which
-    # prints the error and retries.  Because compression never succeeds,
-    # the token count never drops and the loop re-triggers compaction
-    # forever (the "API call #47/#48/#49 ... has no attribute
-    # try_acquire_compression_lock" spin).  Fail OPEN here: if the lock
-    # subsystem is missing or broken in any unexpected way, skip locking
-    # and proceed with compression.  Skipping the lock risks a rare
-    # concurrent-compression session fork; an infinite no-progress loop
-    # that never compresses at all is strictly worse.
-    if _lock_db is not None and _lock_sid:
-        _lock_holder = _compression_lock_holder(agent)
-        try:
-            _lock_acquired = _lock_db.try_acquire_compression_lock(
-                _lock_sid, _lock_holder
-            )
-        except Exception as _lock_err:
-            # Broken/absent lock subsystem (version skew, etc.).  Log once
-            # per session and proceed WITHOUT the lock rather than letting
-            # the exception spin the outer loop.
-            _lock_holder = None  # we don't own anything to release
-            if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
-                agent._last_compression_lock_error_sid = _lock_sid
-                logger.warning(
-                    "compression lock subsystem unavailable for session=%s "
-                    "(%s: %s) — proceeding without lock. This usually means a "
-                    "stale in-memory module after an update; restart the "
-                    "process (or `hermes update`) to resync.",
-                    _lock_sid, type(_lock_err).__name__, _lock_err,
-                )
-            _lock_acquired = True  # treat as acquired-but-unlocked; proceed
-        if not _lock_acquired:
-            try:
-                existing = _lock_db.get_compression_lock_holder(_lock_sid)
-            except Exception:
-                existing = None
+    _lease_store = getattr(agent, "_session_db", None)
+    _lease_session_id = agent.session_id or ""
+    _lease_holder: Optional[str] = None
+    _lease_service = None
+    if _lease_store is not None and _lease_session_id:
+        # Missing durable lease ownership is a deployment error. Proceeding
+        # unlocked can create two canonical continuation sessions.
+        _lease_service = _lease_store.compression_leases
+        _lease_holder = _compression_lock_holder(agent)
+        if not _lease_service.try_acquire(_lease_session_id, _lease_holder):
+            existing = _lease_service.holder(_lease_session_id)
             logger.warning(
                 "compression skipped: another path is compressing session=%s "
                 "(holder=%s) — returning messages unchanged to avoid session fork",
-                _lock_sid, existing,
+                _lease_session_id,
+                existing,
             )
-            _lock_holder = None  # don't release a lock we don't own
+            _lease_holder = None
             # Surface to the user once — quiet for downstream auto-compress loops
-            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
-                agent._last_compression_lock_warning_sid = _lock_sid
+            if (
+                getattr(agent, "_last_compression_lock_warning_sid", None)
+                != _lease_session_id
+            ):
+                agent._last_compression_lock_warning_sid = _lease_session_id
                 try:
                     agent._emit_warning(
                         "⚠ Skipping concurrent compression — another path "
@@ -442,13 +412,18 @@ def compress_context(
                 _existing_sp = agent._build_system_prompt(system_message)
             return messages, _existing_sp
 
-    def _release_lock() -> None:
-        """Release the lock keyed on the OLD session_id (before rotation)."""
-        if _lock_db is not None and _lock_sid and _lock_holder:
+    def _release_lease() -> None:
+        """Release the lease keyed on the pre-rotation session id."""
+        if _lease_service is not None and _lease_session_id and _lease_holder:
             try:
-                _lock_db.release_compression_lock(_lock_sid, _lock_holder)
-            except Exception as _rel_err:
-                logger.debug("compression lock release failed: %s", _rel_err)
+                _lease_service.release(_lease_session_id, _lease_holder)
+            except Exception:
+                logger.warning(
+                    "compression lease release failed: session=%s holder=%s",
+                    _lease_session_id,
+                    _lease_holder,
+                    exc_info=True,
+                )
 
     # Notify external memory provider before compression discards context
     if agent._memory_manager:
@@ -458,15 +433,24 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        try:
+            compressed = agent.context_compressor.compress(
+                messages,
+                current_tokens=approx_tokens,
+                focus_topic=focus_topic,
+                force=force,
+            )
+        except TypeError:
+            # Plugin context engine with strict signature that doesn't accept
+            # focus_topic / force — fall back to calling without them.
+            compressed = agent.context_compressor.compress(
+                messages,
+                current_tokens=approx_tokens,
+            )
     except BaseException:
-        # ANY exception during compress() must release the lock so the
-        # session isn't permanently blocked from future compression.
-        _release_lock()
+        # ANY exception during compress() must release the lease so the
+        # session isn't blocked until lease expiry.
+        _release_lease()
         raise
 
     # If compression aborted (aux LLM failed to produce a usable summary)
@@ -486,7 +470,7 @@ def compress_context(
         _existing_sp = getattr(agent, "_cached_system_prompt", None)
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
-        _release_lock()  # compression aborted — no rotation will happen
+        _release_lease()  # compression aborted — no rotation will happen
         return messages, _existing_sp
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
@@ -549,14 +533,14 @@ def compress_context(
                 # the stored system prompt on the existing row. The session's
                 # id, title, cwd, /goal, FTS-indexed history, and gateway
                 # routing all stay put. See #38763.
-                agent._session_db.update_system_prompt(
+                agent._session_db.sessions.update_system_prompt(
                     agent.session_id, new_system_prompt
                 )
             else:
                 # ── Rotation (legacy): end this session, fork a continuation ─
                 # Propagate title to the new session with auto-numbering
-                old_title = agent._session_db.get_session_title(agent.session_id)
-                agent._session_db.end_session(agent.session_id, "compression")
+                old_title = agent._session_db.sessions.get_title(agent.session_id)
+                agent._session_db.sessions.end(agent.session_id, "compression")
                 old_session_id = agent.session_id
                 agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 # Ordering contract: the agent thread updates the contextvar here;
@@ -583,7 +567,7 @@ def compress_context(
                 except Exception:
                     pass
                 agent._session_db_created = False
-                agent._session_db.create_session(
+                agent._session_db.sessions.create(
                     session_id=agent.session_id,
                     source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=agent.model,
@@ -594,11 +578,11 @@ def compress_context(
                 # Auto-number the title for the continuation session
                 if old_title:
                     try:
-                        new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                        agent._session_db.set_session_title(agent.session_id, new_title)
+                        new_title = agent._session_db.sessions.next_title_in_lineage(old_title)
+                        agent._session_db.sessions.set_title(agent.session_id, new_title)
                     except (ValueError, Exception) as e:
                         logger.debug("Could not propagate title on compression: %s", e)
-                agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+                agent._session_db.sessions.update_system_prompt(agent.session_id, new_system_prompt)
                 # Reset flush cursor — new session starts with no messages written
                 agent._last_flushed_db_idx = 0
         except Exception as e:
@@ -703,7 +687,7 @@ def compress_context(
     # file dedup) ran. A concurrent path that wakes up the moment we
     # release will see the NEW session_id in state.db / SessionEntry and
     # acquire on that — no race against our just-finished work.
-    _release_lock()
+    _release_lease()
     return compressed, new_system_prompt
 
 

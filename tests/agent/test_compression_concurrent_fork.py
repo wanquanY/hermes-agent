@@ -36,10 +36,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _build_agent_with_db(db: SessionDB, session_id: str):
+def _build_agent_with_db(db: CliSessionStore, session_id: str):
     """Build an AIAgent that's wired to ``db`` and pinned to ``session_id``."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         from run_agent import AIAgent
@@ -80,7 +80,7 @@ def _build_agent_with_db(db: SessionDB, session_id: str):
     return agent
 
 
-def _count_children(db: SessionDB, parent_sid: str) -> int:
+def _count_children(db: CliSessionStore, parent_sid: str) -> int:
     """Count rows in state.db whose parent_session_id == parent_sid."""
     rows = db._conn.execute(
         "SELECT id FROM sessions WHERE parent_session_id = ?",
@@ -96,10 +96,10 @@ def test_concurrent_compression_does_not_fork_session(tmp_path: Path) -> None:
     produces 2 child sessions (transcript fork).  With the lock the second
     path aborts cleanly, leaving exactly 1 canonical child.
     """
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
 
     parent_sid = "PARENT_TEST_SESSION"
-    db.create_session(parent_sid, source="discord")
+    db.sessions.create(parent_sid, source="discord")
 
     # Two agents on the same session_id, both wired to the same db —
     # mirrors the parent-turn agent + the background-review fork right
@@ -139,7 +139,7 @@ def test_concurrent_compression_does_not_fork_session(tmp_path: Path) -> None:
     )
 
     # The lock must be released after the winner finished.
-    assert db.get_compression_lock_holder(parent_sid) is None, (
+    assert db.compression_leases.holder(parent_sid) is None, (
         "Compression lock leaked: still held after both rotations completed."
     )
 
@@ -153,12 +153,12 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     detection would break and the caller would mutate the conversation
     without going through state.db rotation.
     """
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     parent_sid = "LOSER_TEST"
-    db.create_session(parent_sid, source="discord")
+    db.sessions.create(parent_sid, source="discord")
 
     # Pre-acquire the lock so the agent's compress_context sees it held.
-    held = db.try_acquire_compression_lock(parent_sid, "external_holder")
+    held = db.compression_leases.try_acquire(parent_sid, "external_holder")
     assert held is True
 
     agent = _build_agent_with_db(db, parent_sid)
@@ -173,71 +173,34 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     agent.context_compressor.compress.assert_not_called()
 
 
-class _NoLockSubsystemDB:
-    """Wraps a real SessionDB but simulates a pre-#34351 version skew.
+class _NoLeaseSubsystemDB:
+    """Wrap a real store while omitting the required lease component."""
 
-    A long-lived process can hold ``hermes_state.SessionDB`` bound to the
-    OLD class in memory (no compression-lock methods) while a lazily
-    re-imported ``conversation_compression.py`` calls the NEW lock code.
-    ``try_acquire_compression_lock`` then raises ``AttributeError`` — which
-    is NOT a ``sqlite3.Error``, so the method's own fail-open guard never
-    runs.  Before the fix the exception propagated to the outer agent loop,
-    which printed the error and retried; compression never succeeded, the
-    token count never dropped, and the loop re-triggered compaction forever.
-    """
-
-    def __init__(self, real_db: SessionDB) -> None:
+    def __init__(self, real_db: CliSessionStore) -> None:
         self._real = real_db
 
-    def try_acquire_compression_lock(self, *_a, **_k):  # noqa: D401
-        raise AttributeError(
-            "'SessionDB' object has no attribute 'try_acquire_compression_lock'"
-        )
-
-    def get_compression_lock_holder(self, *_a, **_k):
-        raise AttributeError("'SessionDB' object has no attribute 'get_compression_lock_holder'")
-
-    def release_compression_lock(self, *_a, **_k):
-        raise AttributeError("'SessionDB' object has no attribute 'release_compression_lock'")
-
     def __getattr__(self, name):
-        # Everything else (create_session, append, rotation helpers) goes to
-        # the real db so the post-lock compression + rotation path runs.
+        if name == "compression_leases":
+            raise AttributeError("compression_leases")
         return getattr(self._real, name)
 
 
-def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path) -> None:
-    """Version skew (no lock methods) must fail OPEN, not raise into the loop.
-
-    Reproduces the "API call #47/#48/#49 ... has no attribute
-    try_acquire_compression_lock" infinite-compaction spin: when the lock
-    subsystem is absent, ``_compress_context`` must skip locking and proceed
-    with compression (so the loop makes progress and terminates) instead of
-    letting the ``AttributeError`` escape to the retry loop.
-    """
-    db = SessionDB(db_path=tmp_path / "state.db")
+def test_missing_lease_subsystem_fails_closed(tmp_path: Path) -> None:
+    """A configured store without durable lease ownership is invalid."""
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     parent_sid = "SKEW_TEST_SESSION"
-    db.create_session(parent_sid, source="discord")
+    db.sessions.create(parent_sid, source="discord")
 
     agent = _build_agent_with_db(db, parent_sid)
-    # Swap in the lock-less wrapper AFTER construction (the agent already
-    # holds a normal db reference; we only break the lock methods).
-    agent._session_db = _NoLockSubsystemDB(db)
+    agent._session_db = _NoLeaseSubsystemDB(db)
 
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    # MUST NOT raise AttributeError. Before the fix this raised and the
-    # outer loop would retry forever.
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    with pytest.raises(AttributeError, match="compression_leases"):
+        agent._compress_context(messages, "sys", approx_tokens=120_000)
 
-    # Compression actually ran (proceeded past the broken lock) and made
-    # progress, so the auto-compress loop would terminate.
-    agent.context_compressor.compress.assert_called_once()
-    assert len(compressed) < len(messages), (
-        "Compression made no progress despite failing open — loop would still spin."
-    )
-    # Session rotated (compression succeeded end-to-end).
-    assert agent.session_id != parent_sid
+    agent.context_compressor.compress.assert_not_called()
+    assert agent.session_id == parent_sid
 
 
 def test_review_fork_disables_compression_to_prevent_stale_parent_fork() -> None:
@@ -280,8 +243,8 @@ def test_review_fork_disables_compression_to_prevent_stale_parent_fork() -> None
     parent_sid = "REVIEW_FORK_FLAG_TEST"
 
     with tempfile.TemporaryDirectory() as td:
-        db = SessionDB(db_path=Path(td) / "state.db")
-        db.create_session(parent_sid, source="discord")
+        db = open_cli_session_store(db_path=Path(td) / "state.db")
+        db.sessions.create(parent_sid, source="discord")
         parent = _build_agent_with_db(db, parent_sid)
 
         # The worker does a local ``from run_agent import AIAgent``; patching

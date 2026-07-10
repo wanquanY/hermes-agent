@@ -29,9 +29,9 @@ class CompressionLeaseService:
         holder: str,
         ttl_seconds: float = 300.0,
     ) -> bool:
-        stable_session_id = str(session_id or "").strip()
-        stable_holder = str(holder or "").strip()
-        if not stable_session_id or not stable_holder:
+        lease_session_id = str(session_id or "").strip()
+        lease_holder = str(holder or "").strip()
+        if not lease_session_id or not lease_holder:
             return False
         ttl = float(ttl_seconds)
         if ttl <= 0:
@@ -39,29 +39,29 @@ class CompressionLeaseService:
         now = float(self._clock())
         return self._unit_of_work.execute(
             lambda _conn: self._repository.try_acquire(
-                stable_session_id,
-                stable_holder,
+                lease_session_id,
+                lease_holder,
                 now=now,
                 expires_at=now + ttl,
             )
         )
 
     def release(self, session_id: str, holder: str) -> bool:
-        stable_session_id = str(session_id or "").strip()
-        stable_holder = str(holder or "").strip()
-        if not stable_session_id or not stable_holder:
+        lease_session_id = str(session_id or "").strip()
+        lease_holder = str(holder or "").strip()
+        if not lease_session_id or not lease_holder:
             return False
         return self._unit_of_work.execute(
-            lambda _conn: self._repository.release(stable_session_id, stable_holder)
+            lambda _conn: self._repository.release(lease_session_id, lease_holder)
         )
 
     def holder(self, session_id: str) -> str | None:
-        stable_session_id = str(session_id or "").strip()
-        if not stable_session_id:
+        lease_session_id = str(session_id or "").strip()
+        if not lease_session_id:
             return None
         now = float(self._clock())
         return self._unit_of_work.execute(
-            lambda _conn: self._repository.holder(stable_session_id, now=now)
+            lambda _conn: self._repository.holder(lease_session_id, now=now)
         )
 
 

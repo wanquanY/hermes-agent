@@ -21,6 +21,7 @@ import pytest
 
 class TestCompressionBoundaryHook:
     def _make_agent(self, session_db):
+        session_db.sessions.create("original-session", source="cli")
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
             from run_agent import AIAgent
             return AIAgent(
@@ -35,10 +36,10 @@ class TestCompressionBoundaryHook:
             )
 
     def test_on_session_start_called_with_compression_boundary(self):
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")
             agent = self._make_agent(db)
 
             # Stub the context compressor: we only need to observe the hook.
@@ -130,10 +131,10 @@ class TestCompressionBoundaryHook:
 
     def test_hook_failure_does_not_break_compression(self):
         """If the context engine raises from on_session_start, compression still completes."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")
             agent = self._make_agent(db)
 
             compressor = MagicMock()
