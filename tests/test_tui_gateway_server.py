@@ -3936,9 +3936,12 @@ def test_append_model_switch_marker_fires_mid_conversation():
     """Once the conversation has a real turn, a switch DOES emit the marker."""
     appended = []
 
-    class _DB:
-        def append_message(self, **kwargs):
+    class _Messages:
+        def append(self, **kwargs):
             appended.append(kwargs)
+
+    class _DB:
+        messages = _Messages()
 
     agent = types.SimpleNamespace(_session_db=_DB(), session_id="session-key")
     session = _session(

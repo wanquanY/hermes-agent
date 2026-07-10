@@ -6,10 +6,7 @@ import json
 from types import SimpleNamespace
 
 from hermes_agent.storage.cli_session_store import open_cli_session_store
-from tui_gateway.core.session_config import (
-    _persist_live_session_runtime,
-    _persist_live_session_system_prompt,
-)
+from tui_gateway import server
 
 
 def test_session_runtime_config_updates_model_and_preserves_it_when_omitted(tmp_path):
@@ -57,7 +54,7 @@ def test_live_session_runtime_persists_through_session_component(tmp_path):
             service_tier="priority",
         )
 
-        _persist_live_session_runtime({"agent": agent, "session_key": "session-1"})
+        server._persist_live_session_runtime({"agent": agent, "session_key": "session-1"})
 
         row = store.sessions.get("session-1")
         assert row is not None
@@ -90,7 +87,7 @@ def test_live_system_prompt_persists_through_session_component(tmp_path):
                 return "updated system prompt"
 
         agent = _Agent()
-        _persist_live_session_system_prompt(
+        server._persist_live_session_system_prompt(
             {"agent": agent, "session_key": "session-1"}
         )
 

@@ -375,7 +375,7 @@ def _persisted_session_codex_runtime(session_key: str) -> dict:
         return {}
     try:
         db = _db_for_stable_session(key)
-        row = db.get_session(key) if db is not None else None
+        row = db.sessions.get(key) if db is not None else None
     except Exception:
         return {}
     if not isinstance(row, dict):
@@ -422,7 +422,7 @@ def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
         return "", None
     try:
         db = _db_for_stable_session(key)
-        row = db.get_session(key) if db is not None else None
+        row = db.sessions.get(key) if db is not None else None
     except Exception:
         return "", None
     if not isinstance(row, dict):
@@ -618,7 +618,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         agent = session.get("agent")
         db = getattr(agent, "_session_db", None) if agent is not None else None
         if db is not None:
-            db.append_message(session_id=session_key, role="system", content=marker)
+            db.messages.append(session_id=session_key, role="system", content=marker)
             return
 
         if "_ensure_session_db_row" in globals():
@@ -626,7 +626,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         if "_session_db" in globals():
             with _session_db(session) as scoped_db:
                 if scoped_db is not None:
-                    scoped_db.append_message(
+                    scoped_db.messages.append(
                         session_id=session_key, role="system", content=marker
                     )
     except Exception:
@@ -743,9 +743,9 @@ def _ensure_session_db_row(session: dict) -> None:
     if tier := session.get("create_service_tier_override"):
         model_config["service_tier"] = tier
     try:
-        db.create_session(
+        db.sessions.create(
             key,
-            source=_session_source(session),
+            source=_server._session_source(session),
             model=row_model,
             model_config=model_config or None,
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
@@ -1053,7 +1053,7 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
     with _session_db(session) as db:
         if db is not None:
             try:
-                db.update_session_cwd(session.get("session_key", ""), resolved)
+                db.sessions.update_cwd(session.get("session_key", ""), resolved)
             except Exception:
                 logger.debug("failed to persist session cwd", exc_info=True)
     try:
