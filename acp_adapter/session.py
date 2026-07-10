@@ -288,7 +288,7 @@ class SessionManager:
 
         if db is not None:
             try:
-                for row in db.list_sessions_rich(source="acp", limit=1000):
+                for row in db.sessions.list_rich(source="acp", limit=1000):
                     persisted_rows[str(row["id"])] = dict(row)
             except Exception:
                 logger.debug("Failed to load ACP sessions from DB", exc_info=True)
@@ -377,11 +377,11 @@ class SessionManager:
         db = self._get_db()
         if db is not None:
             try:
-                rows = db.search_sessions(source="acp", limit=10000)
+                rows = db.sessions.search(source="acp", limit=10000)
                 for row in rows:
                     sid = row["id"]
                     _clear_task_cwd(sid)
-                    db.delete_session(sid)
+                    db.sessions.delete(sid)
             except Exception:
                 logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
 
@@ -447,9 +447,9 @@ class SessionManager:
 
         try:
             # Ensure the session record exists.
-            existing = db.get_session(state.session_id)
+            existing = db.sessions.get(state.session_id)
             if existing is None:
-                db.create_session(
+                db.sessions.create(
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
@@ -470,7 +470,7 @@ class SessionManager:
             # Replace stored messages with current history atomically so a
             # mid-rewrite failure rolls back and the previously persisted
             # conversation is preserved (salvaged from #13675).
-            db.replace_messages(state.session_id, state.history)
+            db.messages.replace(state.session_id, state.history)
         except Exception:
             logger.warning("Failed to persist ACP session %s", state.session_id, exc_info=True)
 
@@ -483,7 +483,7 @@ class SessionManager:
             return None
 
         try:
-            row = db.get_session(session_id)
+            row = db.sessions.get(session_id)
         except Exception:
             logger.debug("Failed to query DB for ACP session %s", session_id, exc_info=True)
             return None
@@ -516,7 +516,7 @@ class SessionManager:
 
         # Load conversation history.
         try:
-            history = db.get_messages_as_conversation(session_id)
+            history = db.messages.all_as_conversation(session_id)
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []
@@ -554,7 +554,7 @@ class SessionManager:
         if db is None:
             return False
         try:
-            return db.delete_session(session_id)
+            return db.sessions.delete(session_id).session_deleted
         except Exception:
             logger.debug("Failed to delete ACP session %s from DB", session_id, exc_info=True)
             return False

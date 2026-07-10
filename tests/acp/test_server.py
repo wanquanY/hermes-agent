@@ -39,7 +39,7 @@ from acp.schema import (
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID
 from acp_adapter.server import HermesACPAgent, HERMES_VERSION
 from acp_adapter.session import SessionManager
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 @pytest.fixture()
@@ -970,7 +970,7 @@ class TestSessionConfiguration:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+        manager = SessionManager(db=open_cli_session_store(tmp_path / "state.db"))
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             acp_agent = HermesACPAgent(session_manager=manager)
@@ -1497,7 +1497,7 @@ class TestSlashCommands:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+        manager = SessionManager(db=open_cli_session_store(tmp_path / "state.db"))
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             acp_agent = HermesACPAgent(session_manager=manager)
