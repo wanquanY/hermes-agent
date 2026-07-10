@@ -204,11 +204,8 @@ def _route_kind_from_session_index(db: Any, session_id: str) -> str:
     session_id = _text(session_id)
     if not session_id:
         return ""
-    getter = getattr(db, "get_session_index", None)
-    if not callable(getter):
-        return ""
     try:
-        row = getter(session_id) or {}
+        row = db.session_index.get(session_id) or {}
     except Exception as exc:
         logger.warning(
             "conversation.render_snapshot route kind lookup skipped session_id=%s: %s",
@@ -355,7 +352,7 @@ def _participants_for_session(session_id: str) -> list[dict[str, Any]]:
         return []
     try:
         db = _get_db()
-        lister = getattr(db, "list_conversation_participants", None) if db is not None else None
+        lister = db.participants.list_conversation_participants if db is not None else None
         if not callable(lister):
             return []
         participants = lister(session_id) or []
@@ -375,10 +372,9 @@ def _mission_activities_for_session(session_id: str) -> list[dict[str, Any]]:
         return []
     try:
         db = _get_db()
-        lister = getattr(db, "list_active_mission_activities", None) if db is not None else None
-        if not callable(lister):
+        if db is None:
             return []
-        activities = lister(session_id) or []
+        activities = db.activities.list_active_missions(session_id) or []
         return [dict(item) for item in activities if isinstance(item, dict)]
     except Exception as exc:
         logger.warning(
@@ -387,29 +383,6 @@ def _mission_activities_for_session(session_id: str) -> list[dict[str, Any]]:
             exc,
         )
         return []
-
-
-def _sqlite_scalar(db: Any, sql: str, params: tuple[Any, ...]) -> Any:
-    conn = getattr(db, "_conn", None)
-    lock = getattr(db, "_lock", None)
-    if conn is None or lock is None:
-        return None
-    with lock:
-        row = conn.execute(sql, params).fetchone()
-    if row is None:
-        return None
-    try:
-        return row[0]
-    except Exception:
-        return None
-
-
-def _int_value(value: Any) -> int:
-    try:
-        parsed = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
 
 
 def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
@@ -427,13 +400,13 @@ def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
 
 def _run_event_session_last_seq(db: Any, session_id: str) -> int:
     session_id = _text(session_id)
-    if not session_id:
+    if not session_id or db is None:
         return 0
-    return _int_value(_sqlite_scalar(
-        db,
-        "SELECT next_seq - 1 FROM seq_counter WHERE session_id = ?",
-        (session_id,),
-    ))
+    try:
+        status = db.runs.session_status(session_id)
+    except Exception:
+        return 0
+    return max(int(status.get("last_event_seq") or 0), 0)
 
 
 def _mission_activity_last_seq(db: Any, mission_id: str) -> int:
