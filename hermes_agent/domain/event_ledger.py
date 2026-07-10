@@ -829,6 +829,39 @@ class EventLedger:
         ).fetchall()
         return list(rows)
 
+    def list_activity_id_backfill_rows(
+        self,
+        *,
+        after_id: int = 0,
+        limit: int = 5000,
+    ) -> list[Any]:
+        return list(
+            self._conn.execute(
+                """
+                SELECT id, session_id, event_json
+                  FROM run_events
+                 WHERE activity_id IS NULL
+                   AND id > ?
+                 ORDER BY id ASC
+                 LIMIT ?
+                """,
+                (max(0, int(after_id or 0)), max(1, int(limit or 5000))),
+            ).fetchall()
+        )
+
+    def has_activity_id_backfill_rows(self, *, after_id: int = 0) -> bool:
+        row = self._conn.execute(
+            """
+            SELECT 1
+              FROM run_events
+             WHERE activity_id IS NULL
+               AND id > ?
+             LIMIT 1
+            """,
+            (max(0, int(after_id or 0)),),
+        ).fetchone()
+        return row is not None
+
     def count_frame_backfill_rows(self, *, session_id: str = "") -> int:
         stable = str(session_id or "").strip()
         session_clause = "AND session_id = ?" if stable else ""

@@ -658,8 +658,8 @@ class StorageEngineMixin:
         query by activity dimension without scanning by session_id.
 
         See ADR-0001 (Activity as Runtime Primitive). The column is nullable
-        during Phase 0; backfill is done out-of-band by
-        ``tui_gateway.services.storage_backfill_activity_id``. After backfill
+        during Phase 0; backfill is owned by
+        ``RunEventMaintenanceService.backfill_activity_ids``. After backfill
         completes the read path may treat ``activity_id`` as authoritative,
         but the column stays nullable so legacy / orphan rows do not block
         writes.

@@ -203,11 +203,7 @@ class StorageMaintenanceService:
         # startup — the compaction result is still returned.
         try:
             backfill_started = time.monotonic()
-            from tui_gateway.services.storage_backfill_activity_id import (
-                backfill_run_events_activity_id,
-            )
-
-            backfill_result = backfill_run_events_activity_id(db)
+            backfill_result = db.run_event_maintenance.backfill_activity_ids()
             self._remember_record(
                 MaintenanceTaskRecord(
                     task="startup_activity_id_backfill",

@@ -7,6 +7,11 @@ import time
 from typing import Any
 
 from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.run_event_activity_backfill import (
+    ACTIVITY_ID_BACKFILL_DONE_KEY,
+    ACTIVITY_ID_BACKFILL_PROGRESS_KEY,
+    activity_id_for_legacy_event,
+)
 from hermes_agent.domain.run_event_compaction import RunEventCompactor
 from hermes_agent.domain.run_event_codec import (
     decode_run_event_row,
@@ -193,6 +198,76 @@ class RunEventMaintenanceService:
             }
 
         return self._unit_of_work.execute(operation)
+
+    def backfill_activity_ids(
+        self,
+        *,
+        dry_run: bool = False,
+        batch_size: int = 5000,
+    ) -> dict[str, Any]:
+        if self._metadata.get(ACTIVITY_ID_BACKFILL_DONE_KEY):
+            return {
+                "skipped": True,
+                "reason": "done",
+                "scanned": 0,
+                "updated": 0,
+            }
+        try:
+            after_id = int(
+                self._metadata.get(ACTIVITY_ID_BACKFILL_PROGRESS_KEY) or 0
+            )
+        except (TypeError, ValueError):
+            after_id = 0
+        bounded_batch_size = max(1, min(int(batch_size or 5000), 20000))
+        started = time.monotonic()
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any]:
+            ledger = EventLedger(conn)
+            rows = ledger.list_activity_id_backfill_rows(
+                after_id=after_id,
+                limit=bounded_batch_size,
+            )
+            next_max_id = after_id
+            updates: list[tuple[int, str]] = []
+            for row in rows:
+                row_id = int(row["id"] or 0)
+                next_max_id = max(next_max_id, row_id)
+                activity_id = activity_id_for_legacy_event(row)
+                if activity_id:
+                    updates.append((row_id, activity_id))
+            if not dry_run:
+                for row_id, activity_id in updates:
+                    ledger.mark_activity_id(
+                        row_id=row_id,
+                        activity_id=activity_id,
+                    )
+            return {
+                "scanned": len(rows),
+                "updated": 0 if dry_run else len(updates),
+                "next_max_id": next_max_id,
+                "done": not ledger.has_activity_id_backfill_rows(
+                    after_id=next_max_id,
+                ),
+            }
+
+        result = self._unit_of_work.execute(operation)
+        if not dry_run:
+            next_max_id = int(result.get("next_max_id") or 0)
+            if next_max_id > after_id:
+                self._metadata.set(
+                    ACTIVITY_ID_BACKFILL_PROGRESS_KEY,
+                    str(next_max_id),
+                )
+            if result.get("done"):
+                self._metadata.set(
+                    ACTIVITY_ID_BACKFILL_DONE_KEY,
+                    str(int(time.time())),
+                )
+        return {
+            "skipped": False,
+            **result,
+            "duration_s": time.monotonic() - started,
+        }
 
     def reference_payloads(
         self,
