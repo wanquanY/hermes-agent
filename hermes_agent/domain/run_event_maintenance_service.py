@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Any
 
 from hermes_agent.domain.event_ledger import EventLedger
@@ -18,6 +19,8 @@ from hermes_agent.domain.run_event_index import (
 from hermes_agent.domain.run_event_reference import (
     reference_projected_run_event_payloads,
 )
+from hermes_agent.domain.session_runtime_state import session_info_payload_hash
+from hermes_agent.domain.state_metadata_service import StateMetadataService
 from hermes_agent.read_models.tool_events import backfill_tool_events_from_run_events
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
@@ -29,10 +32,12 @@ class RunEventMaintenanceService:
         self,
         conn: sqlite3.Connection,
         unit_of_work: SqliteUnitOfWork,
+        metadata: StateMetadataService,
     ) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
         self._unit_of_work = unit_of_work
+        self._metadata = metadata
         self._retention = RunEventRetentionPolicy()
         self._compactor = RunEventCompactor(self._retention)
 
@@ -50,6 +55,83 @@ class RunEventMaintenanceService:
                 self._conn.execute("VACUUM")
             result = {**result, "vacuumed": True}
         return result
+
+    def maybe_auto_compact(
+        self,
+        *,
+        min_interval_hours: int = 24,
+        vacuum: bool = True,
+    ) -> dict[str, Any]:
+        now = time.time()
+        try:
+            last_run = float(
+                self._metadata.get("last_auto_run_event_compaction_v1") or 0
+            )
+        except (TypeError, ValueError):
+            last_run = 0.0
+        interval_seconds = max(0, int(min_interval_hours or 0)) * 3600
+        if last_run and now - last_run < interval_seconds:
+            return {"skipped": True, "reason": "interval"}
+        result = self.compact(vacuum=vacuum)
+        self._metadata.set("last_auto_run_event_compaction_v1", str(now))
+        return {"skipped": False, **result}
+
+    def prune_duplicate_session_info(
+        self,
+        *,
+        session_id: str = "",
+    ) -> dict[str, int]:
+        stable_filter = str(session_id or "").strip()
+
+        def operation(conn: sqlite3.Connection) -> dict[str, int]:
+            params: tuple[str, ...] = (stable_filter,) if stable_filter else ()
+            session_clause = "AND session_id = ?" if stable_filter else ""
+            rows = conn.execute(
+                f"""
+                SELECT *
+                  FROM run_events
+                 WHERE event_type = 'session.info'
+                   {session_clause}
+                 ORDER BY session_id ASC, seq ASC, id ASC
+                """,
+                params,
+            ).fetchall()
+            previous_by_identity: dict[
+                tuple[str, str, str, str, str], tuple[str, sqlite3.Row]
+            ] = {}
+            duplicates: list[sqlite3.Row] = []
+            for row in rows:
+                event = decode_run_event_row(row)
+                payload = (
+                    event.get("payload")
+                    if isinstance(event.get("payload"), dict)
+                    else {}
+                )
+                identity = (
+                    str(event.get("conversation_session_id") or row["session_id"] or ""),
+                    str(event.get("runtime_scope_key") or row["runtime_scope_key"] or ""),
+                    str(
+                        event.get("execution_session_id")
+                        or event.get("session_id")
+                        or row["execution_session_id"]
+                        or ""
+                    ),
+                    str(event.get("run_id") or row["run_id"] or ""),
+                    str(event.get("turn_id") or row["turn_id"] or ""),
+                )
+                payload_hash = session_info_payload_hash(payload)
+                previous = previous_by_identity.get(identity)
+                if previous is not None and previous[0] == payload_hash:
+                    duplicates.append(previous[1])
+                previous_by_identity[identity] = (payload_hash, row)
+            if not duplicates:
+                return {"deleted_events": 0}
+            ledger = EventLedger(conn)
+            ledger.archive_rows(duplicates, reason="duplicate_session_info")
+            ledger.delete_rows_by_id(int(row["id"]) for row in duplicates)
+            return {"deleted_events": len(duplicates)}
+
+        return self._unit_of_work.execute(operation)
 
     def backfill_frames(
         self,
