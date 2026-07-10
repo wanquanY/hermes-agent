@@ -89,6 +89,19 @@ def test_retired_state_mixin_forwarding_package_has_no_source_modules() -> None:
     assert not list(forwarding_dir.glob("*.py"))
 
 
+def test_unreferenced_top_level_state_facade_modules_are_absent() -> None:
+    retired_modules = {
+        "hermes_state_activities.py",
+        "hermes_state_agent_profiles.py",
+        "hermes_state_branch.py",
+        "hermes_state_member_chat.py",
+        "hermes_state_runs.py",
+        "hermes_state_team_capabilities.py",
+        "hermes_state_team_registry.py",
+    }
+    assert not {path.name for path in REPO_ROOT.iterdir()} & retired_modules
+
+
 def _iter_blessed_files():
     for tree in _BLESSED_TREES:
         root = REPO_ROOT / tree
