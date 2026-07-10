@@ -50,6 +50,8 @@ class SessionIndexReconciler:
         )
 
         self._delete_internal_runtime_index_rows()
+        if excluded:
+            self._sessions.delete_index_by_sources(excluded)
         rows = self._conn.execute(select_sql, tuple(params)).fetchall()
         upserted = 0
         for row in rows:

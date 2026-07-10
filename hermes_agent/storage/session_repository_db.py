@@ -16,7 +16,13 @@ from typing import Any
 from hermes_constants import get_hermes_home
 from hermes_agent.domain.seq_allocator import ensure_seq_counter_table
 from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
+from hermes_agent.repositories.session_repo import ensure_session_lineage_repository_schema
+from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import ensure_team_registry_repository_schema
+from hermes_agent.storage.state_schema import RUNTIME_DEFERRED_INDEX_SQL, SCHEMA_SQL
+from hermes_agent.storage.execution_session_migration import (
+    reconcile_legacy_delegate_execution_sessions,
+)
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
 from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
@@ -166,8 +172,19 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS session_lineage (
-            session_id TEXT NOT NULL,
-            branch_origin TEXT NOT NULL DEFAULT ''
+            session_id TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            root_session_id TEXT NOT NULL,
+            branch_from_message_row_id INTEGER,
+            branch_from_turn_id TEXT,
+            branch_from_run_id TEXT,
+            branch_from_client_message_id TEXT,
+            branch_origin TEXT NOT NULL,
+            branch_mode TEXT NOT NULL,
+            branch_depth INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
         );
 
         CREATE TABLE IF NOT EXISTS messages (
@@ -236,10 +253,32 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             "active": "INTEGER NOT NULL DEFAULT 1",
         },
     )
+    ensure_session_lineage_repository_schema(conn)
+    ensure_runtime_repository_schema(conn)
     ensure_agent_profile_repository_schema(conn)
     ensure_seq_counter_table(conn)
     ensure_team_registry_repository_schema(conn)
     ensure_session_index_read_side_schema(conn)
+    migrated_executions = reconcile_legacy_delegate_execution_sessions(conn)
+    if migrated_executions:
+        logger.info(
+            "Session repository classified %d legacy delegated executions",
+            migrated_executions,
+        )
+
+
+def ensure_runtime_repository_schema(conn: sqlite3.Connection) -> None:
+    """Create and verify repository-owned runtime tables."""
+
+    conn.executescript(SCHEMA_SQL)
+    conn.executescript(RUNTIME_DEFERRED_INDEX_SQL)
+    for table_name in ("runs", "run_events", "session_runtime_state"):
+        columns = _table_columns(conn, table_name)
+        if "execution_session_id" not in columns:
+            raise RuntimeError(
+                f"runtime repository schema is not canonical for {table_name}: "
+                f"columns={sorted(columns)}"
+            )
 
 
 def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
@@ -292,6 +331,7 @@ def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
             WHERE kind = 'mission' AND COALESCE(target_mission_id, '') != '';
         """
     )
+    TeamMissionRepoImpl(conn).migrate_legacy_activities_kind_mission_check()
     cursor = conn.cursor()
     cursor.executescript(team_mission_schema_sql())
     migrate_team_mission_runtime_session_columns(cursor)
@@ -318,4 +358,15 @@ def _ensure_columns(
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
-__all__ = ["connect_session_repository_db", "ensure_session_repository_schema"]
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+__all__ = [
+    "connect_session_repository_db",
+    "ensure_runtime_repository_schema",
+    "ensure_session_repository_schema",
+]

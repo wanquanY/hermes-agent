@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
+from hermes_agent.domain.session_runtime_state import session_info_record
 from hermes_agent.repositories.base import RepositoryConnection
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,8 @@ class SessionRepo(Protocol):
 
     def touch_message_activity(self, session_id: str, timestamp: float) -> None: ...
 
+    def project_runtime_state_event(self, event: dict[str, Any]) -> None: ...
+
     def project_run_state(self, projection: SessionRunProjection) -> None: ...
 
     def resolve_resume_session_id(self, session_id: str) -> str: ...
@@ -308,6 +311,8 @@ class SessionRepo(Protocol):
     def reopen(self, session_id: str) -> None: ...
 
     def normalize_index_conversation_kind(self) -> int: ...
+
+    def classify_internal_execution(self, session_id: str) -> bool: ...
 
     def increment_rewind_count(self, session_id: str) -> bool: ...
 
@@ -327,15 +332,17 @@ class SessionRepoImpl:
         stable = str(spec.session_id or "").strip()
         if not stable:
             raise ValueError("SessionSpec.session_id is required")
+        normalized_title = sanitize_session_title(spec.title)
         now = time.time()
         self._conn.execute(
             """
-            INSERT OR REPLACE INTO sessions (
+            INSERT INTO sessions (
                 id, source, user_id, model, model_config,
                 title, display_title, display_title_source,
                 session_kind, conversation_kind, parent_session_id,
                 started_at, updated_at, transient
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
             """,
             (
                 stable,
@@ -343,7 +350,7 @@ class SessionRepoImpl:
                 str(spec.user_id or ""),
                 str(spec.model or ""),
                 _encode_model_config(spec.model_config),
-                str(spec.title or ""),
+                normalized_title,
                 str(spec.display_title or ""),
                 str(spec.display_title_source or ""),
                 str(spec.session_kind or "hermes_session"),
@@ -354,30 +361,55 @@ class SessionRepoImpl:
                 1 if spec.transient else 0,
             ),
         )
-        # spec §4.1 — session_index row auto-provisioned so downstream
-        # projections have a target for update_index().
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO session_index (
-                session_id, owner_agent_profile_id, owner_profile_version_id,
-                runtime_scope_key, title, source, transient, session_kind,
-                conversation_kind, started_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                stable,
-                str(spec.owner_agent_profile_id or ""),
-                str(spec.owner_profile_version_id or ""),
-                str(spec.runtime_scope_key or ""),
-                str(spec.title or ""),
-                str(spec.source or "unknown"),
-                1 if spec.transient else 0,
-                str(spec.session_kind or "hermes_session"),
-                str(spec.conversation_kind or "direct"),
-                now,
-                now,
-            ),
-        )
+        # session_index is the user-visible Conversation projection. Execution
+        # sessions remain durable in sessions/messages/run_events, but must not
+        # become independently navigable sidebar conversations.
+        if _is_user_visible_conversation(spec):
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO session_index (
+                    session_id, owner_agent_profile_id, owner_profile_version_id,
+                    runtime_scope_key, title, source, transient, session_kind,
+                    conversation_kind, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stable,
+                    str(spec.owner_agent_profile_id or ""),
+                    str(spec.owner_profile_version_id or ""),
+                    str(spec.runtime_scope_key or ""),
+                    str(spec.title or ""),
+                    str(spec.source or "unknown"),
+                    1 if spec.transient else 0,
+                    str(spec.session_kind or "hermes_session"),
+                    str(spec.conversation_kind or "direct"),
+                    now,
+                    now,
+                ),
+            )
+        else:
+            # Explicit execution classification is authoritative even when a
+            # placeholder row won the create race first.
+            self._conn.execute(
+                """
+                UPDATE sessions
+                   SET session_kind = ?, conversation_kind = ?,
+                       parent_session_id = COALESCE(NULLIF(?, ''), parent_session_id),
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (
+                    str(spec.session_kind or "execution"),
+                    str(spec.conversation_kind or "internal"),
+                    str(spec.parent_session_id or ""),
+                    now,
+                    stable,
+                ),
+            )
+            self._conn.execute(
+                "DELETE FROM session_index WHERE session_id = ?",
+                (stable,),
+            )
         got = self.get(stable)
         assert got is not None, "SessionRepoImpl.create postcondition violated"
         return got
@@ -887,7 +919,7 @@ class SessionRepoImpl:
             "parent_session_id": parent_session_id,
             "started_at": now,
             "updated_at": now,
-            "title": title,
+            "title": sanitize_session_title(title),
             "cwd": cwd,
             "archived": 1 if archived else 0,
             "session_kind": session_kind or "hermes_session",
@@ -1006,12 +1038,28 @@ class SessionRepoImpl:
         )
         return int(cursor.rowcount or 0) > 0
 
+    def delete_index_by_sources(self, sources: tuple[str, ...]) -> int:
+        normalized = tuple(
+            str(source or "").strip()
+            for source in sources
+            if str(source or "").strip()
+        )
+        if not normalized or not _table_exists(self._conn, "session_index"):
+            return 0
+        placeholders = ",".join("?" for _ in normalized)
+        cursor = self._conn.execute(
+            f"DELETE FROM session_index WHERE COALESCE(source, '') IN ({placeholders})",
+            normalized,
+        )
+        return max(0, int(cursor.rowcount or 0))
+
     def create_materialized_branch_session(self, spec: MaterializedBranchSessionSpec) -> bool:
         stable = str(spec.new_session_id or "").strip()
         if not stable:
             raise ValueError("new_session_id is required")
         source_row = spec.source_row
         created_at = float(spec.created_at or time.time())
+        normalized_title = sanitize_session_title(spec.title)
         values_by_column: dict[str, Any] = {
             "id": stable,
             "source": _row_any(source_row, "source", ""),
@@ -1023,9 +1071,9 @@ class SessionRepoImpl:
             "started_at": created_at,
             "updated_at": created_at,
             "last_active": created_at,
-            "title": str(spec.title or ""),
-            "display_title": str(spec.title or ""),
-            "display_title_source": "branch_title" if spec.title else "",
+            "title": normalized_title,
+            "display_title": normalized_title or "",
+            "display_title_source": "branch_title" if normalized_title else "",
             "transient": int(_row_any(source_row, "transient", 0) or 0),
             "message_count": int(spec.message_count or 0),
             "tool_call_count": int(spec.tool_call_count or 0),
@@ -1039,7 +1087,43 @@ class SessionRepoImpl:
             """,
             [values_by_column[column] for column in columns],
         )
-        return int(cursor.rowcount or 0) > 0
+        created = int(cursor.rowcount or 0) > 0
+        if created and _table_exists(self._conn, "session_index"):
+            source_session_id = str(_row_any(source_row, "id", "") or "")
+            source_index = self._conn.execute(
+                "SELECT * FROM session_index WHERE session_id = ?",
+                (source_session_id,),
+            ).fetchone()
+            index_values = dict(source_index) if source_index is not None else {
+                "source": str(_row_any(source_row, "source", "unknown") or "unknown"),
+                "transient": int(_row_any(source_row, "transient", 0) or 0),
+                "session_kind": str(
+                    _row_any(source_row, "session_kind", "hermes_session")
+                    or "hermes_session"
+                ),
+                "conversation_kind": str(
+                    _row_any(source_row, "conversation_kind", "direct") or "direct"
+                ),
+            }
+            index_values.update(
+                {
+                    "session_id": stable,
+                    "title": normalized_title or "",
+                    "preview": "",
+                    "status": "idle",
+                    "running": 0,
+                    "waiting_approval": 0,
+                    "active_run_id": "",
+                    "active_execution_session_id": "",
+                    "pending_approval_count": 0,
+                    "message_count": int(spec.message_count or 0),
+                    "started_at": created_at,
+                    "updated_at": created_at,
+                    "last_activity": created_at,
+                }
+            )
+            self.upsert_session_index(index_values)
+        return created
 
     def record_branch_lineage(self, spec: BranchLineageSpec) -> None:
         created_at = float(spec.created_at or time.time())
@@ -1218,6 +1302,32 @@ class SessionRepoImpl:
         )
         return int(cursor.rowcount or 0)
 
+    def classify_internal_execution(self, session_id: str) -> bool:
+        """Make a durable session an internal execution and hide its index row."""
+
+        canonical_session_id = str(session_id or "").strip()
+        if not canonical_session_id:
+            return False
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET session_kind = 'execution',
+                   conversation_kind = 'internal',
+                   updated_at = MAX(COALESCE(updated_at, 0), COALESCE(last_active, 0), started_at)
+             WHERE id = ?
+               AND (
+                    COALESCE(session_kind, '') != 'execution'
+                    OR COALESCE(conversation_kind, '') != 'internal'
+               )
+            """,
+            (canonical_session_id,),
+        )
+        self._conn.execute(
+            "DELETE FROM session_index WHERE session_id = ?",
+            (canonical_session_id,),
+        )
+        return int(cursor.rowcount or 0) > 0
+
     def upsert_session_index(self, values: dict[str, Any]) -> dict[str, Any]:
         cols = list(values.keys())
         placeholders = ", ".join(f":{column}" for column in cols)
@@ -1265,6 +1375,59 @@ class SessionRepoImpl:
              WHERE session_id = ?
             """,
             (ts, ts, stable),
+        )
+
+    def project_runtime_state_event(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        record = session_info_record(
+            session_id=str(
+                event.get("conversation_session_id")
+                or event.get("session_id")
+                or ""
+            ),
+            payload=payload,
+            runtime_scope_key=str(event.get("runtime_scope_key") or ""),
+            execution_session_id=str(event.get("execution_session_id") or ""),
+            run_id=str(event.get("run_id") or ""),
+            turn_id=str(event.get("turn_id") or ""),
+            updated_at=float(event.get("timestamp") or 0),
+            source_seq=int(event.get("seq") or 0),
+        )
+        self._conn.execute(
+            """
+            INSERT INTO session_runtime_state (
+                session_id, runtime_scope_key, execution_session_id, run_id,
+                turn_id, status, model, provider, profile_json,
+                payload_hash, updated_at, source_seq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                runtime_scope_key = excluded.runtime_scope_key,
+                execution_session_id = excluded.execution_session_id,
+                run_id = excluded.run_id,
+                turn_id = excluded.turn_id,
+                status = excluded.status,
+                model = excluded.model,
+                provider = excluded.provider,
+                profile_json = excluded.profile_json,
+                payload_hash = excluded.payload_hash,
+                updated_at = excluded.updated_at,
+                source_seq = excluded.source_seq
+            WHERE excluded.source_seq >= COALESCE(session_runtime_state.source_seq, 0)
+            """,
+            (
+                record["session_id"],
+                record["runtime_scope_key"],
+                record["execution_session_id"],
+                record["run_id"],
+                record["turn_id"],
+                record["status"],
+                record["model"],
+                record["provider"],
+                record["profile_json"],
+                record["payload_hash"],
+                record["updated_at"],
+                record["source_seq"],
+            ),
         )
 
     def project_run_state(self, projection: SessionRunProjection) -> None:
@@ -1692,6 +1855,12 @@ def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _is_user_visible_conversation(spec: SessionSpec) -> bool:
+    session_kind = str(spec.session_kind or "hermes_session").strip().lower()
+    conversation_kind = str(spec.conversation_kind or "direct").strip().lower()
+    return session_kind != "execution" and conversation_kind in {"direct", "team"}
+
+
 MAX_SESSION_TITLE_LENGTH = 100
 
 
@@ -1730,6 +1899,47 @@ def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
 
 def _table_exists(conn: RepositoryConnection, table_name: str) -> bool:
     return bool(_table_columns(conn, table_name))
+
+
+def ensure_session_lineage_repository_schema(conn: RepositoryConnection) -> None:
+    """Upgrade legacy lineage rows to the Session aggregate's canonical shape."""
+    columns = _table_columns(conn, "session_lineage")
+    additions = {
+        "parent_session_id": "TEXT",
+        "root_session_id": "TEXT NOT NULL DEFAULT ''",
+        "branch_from_message_row_id": "INTEGER",
+        "branch_from_turn_id": "TEXT",
+        "branch_from_run_id": "TEXT",
+        "branch_from_client_message_id": "TEXT",
+        "branch_origin": "TEXT NOT NULL DEFAULT 'legacy'",
+        "branch_mode": "TEXT NOT NULL DEFAULT 'legacy'",
+        "branch_depth": "INTEGER NOT NULL DEFAULT 0",
+        "created_at": "REAL NOT NULL DEFAULT 0",
+    }
+    for name, ddl in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE session_lineage ADD COLUMN {name} {ddl}")
+    conn.execute(
+        "UPDATE session_lineage SET root_session_id = session_id "
+        "WHERE COALESCE(root_session_id, '') = ''"
+    )
+    conn.execute(
+        "DELETE FROM session_lineage WHERE rowid NOT IN ("
+        "SELECT MAX(rowid) FROM session_lineage GROUP BY session_id"
+        ")"
+    )
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_lineage_session
+            ON session_lineage(session_id);
+        CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
+            ON session_lineage(parent_session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_session_lineage_root
+            ON session_lineage(root_session_id, branch_depth, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point
+            ON session_lineage(branch_from_message_row_id);
+        """
+    )
 
 
 def _column_exists(conn: RepositoryConnection, table_name: str, column_name: str) -> bool:
@@ -1773,6 +1983,7 @@ __all__ = [
     "SessionIndexPatch",
     "SessionMessageAppendProjection",
     "SessionMessageSnapshotProjection",
+    "ensure_session_lineage_repository_schema",
     "sanitize_session_title",
     "SessionNotFound",
     "SessionRepo",

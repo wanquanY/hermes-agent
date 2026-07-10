@@ -74,6 +74,7 @@ class SessionRecallReadModel:
         id_query: str | None = None,
         min_message_count: int = 0,
         archived: str = "false",
+        include_internal: bool = False,
     ) -> list[dict[str, Any]]:
         if not self._table_exists("sessions"):
             return []
@@ -87,6 +88,11 @@ class SessionRecallReadModel:
         params: list[Any] = []
         columns = self._table_columns("sessions")
         has_archived = "archived" in columns
+        if not include_internal:
+            if "session_kind" in columns:
+                where.append("COALESCE(session_kind, 'hermes_session') != 'execution'")
+            if "conversation_kind" in columns:
+                where.append("COALESCE(conversation_kind, 'direct') IN ('direct', 'team')")
         if not include_children and "parent_session_id" in columns:
             if self._table_exists("session_lineage"):
                 where.append(
@@ -256,6 +262,10 @@ class SessionRecallReadModel:
             raise ValueError(f"unsupported archived filter: {archived!r}")
         where: list[str] = []
         params: list[Any] = []
+        if "session_kind" in columns:
+            where.append("COALESCE(session_kind, 'hermes_session') != 'execution'")
+        if "conversation_kind" in columns:
+            where.append("COALESCE(conversation_kind, 'direct') IN ('direct', 'team')")
         if source:
             where.append("source = ?")
             params.append(str(source))

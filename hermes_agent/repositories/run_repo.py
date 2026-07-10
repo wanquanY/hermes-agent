@@ -10,15 +10,27 @@ from typing import Any, Protocol, runtime_checkable
 
 from hermes_agent.domain.canonical_event import CanonicalEvent as DomainCanonicalEvent
 from hermes_agent.domain.event_ledger import EventLedger, LedgerEvent
+from hermes_agent.domain.run_event_codec import decode_run_event_row, encode_run_event_frame
+from hermes_agent.domain.run_event_index import (
+    project_run_event_search_index_from_row,
+    runtime_source_seq_from_event,
+)
+from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_agent.domain.run_state_machine import error_for_status
+from hermes_agent.domain.run_state_machine import event_opens_active_run
+from hermes_agent.domain.run_state_machine import prefer_terminal_run_status
 from hermes_agent.domain.run_state_machine import resolve_explicit_run_status
+from hermes_agent.domain.run_state_machine import resolve_run_status_transition
+from hermes_agent.domain.run_state_machine import terminal_status_from_event
 from hermes_agent.domain.run_terminator import (
     TerminateCause,
     TerminateResult,
     terminate_run as _terminate_run_atomic,
 )
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.read_models.tool_events import TOOL_EVENT_TYPES, project_tool_event
+from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPolicy
 
 
 @dataclass(frozen=True)
@@ -123,6 +135,15 @@ class RunRepo(Protocol):
         allocate_seq: bool = True,
     ) -> int: ...
 
+    def append_runtime_event(
+        self,
+        session_id: str,
+        event: dict[str, Any],
+        *,
+        participant_id: str = "",
+        activity_id: str = "",
+    ) -> dict[str, Any]: ...
+
     def list_events(
         self,
         session_id: str,
@@ -171,6 +192,7 @@ class RunRepoImpl:
     def __init__(self, conn: RepositoryConnection) -> None:
         self._conn = conn
         self._ledger = EventLedger(conn)
+        self._retention = RunEventRetentionPolicy()
 
     # ------------------------------------------------------------------
 
@@ -402,6 +424,222 @@ class RunRepoImpl:
         )
         return outcome.seq
 
+    def append_runtime_event(
+        self,
+        session_id: str,
+        event: dict[str, Any],
+        *,
+        participant_id: str = "",
+        activity_id: str = "",
+    ) -> dict[str, Any]:
+        """Persist one normalized runtime frame before transport delivery.
+
+        Runtime-provided sequence numbers are retained as source metadata. The
+        repository allocates the canonical, conversation-scoped sequence in the
+        same transaction that appends the ledger row and updates projections.
+        """
+
+        stable = str(session_id or "").strip()
+        frame = dict(event or {})
+        event_type = str(frame.get("type") or "").strip()
+        if not stable or not event_type:
+            raise ValueError("session_id and event.type are required")
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        payload = dict(payload)
+        frame["payload"] = payload
+        run_id = _event_text(frame, payload, "run_id", "runId")
+        turn_id = _event_text(frame, payload, "turn_id", "turnId")
+        execution_session_id = _first_text(
+            frame.get("execution_session_id"),
+            payload.get("execution_session_id"),
+        )
+        runtime_scope_key = _first_text(
+            frame.get("runtime_scope_key"),
+            payload.get("runtime_scope_key"),
+            stable,
+        )
+        event_participant_id = _first_text(
+            participant_id,
+            frame.get("participant_id"),
+            frame.get("participantId"),
+            payload.get("participant_id"),
+            payload.get("participantId"),
+        )
+        event_activity_id = _first_text(
+            activity_id,
+            frame.get("activity_id"),
+            frame.get("activityId"),
+            payload.get("activity_id"),
+            payload.get("activityId"),
+        )
+        timestamp = _float_value(frame.get("timestamp"), time.time())
+        inbound_seq = _positive_int(frame.get("seq"))
+        if inbound_seq > 0 and runtime_source_seq_from_event(frame) <= 0:
+            frame["runtime_source_seq"] = inbound_seq
+        runtime_source_seq = runtime_source_seq_from_event(frame)
+        terminal_status = terminal_status_from_event(event_type, payload)
+        existing = self._conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone() if run_id else None
+        existing_status = str(existing["status"] or "") if existing is not None else ""
+        if (
+            existing is not None
+            and existing_status in TERMINAL_RUN_STATUSES
+            and terminal_status in TERMINAL_RUN_STATUSES
+            and prefer_terminal_run_status(existing_status, terminal_status) == existing_status
+        ):
+            return self._existing_terminal_event(
+                stable,
+                run_id,
+                existing_status,
+                existing,
+            )
+
+        canonical_seq = allocate_run_event_seq(
+            self._conn,
+            session_id=stable,
+            updated_at=timestamp,
+        )
+        frame.update(
+            {
+                "conversation_session_id": stable,
+                "session_id": stable,
+                "execution_session_id": execution_session_id,
+                "runtime_scope_key": runtime_scope_key,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "participant_id": event_participant_id,
+                "seq": canonical_seq,
+                "timestamp": timestamp,
+            }
+        )
+        if event_activity_id:
+            frame["activity_id"] = event_activity_id
+        frame_blob, frame_format = encode_run_event_frame(frame)
+        interaction_request_id = _first_text(
+            payload.get("interaction_request_id"),
+            payload.get("request_id"),
+        )
+        interaction_kind = _first_text(payload.get("interaction_kind"), payload.get("kind"))
+        interaction_status = _first_text(
+            payload.get("interaction_status"),
+            payload.get("status"),
+            payload.get("state"),
+        )
+        anchor_seq = _positive_int(payload.get("anchor_seq") or frame.get("anchor_seq"))
+        ignored_after_terminal = bool(
+            existing_status in TERMINAL_RUN_STATUSES
+            and terminal_status is None
+            and event_opens_active_run(event_type)
+        )
+        self._ledger.append_runtime_frame(
+            session_id=stable,
+            run_id=run_id,
+            turn_id=turn_id,
+            execution_session_id=execution_session_id,
+            runtime_scope_key=runtime_scope_key,
+            participant_id=event_participant_id,
+            activity_id=event_activity_id or None,
+            event_type=event_type,
+            seq=canonical_seq,
+            timestamp=timestamp,
+            payload_json=_json_dumps(payload),
+            event_json=_json_dumps(frame),
+            status="ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
+            frame_blob=frame_blob,
+            frame_format=frame_format,
+            retention_class=self._retention.classify_event_type(event_type),
+            interaction_request_id=interaction_request_id or None,
+            interaction_kind=interaction_kind or None,
+            interaction_status=interaction_status or None,
+            anchor_seq=anchor_seq,
+            projection_state="raw",
+            runtime_source_seq=runtime_source_seq,
+        )
+        inserted_row = self._conn.execute(
+            "SELECT * FROM run_events WHERE session_id = ? AND seq = ?",
+            (stable, canonical_seq),
+        ).fetchone()
+        if inserted_row is None:
+            raise RuntimeError(f"run event append failed for {stable}/{canonical_seq}")
+        project_run_event_search_index_from_row(self._conn, inserted_row)
+        if event_type in TOOL_EVENT_TYPES and not ignored_after_terminal:
+            projected_tool = project_tool_event(self._conn, frame)
+            if isinstance(projected_tool, dict) and projected_tool.get("id"):
+                frame["_projected_tool_event_id"] = projected_tool["id"]
+                self._ledger.mark_projected_tool_event(
+                    row_id=int(inserted_row["id"]),
+                    tool_event_id=str(projected_tool["id"]),
+                )
+        if ignored_after_terminal:
+            frame["_persistence_disposition"] = "ignored_after_terminal"
+            return frame
+        if run_id:
+            transition = resolve_run_status_transition(
+                event_type=event_type,
+                existing_status=existing_status,
+                terminal_status=terminal_status,
+                has_existing_run=existing is not None,
+            )
+            if transition.should_track:
+                metadata = _json_loads(existing["metadata_json"], {}) if existing is not None else {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                owner_metadata = frame.get("owner_metadata")
+                if isinstance(owner_metadata, dict):
+                    metadata.update(owner_metadata)
+                self.upsert_materialized_state(
+                    run_id=run_id,
+                    session_id=stable,
+                    runtime_scope_key=runtime_scope_key,
+                    turn_id=turn_id,
+                    execution_session_id=execution_session_id,
+                    status=transition.status,
+                    started_at=timestamp,
+                    updated_at=timestamp,
+                    completed_at=(
+                        timestamp if transition.status in TERMINAL_RUN_STATUSES else None
+                    ),
+                    last_seq=canonical_seq,
+                    error=error_for_status(
+                        status=transition.status,
+                        payload=payload,
+                        existing_error=str(existing["error"] or "") if existing is not None else "",
+                    ),
+                    metadata=metadata,
+                )
+        return frame
+
+    def _existing_terminal_event(
+        self,
+        session_id: str,
+        run_id: str,
+        status: str,
+        run_row: Any,
+    ) -> dict[str, Any]:
+        row = self._conn.execute(
+            """
+            SELECT * FROM run_events
+             WHERE session_id = ? AND run_id = ? AND status = ?
+             ORDER BY seq DESC, id DESC LIMIT 1
+            """,
+            (session_id, run_id, status),
+        ).fetchone()
+        saved = decode_run_event_row(row) if row is not None else {}
+        if not saved:
+            saved = {
+                "type": "message.complete",
+                "session_id": session_id,
+                "conversation_session_id": session_id,
+                "execution_session_id": str(run_row["execution_session_id"] or ""),
+                "run_id": run_id,
+                "seq": int(run_row["last_seq"] or 0),
+                "payload": {"status": "complete" if status == "completed" else status},
+            }
+        saved["_persistence_disposition"] = "duplicate_terminal"
+        return saved
+
     def list_events(
         self,
         session_id: str,
@@ -486,6 +724,44 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _event_text(
+    frame: dict[str, Any],
+    payload: dict[str, Any],
+    snake_key: str,
+    camel_key: str,
+) -> str:
+    return _first_text(
+        frame.get(snake_key),
+        frame.get(camel_key),
+        payload.get(snake_key),
+        payload.get(camel_key),
+    )
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _float_value(value: Any, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    return parsed if parsed > 0 else float(fallback)
 
 
 __all__ = [

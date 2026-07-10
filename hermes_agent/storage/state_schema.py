@@ -582,3 +582,52 @@ CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_mission
 CREATE INDEX IF NOT EXISTS idx_team_capability_snapshot_bindings_conversation
     ON team_capability_snapshot_bindings(conversation_id);
 """
+
+# Repository-owned runtime storage can be bootstrapped independently from the
+# legacy aggregate schema. Keep its deferred indexes executable without first
+# reconciling unrelated table families such as session_lineage.
+RUNTIME_DEFERRED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_run_events_activity_seq
+    ON run_events(activity_id, seq)
+    WHERE activity_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_runs_session_status
+    ON runs(session_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_scope_status
+    ON runs(runtime_scope_key, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_events_session_seq
+    ON run_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_scope_seq
+    ON run_events(runtime_scope_key, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_run
+    ON run_events(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_events_participant
+    ON run_events(participant_id);
+CREATE INDEX IF NOT EXISTS idx_run_events_retention_class
+    ON run_events(retention_class, timestamp);
+CREATE INDEX IF NOT EXISTS idx_run_events_projection_state
+    ON run_events(projection_state, session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_runtime_source_seq
+    ON run_events(session_id, runtime_source_seq, event_type);
+CREATE INDEX IF NOT EXISTS idx_run_events_interaction_request
+    ON run_events(interaction_request_id, seq)
+    WHERE interaction_request_id IS NOT NULL AND interaction_request_id != '';
+CREATE INDEX IF NOT EXISTS idx_run_events_interaction_pending
+    ON run_events(session_id, interaction_status, seq)
+    WHERE interaction_request_id IS NOT NULL AND interaction_request_id != '';
+CREATE INDEX IF NOT EXISTS idx_run_event_search_index_session_seq
+    ON run_event_search_index(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_event_search_index_source_seq
+    ON run_event_search_index(session_id, runtime_source_seq, event_type);
+CREATE INDEX IF NOT EXISTS idx_session_runtime_state_scope
+    ON session_runtime_state(runtime_scope_key, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_runtime_state_status
+    ON session_runtime_state(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_events_session_seq
+    ON tool_events(session_id, seq_start, seq_last);
+CREATE INDEX IF NOT EXISTS idx_tool_events_run
+    ON tool_events(run_id, seq_start);
+CREATE INDEX IF NOT EXISTS idx_tool_events_participant
+    ON tool_events(participant_id);
+CREATE INDEX IF NOT EXISTS idx_run_event_archives_session
+    ON run_event_archives(session_id, archived_at DESC);
+"""

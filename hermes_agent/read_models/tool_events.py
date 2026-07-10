@@ -6,7 +6,9 @@ import json
 import sqlite3
 from typing import Any
 
+from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.run_event_codec import decode_run_event_row
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
 TOOL_EVENT_TYPES = frozenset(
@@ -19,6 +21,40 @@ TOOL_EVENT_TYPES = frozenset(
 )
 TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 PROJECTION_VERSION = "2026-06-28"
+
+
+class ToolEventProjectionReadModel:
+    """Read-only access to the derived ``tool_events`` projection."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._lock = lock_for_connection(conn)
+
+    def list(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        run_id: str = "",
+        direction: str = "after",
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return []
+        with self._lock:
+            rows = EventLedger(self._conn).list_tool_event_projection_rows(
+                stable,
+                after_seq=int(after_seq or 0),
+                run_id=run_id,
+                direction=direction,
+                limit=limit,
+            )
+        return [
+            item
+            for row in rows
+            if (item := tool_event_row_to_dict(row))
+        ]
 
 
 def json_dumps_compact(value: Any) -> str:

@@ -11,8 +11,7 @@ from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 _RUN_EVENT_FRAME_FORMAT = "zlib+json:v1"
-_STORED_SESSION_KEY = "stored" "_session_id"
-_RUNTIME_SESSION_KEY = "runtime" "_session_id"
+_EXECUTION_SESSION_KEY = "execution" "_session_id"
 _TOOL_EVENT_TYPES = (
     "tool.start",
     "tool.progress",
@@ -31,6 +30,7 @@ class RunEventReadModel:
         session_id: str,
         *,
         after_seq: int = 0,
+        before_seq: int = 0,
         active_only: bool = False,
         active_statuses: tuple[str, ...] = (),
         runtime_scope_key: str = "",
@@ -47,6 +47,7 @@ class RunEventReadModel:
                 rows = EventLedger(self._conn).list_runtime_rows(
                     stable,
                     after_seq=int(after_seq or 0),
+                    before_seq=int(before_seq or 0),
                     active_only=active_only,
                     active_statuses=active_statuses,
                     runtime_scope_key=runtime_scope_key,
@@ -105,6 +106,79 @@ class RunEventReadModel:
             event_types=_TOOL_EVENT_TYPES,
             limit=limit,
         )
+
+    def has_source(
+        self,
+        session_id: str,
+        *,
+        run_id: str = "",
+        execution_session_id: str = "",
+        event_type: str = "",
+        runtime_source_seq: int = 0,
+    ) -> bool:
+        return self._has_event(
+            session_id,
+            sequence_column="runtime_source_seq",
+            sequence=runtime_source_seq,
+            run_id=run_id,
+            execution_session_id=execution_session_id,
+            event_type=event_type,
+        )
+
+    def has_frame(
+        self,
+        session_id: str,
+        *,
+        seq: int = 0,
+        run_id: str = "",
+        execution_session_id: str = "",
+        event_type: str = "",
+    ) -> bool:
+        return self._has_event(
+            session_id,
+            sequence_column="seq",
+            sequence=seq,
+            run_id=run_id,
+            execution_session_id=execution_session_id,
+            event_type=event_type,
+        )
+
+    def _has_event(
+        self,
+        session_id: str,
+        *,
+        sequence_column: str,
+        sequence: int,
+        run_id: str,
+        execution_session_id: str,
+        event_type: str,
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        try:
+            normalized_sequence = int(sequence or 0)
+        except (TypeError, ValueError):
+            normalized_sequence = 0
+        if not stable or normalized_sequence <= 0:
+            return False
+        if sequence_column not in {"seq", "runtime_source_seq"}:
+            raise ValueError("unsupported run event sequence column")
+        clauses = ["session_id = ?", f"{sequence_column} = ?"]
+        params: list[Any] = [stable, normalized_sequence]
+        for column, value in (
+            ("run_id", run_id),
+            ("execution_session_id", execution_session_id),
+            ("event_type", event_type),
+        ):
+            normalized = str(value or "").strip()
+            if normalized:
+                clauses.append(f"{column} = ?")
+                params.append(normalized)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT 1 FROM run_events WHERE {' AND '.join(clauses)} LIMIT 1",
+                tuple(params),
+            ).fetchone()
+        return row is not None
 
     def list_activity_events(
         self,
@@ -202,9 +276,17 @@ def _decode_run_event_row(row: Any) -> dict[str, Any]:
         payload = _json_or(_row_value(row, "payload_json"), {})
     payload = payload if isinstance(payload, dict) else {}
     event.setdefault("type", _row_value(row, "event_type", ""))
-    event.setdefault(_STORED_SESSION_KEY, _row_value(row, "session_id", ""))
-    event.setdefault("session_id", _row_value(row, _RUNTIME_SESSION_KEY, ""))
-    event.setdefault(_RUNTIME_SESSION_KEY, _row_value(row, _RUNTIME_SESSION_KEY, ""))
+    conversation_session_id = _row_value(row, "session_id", "")
+    # The relational columns are the canonical identity boundary. Historical
+    # frame blobs may contain pre-contract aliases or a runtime id in
+    # ``session_id``; never let those stale values override the ledger row.
+    event["session_id"] = conversation_session_id
+    event["conversation_session_id"] = conversation_session_id
+    execution_session_id = _row_value(row, _EXECUTION_SESSION_KEY, "")
+    event[_EXECUTION_SESSION_KEY] = execution_session_id
+    payload["session_id"] = conversation_session_id
+    payload["conversation_session_id"] = conversation_session_id
+    payload[_EXECUTION_SESSION_KEY] = execution_session_id
     event.setdefault("runtime_scope_key", _row_value(row, "runtime_scope_key", ""))
     event.setdefault("run_id", _row_value(row, "run_id", ""))
     event.setdefault("turn_id", _row_value(row, "turn_id", ""))
@@ -274,7 +356,7 @@ def _rehydrate_referenced_event(
                 (_text(_row_value(row, "session_id")), conversation_message_id),
             ).fetchone()
             if message_row is not None:
-                content = _text(_row_value(message_row, "content", ""))
+                content = _string_value(_row_value(message_row, "content", ""))
                 metadata = _json_or(_row_value(message_row, "metadata_json"), {})
                 payload.setdefault("text", content)
                 payload.setdefault("content", content)
@@ -297,7 +379,7 @@ def _rehydrate_referenced_event(
                 result = _json_or(_row_value(tool_row, "result_json"), None)
                 if result is not None:
                     payload.setdefault("result", result)
-                result_text = _text(_row_value(tool_row, "result_text", ""))
+                result_text = _string_value(_row_value(tool_row, "result_text", ""))
                 if result_text:
                     payload.setdefault("result_text", result_text)
                 payload.setdefault("status", _text(_row_value(tool_row, "status", "")))
@@ -342,6 +424,10 @@ def _json_or(value: Any, default: Any) -> Any:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _string_value(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
 
 __all__ = ["RunEventReadModel"]

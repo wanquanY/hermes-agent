@@ -561,6 +561,7 @@ class EventLedger:
         session_id: str,
         *,
         after_seq: int = 0,
+        before_seq: int = 0,
         active_only: bool = False,
         active_statuses: Iterable[str] = (),
         runtime_scope_key: str = "",
@@ -579,8 +580,16 @@ class EventLedger:
         if not stable_sid:
             return []
         bounded_limit = max(1, min(int(limit or 2000), 5000))
-        clauses = ["session_id = ?", "seq > ?"]
-        params: list[Any] = [stable_sid, int(after_seq or 0)]
+        clauses = ["session_id = ?"]
+        params: list[Any] = [stable_sid]
+        normalized_after_seq = int(after_seq or 0)
+        normalized_before_seq = int(before_seq or 0)
+        if normalized_after_seq > 0:
+            clauses.append("seq > ?")
+            params.append(normalized_after_seq)
+        if normalized_before_seq > 0:
+            clauses.append("seq < ?")
+            params.append(normalized_before_seq)
         scope = str(runtime_scope_key or "").strip()
         if scope:
             clauses.append("COALESCE(runtime_scope_key, session_id) = ?")
@@ -609,17 +618,21 @@ class EventLedger:
         if not include_internal:
             clauses.append("event_type NOT LIKE '_internal.%'")
         params.append(bounded_limit)
+        reverse_page = normalized_before_seq > 0 and normalized_after_seq <= 0
         rows = self._conn.execute(
             f"""
             SELECT *
             FROM run_events
             WHERE {' AND '.join(clauses)}
-            ORDER BY seq ASC
+            ORDER BY seq {'DESC' if reverse_page else 'ASC'}
             LIMIT ?
             """,
             tuple(params),
         ).fetchall()
-        return list(rows)
+        ordered = list(rows)
+        if reverse_page:
+            ordered.reverse()
+        return ordered
 
     def list_activity_rows(
         self,
@@ -749,6 +762,60 @@ class EventLedger:
                 tuple(params),
             ).fetchall()
         return list(rows)
+
+    def list_frame_backfill_rows(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 5000,
+    ) -> list[Any]:
+        stable = str(session_id or "").strip()
+        session_clause = "AND session_id = ?" if stable else ""
+        params: list[Any] = [stable] if stable else []
+        rows = self._conn.execute(
+            f"""
+            SELECT *
+            FROM run_events
+            WHERE (
+                frame_blob IS NULL
+                OR COALESCE(frame_format, '') = ''
+                OR COALESCE(retention_class, '') = ''
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM run_event_search_index idx
+                    WHERE idx.run_event_id = run_events.id
+                )
+            )
+              {session_clause}
+            ORDER BY session_id ASC, seq ASC, id ASC
+            LIMIT ?
+            """,
+            (*params, max(1, min(int(limit or 5000), 20000))),
+        ).fetchall()
+        return list(rows)
+
+    def count_frame_backfill_rows(self, *, session_id: str = "") -> int:
+        stable = str(session_id or "").strip()
+        session_clause = "AND session_id = ?" if stable else ""
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(1) AS count
+            FROM run_events
+            WHERE (
+                frame_blob IS NULL
+                OR COALESCE(frame_format, '') = ''
+                OR COALESCE(retention_class, '') = ''
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM run_event_search_index idx
+                    WHERE idx.run_event_id = run_events.id
+                )
+            )
+              {session_clause}
+            """,
+            (stable,) if stable else (),
+        ).fetchone()
+        return int(row["count"] if row else 0)
 
     def list_filtered_rows(
         self,

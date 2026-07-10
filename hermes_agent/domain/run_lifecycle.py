@@ -92,8 +92,8 @@ def orphaned_active_run_decision(
         if updated_age < owner_dead_grace:
             return False, "owner-pid-dead-fresh"
         return True, "owner-pid-dead"
-    runtime_session_value = str(_row_value(row, "runtime_" + "session_id") or "").strip()
-    if runtime_session_value and runtime_session_value in live_runtime_ids:
+    execution_session_id = str(_row_value(row, "execution_session_id") or "").strip()
+    if execution_session_id and execution_session_id in live_runtime_ids:
         return False, "live-runtime-session"
     if updated_age >= stale_after:
         return True, "legacy-owner-metadata-stale"

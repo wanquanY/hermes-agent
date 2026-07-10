@@ -100,6 +100,20 @@ def _make_conn() -> sqlite3.Connection:
             result_session_id TEXT NOT NULL,
             created_at REAL NOT NULL
         );
+        CREATE TABLE session_runtime_state (
+            session_id TEXT PRIMARY KEY,
+            runtime_scope_key TEXT NOT NULL DEFAULT '',
+            execution_session_id TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            turn_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '',
+            profile_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL DEFAULT 0,
+            source_seq INTEGER NOT NULL DEFAULT 0
+        );
         """
     )
     conn.commit()
@@ -136,6 +150,82 @@ def test_create_provisions_session_index_row():
     assert row is not None
     assert row["session_id"] == "s1"
     assert row["title"] == "T1"
+
+
+def test_create_allows_multiple_untitled_sessions_without_replacing_them():
+    conn = _make_conn()
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_sessions_title_unique "
+        "ON sessions(title) WHERE title IS NOT NULL"
+    )
+    repo = SessionRepoImpl(conn)
+
+    repo.create(SessionSpec(session_id="s1", source="tui"))
+    repo.create(SessionSpec(session_id="s2", source="tui", title="  "))
+
+    rows = conn.execute("SELECT id, title FROM sessions ORDER BY id").fetchall()
+    assert [(row["id"], row["title"]) for row in rows] == [
+        ("s1", None),
+        ("s2", None),
+    ]
+
+
+def test_create_rejects_a_duplicate_nonempty_title():
+    conn = _make_conn()
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_sessions_title_unique "
+        "ON sessions(title) WHERE title IS NOT NULL"
+    )
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="tui", title="Shared"))
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.create(SessionSpec(session_id="s2", source="tui", title="Shared"))
+
+
+def test_repeated_create_preserves_existing_session_aggregate():
+    conn = _make_conn()
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            role TEXT NOT NULL,
+            content TEXT
+        );
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE run_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL
+        );
+        """
+    )
+    repo = SessionRepoImpl(conn)
+    created = repo.create(SessionSpec(session_id="s1", source="tui", title="First turn"))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content) VALUES ('s1', 'user', 'hello')"
+    )
+    conn.execute("INSERT INTO runs (run_id, session_id, status) VALUES ('run-1', 's1', 'complete')")
+    conn.execute(
+        "INSERT INTO run_events (session_id, run_id, event_type) "
+        "VALUES ('s1', 'run-1', 'run.completed')"
+    )
+
+    repeated = repo.create(SessionSpec(session_id="s1", source="runtime", title="Replacement"))
+
+    assert repeated.started_at == created.started_at
+    assert repeated.source == "tui"
+    assert repeated.title == "First turn"
+    assert conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = 's1'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM runs WHERE session_id = 's1'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM run_events WHERE session_id = 's1'").fetchone()[0] == 1
 
 
 def test_normalize_index_conversation_kind_repairs_invalid_and_team_rows():
@@ -979,3 +1069,36 @@ def test_reopen_supports_legacy_session_schema_without_updated_at_or_end_reason(
         "waiting_approval": 0,
         "active_run_id": "",
     }
+
+
+def test_project_runtime_state_event_is_owned_by_session_repo():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s-runtime", source="test"))
+
+    repo.project_runtime_state_event(
+        {
+            "type": "session.info",
+            "conversation_session_id": "s-runtime",
+            "execution_session_id": "exec-1",
+            "runtime_scope_key": "profile:agent-default",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 7,
+            "timestamp": 12.5,
+            "payload": {
+                "status": "running",
+                "model": "test-model",
+                "provider": "test-provider",
+                "profile": {"id": "agent-default"},
+            },
+        }
+    )
+
+    row = conn.execute(
+        "SELECT * FROM session_runtime_state WHERE session_id = ?",
+        ("s-runtime",),
+    ).fetchone()
+    assert row["execution_session_id"] == "exec-1"
+    assert row["runtime_scope_key"] == "profile:agent-default"
+    assert row["source_seq"] == 7

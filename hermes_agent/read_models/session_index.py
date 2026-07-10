@@ -21,10 +21,22 @@ class SessionIndexReadModel:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def get(self, session_id: str) -> dict[str, Any] | None:
+        stable = str(session_id or "").strip()
+        if not stable:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM session_index WHERE session_id = ?",
+            (stable,),
+        ).fetchone()
+        return _session_index_row_to_item(row) if row is not None else None
+
     def list(self, query: SessionIndexQuery) -> dict[str, Any]:
         capped = max(1, min(int(query.limit or 200), 200))
         where: list[str] = []
         params: list[Any] = []
+        where.append("si.session_kind != 'execution'")
+        where.append("si.conversation_kind IN ('direct', 'team')")
         if not query.include_transient:
             where.append("si.transient = 0")
         normalized_conversation_kind = str(query.conversation_kind or "").strip().lower()
