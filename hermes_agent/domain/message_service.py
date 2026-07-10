@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
-from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
+from hermes_agent.read_models.message_history import (
+    MessageHistoryReadModel,
+    MessagePageQuery,
+)
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
+from hermes_agent.read_models.visible_transcript import (
+    TranscriptVisibilityPolicy,
+    VisibleConversationTranscriptReadModel,
+)
 from hermes_agent.repositories.message_content_codec import decode_message_content
 from hermes_agent.repositories.message_repo import MessageRepository
 from hermes_agent.repositories.session_repo import SessionRepo, SessionSpec
@@ -22,12 +30,28 @@ from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 class MessageService:
     """Coordinates canonical transcript writes and visible-history reads."""
 
-    def __init__(self, conn: sqlite3.Connection, sessions: SessionRepo) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        sessions: SessionRepo,
+        *,
+        visibility_policies: Mapping[str, TranscriptVisibilityPolicy] | None = None,
+    ) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
         self._sessions = sessions
         self._writer = MessageRepository(conn, sessions)
         self._history = MessageHistoryReadModel(conn)
+        self._visible_histories = {
+            str(conversation_kind or "")
+            .strip()
+            .lower(): VisibleConversationTranscriptReadModel(
+                conn,
+                policy,
+            )
+            for conversation_kind, policy in (visibility_policies or {}).items()
+            if str(conversation_kind or "").strip()
+        }
         self._recall = SessionRecallReadModel(conn)
 
     def count(self, session_id: str | None = None) -> int:
@@ -39,7 +63,9 @@ class MessageService:
                     (stable,),
                 ).fetchone()
             else:
-                row = self._conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS count FROM messages"
+                ).fetchone()
         return int(row["count"] if row else 0)
 
     def search(
@@ -64,7 +90,9 @@ class MessageService:
             include_inactive=include_inactive,
         )
 
-    def list(self, session_id: str, include_inactive: bool = False) -> list[dict[str, Any]]:
+    def list(
+        self, session_id: str, include_inactive: bool = False
+    ) -> list[dict[str, Any]]:
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             rows = self._conn.execute(
@@ -81,7 +109,7 @@ class MessageService:
         include_storage_metadata: bool = False,
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
-        return self._history.all_as_conversation(
+        return self._history_for(session_id).all_as_conversation(
             session_id,
             include_ancestors=include_ancestors,
             include_storage_metadata=include_storage_metadata,
@@ -97,7 +125,7 @@ class MessageService:
         include_ancestors: bool = False,
         include_inactive: bool = False,
     ) -> dict[str, Any]:
-        return self._history.page_as_conversation(
+        return self._history_for(session_id).page_as_conversation(
             session_id,
             MessagePageQuery(
                 direction=direction,
@@ -135,9 +163,21 @@ class MessageService:
             "codex_reasoning_items": fields.get("codex_reasoning_items"),
             "codex_message_items": fields.get("codex_message_items"),
             "platform_message_id": fields.get("platform_message_id"),
+            "conversation_message_id": fields.get("conversation_message_id"),
             "metadata": fields.get("metadata"),
+            "timestamp": fields.get("timestamp"),
         }
         return self._writer.append_conversation_message(stable, message)
+
+    def _history_for(
+        self,
+        session_id: str,
+    ) -> MessageHistoryReadModel | VisibleConversationTranscriptReadModel:
+        session = self._sessions.get(str(session_id or "").strip())
+        conversation_kind = (
+            str(session.conversation_kind if session else "").strip().lower()
+        )
+        return self._visible_histories.get(conversation_kind, self._history)
 
     def replace(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         stable = str(session_id or "").strip()
@@ -202,8 +242,15 @@ class MessageService:
 
 def _message_row(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
-    item["content"] = decode_message_content(item.get("content"), allow_legacy_json=True)
-    for key in ("tool_calls", "reasoning_details", "codex_reasoning_items", "codex_message_items"):
+    item["content"] = decode_message_content(
+        item.get("content"), allow_legacy_json=True
+    )
+    for key in (
+        "tool_calls",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+    ):
         if item.get(key):
             item[key] = _json_or(item[key], [])
     if item.get("metadata_json"):
