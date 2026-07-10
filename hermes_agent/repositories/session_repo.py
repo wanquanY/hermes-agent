@@ -204,6 +204,13 @@ class SessionRepo(Protocol):
 
     def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool: ...
 
+    def update_runtime_config(
+        self,
+        session_id: str,
+        model_config: dict[str, Any],
+        model: str | None = None,
+    ) -> bool: ...
+
     def update_source(self, session_id: str, source: str) -> int: ...
 
     def update_token_counts(
@@ -789,6 +796,29 @@ class SessionRepoImpl:
         cursor = self._conn.execute(
             "UPDATE sessions SET system_prompt = ?, updated_at = ? WHERE id = ?",
             (str(system_prompt or ""), time.time(), stable),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def update_runtime_config(
+        self,
+        session_id: str,
+        model_config: dict[str, Any],
+        model: str | None = None,
+    ) -> bool:
+        session_key = str(session_id or "").strip()
+        if not session_key:
+            raise ValueError("session_id is required for update_runtime_config")
+        encoded_config = _encode_model_config(model_config)
+        next_model = str(model or "").strip()
+        cursor = self._conn.execute(
+            """
+            UPDATE sessions
+               SET model_config = ?,
+                   model = CASE WHEN ? != '' THEN ? ELSE model END,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (encoded_config, next_model, next_model, time.time(), session_key),
         )
         return int(cursor.rowcount or 0) > 0
 

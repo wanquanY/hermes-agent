@@ -232,6 +232,21 @@ class SessionService:
     def update_token_counts(self, session_id: str, **counts: Any) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.update_usage(session_id, counts))
 
+    def update_runtime_config(
+        self,
+        session_id: str,
+        model_config: dict[str, Any],
+        *,
+        model: str | None = None,
+    ) -> bool:
+        return self._unit_of_work.execute(
+            lambda _conn: self._repo.update_runtime_config(
+                session_id,
+                model_config,
+                model,
+            )
+        )
+
     def set_archived(self, session_id: str, archived: bool) -> bool:
         return self._unit_of_work.execute(lambda _conn: self._repo.set_archived(session_id, archived))
 

@@ -496,7 +496,7 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         return
 
     try:
-        row = db.get_session(session_key) or {}
+        row = db.sessions.get(session_key) or {}
         raw_config = row.get("model_config")
         existing_config = {}
         if isinstance(raw_config, dict):
@@ -507,10 +507,11 @@ def _persist_live_session_runtime(session: dict | None) -> None:
                 existing_config = parsed
         model_config = _runtime_model_config(agent, existing_config)
         model = str(getattr(agent, "model", "") or "").strip()
-        if hasattr(db, "update_session_meta"):
-            db.update_session_meta(session_key, json.dumps(model_config), model or None)
-        elif model and hasattr(db, "update_session_model"):
-            db.update_session_model(session_key, model)
+        db.sessions.update_runtime_config(
+            session_key,
+            model_config,
+            model=model or None,
+        )
     except Exception:
         logger.debug("failed to persist live session runtime", exc_info=True)
 
@@ -525,7 +526,7 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
         return
 
     db = getattr(agent, "_session_db", None) or _get_db()
-    if db is None or not hasattr(db, "update_system_prompt"):
+    if db is None:
         return
 
     try:
@@ -542,7 +543,7 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
                 prompt,
             )
             return
-        db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
+        db.sessions.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
     except Exception:
         logger.debug("failed to persist live session system prompt", exc_info=True)
 
