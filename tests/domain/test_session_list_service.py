@@ -36,3 +36,17 @@ def test_session_service_list_preserves_keyset_cursor(tmp_path):
     assert len(first_page) == 1
     assert len(second_page) == 1
     assert first_page[0]["id"] != second_page[0]["id"]
+
+
+def test_session_service_resolves_id_and_title_to_one_shape(tmp_path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("session-1", "tui", title="Named session")
+        by_id = db.sessions.resolve_reference("session-1")
+        by_title = db.sessions.resolve_reference("Named session")
+    finally:
+        db.close()
+
+    assert by_id[0] == "session-1"
+    assert by_title[0] == "session-1"
+    assert by_id[1] == by_title[1]

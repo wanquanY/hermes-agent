@@ -76,12 +76,12 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_list_named_sessions_when_no_arg(self, tmp_path):
         """With no argument, lists recently titled sessions."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")
-        db.create_session("sess_002", "telegram")
-        db.set_session_title("sess_001", "Research")
-        db.set_session_title("sess_002", "Coding")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("sess_001", "telegram")
+        db.sessions.create("sess_002", "telegram")
+        db.sessions.set_title("sess_001", "Research")
+        db.sessions.set_title("sess_002", "Coding")
 
         event = _make_event(text="/resume")
         runner = _make_runner(session_db=db, event=event)
@@ -94,9 +94,9 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_list_shows_usage_when_no_titled(self, tmp_path):
         """With no arg and no titled sessions, shows instructions."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")  # No title
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("sess_001", "telegram")  # No title
 
         event = _make_event(text="/resume")
         runner = _make_runner(session_db=db, event=event)
@@ -108,11 +108,11 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_by_name(self, tmp_path):
         """Resolves a title and switches to that session."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session_abc", "telegram")
-        db.set_session_title("old_session_abc", "My Project")
-        db.create_session("current_session_001", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("old_session_abc", "telegram")
+        db.sessions.set_title("old_session_abc", "My Project")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume My Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -130,9 +130,9 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_nonexistent_name(self, tmp_path):
         """Returns error for unknown session name."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume Nonexistent Session")
         runner = _make_runner(session_db=db, event=event)
@@ -143,10 +143,10 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_already_on_session(self, tmp_path):
         """Returns friendly message when already on the requested session."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram")
-        db.set_session_title("current_session_001", "Active Project")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("current_session_001", "telegram")
+        db.sessions.set_title("current_session_001", "Active Project")
 
         event = _make_event(text="/resume Active Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -158,13 +158,13 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_auto_lineage(self, tmp_path):
         """Asking for 'My Project' when 'My Project #2' exists gets the latest."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_v1", "telegram")
-        db.set_session_title("sess_v1", "My Project")
-        db.create_session("sess_v2", "telegram")
-        db.set_session_title("sess_v2", "My Project #2")
-        db.create_session("current_session_001", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("sess_v1", "telegram")
+        db.sessions.set_title("sess_v1", "My Project")
+        db.sessions.create("sess_v2", "telegram")
+        db.sessions.set_title("sess_v2", "My Project #2")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume My Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -180,15 +180,15 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_follows_compression_continuation(self, tmp_path):
         """Gateway /resume should reopen the live descendant after compression."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("compressed_root", "telegram")
-        db.set_session_title("compressed_root", "Compressed Work")
-        db.end_session("compressed_root", "compression")
-        db.create_session("compressed_child", "telegram", parent_session_id="compressed_root")
-        db.append_message("compressed_child", "user", "hello from continuation")
-        db.create_session("current_session_001", "telegram")
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("compressed_root", "telegram")
+        db.sessions.set_title("compressed_root", "Compressed Work")
+        db.sessions.end("compressed_root", "compression")
+        db.sessions.create("compressed_child", "telegram", parent_session_id="compressed_root")
+        db.messages.append("compressed_child", "user", "hello from continuation")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume Compressed Work")
         runner = _make_runner(
@@ -214,11 +214,11 @@ class TestHandleResumeCommand:
     @pytest.mark.asyncio
     async def test_resume_clears_running_agent(self, tmp_path):
         """Switching sessions clears any cached running agent."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session", "telegram")
-        db.set_session_title("old_session", "Old Work")
-        db.create_session("current_session_001", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("old_session", "telegram")
+        db.sessions.set_title("old_session", "Old Work")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume Old Work")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -240,11 +240,11 @@ class TestHandleResumeCommand:
         writing into the wrong session. See #6672.
         """
         import threading
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session", "telegram")
-        db.set_session_title("old_session", "Old Work")
-        db.create_session("current_session_001", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("old_session", "telegram")
+        db.sessions.set_title("old_session", "Old Work")
+        db.sessions.create("current_session_001", "telegram")
 
         event = _make_event(text="/resume Old Work")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",

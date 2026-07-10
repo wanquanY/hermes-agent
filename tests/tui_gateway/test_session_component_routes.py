@@ -125,3 +125,32 @@ def test_session_delete_route_uses_session_lifecycle_component(
     assert "error" not in response, response
     assert response["result"]["deleted"] == "delete-session"
     assert stored is None
+
+
+def test_session_title_route_resolves_and_updates_through_session_component(
+    tmp_path,
+    monkeypatch,
+):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("title-session", "tui", title="Before")
+        _install_db(monkeypatch, db)
+
+        response = server.handle_request(
+            {
+                "id": "title",
+                "method": "session.title",
+                "params": {
+                    "session_id": "Before",
+                    "title": "After",
+                },
+            }
+        )
+        stored = db.sessions.get("title-session")
+    finally:
+        db.close()
+
+    assert "error" not in response, response
+    assert response["result"] == {"pending": False, "title": "After"}
+    assert stored is not None
+    assert stored["title"] == "After"

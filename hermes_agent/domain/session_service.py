@@ -146,6 +146,21 @@ class SessionService:
             return str(rows[0]["id"])
         return str(exact["id"]) if exact else None
 
+    def resolve_reference(
+        self,
+        session_id_or_title: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        requested = str(session_id_or_title or "").strip()
+        if not requested:
+            return "", None
+        session = self.get(requested)
+        if session is not None:
+            return requested, session
+        session = self.get_by_title(requested)
+        if session is None:
+            return requested, None
+        return str(session.get("id") or requested), session
+
     def next_title_in_lineage(self, base_title: str) -> str:
         match = re.match(r"^(.*?) #(\d+)$", str(base_title or ""))
         base = match.group(1) if match else str(base_title or "")

@@ -9,8 +9,6 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
-from hermes_agent.read_models.session_recall import SessionRecallReadModel
-from hermes_agent.repositories.session_repo import SessionRepoImpl
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services import run_control
@@ -137,20 +135,6 @@ def _db_for_session_request(params: dict | None, conversation_session_id: str = 
     if stable and _is_control_plane_conversation_session_id(stable):
         return _db_for_stable_session(stable)
     return _profile_db_from_params(params) or _get_db()
-
-
-def _session_repo_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return SessionRepoImpl(conn)
-
-
-def _session_recall_read_model_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return SessionRecallReadModel(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1702,16 +1686,9 @@ def _(rid, params: dict) -> dict:
     db = _db_for_stable_session(target)
     if db is None:
         return _err(rid, 4007, "session not found")
-    repo = _session_repo_for_db(db)
-    if repo is None:
-        return _err(rid, 5000, "session repository unavailable")
-    found = repo.get(target)
+    target, found = db.sessions.resolve_reference(target)
     if not found:
-        found = repo.get_by_title(target)
-        if found:
-            target = found.session_id
-        else:
-            return _err(rid, 4007, "session not found")
+        return _err(rid, 4007, "session not found")
     # Context compression ends the current transcript session and forks a
     # continuation child that holds the post-compression turns (agent.session_id
     # rotates — see _sync_session_key_after_compress). Resuming the parent id
@@ -1721,14 +1698,13 @@ def _(rid, params: dict) -> dict:
     # the session that actually holds the messages (#15000). Skipped for lazy
     # watch windows, which attach to the exact branch they were opened on.
     if found and not is_truthy_value(params.get("lazy", False)):
-        recall_read_model = _session_recall_read_model_for_db(db)
         try:
-            tip = recall_read_model.resolve_resume_session_id(target) if recall_read_model else target
+            tip = db.sessions.resolve_resume_id(target) or target
         except Exception:
             tip = target
         if tip and tip != target:
             target = tip
-            found = repo.get(target) or found
+            found = db.sessions.get(target) or found
     existing_workspace = _stored_workspace(target)
     raw_cwd = params.get("cwd") or (existing_workspace or {}).get("cwd")
     workspace_params = params
@@ -1782,7 +1758,7 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:
-        repo.reopen(target)
+        db.sessions.reopen(target)
         history = load_conversation_history(db, target)
         # P1 participant-view projection: when this runtime is hydrating a
         # MULTI-PARTICIPANT conversation (the team leader reading a team
@@ -1977,9 +1953,6 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5007)
-    repo = _session_repo_for_db(db)
-    if repo is None:
-        return _err(rid, 5007, "session repository unavailable")
     requested = str(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
@@ -1997,12 +1970,7 @@ def _(rid, params: dict) -> dict:
 
     if not session:
         try:
-            stored_row = repo.get(key)
-            if not stored_row:
-                by_title = repo.get_by_title(key)
-                if by_title:
-                    key = by_title.session_id or key
-                    stored_row = by_title
+            key, stored_row = db.sessions.resolve_reference(key)
             if not stored_row:
                 return _err(rid, 4007, "session not found")
         except Exception as e:
@@ -2011,15 +1979,15 @@ def _(rid, params: dict) -> dict:
     if "title" not in params:
         fallback = (session or {}).get("pending_title") or ""
         try:
-            resolved_title = repo.get_title(key) or ""
+            resolved_title = db.sessions.get_title(key) or ""
             if fallback:
-                if repo.set_title(key, fallback):
+                if db.sessions.set_title(key, fallback):
                     if session:
                         session["pending_title"] = None
                     resolved_title = fallback
                 else:
-                    existing_row = repo.get(key)
-                    existing_title = ((existing_row.title if existing_row else "") or "").strip()
+                    existing_row = db.sessions.get(key)
+                    existing_title = str((existing_row or {}).get("title") or "").strip()
                     if existing_title == fallback:
                         if session:
                             session["pending_title"] = None
@@ -2039,13 +2007,13 @@ def _(rid, params: dict) -> dict:
             },
         )
     try:
-        if repo.set_title(key, title):
+        if db.sessions.set_title(key, title):
             if session:
                 session["pending_title"] = None
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
-        existing_row = repo.get(key)
+        existing_row = db.sessions.get(key)
         if existing_row:
             if session:
                 session["pending_title"] = None
@@ -2053,7 +2021,7 @@ def _(rid, params: dict) -> dict:
                 rid,
                 {
                     "pending": False,
-                    "title": (existing_row.title or title),
+                    "title": (existing_row.get("title") or title),
                 },
             )
         if not session:
@@ -2130,25 +2098,20 @@ def _(rid, params: dict) -> dict:
     key = str((session or {}).get("session_key") or requested)
     agent = (session or {}).get("agent")
     db = _db_for_session_request(params, key)
-    repo = _session_repo_for_db(db) if db else None
     meta_title = ""
     meta_started_at = 0.0
     meta_updated_at = 0.0
-    if repo and key:
+    stored = None
+    if db and key:
         try:
-            stored = repo.get(key)
-            if not stored:
-                by_title = repo.get_by_title(key)
-                if by_title:
-                    key = by_title.session_id
-                    stored = by_title
+            key, stored = db.sessions.resolve_reference(key)
             if stored:
-                meta_title = stored.title
-                meta_started_at = stored.started_at
-                meta_updated_at = stored.updated_at
-        except Exception:
-            pass
-    if db and repo and not meta_started_at and session is None:
+                meta_title = str(stored.get("title") or "")
+                meta_started_at = float(stored.get("started_at") or 0)
+                meta_updated_at = float(stored.get("updated_at") or 0)
+        except Exception as exc:
+            return _err(rid, 5007, str(exc))
+    if db and not stored and session is None:
         return _err(rid, 4007, "session not found")
 
     def _dt(value, fallback: datetime | None = None) -> datetime:
