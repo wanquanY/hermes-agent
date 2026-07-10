@@ -58,9 +58,9 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_set_title(self, tmp_path):
         """Setting a title returns confirmation."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title My Research Project")
@@ -69,16 +69,16 @@ class TestHandleTitleCommand:
         assert "✏️" in result
 
         # Verify in DB
-        assert db.get_session_title("test_session_123") == "My Research Project"
+        assert db.sessions.get_title("test_session_123") == "My Research Project"
         db.close()
 
     @pytest.mark.asyncio
     async def test_show_title_when_set(self, tmp_path):
         """Showing title when one is set returns the title."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
-        db.set_session_title("test_session_123", "Existing Title")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
+        db.sessions.set_title("test_session_123", "Existing Title")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title")
@@ -90,9 +90,9 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_show_title_when_not_set(self, tmp_path):
         """Showing title when none is set returns usage hint."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title")
@@ -104,11 +104,11 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_title_conflict(self, tmp_path):
         """Setting a title already used by another session returns error."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("other_session", "telegram")
-        db.set_session_title("other_session", "Taken Title")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("other_session", "telegram")
+        db.sessions.set_title("other_session", "Taken Title")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title Taken Title")
@@ -128,9 +128,9 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_title_too_long(self, tmp_path):
         """Setting a title that exceeds max length returns error."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         long_title = "A" * 150
@@ -143,23 +143,23 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_title_control_chars_sanitized(self, tmp_path):
         """Control characters are stripped and sanitized title is stored."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title hello\x00world")
         result = await title_command_for(runner).handle_title_command(event)
         assert "helloworld" in result
-        assert db.get_session_title("test_session_123") == "helloworld"
+        assert db.sessions.get_title("test_session_123") == "helloworld"
         db.close()
 
     @pytest.mark.asyncio
     async def test_title_only_control_chars(self, tmp_path):
         """Title with only control chars returns empty error."""
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("test_session_123", "telegram")
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
+        db.sessions.create("test_session_123", "telegram")
 
         runner = _make_runner(session_db=db)
         event = _make_event(text="/title \x00\x01\x02")
@@ -170,16 +170,16 @@ class TestHandleTitleCommand:
     @pytest.mark.asyncio
     async def test_works_across_platforms(self, tmp_path):
         """The /title command works for Discord, Slack, and WhatsApp too."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         for platform in [Platform.DISCORD, Platform.TELEGRAM]:
-            db = SessionDB(db_path=tmp_path / f"state_{platform.value}.db")
-            db.create_session("test_session_123", platform.value)
+            db = open_cli_session_store(db_path=tmp_path / f"state_{platform.value}.db")
+            db.sessions.create("test_session_123", platform.value)
 
             runner = _make_runner(session_db=db)
             event = _make_event(text="/title Cross-Platform Test", platform=platform)
             result = await title_command_for(runner).handle_title_command(event)
             assert "Cross-Platform Test" in result
-            assert db.get_session_title("test_session_123") == "Cross-Platform Test"
+            assert db.sessions.get_title("test_session_123") == "Cross-Platform Test"
             db.close()
 
 
@@ -272,7 +272,7 @@ class TestResetCommandWithTitle:
         result = await runner._handle_reset_command(event)
 
         runner.session_store.reset_session.assert_called_once()
-        runner._session_db.set_session_title.assert_called_once_with(
+        runner._session_db.sessions.set_title.assert_called_once_with(
             "sess-new", "Custom Name"
         )
         # Header reflects the applied title
@@ -323,7 +323,7 @@ class TestResetCommandWithTitle:
         runner._pending_messages = {}
         runner._pending_approvals = {}
         runner._session_db = MagicMock()
-        runner._session_db.set_session_title.side_effect = ValueError(
+        runner._session_db.sessions.set_title.side_effect = ValueError(
             "Title 'Dup' is already in use by session abc-123"
         )
         runner._agent_cache = {}
@@ -334,7 +334,7 @@ class TestResetCommandWithTitle:
         event = _make_event(text="/new Dup")
         result = await runner._handle_reset_command(event)
 
-        runner._session_db.set_session_title.assert_called_once()
+        runner._session_db.sessions.set_title.assert_called_once()
         reply = str(result)
         assert "already in use" in reply
         assert "session started untitled" in reply

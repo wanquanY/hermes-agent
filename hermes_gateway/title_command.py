@@ -25,10 +25,10 @@ class GatewayTitleCommandService:
         if not session_db:
             return self._runner._format_session_db_unavailable()
 
-        existing_title = session_db.get_session_title(session_id)
+        existing_title = session_db.sessions.get_title(session_id)
         if existing_title is None:
             try:
-                session_db.create_session(
+                session_db.sessions.create(
                     session_id=session_id,
                     source=source.platform.value if source.platform else "unknown",
                     user_id=source.user_id,
@@ -39,19 +39,19 @@ class GatewayTitleCommandService:
         title_arg = event.get_command_args().strip()
         if title_arg:
             try:
-                sanitized = session_db.sanitize_title(title_arg)
+                sanitized = session_db.sessions.sanitize_title(title_arg)
             except ValueError as e:
                 return t("gateway.shared.warn_passthrough", error=e)
             if not sanitized:
                 return t("gateway.title.empty_after_clean")
             try:
-                if session_db.set_session_title(session_id, sanitized):
+                if session_db.sessions.set_title(session_id, sanitized):
                     return t("gateway.title.set_to", title=sanitized)
                 return t("gateway.title.not_found")
             except ValueError as e:
                 return t("gateway.shared.warn_passthrough", error=e)
 
-        title = session_db.get_session_title(session_id)
+        title = session_db.sessions.get_title(session_id)
         if title:
             return t("gateway.title.current_with_title", session_id=session_id, title=title)
         return t("gateway.title.current_no_title", session_id=session_id)
