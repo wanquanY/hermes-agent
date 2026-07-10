@@ -178,36 +178,6 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _db_method(db: Any, name: str):
-    if db is None or db.__class__.__module__.startswith("unittest.mock"):
-        return None
-    method = getattr(db, name, None)
-    return method if callable(method) else None
-
-
-def _sqlite_scalar(db: Any, sql: str, params: tuple[Any, ...]) -> Any:
-    conn = getattr(db, "_conn", None)
-    lock = getattr(db, "_lock", None)
-    if conn is None or lock is None:
-        return None
-    with lock:
-        row = conn.execute(sql, params).fetchone()
-    if row is None:
-        return None
-    try:
-        return row[0]
-    except Exception:
-        return None
-
-
-def _int_value(value: Any) -> int:
-    try:
-        parsed = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
-
-
 def mission_id(activity_id: str) -> str:
     normalized = str(activity_id or "").strip()
     if normalized.startswith("mission:"):
@@ -227,11 +197,10 @@ def _activity_target_mission_id(activity_id: str, db: Any = None) -> str:
     normalized = str(activity_id or "").strip()
     if not normalized:
         return ""
-    getter = _db_method(db, "get_activity")
-    if getter is None:
+    if db is None:
         return ""
     try:
-        activity = getter(normalized)
+        activity = db.activities.get(normalized)
     except Exception:
         return ""
     if not isinstance(activity, dict):
@@ -291,37 +260,24 @@ def uses_event_log(activity_id: str, db: Any = None) -> bool:
         return False
     if str(activity_id or "").strip().startswith("act-node:"):
         return True
-    graph_getter = _db_method(db, "get_team_mission_graph")
-    if graph_getter is None:
+    if db is None:
         return False
     try:
-        graph = graph_getter(normalized_mission_id)
+        return db.team_missions.exists(normalized_mission_id)
     except Exception:
         return False
-    mission = graph.get("mission") if isinstance(graph, dict) else {}
-    return isinstance(mission, dict) and bool(str(mission.get("mission_id") or "").strip())
 
 
 def mission_status_for_activity(activity_id: str, db: Any = None) -> str:
     normalized_mission_id = mission_id_for_activity(activity_id, db=db)
     if not normalized_mission_id:
         return ""
-    graph_getter = _db_method(db, "get_team_mission_graph")
-    if graph_getter is not None:
-        try:
-            graph = graph_getter(normalized_mission_id)
-        except Exception:
-            graph = {}
-        mission = graph.get("mission") if isinstance(graph, dict) else {}
-        status = text(mission.get("status")) if isinstance(mission, dict) else ""
-        if status:
-            return status.lower()
-    status = _sqlite_scalar(
-        db,
-        "SELECT status FROM team_missions WHERE mission_id = ?",
-        (normalized_mission_id,),
-    )
-    return text(status).lower()
+    if db is None:
+        return ""
+    try:
+        return db.team_missions.status(normalized_mission_id)
+    except Exception:
+        return ""
 
 
 def is_terminal_activity(activity_id: str, db: Any = None) -> bool:
@@ -344,11 +300,13 @@ def activity_last_seq(activity_id: str, db: Any = None) -> int:
     session_id = session_id_for_activity(normalized_activity_id)
     if not session_id:
         return 0
-    return _int_value(_sqlite_scalar(
-        db,
-        "SELECT next_seq - 1 FROM seq_counter WHERE session_id = ?",
-        (session_id,),
-    ))
+    if db is None:
+        return 0
+    try:
+        status = db.runs.session_status(session_id)
+    except Exception:
+        return 0
+    return max(int(status.get("last_event_seq") or 0), 0)
 
 
 def event_subject(event: dict[str, Any]) -> dict[str, Any]:

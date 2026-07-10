@@ -27,6 +27,7 @@ from hermes_agent.domain.state_metadata_service import StateMetadataService
 from hermes_agent.domain.storage_maintenance_service import StorageMaintenanceService
 from hermes_agent.domain.team_capability_service import TeamCapabilityService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
+from hermes_agent.read_models.team_missions import TeamMissionReadModel
 from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
@@ -79,6 +80,7 @@ class CliSessionStore(TeamMissionStateMixin):
         self.participants.reconcile()
         activity_repository = TeamMissionRepoImpl(conn)
         self.activities = ActivityService(activity_repository, self._unit_of_work)
+        self.team_missions = TeamMissionReadModel(conn)
         self._session_deletion = SessionDeletionService(
             conn,
             session_repo=self._session_repo,
