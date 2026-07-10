@@ -713,7 +713,7 @@ def _(rid, params: dict) -> dict:
     db = _run_db_for_stable_session(conversation_session_id) if conversation_session_id else _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    result = db.prune_run_events(
+    result = db.runs.retention.prune(
         session_id=conversation_session_id,
         retention_days=int(params.get("retention_days") or params.get("retentionDays") or 14),
         max_events_per_session=int(params.get("max_events_per_session") or params.get("maxEventsPerSession") or 5000),
