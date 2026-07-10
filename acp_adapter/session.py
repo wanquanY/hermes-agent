@@ -251,7 +251,7 @@ class SessionManager:
         return existed or db_existed
 
     def fork_session(self, session_id: str, cwd: str = ".") -> Optional[SessionState]:
-        """Deep-copy a session's history into a new session."""
+        """Create a durable, non-destructive branch of an ACP session."""
         import threading
 
         cwd = _translate_acp_cwd(cwd)
@@ -273,10 +273,27 @@ class SessionManager:
             history=copy.deepcopy(original.history),
             cancel_event=threading.Event(),
         )
+        db = self._get_db()
+        if db is None or not self._persist(original):
+            logger.warning("Failed to persist ACP source session %s before fork", session_id)
+            return None
+        model_str, runtime_config = self._runtime_config(state)
+        try:
+            db.branches.branch_session(
+                source_session_id=original.session_id,
+                new_session_id=new_id,
+                scope="full_conversation",
+                branch_origin="acp_fork",
+                allow_empty=True,
+                target_model=model_str,
+                target_model_config=runtime_config,
+            )
+        except Exception:
+            logger.warning("Failed to persist ACP fork %s -> %s", session_id, new_id, exc_info=True)
+            return None
         with self._lock:
             self._sessions[new_id] = state
         _register_task_cwd(new_id, cwd)
-        self._persist(state)
         logger.info("Forked ACP session %s -> %s", session_id, new_id)
         return state
 
@@ -421,7 +438,17 @@ class SessionManager:
             logger.debug("Session store unavailable for ACP persistence", exc_info=True)
             return None
 
-    def _persist(self, state: SessionState) -> None:
+    @staticmethod
+    def _runtime_config(state: SessionState) -> tuple[str | None, dict[str, str]]:
+        model = str(state.model) if state.model else None
+        config = {"cwd": state.cwd}
+        for field in ("provider", "base_url", "api_mode"):
+            value = getattr(state.agent, field, None)
+            if isinstance(value, str) and value.strip():
+                config[field] = value.strip()
+        return model, config
+
+    def _persist(self, state: SessionState) -> bool:
         """Write session state to the database.
 
         Creates the session record if it doesn't exist, then replaces all
@@ -429,21 +456,9 @@ class SessionManager:
         """
         db = self._get_db()
         if db is None:
-            return
+            return False
 
-        # Ensure model is a plain string (not a MagicMock or other proxy).
-        model_str = str(state.model) if state.model else None
-        session_meta = {"cwd": state.cwd}
-        provider = getattr(state.agent, "provider", None)
-        base_url = getattr(state.agent, "base_url", None)
-        api_mode = getattr(state.agent, "api_mode", None)
-        if isinstance(provider, str) and provider.strip():
-            session_meta["provider"] = provider.strip()
-        if isinstance(base_url, str) and base_url.strip():
-            session_meta["base_url"] = base_url.strip()
-        if isinstance(api_mode, str) and api_mode.strip():
-            session_meta["api_mode"] = api_mode.strip()
-        cwd_json = json.dumps(session_meta)
+        model_str, runtime_config = self._runtime_config(state)
 
         try:
             # Ensure the session record exists.
@@ -453,26 +468,23 @@ class SessionManager:
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=runtime_config,
                 )
             else:
-                # Update model_config (contains cwd) if changed.
-                try:
-                    with db._lock:
-                        db._conn.execute(
-                            "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
-                            (cwd_json, model_str, state.session_id),
-                        )
-                        db._conn.commit()
-                except Exception:
-                    logger.debug("Failed to update ACP session metadata", exc_info=True)
+                db.sessions.update_runtime_config(
+                    state.session_id,
+                    runtime_config,
+                    model=model_str,
+                )
 
             # Replace stored messages with current history atomically so a
             # mid-rewrite failure rolls back and the previously persisted
             # conversation is preserved (salvaged from #13675).
             db.messages.replace(state.session_id, state.history)
+            return True
         except Exception:
             logger.warning("Failed to persist ACP session %s", state.session_id, exc_info=True)
+            return False
 
     def _restore(self, session_id: str) -> Optional[SessionState]:
         """Load a session from the database into memory, recreating the AIAgent."""

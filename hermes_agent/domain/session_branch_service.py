@@ -36,12 +36,19 @@ class SessionBranchService:
         branch_point: Optional[Dict[str, Any]],
         scope: str,
         title: Optional[str],
+        *,
+        allow_empty: bool,
+        target_model: Optional[str],
+        target_model_config: Optional[Dict[str, Any]],
     ) -> str:
         payload = {
             "source_session_id": source_session_id,
             "branch_point": branch_point or {},
             "scope": scope,
             "title": title or "",
+            "allow_empty": allow_empty,
+            "target_model": target_model or "",
+            "target_model_config": target_model_config or {},
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -108,6 +115,8 @@ class SessionBranchService:
         source_session_ids: List[str],
         branch_point: Optional[Dict[str, Any]],
         scope: str,
+        *,
+        allow_empty: bool,
     ) -> Tuple[int, Dict[str, str]]:
         placeholders = ",".join("?" for _ in source_session_ids)
         normalized_scope = str(scope or "through_turn").strip() or "through_turn"
@@ -169,7 +178,7 @@ class SessionBranchService:
             tuple(source_session_ids),
         ).fetchone()
         max_id = int(row["max_id"] or 0) if row else 0
-        if max_id <= 0:
+        if max_id <= 0 and not allow_empty:
             raise ValueError("source transcript is empty")
         return max_id, normalized_point
 
@@ -290,6 +299,9 @@ class SessionBranchService:
         title: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         branch_origin: str = "user_message_action",
+        allow_empty: bool = False,
+        target_model: Optional[str] = None,
+        target_model_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a non-destructive user branch as a normal stored session.
 
@@ -312,6 +324,9 @@ class SessionBranchService:
             branch_point,
             normalized_scope,
             requested_title,
+            allow_empty=bool(allow_empty),
+            target_model=target_model,
+            target_model_config=target_model_config,
         )
         branch_origin = str(branch_origin or "user_message_action").strip() or "user_message_action"
 
@@ -347,6 +362,7 @@ class SessionBranchService:
                 source_session_ids,
                 branch_point,
                 normalized_scope,
+                allow_empty=bool(allow_empty),
             )
             placeholders = ",".join("?" for _ in source_session_ids)
             source_params = tuple(source_session_ids) + (included_row_id,)
@@ -368,7 +384,7 @@ class SessionBranchService:
                 source_params,
             ).fetchone()
             message_count = int(count_row["message_count"] or 0)
-            if message_count <= 0:
+            if message_count <= 0 and not allow_empty:
                 raise ValueError("source transcript is empty")
             tool_call_count = int(count_row["tool_call_count"] or 0)
 
@@ -387,6 +403,8 @@ class SessionBranchService:
                     message_count=message_count,
                     tool_call_count=tool_call_count,
                     source_row=source,
+                    model=target_model,
+                    model_config=target_model_config,
                 )
             )
 
@@ -412,13 +430,13 @@ class SessionBranchService:
                 )
             )
 
-            copy_started_at = created_at
-            MessageRepoImpl(conn).copy_branch_prefix(
-                list(source_session_ids),
-                included_row_id,
-                new_session_id,
-                copy_started_at,
-            )
+            if included_row_id > 0:
+                MessageRepoImpl(conn).copy_branch_prefix(
+                    list(source_session_ids),
+                    included_row_id,
+                    new_session_id,
+                    created_at,
+                )
 
             if idempotency_key:
                 session_repo.record_branch_request(

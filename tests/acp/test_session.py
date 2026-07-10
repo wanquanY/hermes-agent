@@ -458,6 +458,26 @@ class TestPersistence:
         assert len(forked.history) == 1
         assert forked.history[0]["content"] == "context"
         assert forked.session_id != original.session_id
+        db = manager._get_db()
+        lineage = db.branches.get_session_branch_info(forked.session_id)
+        row = db.sessions.get(forked.session_id)
+        assert lineage is not None
+        assert lineage["parent_session_id"] == original.session_id
+        assert lineage["branch_origin"] == "acp_fork"
+        assert json.loads(row["model_config"])["cwd"] == "/fork"
+
+    def test_fork_empty_session_persists_branch_lineage(self, manager):
+        original = manager.create_session(cwd="/source")
+
+        forked = manager.fork_session(original.session_id, cwd="/empty-fork")
+
+        assert forked is not None
+        assert forked.history == []
+        db = manager._get_db()
+        lineage = db.branches.get_session_branch_info(forked.session_id)
+        assert lineage is not None
+        assert lineage["parent_session_id"] == original.session_id
+        assert db.messages.list(forked.session_id) == []
 
     def test_update_cwd_restores_from_db(self, manager):
         state = manager.create_session(cwd="/old")

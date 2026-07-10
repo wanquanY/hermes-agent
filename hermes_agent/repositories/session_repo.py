@@ -148,6 +148,8 @@ class MaterializedBranchSessionSpec:
     message_count: int
     tool_call_count: int
     source_row: Any
+    model: str | None = None
+    model_config: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1139,8 +1141,16 @@ class SessionRepoImpl:
             "id": stable,
             "source": _row_any(source_row, "source", ""),
             "user_id": _row_any(source_row, "user_id", ""),
-            "model": _row_any(source_row, "model", ""),
-            "model_config": _row_any(source_row, "model_config", ""),
+            "model": (
+                str(spec.model)
+                if spec.model is not None
+                else _row_any(source_row, "model", "")
+            ),
+            "model_config": (
+                _encode_model_config(spec.model_config)
+                if spec.model_config is not None
+                else _row_any(source_row, "model_config", "")
+            ),
             "system_prompt": _row_any(source_row, "system_prompt", ""),
             "parent_session_id": None,
             "started_at": created_at,
