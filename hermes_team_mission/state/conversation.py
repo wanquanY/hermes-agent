@@ -13,7 +13,6 @@ from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
 _ACTIVE_RUN_STATUS_SQL = "'cancelling','finalizing','queued','running','starting','waiting_approval'"
-_EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS = 300.0
 
 
 def is_placeholder_team_mission_conversation_title(title: Any) -> bool:
@@ -397,103 +396,6 @@ def repair_placeholder_team_mission_conversation_titles(db: Any, *, limit: int =
             )
             repaired += cursor.rowcount
         return repaired
-
-    return db._execute_write(_do) or 0
-
-
-def prune_empty_team_mission_conversations(
-    db: Any,
-    *,
-    limit: int = 5000,
-    min_age_seconds: float = _EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS,
-) -> int:
-    bounded_limit = max(1, min(int(limit or 5000), 10000))
-    cutoff = time.time() - max(0.0, float(min_age_seconds or 0.0))
-    with db._lock:
-        rows = db._conn.execute(
-            """
-            SELECT c.conversation_id AS conversation_id,
-                   c.conversation_session_id AS conversation_session_id
-            FROM team_mission_conversations c
-            WHERE COALESCE(c.updated_at, c.created_at, 0) <= ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM conversation_missions cm
-                  WHERE cm.conversation_id = c.conversation_id
-                    AND cm.status = 'active'
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM team_missions tm
-                  WHERE tm.conversation_id = c.conversation_id
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM messages m
-                  WHERE m.session_id = c.conversation_session_id
-                    AND m.active = 1
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM runs r
-                  WHERE r.session_id = c.conversation_session_id
-                    AND r.status IN ('cancelling','finalizing','queued','running','starting','waiting_approval')
-                  LIMIT 1
-              )
-            ORDER BY c.updated_at DESC, c.conversation_id ASC
-            LIMIT ?
-            """,
-            (cutoff, bounded_limit),
-        ).fetchall()
-    conversation_ids = [
-        _text(_row_value(row, "conversation_id", ""))
-        for row in rows
-        if _text(_row_value(row, "conversation_id", ""))
-    ]
-    if not conversation_ids:
-        return 0
-    conversation_session_ids = [
-        _text(_row_value(row, "conversation_session_id", ""))
-        for row in rows
-        if _text(_row_value(row, "conversation_session_id", ""))
-    ]
-
-    def _do(conn: sqlite3.Connection) -> int:
-        placeholders = ",".join("?" for _ in conversation_ids)
-        conn.execute(
-            f"DELETE FROM team_mission_conversations WHERE conversation_id IN ({placeholders})",
-            tuple(conversation_ids),
-        )
-        conn.execute(
-            f"DELETE FROM session_index WHERE conversation_id IN ({placeholders})",
-            tuple(conversation_ids),
-        )
-        if conversation_session_ids:
-            session_placeholders = ",".join("?" for _ in conversation_session_ids)
-            conn.execute(
-                f"DELETE FROM session_index WHERE session_id IN ({session_placeholders})",
-                tuple(conversation_session_ids),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM sessions
-                WHERE id IN ({session_placeholders})
-                  AND source = 'team_mission'
-                  AND COALESCE(message_count, 0) = 0
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM messages m
-                      WHERE m.session_id = sessions.id
-                        AND m.active = 1
-                      LIMIT 1
-                  )
-                """,
-                tuple(conversation_session_ids),
-            )
-        return len(conversation_ids)
 
     return db._execute_write(_do) or 0
 

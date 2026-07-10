@@ -86,6 +86,14 @@ class SessionIndexService:
     def get(self, session_id: str) -> dict[str, Any] | None:
         return self._read_model.get(session_id)
 
+    def repair_terminal_active_runs(self) -> int:
+        """Clear stale active-run state from the durable session projection."""
+        return int(
+            self._unit_of_work.execute(
+                lambda conn: SessionIndexReconciler(conn).repair_terminal_active_runs()
+            )
+        )
+
     def list(
         self,
         *,

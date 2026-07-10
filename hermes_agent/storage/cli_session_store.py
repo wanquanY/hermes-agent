@@ -7,6 +7,7 @@ import the legacy state facade.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -47,7 +48,11 @@ from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 from hermes_team_mission.domain.transcript_visibility import (
     TeamMissionTranscriptVisibilityPolicy,
 )
+from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
+
+
+logger = logging.getLogger(__name__)
 
 
 def open_cli_session_store(db_path: Path | str | None = None):
@@ -154,6 +159,7 @@ class CliSessionStore(TeamMissionStateMixin):
             TeamCapabilityRepo(conn, self._execute_write, self._lock),
             self,
         )
+        run_team_mission_startup_maintenance(self, logger)
 
     @property
     def db_path(self) -> Path:
