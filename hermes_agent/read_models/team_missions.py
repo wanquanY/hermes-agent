@@ -84,5 +84,40 @@ class TeamMissionReadModel:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def mission_ids_for_session_key(self, session_key: str) -> list[str]:
+        stable_session_key = str(session_key or "").strip()
+        if not stable_session_key:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT tm.mission_id
+                  FROM team_missions tm
+                  JOIN team_mission_conversations tmc
+                    ON tmc.conversation_id = tm.conversation_id
+                 WHERE tmc.conversation_session_id = ?
+                UNION
+                SELECT DISTINCT mission_id
+                  FROM team_mission_run_bindings
+                 WHERE session_id = ?
+                    OR execution_session_id = ?
+                    OR runtime_scope_key = ?
+                """,
+                (
+                    stable_session_key,
+                    stable_session_key,
+                    stable_session_key,
+                    stable_session_key,
+                ),
+            ).fetchall()
+        return [
+            mission_id
+            for mission_id in (
+                str(row["mission_id"] or "").strip()
+                for row in rows
+            )
+            if mission_id
+        ]
+
 
 __all__ = ["TeamMissionReadModel"]
