@@ -9,7 +9,6 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
-from hermes_agent.domain.session_deletion import SessionDeletionService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from tui_gateway.methods._shared import bind_server_globals
@@ -152,13 +151,6 @@ def _session_recall_read_model_for_db(db):
     if conn is None:
         return None
     return SessionRecallReadModel(conn)
-
-
-def _session_deletion_service_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return SessionDeletionService(conn)
 
 
 def _requested_runtime_executor(params: dict | None = None) -> str:
@@ -1958,12 +1950,9 @@ def _(rid, params: dict) -> dict:
     active = {s.get("session_key") for s in snapshot if s.get("session_key")}
     if target in active:
         return _err(rid, 4023, "cannot delete an active session")
-    deletion_service = _session_deletion_service_for_db(db)
-    if deletion_service is None:
-        return _err(rid, 5036, "session deletion service unavailable")
     sessions_dir = Path(get_hermes_home()) / "sessions"
     try:
-        deletion = deletion_service.delete(target, sessions_dir=sessions_dir)
+        deletion = db.sessions.delete(target, sessions_dir=sessions_dir)
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
     if not deletion.session_deleted:

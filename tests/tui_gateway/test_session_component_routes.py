@@ -98,3 +98,30 @@ def test_session_create_route_writes_through_session_component(
     assert stored is not None
     assert stored["source"] == "tui"
     assert stored["model"] == "test-model"
+
+
+def test_session_delete_route_uses_session_lifecycle_component(
+    tmp_path,
+    monkeypatch,
+):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("delete-session", "tui")
+        db.messages.append("delete-session", "user", "delete me")
+        _install_db(monkeypatch, db)
+        monkeypatch.setattr(session_methods, "get_hermes_home", lambda: tmp_path)
+
+        response = server.handle_request(
+            {
+                "id": "delete",
+                "method": "session.delete",
+                "params": {"session_id": "delete-session"},
+            }
+        )
+        stored = db.sessions.get("delete-session")
+    finally:
+        db.close()
+
+    assert "error" not in response, response
+    assert response["result"]["deleted"] == "delete-session"
+    assert stored is None

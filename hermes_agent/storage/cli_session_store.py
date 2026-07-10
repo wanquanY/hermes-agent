@@ -107,6 +107,7 @@ class CliSessionStore(TeamMissionStateMixin):
             self._recall,
             self.messages,
             self._unit_of_work,
+            deletion=self._session_deletion,
         )
         self.session_index = SessionIndexService(
             conn,

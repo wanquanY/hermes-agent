@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from hermes_agent.domain.message_service import MessageService
+from hermes_agent.domain.session_deletion import SessionDeletionResult, SessionDeletionService
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepo, SessionSpec, sanitize_session_title
@@ -24,6 +26,7 @@ class SessionService:
         recall: SessionRecallReadModel,
         messages: MessageService,
         unit_of_work: SqliteUnitOfWork,
+        deletion: SessionDeletionService | None = None,
     ) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
@@ -32,6 +35,11 @@ class SessionService:
         self._list = SessionListReadModel(conn)
         self._messages = messages
         self._unit_of_work = unit_of_work
+        self._deletion = deletion or SessionDeletionService(
+            conn,
+            session_repo=repo,
+            unit_of_work=unit_of_work,
+        )
 
     def create(self, session_id: str, source: str, **fields: Any) -> str:
         stable = str(session_id or "").strip()
@@ -278,6 +286,14 @@ class SessionService:
 
     def set_archived(self, session_id: str, archived: bool) -> bool:
         return self._unit_of_work.execute(lambda _conn: self._repo.set_archived(session_id, archived))
+
+    def delete(
+        self,
+        session_id: str,
+        *,
+        sessions_dir: Path | None = None,
+    ) -> SessionDeletionResult:
+        return self._deletion.delete(session_id, sessions_dir=sessions_dir)
 
     def latest_descendant(self, session_id: str) -> tuple[str | None, list[str]]:
         stable = self.resolve_id(session_id)
