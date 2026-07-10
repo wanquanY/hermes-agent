@@ -7,54 +7,125 @@ import the legacy state facade.
 
 from __future__ import annotations
 
-import json
-import logging
-import re
-import shutil
 import sqlite3
-import time
 from pathlib import Path
-from typing import Any
 
-from agent.memory_manager import sanitize_context
+from hermes_agent.domain.activity_service import ActivityService
+from hermes_agent.domain.compression_lease_service import CompressionLeaseService
+from hermes_agent.domain.message_service import MessageService
+from hermes_agent.domain.member_chat_projection_service import MemberChatProjectionService
+from hermes_agent.domain.participant_service import ParticipantService
+from hermes_agent.domain.run_event_maintenance_service import RunEventMaintenanceService
+from hermes_agent.domain.run_service import RunService
+from hermes_agent.domain.session_analytics_service import SessionAnalyticsService
+from hermes_agent.domain.session_branch_service import SessionBranchService
 from hermes_agent.domain.session_deletion import SessionDeletionService
-from hermes_agent.read_models.message_history import MessageHistoryReadModel
+from hermes_agent.domain.session_index_service import SessionIndexService
+from hermes_agent.domain.session_service import SessionService
+from hermes_agent.domain.state_metadata_service import StateMetadataService
+from hermes_agent.domain.storage_maintenance_service import StorageMaintenanceService
+from hermes_agent.domain.team_capability_service import TeamCapabilityService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
+from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
-from hermes_agent.repositories.message_content_codec import decode_message_content
-from hermes_agent.repositories.message_content_codec import encode_message_content
-from hermes_agent.repositories.message_repo import MessageRepository
-from hermes_agent.repositories.session_repo import (
-    SessionRepoImpl,
-    SessionSpec,
-    sanitize_session_title,
-)
+from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
+from hermes_agent.repositories.conversation_participant_repo import ConversationParticipantRepo
+from hermes_agent.repositories.session_repo import SessionRepoImpl
+from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
+from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
 from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
-from hermes_agent.application.state_facade.team_capability_facade import TeamCapabilityStateMixin
+from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
+from hermes_team_mission.domain.transcript_visibility import (
+    TeamMissionTranscriptVisibilityPolicy,
+)
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
-
-logger = logging.getLogger(__name__)
 
 
 def open_cli_session_store(db_path: Path | str | None = None):
     return CliSessionStore(connect_session_repository_db(db_path))
 
 
-class CliSessionStore(TeamMissionStateMixin, TeamCapabilityStateMixin):
+class CliSessionStore(TeamMissionStateMixin):
     """Method surface currently required by CLI and AIAgent persistence."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
-        self._sessions = SessionRepoImpl(conn)
-        self._profiles = AgentProfileRepoImpl(conn)
-        self._teams = TeamRegistryRepo(conn, self._execute_write, self._lock)
-        self._session_deletion = SessionDeletionService(conn)
-        self._message_writer = MessageRepository(conn, self._sessions)
-        self._messages = MessageHistoryReadModel(conn)
+        self._unit_of_work = SqliteUnitOfWork(conn, self._lock)
+        self._session_repo = SessionRepoImpl(conn)
+        self.compression_leases = CompressionLeaseService(
+            CompressionLeaseRepository(conn),
+            self._unit_of_work,
+        )
+        self.profiles = AgentProfileRepoImpl(conn)
+        self.teams = TeamRegistryRepo(conn, self._execute_write, self._lock)
+        participant_repository = ConversationParticipantRepo(
+            conn,
+            self._execute_write,
+            self._lock,
+        )
+        self.participants = ParticipantService(
+            participant_repository,
+            self._unit_of_work,
+        )
+        self.participants.reconcile()
+        activity_repository = TeamMissionRepoImpl(conn)
+        self.activities = ActivityService(activity_repository, self._unit_of_work)
+        self._session_deletion = SessionDeletionService(
+            conn,
+            session_repo=self._session_repo,
+            unit_of_work=self._unit_of_work,
+        )
+        self.metadata = StateMetadataService(conn, self._unit_of_work)
+        self.analytics = SessionAnalyticsService(conn)
+        self.maintenance = StorageMaintenanceService(
+            conn,
+            self._lock,
+            self._unit_of_work,
+            self._session_repo,
+            self._session_deletion,
+            self.metadata,
+        )
+        self.messages = MessageService(
+            conn,
+            self._session_repo,
+            visibility_policies={"team": TeamMissionTranscriptVisibilityPolicy()},
+        )
         self._recall = SessionRecallReadModel(conn)
+        self.sessions = SessionService(
+            conn,
+            self._session_repo,
+            self._recall,
+            self.messages,
+            self._unit_of_work,
+        )
+        self.session_index = SessionIndexService(
+            conn,
+            self._session_repo,
+            self._unit_of_work,
+            self._repair_session_index_active_team_runtime_scope_locked,
+        )
+        self.branches = SessionBranchService(
+            conn,
+            self._execute_write,
+            self._lock,
+            self.sessions.sanitize_title,
+        )
+        self.member_chat_views = MemberChatProjectionService(
+            conn,
+            self._execute_write,
+            self.messages.list,
+            self.messages.append,
+        )
+        self.runs = RunService(conn, self._unit_of_work, self._session_repo)
+        self.run_event_maintenance = RunEventMaintenanceService(self._unit_of_work)
+        self.tool_event_projection = ToolEventProjectionReadModel(conn)
+        self.team_capabilities = TeamCapabilityService(
+            TeamCapabilityRepo(conn, self._execute_write, self._lock),
+            self,
+        )
 
     @property
     def db_path(self) -> Path:
@@ -65,831 +136,11 @@ class CliSessionStore(TeamMissionStateMixin, TeamCapabilityStateMixin):
         return Path(str(file_value or ""))
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def _execute_write(self, fn):
-        with self._lock:
-            try:
-                result = fn(self._conn)
-                self._conn.commit()
-                return result
-            except BaseException:
-                self._conn.rollback()
-                raise
-
-    def create_session(self, session_id: str, source: str, **kwargs: Any) -> str:
-        self._sessions.create(
-            SessionSpec(
-                session_id=str(session_id or ""),
-                source=str(source or "unknown"),
-                user_id=str(kwargs.get("user_id") or ""),
-                model=str(kwargs.get("model") or ""),
-                model_config=kwargs.get("model_config"),
-                parent_session_id=str(kwargs.get("parent_session_id") or ""),
-                transient=bool(kwargs.get("transient", False)),
-                title=str(kwargs.get("title") or ""),
-            )
-        )
-        system_prompt = kwargs.get("system_prompt")
-        if system_prompt:
-            self.update_system_prompt(session_id, str(system_prompt))
-        cwd = str(kwargs.get("cwd") or "").strip()
-        if cwd:
-            self.update_session_cwd(session_id, cwd)
-        return str(session_id or "")
-
-    def ensure_session(self, session_id: str, source: str = "unknown", **kwargs: Any) -> str:
-        stable = str(session_id or "").strip()
-        if not stable:
-            raise ValueError("session_id is required")
-        if self.get_session(stable) is None:
-            self.create_session(stable, source, **kwargs)
-        return stable
-
-    def get_session(self, session_id: str) -> dict[str, Any] | None:
-        stable = str(session_id or "").strip()
-        if not stable:
-            return None
-        row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (stable,)).fetchone()
-        return dict(row) if row else None
-
-    def resolve_session_id(self, session_id: str) -> str | None:
-        stable = str(session_id or "").strip()
-        if not stable:
-            return None
-        return stable if self.get_session(stable) is not None else None
-
-    def end_session(self, session_id: str, end_reason: str) -> None:
-        with self._lock:
-            self._sessions.close(session_id, str(end_reason or ""))
-            self._conn.commit()
-
-    def reopen_session(self, session_id: str) -> None:
-        with self._lock:
-            self._sessions.reopen(session_id)
-            self._conn.commit()
-
-    def get_session_title(self, session_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT title FROM sessions WHERE id = ?",
-            (str(session_id or ""),),
-        ).fetchone()
-        if not row or not row["title"]:
-            return None
-        return str(row["title"])
-
-    def set_session_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool:
-        return self._sessions.set_title(session_id, title, title_source=title_source)
-
-    def update_session_cwd(self, session_id: str, cwd: str) -> None:
-        stable = str(session_id or "").strip()
-        if not stable:
-            raise ValueError("session_id is required")
-        with self._lock:
-            self._sessions.update_cwd(stable, str(cwd or ""))
-            self._conn.commit()
-
-    def get_session_by_title(self, title: str) -> dict[str, Any] | None:
-        normalized = sanitize_session_title(title)
-        if not normalized:
-            return None
-        row = self._conn.execute("SELECT * FROM sessions WHERE title = ?", (normalized,)).fetchone()
-        return dict(row) if row else None
-
-    def resolve_session_by_title(self, title: str) -> str | None:
-        normalized = sanitize_session_title(title)
-        if not normalized:
-            return None
-        exact = self.get_session_by_title(normalized)
-        escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        rows = self._conn.execute(
-            "SELECT id FROM sessions WHERE title LIKE ? ESCAPE '\\' "
-            "ORDER BY started_at DESC, id DESC",
-            (f"{escaped} #%",),
-        ).fetchall()
-        if rows:
-            return str(rows[0]["id"])
-        if exact:
-            return str(exact["id"])
-        return None
-
-    def upsert_agent_profile(self, **kwargs: Any) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.upsert_agent_profile(**kwargs)
-
-    def get_agent_profile(self, profile_id: str) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.get_agent_profile(profile_id)
-
-    def get_agent_profile_by_slug(self, slug: str) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.get_agent_profile_by_slug(slug)
-
-    def list_agent_profiles(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
-        with self._lock:
-            return self._profiles.list_agent_profiles(include_archived=include_archived)
-
-    def archive_agent_profile(self, profile_id: str) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.archive_agent_profile(profile_id)
-
-    def agent_profile_growth_summary(
-        self,
-        agent_profile_id: str,
-        *,
-        agent_profile_version_id: str = "",
-        range_preset: str = "",
-        start_date: str = "",
-        end_date: str = "",
-    ) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.agent_profile_growth_summary(
-                agent_profile_id,
-                agent_profile_version_id=agent_profile_version_id,
-                range_preset=range_preset,
-                start_date=start_date,
-                end_date=end_date,
-            )
-
-    def upsert_agent_profile_draft(self, **kwargs: Any) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.upsert_agent_profile_draft(**kwargs)
-
-    def get_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.get_agent_profile_draft(draft_id)
-
-    def list_agent_profile_drafts(
-        self,
-        *,
-        include_published: bool = False,
-        include_discarded: bool = False,
-        statuses: list[str] | None = None,
-        source_session_id: str = "",
-        source_agent_profile_id: str = "",
-        workspace_id: str = "",
-    ) -> list[dict[str, Any]]:
-        with self._lock:
-            return self._profiles.list_agent_profile_drafts(
-                include_published=include_published,
-                include_discarded=include_discarded,
-                statuses=statuses,
-                source_session_id=source_session_id,
-                source_agent_profile_id=source_agent_profile_id,
-                workspace_id=workspace_id,
-            )
-
-    def discard_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
-        with self._lock:
-            return self._profiles.discard_agent_profile_draft(draft_id)
-
-    def upsert_agent_team(self, **kwargs: Any) -> dict[str, Any]:
-        return self._teams.upsert_agent_team(**kwargs)
-
-    def get_agent_team(self, team_id: str) -> dict[str, Any]:
-        return self._teams.get_agent_team(team_id)
-
-    def list_agent_teams(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
-        return self._teams.list_agent_teams(include_archived=include_archived)
-
-    def list_agent_team_summaries(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
-        return self._teams.list_agent_team_summaries(include_archived=include_archived)
-
-    def archive_agent_team(self, team_id: str) -> dict[str, Any]:
-        return self._teams.archive_agent_team(team_id)
-
-    def upsert_agent_team_member(self, **kwargs: Any) -> dict[str, Any]:
-        return self._teams.upsert_agent_team_member(**kwargs)
-
-    def get_agent_team_member(self, member_id: str) -> dict[str, Any]:
-        return self._teams.get_agent_team_member(member_id)
-
-    def list_agent_team_members(self, team_id: str) -> list[dict[str, Any]]:
-        return self._teams.list_agent_team_members(team_id)
-
-    def delete_agent_team_member(self, member_id: str) -> dict[str, Any]:
-        return self._teams.delete_agent_team_member(member_id)
-
-    def get_agent_team_with_members(self, team_id: str) -> dict[str, Any]:
-        return self._teams.get_agent_team_with_members(team_id)
-
-    def get_next_title_in_lineage(self, base_title: str) -> str:
-        match = re.match(r"^(.*?) #(\d+)$", str(base_title or ""))
-        base = match.group(1) if match else str(base_title or "")
-        escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        rows = self._conn.execute(
-            "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-            (base, f"{escaped} #%"),
-        ).fetchall()
-        existing = [str(row["title"] or "") for row in rows]
-        if not existing:
-            return base
-        max_num = 1
-        for title in existing:
-            suffix = re.match(r"^.* #(\d+)$", title)
-            if suffix:
-                max_num = max(max_num, int(suffix.group(1)))
-        return f"{base} #{max_num + 1}"
-
-    def resolve_resume_session_id(self, session_id: str) -> str:
-        return self._recall.resolve_resume_session_id(session_id)
-
-    def get_compression_tip(self, session_id: str) -> str:
-        return self._recall.get_compression_tip(session_id)
-
-    def list_sessions_rich(
-        self,
-        *,
-        source: str | None = None,
-        limit: int = 20,
-        offset: int = 0,
-        exclude_sources: list[str] | None = None,
-        include_children: bool = False,
-        order_by_last_active: bool = True,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]:
-        return self._recall.list_sessions_rich(
-            source=source,
-            exclude_sources=exclude_sources,
-            limit=limit,
-            offset=offset,
-            include_children=include_children,
-            order_by_last_active=order_by_last_active,
-            **kwargs,
-        )
-
-    def search_sessions(
-        self,
-        source: str | None = None,
-        limit: int = 20,
-        offset: int = 0,
-        **_kwargs: Any,
-    ) -> list[dict[str, Any]]:
-        return self._recall.list_sessions_rich(
-            source=source,
-            limit=limit,
-            offset=offset,
-            include_children=True,
-            order_by_last_active=True,
-        )
-
-    def search_sessions_by_id(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        needle = str(query or "").strip().lower()
-        if not needle:
-            return []
-        bounded_limit = max(1, min(_to_int(limit, 20), 100))
-        candidates = self._recall.list_sessions_rich(
-            limit=max(bounded_limit * 4, bounded_limit),
-            offset=0,
-            include_children=True,
-            order_by_last_active=True,
-            id_query=needle,
-            archived="all",
-        )
-
-        def score(row: dict[str, Any]) -> int:
-            values = [
-                str(row.get("id") or "").lower(),
-                str(row.get("_lineage_root_id") or "").lower(),
-            ]
-            if any(value == needle for value in values):
-                return 0
-            if any(value.startswith(needle) for value in values):
-                return 1
-            return 2
-
-        ranked = sorted(enumerate(candidates), key=lambda item: (score(item[1]), item[0]))
-        return [row for _, row in ranked[:bounded_limit]]
-
-    def session_count(
-        self,
-        source: str | None = None,
-        *,
-        min_message_count: int = 0,
-        archived: str = "false",
-        **_kwargs: Any,
-    ) -> int:
-        return self._recall.session_count(
-            source=source,
-            min_message_count=min_message_count,
-            archived=archived,
-        )
-
-    def message_count(self, session_id: str | None = None) -> int:
-        stable = str(session_id or "").strip()
-        if stable:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
-                (stable,),
-            ).fetchone()
-        else:
-            row = self._conn.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
-        return int(row["count"] if row else 0)
-
-    def search_messages(
-        self,
-        query: str,
-        source_filter: list[str] | None = None,
-        exclude_sources: list[str] | None = None,
-        role_filter: list[str] | None = None,
-        limit: int = 20,
-        offset: int = 0,
-        sort: str | None = None,
-        include_inactive: bool = False,
-    ) -> list[dict[str, Any]]:
-        return self._recall.search_messages(
-            query,
-            source_filter=source_filter,
-            exclude_sources=exclude_sources,
-            role_filter=role_filter,
-            limit=limit,
-            offset=offset,
-            sort=sort,
-            include_inactive=include_inactive,
-        )
-
-    def get_messages(self, session_id: str, include_inactive: bool = False) -> list[dict[str, Any]]:
-        active_clause = "" if include_inactive else " AND active = 1"
-        rows = self._conn.execute(
-            "SELECT * FROM messages WHERE session_id = ?"
-            f"{active_clause} ORDER BY id",
-            (str(session_id or ""),),
-        ).fetchall()
-        return [_message_row(row) for row in rows]
-
-    def get_messages_as_conversation(
-        self,
-        session_id: str,
-        include_ancestors: bool = False,
-        include_storage_metadata: bool = False,
-        include_inactive: bool = False,
-    ) -> list[dict[str, Any]]:
-        return self._messages.all_as_conversation(
-            session_id,
-            include_ancestors=include_ancestors,
-            include_storage_metadata=include_storage_metadata,
-            include_inactive=include_inactive,
-        )
-
-    def export_session(self, session_id: str) -> dict[str, Any] | None:
-        session = self.get_session(session_id)
-        if not session:
-            return None
-        return {**session, "messages": self.get_messages(session_id, include_inactive=True)}
-
-    def export_all(self, source: str | None = None) -> list[dict[str, Any]]:
-        sessions = self.search_sessions(
-            source=source,
-            limit=100_000,
-            include_children=True,
-            archived="all",
-        )
-        exported: list[dict[str, Any]] = []
-        for session in sessions:
-            session_id = str(session.get("id") or "")
-            exported.append({**session, "messages": self.get_messages(session_id, include_inactive=True)})
-        return exported
-
-    def append_message(
-        self,
-        session_id: str,
-        role: str,
-        content: Any,
-        *,
-        participant_id: str = "",
-        tool_call_id: str | None = None,
-        tool_calls: Any = None,
-        tool_name: str | None = None,
-        token_count: int | None = None,
-        finish_reason: str | None = None,
-        reasoning: str | None = None,
-        reasoning_content: str | None = None,
-        reasoning_details: Any = None,
-        codex_reasoning_items: Any = None,
-        codex_message_items: Any = None,
-        platform_message_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> int:
-        stable = str(session_id or "").strip()
-        if not stable:
-            raise ValueError("session_id is required")
-        if self.get_session(stable) is None:
-            self.create_session(stable, source="cli")
-        message: dict[str, Any] = {
-            "role": str(role or "unknown"),
-            "content": content,
-            "participant_id": str(participant_id or ""),
-            "tool_call_id": tool_call_id,
-            "tool_calls": tool_calls,
-            "tool_name": tool_name,
-            "token_count": token_count,
-            "finish_reason": finish_reason,
-            "reasoning": reasoning,
-            "reasoning_content": reasoning_content,
-            "reasoning_details": reasoning_details,
-            "codex_reasoning_items": codex_reasoning_items,
-            "codex_message_items": codex_message_items,
-            "platform_message_id": platform_message_id,
-            "metadata": metadata,
-        }
-        return self._message_writer.append_conversation_message(stable, message)
-
-    def replace_messages(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        stable = str(session_id or "").strip()
-        if not stable:
-            raise ValueError("session_id is required")
-        self._message_writer.replace_conversation(stable, messages)
-
-    def update_token_counts(self, session_id: str, **counts: Any) -> None:
-        with self._lock:
-            self._sessions.update_usage(session_id, counts)
-            self._conn.commit()
-
-    def set_session_archived(self, session_id: str, archived: bool) -> bool:
-        stable = str(session_id or "").strip()
-        if not stable:
-            return False
-        with self._lock:
-            updated = self._sessions.set_archived(stable, archived)
-            self._conn.commit()
-        return updated
-
-    def latest_descendant(self, session_id: str) -> tuple[str | None, list[str]]:
-        stable = self.resolve_session_id(session_id)
-        if not stable:
-            return None, []
-        rows = self._conn.execute(
-            "SELECT id, parent_session_id, started_at FROM sessions"
-        ).fetchall()
-        children: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            item = dict(row)
-            parent = str(item.get("parent_session_id") or "")
-            if parent:
-                children.setdefault(parent, []).append(item)
-
-        def started(row: dict[str, Any]) -> float:
-            try:
-                return float(row.get("started_at") or 0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        current = stable
-        path = [stable]
-        seen = {stable}
-        while children.get(current):
-            candidates = [row for row in children[current] if row.get("id") not in seen]
-            if not candidates:
-                break
-            candidates.sort(key=started, reverse=True)
-            current = str(candidates[0]["id"])
-            path.append(current)
-            seen.add(current)
-        return current, path
-
-    def usage_analytics(self, days: int = 30) -> dict[str, Any]:
-        from agent.insights import InsightsEngine
-
-        cutoff = time.time() - (int(days or 30) * 86400)
-        daily_rows = self._conn.execute(
-            """
-            SELECT date(started_at, 'unixepoch') AS day,
-                   SUM(input_tokens) AS input_tokens,
-                   SUM(output_tokens) AS output_tokens,
-                   SUM(cache_read_tokens) AS cache_read_tokens,
-                   SUM(reasoning_tokens) AS reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
-                   COUNT(*) AS sessions,
-                   SUM(COALESCE(api_call_count, 0)) AS api_calls
-              FROM sessions WHERE started_at > ?
-             GROUP BY day ORDER BY day
-            """,
-            (cutoff,),
-        ).fetchall()
-        model_rows = self._conn.execute(
-            """
-            SELECT model,
-                   SUM(input_tokens) AS input_tokens,
-                   SUM(output_tokens) AS output_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
-                   COUNT(*) AS sessions,
-                   SUM(COALESCE(api_call_count, 0)) AS api_calls
-              FROM sessions
-             WHERE started_at > ? AND model IS NOT NULL
-             GROUP BY model
-             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-            """,
-            (cutoff,),
-        ).fetchall()
-        totals = dict(self._conn.execute(
-            """
-            SELECT SUM(input_tokens) AS total_input,
-                   SUM(output_tokens) AS total_output,
-                   SUM(cache_read_tokens) AS total_cache_read,
-                   SUM(reasoning_tokens) AS total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) AS total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
-                   COUNT(*) AS total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) AS total_api_calls
-              FROM sessions WHERE started_at > ?
-            """,
-            (cutoff,),
-        ).fetchone())
-        insights_report = InsightsEngine(self).generate(days=days)
-        return {
-            "daily": [dict(row) for row in daily_rows],
-            "by_model": [dict(row) for row in model_rows],
-            "totals": totals,
-            "period_days": days,
-            "skills": insights_report.get("skills", _empty_skill_breakdown()),
-        }
-
-    def model_analytics(self, days: int = 30) -> dict[str, Any]:
-        cutoff = time.time() - (int(days or 30) * 86400)
-        rows = self._conn.execute(
-            """
-            SELECT model,
-                   billing_provider,
-                   SUM(input_tokens) AS input_tokens,
-                   SUM(output_tokens) AS output_tokens,
-                   SUM(cache_read_tokens) AS cache_read_tokens,
-                   SUM(reasoning_tokens) AS reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost,
-                   COUNT(*) AS sessions,
-                   SUM(COALESCE(api_call_count, 0)) AS api_calls,
-                   SUM(tool_call_count) AS tool_calls,
-                   MAX(started_at) AS last_used_at,
-                   AVG(input_tokens + output_tokens) AS avg_tokens_per_session
-              FROM sessions
-             WHERE started_at > ? AND model IS NOT NULL AND model != ''
-             GROUP BY model, billing_provider
-             ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-            """,
-            (cutoff,),
-        ).fetchall()
-        totals = dict(self._conn.execute(
-            """
-            SELECT COUNT(DISTINCT model) AS distinct_models,
-                   SUM(input_tokens) AS total_input,
-                   SUM(output_tokens) AS total_output,
-                   SUM(cache_read_tokens) AS total_cache_read,
-                   SUM(reasoning_tokens) AS total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) AS total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) AS total_actual_cost,
-                   COUNT(*) AS total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) AS total_api_calls
-              FROM sessions
-             WHERE started_at > ? AND model IS NOT NULL AND model != ''
-            """,
-            (cutoff,),
-        ).fetchone())
-        return {"rows": [dict(row) for row in rows], "totals": totals, "period_days": days}
-
-    def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
-        with self._lock:
-            self._sessions.update_system_prompt(session_id, system_prompt)
-            self._conn.commit()
-
-    def request_handoff(self, session_id: str, platform: str) -> bool:
-        with self._lock:
-            updated = self._sessions.request_handoff(session_id, platform)
-            self._conn.commit()
-        return updated
-
-    def get_handoff_state(self, session_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT handoff_state, handoff_platform, handoff_error FROM sessions WHERE id = ?",
-            (str(session_id or ""),),
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "state": row["handoff_state"],
-            "platform": row["handoff_platform"],
-            "error": row["handoff_error"],
-        }
-
-    def fail_handoff(self, session_id: str, error: str) -> None:
-        with self._lock:
-            self._sessions.fail_handoff(session_id, error)
-            self._conn.commit()
-
-    def delete_session(self, session_id: str, sessions_dir: Path | None = None) -> bool:
-        stable = str(session_id or "").strip()
-        if not stable:
-            return False
-        with self._lock:
-            result = self._session_deletion.delete(stable, sessions_dir=sessions_dir)
-        return result.session_deleted
-
-    def prune_sessions(
-        self,
-        older_than_days: int = 90,
-        source: str | None = None,
-        sessions_dir: Path | None = None,
-    ) -> int:
-        cutoff = time.time() - (int(older_than_days or 0) * 86400)
-        params: list[Any] = [cutoff]
-        source_clause = ""
-        if source:
-            source_clause = " AND source = ?"
-            params.append(str(source))
-        rows = self._conn.execute(
-            f"SELECT id FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL{source_clause}",
-            tuple(params),
-        ).fetchall()
-        session_ids = [str(row["id"] or "") for row in rows if str(row["id"] or "")]
-        if not session_ids:
-            return 0
-        deleted = 0
-        for stable in session_ids:
-            with self._lock:
-                result = self._session_deletion.delete(stable, sessions_dir=sessions_dir)
-            if result.session_deleted:
-                deleted += 1
-        return deleted
-
-    @staticmethod
-    def _remove_session_files(sessions_dir: Path, session_id: str) -> None:
-        if not sessions_dir:
-            return
-        for suffix in (".json", ".jsonl"):
-            try:
-                (sessions_dir / f"{session_id}{suffix}").unlink(missing_ok=True)
-            except OSError as exc:
-                logger.debug("failed to remove CLI session file %s%s: %s", session_id, suffix, exc)
-        try:
-            for path in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as exc:
-                    logger.debug("failed to remove CLI request dump %s: %s", path, exc)
-            legacy_dir = sessions_dir / session_id
-            if legacy_dir.exists():
-                shutil.rmtree(legacy_dir, ignore_errors=True)
-        except OSError as exc:
-            logger.debug("failed to cleanup CLI session directory for %s: %s", session_id, exc)
-
-    def _table_exists(self, table: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-            (table,),
-        ).fetchone()
-        return row is not None
-
-    def _table_columns(self, table: str) -> set[str]:
-        if not self._table_exists(table):
-            return set()
-        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(row["name"]) for row in rows}
-
-    def prune_empty_ghost_sessions(self, sessions_dir: Path | None = None) -> int:
-        rows = self._conn.execute(
-            """
-            SELECT id FROM sessions
-             WHERE COALESCE(message_count, 0) = 0
-               AND (ended_at IS NOT NULL OR COALESCE(transient, 0) = 1)
-            """
-        ).fetchall()
-        count = 0
-        for row in rows:
-            if self.delete_session(str(row["id"]), sessions_dir=sessions_dir):
-                count += 1
-        return count
-
-    def finalize_orphaned_compression_sessions(self) -> int:
-        with self._lock:
-            finalized = self._sessions.finalize_orphaned_compression_sessions()
-            self._conn.commit()
-        return finalized
-
-    def maybe_auto_prune_and_vacuum(
-        self,
-        *,
-        retention_days: int = 90,
-        min_interval_hours: int = 24,
-        vacuum: bool = True,
-        sessions_dir: Path | None = None,
-    ) -> dict[str, Any]:
-        now = time.time()
-        last_raw = self.get_meta("last_auto_prune")
-        try:
-            last = float(last_raw or 0)
-        except (TypeError, ValueError):
-            last = 0.0
-        if last and now - last < max(0, int(min_interval_hours or 0)) * 3600:
-            return {"skipped": True, "reason": "interval"}
-        cutoff = now - max(1, int(retention_days or 90)) * 86400
-        rows = self._conn.execute(
-            "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
-            (cutoff,),
-        ).fetchall()
-        pruned = 0
-        for row in rows:
-            if self.delete_session(str(row["id"]), sessions_dir=sessions_dir):
-                pruned += 1
-        if vacuum:
-            try:
-                self._conn.execute("VACUUM")
-            except sqlite3.Error as exc:
-                logger.debug("CLI auto-prune VACUUM failed: %s", exc)
-        self.set_meta("last_auto_prune", str(now))
-        return {"skipped": False, "pruned_sessions": pruned}
-
-    def get_meta(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM state_meta WHERE key = ?", (str(key),)).fetchone()
-        return str(row["value"]) if row else None
-
-    def set_meta(self, key: str, value: str) -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO state_meta (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(key), str(value)),
-            )
-            self._conn.commit()
-
-
-def _message_row(row: sqlite3.Row) -> dict[str, Any]:
-    item = dict(row)
-    item["content"] = _decode_content(item.get("content"))
-    for key in ("tool_calls", "reasoning_details", "codex_reasoning_items", "codex_message_items"):
-        if item.get(key):
-            item[key] = _json_or(item[key], [])
-    if item.get("metadata_json"):
-        item["metadata"] = _json_or(item["metadata_json"], None)
-    return item
-
-
-def _encode_content(value: Any) -> Any:
-    return encode_message_content(value)
-
-
-def _decode_content(value: Any) -> Any:
-    return decode_message_content(value, allow_legacy_json=True)
-
-
-def _json_or_none(value: Any) -> str | None:
-    if value in (None, "", [], {}):
-        return None
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _json_or(raw: Any, default: Any) -> Any:
-    try:
-        return json.loads(raw) if raw else default
-    except (json.JSONDecodeError, TypeError):
-        return default
-
-
-def _tool_call_count(value: Any) -> int:
-    if isinstance(value, list):
-        return len(value)
-    return 1 if value else 0
-
-
-def _message_preview_text(content: Any) -> str:
-    text = _message_text(content)
-    return text[:120]
-
-
-def _message_display_title_text(content: Any) -> str:
-    text = _message_text(content)
-    return text[:80]
-
-
-def _message_text(content: Any) -> str:
-    if isinstance(content, str):
-        return " ".join(sanitize_context(content).split())
-    if isinstance(content, list):
-        parts = [
-            str(part.get("text") or "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        return " ".join(" ".join(parts).split())
-    return ""
-
-
-def _to_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _empty_skill_breakdown() -> dict[str, Any]:
-    return {
-        "summary": {
-            "total_skill_loads": 0,
-            "total_skill_edits": 0,
-            "total_skill_actions": 0,
-            "distinct_skills_used": 0,
-        },
-        "top_skills": [],
-    }
+        return self._unit_of_work.execute(fn)
 
 
 __all__ = ["CliSessionStore", "open_cli_session_store"]

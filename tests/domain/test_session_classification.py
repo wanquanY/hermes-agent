@@ -149,6 +149,31 @@ def test_bootstrap_reconciles_legacy_team_conversation_from_owner_record(tmp_pat
         conn.close()
 
 
+def test_bootstrap_creates_missing_team_session_shell_from_owner_record(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_session_repository_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO team_mission_conversations (
+            conversation_id, conversation_session_id, title, status,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("team-conversation-1", "conversation-1", "Team Mission", "active", 1.0, 1.0),
+    )
+    conn.close()
+
+    conn = connect_session_repository_db(db_path)
+    try:
+        session = SessionRepoImpl(conn).get("conversation-1")
+        assert session is not None
+        assert session.title == "Team Mission"
+        assert session.session_kind == "team_mission"
+        assert session.conversation_kind == "team"
+    finally:
+        conn.close()
+
+
 def test_bootstrap_hides_legacy_unowned_transient_team_execution(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_session_repository_db(db_path)

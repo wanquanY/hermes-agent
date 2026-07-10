@@ -40,6 +40,8 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
     assert {
         "sessions",
         "messages",
+        "messages_fts",
+        "messages_fts_trigram",
         "run_events",
         "session_runtime_state",
         "tool_events",

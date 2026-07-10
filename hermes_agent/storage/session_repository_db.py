@@ -24,6 +24,7 @@ from hermes_agent.storage.execution_session_migration import (
     reconcile_legacy_delegate_execution_sessions,
     reconcile_team_mission_session_classification,
 )
+from hermes_agent.storage.fts_schema import ensure_message_fts
 from hermes_agent.storage.migrations import MigrationRunner
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
@@ -69,6 +70,7 @@ def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.
     _configure_connection(conn, db_label=str(path))
     ensure_session_repository_schema(conn)
     MigrationRunner(conn.cursor()).run_all()
+    ensure_message_fts(conn)
     return conn
 
 

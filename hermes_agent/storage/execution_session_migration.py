@@ -66,11 +66,13 @@ def reconcile_team_mission_session_classification(conn: sqlite3.Connection) -> d
 
     rows = conn.execute(
         """
-        SELECT s.id, s.title
-          FROM sessions s
-          JOIN team_mission_conversations c
-            ON c.conversation_session_id = s.id
-         WHERE COALESCE(s.session_kind, '') != 'team_mission'
+        SELECT c.conversation_session_id AS id,
+               COALESCE(NULLIF(s.title, ''), c.title, '') AS title
+          FROM team_mission_conversations c
+          LEFT JOIN sessions s
+            ON s.id = c.conversation_session_id
+         WHERE s.id IS NULL
+            OR COALESCE(s.session_kind, '') != 'team_mission'
             OR COALESCE(s.conversation_kind, '') != 'team'
             OR COALESCE(s.source, '') != 'team_mission'
             OR NOT EXISTS (

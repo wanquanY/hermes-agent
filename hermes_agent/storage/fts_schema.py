@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content
@@ -55,4 +57,29 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON message
 END;
 """
 
-__all__ = ["FTS_SQL", "FTS_TRIGRAM_SQL"]
+
+def ensure_message_fts(conn: sqlite3.Connection) -> None:
+    """Ensure FTS tables/triggers exist and match the canonical message rows."""
+
+    cursor = conn.cursor()
+    cursor.executescript(FTS_SQL)
+    cursor.executescript(FTS_TRIGRAM_SQL)
+    message_count = int(cursor.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+    for table in ("messages_fts", "messages_fts_trigram"):
+        indexed_count = int(cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        if indexed_count == message_count:
+            continue
+        cursor.execute(f"DELETE FROM {table}")
+        cursor.execute(
+            f"""
+            INSERT INTO {table}(rowid, content)
+            SELECT id,
+                   COALESCE(content, '') || ' ' ||
+                   COALESCE(tool_name, '') || ' ' ||
+                   COALESCE(tool_calls, '')
+            FROM messages
+            """
+        )
+
+
+__all__ = ["FTS_SQL", "FTS_TRIGRAM_SQL", "ensure_message_fts"]
