@@ -35,20 +35,28 @@ class SessionService:
         stable = str(session_id or "").strip()
         if not stable:
             raise ValueError("session_id is required")
+        normalized_source = str(source or "unknown").strip() or "unknown"
+        transient = bool(fields.get("transient", False))
+        session_kind, conversation_kind = _resolve_session_classification(
+            source=normalized_source,
+            transient=transient,
+            session_kind=fields.get("session_kind"),
+            conversation_kind=fields.get("conversation_kind"),
+        )
 
         def write(_conn: sqlite3.Connection) -> None:
             self._repo.create(
                 SessionSpec(
                     session_id=stable,
-                    source=str(source or "unknown"),
+                    source=normalized_source,
                     user_id=str(fields.get("user_id") or ""),
                     model=str(fields.get("model") or ""),
                     model_config=fields.get("model_config"),
                     parent_session_id=str(fields.get("parent_session_id") or ""),
-                    transient=bool(fields.get("transient", False)),
+                    transient=transient,
                     title=str(fields.get("title") or ""),
-                    session_kind=str(fields.get("session_kind") or "hermes_session"),
-                    conversation_kind=str(fields.get("conversation_kind") or "direct"),
+                    session_kind=session_kind,
+                    conversation_kind=conversation_kind,
                     owner_agent_profile_id=str(fields.get("owner_agent_profile_id") or ""),
                     owner_profile_version_id=str(fields.get("owner_profile_version_id") or ""),
                     runtime_scope_key=str(fields.get("runtime_scope_key") or ""),
@@ -270,6 +278,30 @@ class SessionService:
 
     def fail_handoff(self, session_id: str, error: str) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.fail_handoff(session_id, error))
+
+
+def _resolve_session_classification(
+    *,
+    source: str,
+    transient: bool,
+    session_kind: Any,
+    conversation_kind: Any,
+) -> tuple[str, str]:
+    explicit_session_kind = str(session_kind or "").strip().lower()
+    explicit_conversation_kind = str(conversation_kind or "").strip().lower()
+
+    if explicit_session_kind or explicit_conversation_kind:
+        if explicit_session_kind == "execution" or explicit_conversation_kind == "internal":
+            return explicit_session_kind or "execution", explicit_conversation_kind or "internal"
+        if explicit_session_kind == "team_mission" or explicit_conversation_kind == "team":
+            return explicit_session_kind or "team_mission", explicit_conversation_kind or "team"
+        return explicit_session_kind or "hermes_session", explicit_conversation_kind or "direct"
+
+    if source == "team_mission":
+        if transient:
+            return "execution", "internal"
+        return "team_mission", "team"
+    return "hermes_session", "direct"
 
 
 def _to_int(value: Any, default: int) -> int:

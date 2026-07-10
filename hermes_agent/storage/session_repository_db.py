@@ -22,6 +22,7 @@ from hermes_agent.repositories.team_registry_repo import ensure_team_registry_re
 from hermes_agent.storage.state_schema import RUNTIME_DEFERRED_INDEX_SQL, SCHEMA_SQL
 from hermes_agent.storage.execution_session_migration import (
     reconcile_legacy_delegate_execution_sessions,
+    reconcile_team_mission_session_classification,
 )
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
@@ -259,6 +260,12 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
     ensure_seq_counter_table(conn)
     ensure_team_registry_repository_schema(conn)
     ensure_session_index_read_side_schema(conn)
+    classification = reconcile_team_mission_session_classification(conn)
+    if any(classification.values()):
+        logger.info(
+            "Session repository reconciled Team Mission classifications: %s",
+            classification,
+        )
     migrated_executions = reconcile_legacy_delegate_execution_sessions(conn)
     if migrated_executions:
         logger.info(

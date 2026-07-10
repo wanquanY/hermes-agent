@@ -365,6 +365,23 @@ class SessionRepoImpl:
         # sessions remain durable in sessions/messages/run_events, but must not
         # become independently navigable sidebar conversations.
         if _is_user_visible_conversation(spec):
+            if str(spec.conversation_kind or "").strip().lower() == "team":
+                self._conn.execute(
+                    """
+                    UPDATE sessions
+                       SET source = ?, session_kind = ?, conversation_kind = ?,
+                           transient = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (
+                        str(spec.source or "team_mission"),
+                        str(spec.session_kind or "team_mission"),
+                        "team",
+                        1 if spec.transient else 0,
+                        now,
+                        stable,
+                    ),
+                )
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO session_index (
@@ -387,6 +404,22 @@ class SessionRepoImpl:
                     now,
                 ),
             )
+            if str(spec.conversation_kind or "").strip().lower() == "team":
+                self._conn.execute(
+                    """
+                    UPDATE session_index
+                       SET source = ?, session_kind = ?, conversation_kind = 'team',
+                           transient = ?, updated_at = ?
+                     WHERE session_id = ?
+                    """,
+                    (
+                        str(spec.source or "team_mission"),
+                        str(spec.session_kind or "team_mission"),
+                        1 if spec.transient else 0,
+                        now,
+                        stable,
+                    ),
+                )
         else:
             # Explicit execution classification is authoritative even when a
             # placeholder row won the create race first.

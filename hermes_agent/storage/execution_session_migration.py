@@ -7,7 +7,7 @@ import sqlite3
 from typing import Any
 
 from hermes_agent.repositories.message_content_codec import decode_message_content
-from hermes_agent.repositories.session_repo import SessionRepoImpl
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 
 
 _DELEGATE_TOOL_NAMES = frozenset({"delegate_task", "delegate"})
@@ -54,6 +54,69 @@ def reconcile_legacy_delegate_execution_sessions(conn: sqlite3.Connection) -> in
         if sessions.classify_internal_execution(child_id):
             migrated += 1
     return migrated
+
+
+def reconcile_team_mission_session_classification(conn: sqlite3.Connection) -> dict[str, int]:
+    """Align legacy Team Mission session rows with persisted ownership evidence.
+
+    A row referenced by ``team_mission_conversations`` is a user-visible team
+    conversation. An unreferenced transient Team Mission row is an execution
+    session and must not have a sidebar projection.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT s.id, s.title
+          FROM sessions s
+          JOIN team_mission_conversations c
+            ON c.conversation_session_id = s.id
+         WHERE COALESCE(s.session_kind, '') != 'team_mission'
+            OR COALESCE(s.conversation_kind, '') != 'team'
+            OR COALESCE(s.source, '') != 'team_mission'
+            OR NOT EXISTS (
+                SELECT 1 FROM session_index i WHERE i.session_id = s.id
+            )
+        """
+    ).fetchall()
+    sessions = SessionRepoImpl(conn)
+    for row in rows:
+        sessions.create(
+            SessionSpec(
+                session_id=str(row["id"] or ""),
+                source="team_mission",
+                title=str(row["title"] or ""),
+                session_kind="team_mission",
+                conversation_kind="team",
+            )
+        )
+
+    internal_rows = conn.execute(
+        """
+        SELECT s.id
+          FROM sessions s
+         WHERE s.source = 'team_mission'
+           AND COALESCE(s.transient, 0) = 1
+           AND NOT EXISTS (
+                SELECT 1 FROM team_mission_conversations c
+                 WHERE c.conversation_session_id = s.id
+           )
+           AND (
+                COALESCE(s.session_kind, '') != 'execution'
+                OR COALESCE(s.conversation_kind, '') != 'internal'
+                OR EXISTS (
+                    SELECT 1 FROM session_index i WHERE i.session_id = s.id
+                )
+           )
+        """
+    ).fetchall()
+    internal_ids = [str(row["id"] or "") for row in internal_rows if str(row["id"] or "")]
+    for session_id in internal_ids:
+        sessions.classify_internal_execution(session_id)
+
+    return {
+        "team_conversations": len(rows),
+        "internal_executions": len(internal_ids),
+    }
 
 
 def _first_user_prompt(conn: sqlite3.Connection, session_id: str) -> str:
@@ -130,4 +193,7 @@ def _json_value(value: Any, fallback: Any) -> Any:
         return fallback
 
 
-__all__ = ["reconcile_legacy_delegate_execution_sessions"]
+__all__ = [
+    "reconcile_legacy_delegate_execution_sessions",
+    "reconcile_team_mission_session_classification",
+]
