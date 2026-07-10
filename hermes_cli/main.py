@@ -13052,7 +13052,7 @@ Examples:
             from agent.insights import InsightsEngine
 
             db = open_cli_session_store()
-            engine = InsightsEngine(db)
+            engine = InsightsEngine(db.analytics)
             report = engine.generate(days=args.days, source=args.source)
             print(engine.format_terminal(report))
         except Exception as e:

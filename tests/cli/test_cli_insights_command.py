@@ -6,8 +6,8 @@ from cli import HermesCLI
 class _InsightsEngineStub:
     calls = []
 
-    def __init__(self, db):
-        self.db = db
+    def __init__(self, analytics):
+        self.analytics = analytics
 
     def generate(self, *, days=30, source=None):
         self.calls.append({"days": days, "source": source})
@@ -19,25 +19,25 @@ class _InsightsEngineStub:
 
 def _run_show_insights(command: str):
     cli_obj = HermesCLI.__new__(HermesCLI)
-    conn = MagicMock()
+    store = MagicMock()
     _InsightsEngineStub.calls = []
-    with patch("hermes_agent.storage.session_repository_db.connect_session_repository_db", return_value=conn), \
+    with patch("cli.open_cli_session_store", return_value=store), \
          patch("agent.insights.InsightsEngine", _InsightsEngineStub):
         cli_obj._show_insights(command)
-    return _InsightsEngineStub.calls, conn
+    return _InsightsEngineStub.calls, store
 
 
 def test_cli_insights_accepts_positional_days(capsys):
-    calls, conn = _run_show_insights("/insights 7")
+    calls, store = _run_show_insights("/insights 7")
 
     assert calls == [{"days": 7, "source": None}]
-    conn.close.assert_called_once()
+    store.close.assert_called_once()
     assert "days=7 source=None" in capsys.readouterr().out
 
 
 def test_cli_insights_keeps_days_flag_and_source(capsys):
-    calls, conn = _run_show_insights("/insights --days 14 --source discord")
+    calls, store = _run_show_insights("/insights --days 14 --source discord")
 
     assert calls == [{"days": 14, "source": "discord"}]
-    conn.close.assert_called_once()
+    store.close.assert_called_once()
     assert "days=14 source=discord" in capsys.readouterr().out

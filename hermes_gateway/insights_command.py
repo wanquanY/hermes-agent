@@ -55,7 +55,7 @@ class GatewayInsightsCommandMixin:
             def _run_insights():
                 db = open_cli_session_store()
                 try:
-                    engine = InsightsEngine(db)
+                    engine = InsightsEngine(db.analytics)
                     report = engine.generate(days=days, source=source)
                     return engine.format_gateway(report)
                 finally:

@@ -9803,17 +9803,19 @@ class HermesCLI:
             else:
                 i += 1
 
+        store = None
         try:
             from agent.insights import InsightsEngine
-            from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
-            conn = connect_session_repository_db()
-            engine = InsightsEngine(conn)
+            store = open_cli_session_store()
+            engine = InsightsEngine(store.analytics)
             report = engine.generate(days=days, source=source)
             print(engine.format_terminal(report))
-            conn.close()
         except Exception as e:
             print(f"  Error generating insights: {e}")
+        finally:
+            if store is not None:
+                store.close()
 
     def _check_config_mcp_changes(self) -> None:
         """Detect mcp_servers changes in config.yaml and auto-reload MCP connections.

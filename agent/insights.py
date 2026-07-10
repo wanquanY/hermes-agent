@@ -11,12 +11,11 @@ breakdown capabilities.
 
 Usage:
     from agent.insights import InsightsEngine
-    engine = InsightsEngine(db)
+    engine = InsightsEngine(store.analytics)
     report = engine.generate(days=30)
     print(engine.format_terminal(report))
 """
 
-import json
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -94,19 +93,12 @@ class InsightsEngine:
     """
     Analyzes session history and produces usage insights.
 
-    Works directly with a raw sqlite3 connection or an object exposing ``_conn``
-    to query session and message data.
+    Persistence queries are delegated to ``SessionAnalyticsService``; this
+    class owns report computation and presentation only.
     """
 
-    def __init__(self, db):
-        """
-        Initialize with a SQLite connection or connection-owning object.
-
-        Args:
-            db: sqlite3.Connection or an object with ``_conn``.
-        """
-        self.db = db
-        self._conn = getattr(db, "_conn", db)
+    def __init__(self, analytics):
+        self._analytics = analytics
 
     def generate(self, days: int = 30, source: str = None) -> Dict[str, Any]:
         """
@@ -176,233 +168,18 @@ class InsightsEngine:
     # Data gathering (SQL queries)
     # =========================================================================
 
-    # Columns we actually need (skip system_prompt, model_config blobs)
-    _SESSION_COLS = ("id, source, model, started_at, ended_at, "
-                     "message_count, tool_call_count, input_tokens, output_tokens, "
-                     "cache_read_tokens, cache_write_tokens, billing_provider, "
-                     "billing_base_url, billing_mode, estimated_cost_usd, "
-                     "actual_cost_usd, cost_status, cost_source")
-
-    # Pre-computed query strings — f-string evaluated once at class definition,
-    # not at runtime, so no user-controlled value can alter the query structure.
-    _GET_SESSIONS_WITH_SOURCE = (
-        f"SELECT {_SESSION_COLS} FROM sessions"
-        " WHERE started_at >= ? AND source = ?"
-        " ORDER BY started_at DESC"
-    )
-    _GET_SESSIONS_ALL = (
-        f"SELECT {_SESSION_COLS} FROM sessions"
-        " WHERE started_at >= ?"
-        " ORDER BY started_at DESC"
-    )
-
     def _get_sessions(self, cutoff: float, source: str = None) -> List[Dict]:
         """Fetch sessions within the time window."""
-        if source:
-            cursor = self._conn.execute(self._GET_SESSIONS_WITH_SOURCE, (cutoff, source))
-        else:
-            cursor = self._conn.execute(self._GET_SESSIONS_ALL, (cutoff,))
-        return [dict(row) for row in cursor.fetchall()]
+        return self._analytics.insight_sessions(cutoff, source)
 
     def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Get tool call counts from messages.
-
-        Uses two sources:
-        1. tool_name column on 'tool' role messages (set by gateway)
-        2. tool_calls JSON on 'assistant' role messages (covers CLI where
-           tool_name is not populated on tool responses)
-        """
-        tool_counts = Counter()
-
-        # Source 1: explicit tool_name on tool response messages
-        if source:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff,),
-            )
-        for row in cursor.fetchall():
-            tool_counts[row["tool_name"]] += row["count"]
-
-        # Source 2: extract from tool_calls JSON on assistant messages
-        # (covers CLI sessions where tool_name is NULL on tool responses)
-        if source:
-            cursor2 = self._conn.execute(
-                """SELECT m.tool_calls
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff, source),
-            )
-        else:
-            cursor2 = self._conn.execute(
-                """SELECT m.tool_calls
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff,),
-            )
-
-        tool_calls_counts = Counter()
-        for row in cursor2.fetchall():
-            try:
-                calls = row["tool_calls"]
-                if isinstance(calls, str):
-                    calls = json.loads(calls)
-                if isinstance(calls, list):
-                    for call in calls:
-                        func = call.get("function", {}) if isinstance(call, dict) else {}
-                        name = func.get("name")
-                        if name:
-                            tool_calls_counts[name] += 1
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                continue
-
-        # Merge: prefer tool_name source, supplement with tool_calls source
-        # for tools not already counted
-        if not tool_counts and tool_calls_counts:
-            # No tool_name data at all — use tool_calls exclusively
-            tool_counts = tool_calls_counts
-        elif tool_counts and tool_calls_counts:
-            # Both sources have data — use whichever has the higher count per tool
-            # (they may overlap, so take the max to avoid double-counting)
-            all_tools = set(tool_counts) | set(tool_calls_counts)
-            merged = Counter()
-            for tool in all_tools:
-                merged[tool] = max(tool_counts.get(tool, 0), tool_calls_counts.get(tool, 0))
-            tool_counts = merged
-
-        # Convert to the expected format
-        return [
-            {"tool_name": name, "count": count}
-            for name, count in tool_counts.most_common()
-        ]
+        return self._analytics.insight_tool_usage(cutoff, source)
 
     def _get_skill_usage(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Extract per-skill usage from assistant tool calls."""
-        skill_counts: Dict[str, Dict[str, Any]] = {}
-
-        if source:
-            cursor = self._conn.execute(
-                """SELECT m.tool_calls, m.timestamp
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT m.tool_calls, m.timestamp
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff,),
-            )
-
-        for row in cursor.fetchall():
-            try:
-                calls = row["tool_calls"]
-                if isinstance(calls, str):
-                    calls = json.loads(calls)
-                if not isinstance(calls, list):
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-            timestamp = row["timestamp"]
-            for call in calls:
-                if not isinstance(call, dict):
-                    continue
-                func = call.get("function", {})
-                tool_name = func.get("name")
-                if tool_name not in {"skill_view", "skill_manage"}:
-                    continue
-
-                args = func.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                if not isinstance(args, dict):
-                    continue
-
-                skill_name = args.get("name")
-                if not isinstance(skill_name, str) or not skill_name.strip():
-                    continue
-
-                entry = skill_counts.setdefault(
-                    skill_name,
-                    {
-                        "skill": skill_name,
-                        "view_count": 0,
-                        "manage_count": 0,
-                        "last_used_at": None,
-                    },
-                )
-                if tool_name == "skill_view":
-                    entry["view_count"] += 1
-                else:
-                    entry["manage_count"] += 1
-
-                if timestamp is not None and (
-                    entry["last_used_at"] is None or timestamp > entry["last_used_at"]
-                ):
-                    entry["last_used_at"] = timestamp
-
-        return list(skill_counts.values())
+        return self._analytics.insight_skill_usage(cutoff, source)
 
     def _get_message_stats(self, cutoff: float, source: str = None) -> Dict:
-        """Get aggregate message statistics."""
-        if source:
-            cursor = self._conn.execute(
-                """SELECT
-                     COUNT(*) as total_messages,
-                     SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) as user_messages,
-                     SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) as assistant_messages,
-                     SUM(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END) as tool_messages
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT
-                     COUNT(*) as total_messages,
-                     SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) as user_messages,
-                     SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) as assistant_messages,
-                     SUM(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END) as tool_messages
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?""",
-                (cutoff,),
-            )
-        row = cursor.fetchone()
-        return dict(row) if row else {
-            "total_messages": 0, "user_messages": 0,
-            "assistant_messages": 0, "tool_messages": 0,
-        }
+        return self._analytics.insight_message_stats(cutoff, source)
 
     # =========================================================================
     # Computation
@@ -564,44 +341,7 @@ class InsightsEngine:
         return result
 
     def _compute_skill_breakdown(self, skill_usage: List[Dict]) -> Dict[str, Any]:
-        """Process per-skill usage into summary + ranked list."""
-        total_skill_loads = sum(s["view_count"] for s in skill_usage) if skill_usage else 0
-        total_skill_edits = sum(s["manage_count"] for s in skill_usage) if skill_usage else 0
-        total_skill_actions = total_skill_loads + total_skill_edits
-
-        top_skills = []
-        for skill in skill_usage:
-            total_count = skill["view_count"] + skill["manage_count"]
-            percentage = (total_count / total_skill_actions * 100) if total_skill_actions else 0
-            top_skills.append({
-                "skill": skill["skill"],
-                "view_count": skill["view_count"],
-                "manage_count": skill["manage_count"],
-                "total_count": total_count,
-                "percentage": percentage,
-                "last_used_at": skill.get("last_used_at"),
-            })
-
-        top_skills.sort(
-            key=lambda s: (
-                s["total_count"],
-                s["view_count"],
-                s["manage_count"],
-                s["last_used_at"] or 0,
-                s["skill"],
-            ),
-            reverse=True,
-        )
-
-        return {
-            "summary": {
-                "total_skill_loads": total_skill_loads,
-                "total_skill_edits": total_skill_edits,
-                "total_skill_actions": total_skill_actions,
-                "distinct_skills_used": len(skill_usage),
-            },
-            "top_skills": top_skills,
-        }
+        return self._analytics.skill_breakdown(skill_usage)
 
     def _compute_activity_patterns(self, sessions: List[Dict]) -> Dict:
         """Analyze activity patterns by day of week and hour."""

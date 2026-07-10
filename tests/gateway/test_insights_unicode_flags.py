@@ -3,9 +3,15 @@
 Telegram on iOS auto-converts -- to em/en dashes. The /insights handler
 normalizes these before parsing --days and --source flags.
 """
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from hermes_gateway.insights_command import normalize_insights_args
+from hermes_gateway.insights_command import (
+    GatewayInsightsCommandMixin,
+    normalize_insights_args,
+)
 
 
 class TestInsightsUnicodeDashFlags:
@@ -44,3 +50,36 @@ class TestInsightsUnicodeDashFlags:
         """Input with no flags passes through as-is."""
         assert normalize_insights_args("") == ""
         assert normalize_insights_args("30") == "30"
+
+
+@pytest.mark.asyncio
+async def test_gateway_insights_uses_analytics_component_and_closes_store():
+    analytics = object()
+    store = SimpleNamespace(analytics=analytics, close=MagicMock())
+    observed = {}
+
+    class Engine:
+        def __init__(self, component):
+            observed["component"] = component
+
+        def generate(self, *, days, source):
+            observed["query"] = (days, source)
+            return {"ok": True}
+
+        def format_gateway(self, report):
+            return "formatted" if report["ok"] else "invalid"
+
+    event = SimpleNamespace(get_command_args=lambda: "--days 7 --source cli")
+    handler = GatewayInsightsCommandMixin()
+    with (
+        patch(
+            "hermes_gateway.insights_command.open_cli_session_store",
+            return_value=store,
+        ),
+        patch("agent.insights.InsightsEngine", Engine),
+    ):
+        result = await handler._handle_insights_command(event)
+
+    assert result == "formatted"
+    assert observed == {"component": analytics, "query": (7, "cli")}
+    store.close.assert_called_once_with()
