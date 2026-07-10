@@ -8,19 +8,19 @@ from typing import Any
 import pytest
 
 import tools.dispatch_agent_async as dispatch_tool
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tools.registry import registry
 from tui_gateway.methods.dispatch import dispatch_agent_async
 from tui_gateway.run_worker import DBRpcRequestFrame, RunStartFrame
 from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _profile(db: SessionDB, tmp_path: Path, profile_id: str = "profile-worker") -> dict[str, Any]:
-    return db.upsert_agent_profile(
+def _profile(db: CliSessionStore, tmp_path: Path, profile_id: str = "profile-worker") -> dict[str, Any]:
+    return db.profiles.upsert_agent_profile(
         profile_id=profile_id,
         slug=profile_id,
         name="Worker",
@@ -47,7 +47,7 @@ def _params(**overrides: Any) -> dict[str, Any]:
 
 
 class _FakePool:
-    def __init__(self, db: SessionDB | None = None) -> None:
+    def __init__(self, db: CliSessionStore | None = None) -> None:
         self.db = db
         self.spawn_calls: list[tuple[str, dict[str, Any]]] = []
         self.pending_row: dict[str, Any] | None = None
@@ -58,7 +58,7 @@ class _FakePool:
     async def get_or_spawn(self, conversation_id: str, profile_context: dict[str, Any]):
         self.spawn_calls.append((conversation_id, profile_context))
         if self.db is not None:
-            self.pending_row = self.db.get_activity("act-1")
+            self.pending_row = self.db.activities.get("act-1")
         return SimpleNamespace(
             scope_key=profile_context.get("runtime_scope_key") or "",
             worker_conversation_id=conversation_id,
@@ -151,7 +151,7 @@ async def test_dispatch_returns_activity_id_and_conversation_id(tmp_path: Path) 
         "conversation_id": "conv-child",
         "status": "running",
     }
-    assert db.get_activity("act-1")["status"] == "running"
+    assert db.activities.get("act-1")["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_dispatch_missing_target_profile_marks_activity_failed(tmp_path: P
     assert result["activity_id"] == "act-1"
     assert result["conversation_id"] == "conv-child"
     assert result["status"] == "failed"
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "failed"
     assert row["result_summary"] == "profile not found"
     assert row["completed_at"] == 123.0
@@ -263,7 +263,7 @@ async def test_dispatch_worker_pool_spawn_failure_marks_activity_failed(tmp_path
         "status": "failed",
         "error": "spawn exploded",
     }
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "failed"
     assert row["result_summary"] == "spawn exploded"
     assert row["completed_at"] == 123.0
@@ -283,7 +283,7 @@ async def test_dispatch_with_parent_activity_id_links_correctly(tmp_path: Path) 
         uuid_factory=_ids("act-1", "conv-child", "run-1", "turn-1"),
     )
 
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["parent_activity_id"] == "leader-activity"
     assert row["conversation_id"] == "conv-parent"
 

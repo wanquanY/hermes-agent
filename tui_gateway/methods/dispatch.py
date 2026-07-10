@@ -52,7 +52,7 @@ def _create_dispatch_activity(
     target_mission_id: str = "",
     prompt_summary: str = "",
 ) -> dict[str, Any]:
-    return db.create_activity(
+    return db.activities.create(
         activity_id=activity_id,
         conversation_id=conversation_id,
         kind=kind,
@@ -227,15 +227,12 @@ async def dispatch_agent_async(
         prompt_summary=_prompt_summary(params),
     )
 
-    profile = {}
     try:
-        getter = getattr(db, "get_agent_profile", None)
-        if callable(getter):
-            profile = getter(target_profile_id) or {}
+        profile = db.profiles.get_agent_profile(target_profile_id) or {}
     except Exception:
         profile = {}
     if not profile:
-        db.update_activity_status(
+        db.activities.update_status(
             activity_id,
             "failed",
             result_summary="profile not found",
@@ -270,7 +267,7 @@ async def dispatch_agent_async(
         lease = await pool.get_or_spawn(conversation_id, target_profile_context)
     except Exception as exc:
         message = str(exc) or type(exc).__name__
-        db.update_activity_status(
+        db.activities.update_status(
             activity_id,
             "failed",
             result_summary=message,
@@ -284,7 +281,7 @@ async def dispatch_agent_async(
         }
 
     started_at = time_fn()
-    db.update_activity_status(activity_id, "running", started_at=started_at)
+    db.activities.update_status(activity_id, "running", started_at=started_at)
 
     if router is not None and callable(getattr(router, "record_run_start", None)):
         router.record_run_start(
@@ -349,7 +346,7 @@ async def dispatch_agent_async(
         if callable(getattr(pool, "forget_run", None)):
             await pool.forget_run(run_id)
         message = send_error or "worker stdin write failed"
-        db.update_activity_status(
+        db.activities.update_status(
             activity_id,
             "failed",
             result_summary=message,
@@ -427,7 +424,7 @@ async def dispatch_team_async(
     )
 
     def _fail(message: str) -> dict[str, Any]:
-        db.update_activity_status(
+        db.activities.update_status(
             activity_id,
             "failed",
             result_summary=message,
@@ -482,7 +479,7 @@ async def dispatch_team_async(
     if not created_mission_id:
         return _fail("team mission create did not return mission_id")
 
-    db.update_activity_status(
+    db.activities.update_status(
         activity_id,
         "running",
         target_mission_id=created_mission_id,
