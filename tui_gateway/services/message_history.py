@@ -30,10 +30,7 @@ def load_conversation_history(
     include_storage_metadata: bool = False,
     include_inactive: bool = False,
 ) -> list[dict[str, Any]]:
-    read_model = message_history_read_model_for_db(db)
-    if read_model is None:
-        return []
-    return read_model.all_as_conversation(
+    return db.messages.all_as_conversation(
         session_id,
         include_ancestors=include_ancestors,
         include_storage_metadata=include_storage_metadata,
