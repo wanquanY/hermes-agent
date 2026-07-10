@@ -127,7 +127,7 @@ class CliSessionStore(TeamMissionStateMixin):
             self.messages.append,
         )
         self.runs = RunService(conn, self._unit_of_work, self._session_repo)
-        self.run_event_maintenance = RunEventMaintenanceService(self._unit_of_work)
+        self.run_event_maintenance = RunEventMaintenanceService(conn, self._unit_of_work)
         self.tool_event_projection = ToolEventProjectionReadModel(conn)
         self.team_capabilities = TeamCapabilityService(
             TeamCapabilityRepo(conn, self._execute_write, self._lock),

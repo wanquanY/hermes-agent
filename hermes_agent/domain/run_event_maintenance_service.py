@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.run_event_compaction import RunEventCompactor
 from hermes_agent.domain.run_event_codec import (
     decode_run_event_row,
     update_run_event_frame_columns,
@@ -18,13 +20,36 @@ from hermes_agent.domain.run_event_reference import (
 )
 from hermes_agent.read_models.tool_events import backfill_tool_events_from_run_events
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_team_mission.runtime.run_event_retention import RunEventRetentionPolicy
 
 
 class RunEventMaintenanceService:
-    def __init__(self, unit_of_work: SqliteUnitOfWork) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        unit_of_work: SqliteUnitOfWork,
+    ) -> None:
+        self._conn = conn
+        self._lock = lock_for_connection(conn)
         self._unit_of_work = unit_of_work
         self._retention = RunEventRetentionPolicy()
+        self._compactor = RunEventCompactor(self._retention)
+
+    def compact(
+        self,
+        *,
+        session_id: str = "",
+        vacuum: bool = False,
+    ) -> dict[str, Any]:
+        result = self._unit_of_work.execute(
+            lambda conn: self._compactor.compact(conn, session_id=session_id)
+        )
+        if vacuum and int(result.get("deleted_events") or 0) > 0:
+            with self._lock:
+                self._conn.execute("VACUUM")
+            result = {**result, "vacuumed": True}
+        return result
 
     def backfill_frames(
         self,

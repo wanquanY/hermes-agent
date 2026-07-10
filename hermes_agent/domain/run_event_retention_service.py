@@ -79,8 +79,9 @@ class RunEventRetentionService:
             ]
             if not deletable:
                 return {"deleted_events": 0, "event_types": list(event_types)}
-            self._archive(conn, deletable, reason="terminal_run_stream_events")
-            EventLedger(conn).delete_rows_by_id([int(row["id"]) for row in deletable])
+            ledger = EventLedger(conn)
+            ledger.archive_rows(deletable, reason="terminal_run_stream_events")
+            ledger.delete_rows_by_id([int(row["id"]) for row in deletable])
             RunRepoImpl(conn).reset_last_seq_from_events(normalized_run_id)
             return {"deleted_events": len(deletable), "event_types": list(event_types)}
 
@@ -159,46 +160,10 @@ class RunEventRetentionService:
     ) -> int:
         if not rows:
             return 0
-        self._archive(conn, rows, reason=reason)
-        EventLedger(conn).delete_rows_by_id([int(row["id"]) for row in rows])
+        ledger = EventLedger(conn)
+        ledger.archive_rows(rows, reason=reason)
+        ledger.delete_rows_by_id([int(row["id"]) for row in rows])
         return len(rows)
-
-    @staticmethod
-    def _archive(
-        conn: sqlite3.Connection,
-        rows: list[sqlite3.Row],
-        *,
-        reason: str,
-    ) -> None:
-        grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
-        for row in rows:
-            key = (str(row["session_id"] or ""), str(row["run_id"] or ""))
-            grouped.setdefault(key, []).append(row)
-        archived_at = time.time()
-        for (session_id, run_id), group in grouped.items():
-            seqs = [int(row["seq"] or 0) for row in group]
-            timestamps = [float(row["timestamp"] or 0) for row in group]
-            conn.execute(
-                """
-                INSERT INTO run_event_archives (
-                    session_id, run_id, archived_at, first_seq, last_seq,
-                    first_timestamp, last_timestamp, event_count, reason,
-                    metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    run_id,
-                    archived_at,
-                    min(seqs),
-                    max(seqs),
-                    min(timestamps),
-                    max(timestamps),
-                    len(group),
-                    reason,
-                    json.dumps({"policy": "run_event_retention"}, separators=(",", ":")),
-                ),
-            )
 
 
 __all__ = ["RunEventRetentionService"]

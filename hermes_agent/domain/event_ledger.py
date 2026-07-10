@@ -537,6 +537,40 @@ class EventLedger:
             deleted += int(cursor.rowcount or 0)
         return deleted
 
+    def archive_rows(self, rows: Iterable[sqlite3.Row], *, reason: str) -> int:
+        grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            key = (str(row["session_id"] or ""), str(row["run_id"] or ""))
+            grouped.setdefault(key, []).append(row)
+        archived_at = time.time()
+        archived = 0
+        for (session_id, run_id), group in grouped.items():
+            seqs = [int(row["seq"] or 0) for row in group]
+            timestamps = [float(row["timestamp"] or 0) for row in group]
+            self._conn.execute(
+                """
+                INSERT INTO run_event_archives (
+                    session_id, run_id, archived_at, first_seq, last_seq,
+                    first_timestamp, last_timestamp, event_count, reason,
+                    metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    run_id,
+                    archived_at,
+                    min(seqs),
+                    max(seqs),
+                    min(timestamps),
+                    max(timestamps),
+                    len(group),
+                    str(reason or ""),
+                    _dumps({"policy": "run_event_retention"}),
+                ),
+            )
+            archived += len(group)
+        return archived
+
     def delete_sessions(self, session_ids: Iterable[str]) -> int:
         ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
         if not ids:

@@ -727,10 +727,7 @@ def _(rid, params: dict) -> dict:
     db = _run_db_for_stable_session(conversation_session_id) if conversation_session_id else _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    compact = getattr(db, "compact_run_events", None)
-    if not callable(compact):
-        return _err(rid, 5006, "run event compaction is not available")
-    result = compact(
+    result = db.run_event_maintenance.compact(
         session_id=conversation_session_id,
         vacuum=bool(params.get("vacuum")),
     )
