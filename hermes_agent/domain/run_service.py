@@ -291,6 +291,17 @@ class RunService:
             include_internal=include_internal,
         )
 
+    def latest_event_for_run(
+        self,
+        run_id: str,
+        *,
+        include_internal: bool = True,
+    ) -> dict[str, Any] | None:
+        return self._events.latest_for_run(
+            run_id,
+            include_internal=include_internal,
+        )
+
     def list_filtered_events(
         self,
         session_id: str,

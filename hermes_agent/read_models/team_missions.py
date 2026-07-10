@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
@@ -50,6 +51,38 @@ class TeamMissionReadModel:
                 (stable,),
             ).fetchone()
         return str(row["mission_id"] or "").strip() if row is not None else ""
+
+    def list_node_run_attempts(
+        self,
+        mission_id: str,
+        node_id: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        stable_mission_id = str(mission_id or "").strip()
+        stable_node_id = str(node_id or "").strip()
+        if not stable_mission_id or not stable_node_id:
+            return []
+        bounded_limit = max(1, min(int(limit or 5), 100))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT b.run_id,
+                       b.session_id,
+                       b.execution_session_id,
+                       b.role,
+                       b.created_at,
+                       r.status AS run_status,
+                       r.updated_at AS run_updated_at
+                  FROM team_mission_run_bindings b
+                  LEFT JOIN runs r ON r.run_id = b.run_id
+                 WHERE b.mission_id = ? AND b.node_id = ?
+                 ORDER BY b.created_at DESC, b.run_id DESC
+                 LIMIT ?
+                """,
+                (stable_mission_id, stable_node_id, bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 __all__ = ["TeamMissionReadModel"]

@@ -97,6 +97,28 @@ class RunEventReadModel:
                 result[run_id].append(event)
         return result
 
+    def latest_for_run(
+        self,
+        run_id: str,
+        *,
+        include_internal: bool = True,
+    ) -> dict[str, Any] | None:
+        stable_run_id = str(run_id or "").strip()
+        if not stable_run_id:
+            return None
+        with self._lock:
+            try:
+                row = EventLedger(self._conn).latest_run_row(
+                    stable_run_id,
+                    include_internal=include_internal,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table: run_events" in str(exc):
+                    return None
+                raise
+            events = self._decode_rows([row] if row is not None else [])
+        return events[0] if events else None
+
     def list_filtered(
         self,
         session_id: str,

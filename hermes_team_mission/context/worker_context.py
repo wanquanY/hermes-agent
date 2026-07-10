@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from hermes_team_mission.domain.handoff_contract import output_contract_requires_handoff
-from hermes_agent.domain.run_event_payload import payload_from_run_event_row
 
 
 TOOL_RESULT_BUDGET_CHARS = 8 * 1024
@@ -189,15 +188,6 @@ def upstream_handoff_deliverables(graph: Mapping[str, Any], node_id: str, *, lim
     return result
 
 
-def _row_value(row: Any, key: str, default: Any = None) -> Any:
-    if row is None:
-        return default
-    try:
-        return row[key]
-    except Exception:
-        return default
-
-
 def _json_loads(value: Any, fallback: Any) -> Any:
     if not value:
         return fallback
@@ -233,20 +223,10 @@ def _event_node_id(event: Mapping[str, Any]) -> str:
 
 
 def _terminal_excerpt(db: Any, run_id: str, *, limit: int = RECENT_EVENT_MAX_CHARS) -> dict[str, Any]:
-    if not run_id or not getattr(db, "_conn", None):
+    if not run_id:
         return {}
-    with db._lock:
-        row = db._conn.execute(
-            """
-            SELECT *
-              FROM run_events
-             WHERE run_id = ?
-             ORDER BY seq DESC, id DESC
-             LIMIT 1
-            """,
-            (run_id,),
-        ).fetchone()
-    payload = payload_from_run_event_row(row)
+    event = db.runs.latest_event_for_run(run_id, include_internal=True) or {}
+    payload = _event_payload(event)
     excerpt = cap_text(
         payload.get("summary")
         or payload.get("text")
@@ -257,10 +237,10 @@ def _terminal_excerpt(db: Any, run_id: str, *, limit: int = RECENT_EVENT_MAX_CHA
     return {
         key: value
         for key, value in {
-            "event_type": text(_row_value(row, "event_type")),
+            "event_type": text(event.get("type")),
             "status": text(payload.get("status")),
             "excerpt": excerpt,
-            "seq": int(_row_value(row, "seq", 0) or 0),
+            "seq": int(event.get("seq") or 0),
         }.items()
         if value not in ("", 0)
     }
@@ -269,25 +249,17 @@ def _terminal_excerpt(db: Any, run_id: str, *, limit: int = RECENT_EVENT_MAX_CHA
 def prior_node_attempts(db: Any, mission_id: str, node_id: str, *, limit: int = PRIOR_ATTEMPTS_LIMIT) -> list[dict[str, Any]]:
     mission_id = text(mission_id)
     node_id = text(node_id)
-    if not mission_id or not node_id or not getattr(db, "_conn", None):
+    if not mission_id or not node_id:
         return []
-    with db._lock:
-        rows = db._conn.execute(
-            """
-            SELECT b.run_id, b.session_id, b.execution_session_id, b.role, b.created_at,
-                   r.status AS run_status, r.updated_at AS run_updated_at
-              FROM team_mission_run_bindings b
-              LEFT JOIN runs r ON r.run_id = b.run_id
-             WHERE b.mission_id = ? AND b.node_id = ?
-             ORDER BY b.created_at DESC, b.run_id DESC
-             LIMIT ?
-            """,
-            (mission_id, node_id, max(1, min(int(limit or PRIOR_ATTEMPTS_LIMIT), PRIOR_ATTEMPTS_LIMIT))),
-        ).fetchall()
+    rows = db.team_missions.list_node_run_attempts(
+        mission_id,
+        node_id,
+        limit=max(1, min(int(limit or PRIOR_ATTEMPTS_LIMIT), PRIOR_ATTEMPTS_LIMIT)),
+    )
     result: list[dict[str, Any]] = []
     deliverable_getter = getattr(db, "latest_team_mission_deliverable_for_run", None)
     for row in rows:
-        run_id = text(_row_value(row, "run_id"))
+        run_id = text(row.get("run_id"))
         deliverable = deliverable_getter(run_id) if callable(deliverable_getter) else {}
         deliverable = deliverable if isinstance(deliverable, Mapping) else {}
         terminal = _terminal_excerpt(db, run_id, limit=PRIOR_ATTEMPT_MAX_CHARS)
@@ -295,8 +267,8 @@ def prior_node_attempts(db: Any, mission_id: str, node_id: str, *, limit: int = 
             key: value
             for key, value in {
                 "run_id": run_id,
-                "status": text(_row_value(row, "run_status")),
-                "role": text(_row_value(row, "role")),
+                "status": text(row.get("run_status")),
+                "role": text(row.get("role")),
                 "summary": cap_text(deliverable.get("summary") or terminal.get("excerpt"), PRIOR_ATTEMPT_MAX_CHARS),
                 "result": text(deliverable.get("result")),
                 "deliverable_status": text(deliverable.get("status")),

@@ -722,6 +722,28 @@ class EventLedger:
         )
         return rows
 
+    def latest_run_row(
+        self,
+        run_id: str,
+        *,
+        include_internal: bool = True,
+    ) -> Any | None:
+        stable_run_id = str(run_id or "").strip()
+        if not stable_run_id:
+            return None
+        internal_clause = "" if include_internal else "AND event_type NOT LIKE '_internal.%'"
+        return self._conn.execute(
+            f"""
+            SELECT *
+              FROM run_events
+             WHERE run_id = ?
+               {internal_clause}
+             ORDER BY seq DESC, id DESC
+             LIMIT 1
+            """,
+            (stable_run_id,),
+        ).fetchone()
+
     def list_activity_rows(
         self,
         activity_id: str,
