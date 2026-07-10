@@ -1,8 +1,8 @@
-"""Compatibility exports for `hermes_agent.storage.state_mixins.activities`."""
+"""Compatibility exports for the retired activity state facade."""
 
 from __future__ import annotations
 
-from hermes_agent.storage.state_mixins.activities import ActivitiesMixin
+from hermes_agent.application.state_facade.activity_facade import ActivitiesMixin
 
 __all__ = [
     "ActivitiesMixin",

@@ -1,8 +1,8 @@
-"""Compatibility exports for `hermes_agent.storage.state_mixins.team_capabilities`."""
+"""Compatibility exports for the retired team-capability state facade."""
 
 from __future__ import annotations
 
-from hermes_agent.storage.state_mixins.team_capabilities import TeamCapabilityStateMixin
+from hermes_agent.application.state_facade.team_capability_facade import TeamCapabilityStateMixin
 
 __all__ = [
     "TeamCapabilityStateMixin",

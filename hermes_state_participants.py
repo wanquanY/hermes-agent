@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hermes_agent.storage.state_mixins.participants import ParticipantsMixin
+from hermes_agent.application.state_facade.participant_facade import ParticipantsMixin
 from hermes_agent.repositories.conversation_participant_repo import agent_participant_id
 from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 from hermes_agent.repositories.conversation_participant_repo import member_participant_id

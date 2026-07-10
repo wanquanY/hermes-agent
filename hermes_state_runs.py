@@ -1,8 +1,8 @@
-"""Compatibility exports for `hermes_agent.storage.state_mixins.runs`."""
+"""Compatibility exports for the retired run state facade."""
 
 from __future__ import annotations
 
-from hermes_agent.storage.state_mixins.runs import RunStateMixin
+from hermes_agent.application.state_facade.run_facade import RunStateMixin
 
 __all__ = [
     "RunStateMixin",

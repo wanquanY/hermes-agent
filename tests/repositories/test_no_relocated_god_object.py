@@ -84,6 +84,11 @@ _BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
 _EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
 
 
+def test_retired_state_mixin_forwarding_package_has_no_source_modules() -> None:
+    forwarding_dir = REPO_ROOT / "hermes_agent" / "storage" / "state_mixins"
+    assert not list(forwarding_dir.glob("*.py"))
+
+
 def _iter_blessed_files():
     for tree in _BLESSED_TREES:
         root = REPO_ROOT / tree
