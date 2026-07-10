@@ -28,22 +28,23 @@ class GatewaySessionHandoffRuntimeService:
                 if runner._session_db is None:
                     await asyncio.sleep(interval)
                     continue
-                pending = runner._session_db.list_pending_handoffs()
+                sessions = runner._session_db.sessions
+                pending = sessions.list_pending_handoffs()
                 for row in pending:
                     session_id = row.get("id")
                     if not session_id:
                         continue
-                    if not runner._session_db.claim_handoff(session_id):
+                    if not sessions.claim_handoff(session_id):
                         continue
                     try:
                         await self.process_handoff(row)
-                        runner._session_db.complete_handoff(session_id)
+                        sessions.complete_handoff(session_id)
                     except Exception as exc:
                         logger.warning(
                             "Handoff for session %s failed: %s",
                             session_id, exc, exc_info=True,
                         )
-                        runner._session_db.fail_handoff(session_id, str(exc))
+                        sessions.fail_handoff(session_id, str(exc))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
