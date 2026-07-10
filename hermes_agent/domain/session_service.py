@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from hermes_agent.domain.message_service import MessageService
+from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepo, SessionSpec, sanitize_session_title
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
@@ -28,6 +29,7 @@ class SessionService:
         self._lock = lock_for_connection(conn)
         self._repo = repo
         self._recall = recall
+        self._list = SessionListReadModel(conn)
         self._messages = messages
         self._unit_of_work = unit_of_work
 
@@ -163,6 +165,33 @@ class SessionService:
 
     def list_rich(self, **query: Any) -> list[dict[str, Any]]:
         return self._recall.list_sessions_rich(**query)
+
+    def list(
+        self,
+        *,
+        source: str | None = None,
+        exclude_sources: tuple[str, ...] = (),
+        limit: int = 20,
+        offset: int = 0,
+        include_children: bool = False,
+        project_compression_tips: bool = True,
+        order_by_last_active: bool = False,
+        page_cursor: dict[str, Any] | None = None,
+        id_query: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._list.list(
+            SessionListQuery(
+                source=source,
+                exclude_sources=exclude_sources,
+                limit=limit,
+                offset=offset,
+                include_children=include_children,
+                project_compression_tips=project_compression_tips,
+                order_by_last_active=order_by_last_active,
+                page_cursor=page_cursor,
+                id_query=id_query,
+            )
+        )
 
     def search(
         self,

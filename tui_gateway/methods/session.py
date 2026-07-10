@@ -10,8 +10,6 @@ from dovie_extension.display_transcript import (
     sanitize_transcript_messages,
 )
 from hermes_agent.domain.session_deletion import SessionDeletionService
-from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
-from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from tui_gateway.methods._shared import bind_server_globals
@@ -147,20 +145,6 @@ def _session_repo_for_db(db):
     if conn is None:
         return None
     return SessionRepoImpl(conn)
-
-
-def _session_list_read_model_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return SessionListReadModel(conn)
-
-
-def _session_index_read_model_for_db(db):
-    conn = getattr(db, "_conn", None)
-    if conn is None:
-        return None
-    return SessionIndexReadModel(conn)
 
 
 def _session_recall_read_model_for_db(db):
@@ -1218,19 +1202,14 @@ def _(rid, params: dict) -> dict:
 
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
-        read_model = _session_list_read_model_for_db(db)
-        if read_model is None:
-            return _err(rid, 5006, "session list read model unavailable")
         rows = [
             s
-            for s in read_model.list(
-                SessionListQuery(
-                    source=None,
-                    exclude_sources=tuple(deny),
-                    limit=limit + 1,
-                    page_cursor=cursor,
-                    order_by_last_active=True,
-                )
+            for s in db.sessions.list(
+                source=None,
+                exclude_sources=tuple(deny),
+                limit=limit + 1,
+                page_cursor=cursor,
+                order_by_last_active=True,
             )
             if str(s.get("source") or "").strip().lower() not in deny
         ]
@@ -1568,12 +1547,7 @@ def _ensure_session_index_reconciled(db) -> None:
     global _SESSION_INDEX_RECONCILED
     if _SESSION_INDEX_RECONCILED:
         return
-    reconcile = getattr(db, "reconcile_session_index", None)
-    if callable(reconcile):
-        try:
-            reconcile()
-        except Exception:
-            pass
+    db.session_index.reconcile()
     _SESSION_INDEX_RECONCILED = True
 
 
@@ -1587,9 +1561,6 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    read_model = _session_index_read_model_for_db(db)
-    if read_model is None:
-        return _err(rid, 5006, "session_index unavailable")
     try:
         _ensure_session_index_reconciled(db)
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
@@ -1606,13 +1577,11 @@ def _(rid, params: dict) -> dict:
         ).strip().lower()
         if requested_conversation_kind not in {"direct", "team"}:
             requested_conversation_kind = ""
-        result = read_model.list(
-            SessionIndexQuery(
-                limit=limit,
-                cursor=cursor or None,
-                include_transient=include_transient,
-                conversation_kind=requested_conversation_kind or None,
-            )
+        result = db.session_index.list(
+            limit=limit,
+            cursor=cursor or None,
+            include_transient=include_transient,
+            conversation_kind=requested_conversation_kind or None,
         )
         rows = [
             _session_index_row_with_active_mission_running(db, row)
@@ -1677,16 +1646,11 @@ def _(rid, params: dict) -> dict:
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a
         # similar over-fetch strategy.
-        read_model = _session_list_read_model_for_db(db)
-        if read_model is None:
-            return _ok(rid, {"session_id": None})
-        rows = read_model.list(
-            SessionListQuery(
-                source=None,
-                exclude_sources=tuple(deny),
-                limit=200,
-                order_by_last_active=True,
-            )
+        rows = db.sessions.list(
+            source=None,
+            exclude_sources=tuple(deny),
+            limit=200,
+            order_by_last_active=True,
         )
         for row in rows:
             src = (row.get("source") or "").strip().lower()
