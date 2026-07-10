@@ -256,6 +256,31 @@ class TeamMissionRepoImpl:
     def __init__(self, conn: RepositoryConnection) -> None:
         self._conn = conn
 
+    def rebase_workspace_paths(self, old_path: str, new_path: str) -> dict[str, int]:
+        source = str(old_path or "").strip()
+        target = str(new_path or "").strip()
+        if not source or not target or source == target:
+            return {
+                "team_missions": 0,
+                "team_mission_conversations": 0,
+            }
+        mission_rows = self._conn.execute(
+            "UPDATE team_missions SET workspace_path = ? WHERE workspace_path = ?",
+            (target, source),
+        ).rowcount
+        conversation_rows = self._conn.execute(
+            """
+            UPDATE team_mission_conversations
+               SET workspace_path = ?
+             WHERE workspace_path = ?
+            """,
+            (target, source),
+        ).rowcount
+        return {
+            "team_missions": int(mission_rows or 0),
+            "team_mission_conversations": int(conversation_rows or 0),
+        }
+
     # ------------------------------------------------------------------
     # Mission graph
     # ------------------------------------------------------------------

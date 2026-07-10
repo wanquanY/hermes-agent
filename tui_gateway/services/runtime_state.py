@@ -549,33 +549,11 @@ def rebase_team_mission_workspace_paths(*, old_path: str, new_path: str, db: Any
         active_db = open_cli_session_store()
         close_db = True
     try:
-        conn = getattr(active_db, "_conn", None)
-        if conn is None:
-            raise RuntimeError("session store connection unavailable")
-        lock = getattr(active_db, "_lock", None)
-        if lock is None:
-            lock_cm = None
-        else:
-            lock_cm = lock
-        updates: dict[str, Any] = {}
-        if lock_cm is None:
-            _rebase_workspace_paths_on_connection(conn, old_path, new_path, updates)
-        else:
-            with lock_cm:
-                _rebase_workspace_paths_on_connection(conn, old_path, new_path, updates)
-        return {"updates": updates, "changed": sum(value for value in updates.values() if isinstance(value, int))}
+        updates = active_db.team_mission_maintenance.rebase_workspace_paths(
+            old_path,
+            new_path,
+        )
+        return {"updates": updates, "changed": sum(updates.values())}
     finally:
         if close_db and hasattr(active_db, "close"):
             active_db.close()
-
-
-def _rebase_workspace_paths_on_connection(conn: Any, old_path: str, new_path: str, updates: dict[str, Any]) -> None:
-    for table in ("team_missions", "team_mission_conversations"):
-        try:
-            cursor = conn.execute(
-                f"UPDATE {table} SET workspace_path = ? WHERE workspace_path = ?",
-                (new_path, old_path),
-            )
-            updates[table] = int(cursor.rowcount or 0)
-        except Exception as exc:
-            updates[table] = f"error: {exc}"
