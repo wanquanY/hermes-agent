@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Iterable
 
 from hermes_agent.domain.exceptions import SeqAllocatorBusy
+from hermes_agent.domain.interaction import InternalRunEventType
 from hermes_agent.domain.seq_allocator import allocate_only
 
 
@@ -907,6 +908,33 @@ class EventLedger:
             tuple(params),
         ).fetchall()
         return list(rows)
+
+    def interaction_anchor_seq(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> int:
+        stable_sid = str(session_id or "").strip()
+        stable_request_id = str(request_id or "").strip()
+        if not stable_sid or not stable_request_id:
+            return 0
+        row = self._conn.execute(
+            """
+            SELECT anchor_seq
+              FROM run_events
+             WHERE session_id = ?
+               AND interaction_request_id = ?
+               AND event_type = ?
+             ORDER BY seq ASC
+             LIMIT 1
+            """,
+            (
+                stable_sid,
+                stable_request_id,
+                InternalRunEventType.INTERACTION_REQUESTED.value,
+            ),
+        ).fetchone()
+        return int(row["anchor_seq"] or 0) if row is not None else 0
 
     def list(
         self,

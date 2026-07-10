@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -31,6 +32,34 @@ def _production_python_files() -> list[Path]:
     return files
 
 
+def _contains_direct_interaction_write(source: str) -> bool:
+    tree = ast.parse(source)
+    if any(
+        (isinstance(node, ast.Name) and node.id == "InternalRunEventType")
+        or (isinstance(node, ast.Attribute) and node.attr == "InternalRunEventType")
+        for node in ast.walk(tree)
+    ):
+        return True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function_name = ""
+        if isinstance(node.func, ast.Name):
+            function_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            function_name = node.func.attr
+        if function_name not in {"append_event", "append_run_event"}:
+            continue
+        if any(
+            isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and value.value.startswith("_internal.interaction.")
+            for value in ast.walk(node)
+        ):
+            return True
+    return False
+
+
 def test_interaction_internal_run_event_writes_have_single_owner() -> None:
     offenders: list[str] = []
     for path in _production_python_files():
@@ -38,9 +67,7 @@ def test_interaction_internal_run_event_writes_have_single_owner() -> None:
         if rel in _ALLOWED_DIRECT_INTERNAL_REFERENCES:
             continue
         text = path.read_text(encoding="utf-8")
-        if "_internal.interaction." not in text:
-            continue
-        if "append_run_event" in text or "InternalRunEventType" in text:
+        if _contains_direct_interaction_write(text):
             offenders.append(rel)
 
     if offenders:

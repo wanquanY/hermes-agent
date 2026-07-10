@@ -107,6 +107,22 @@ class RunEventReadModel:
             limit=limit,
         )
 
+    def interaction_anchor_seq(
+        self,
+        session_id: str,
+        request_id: str,
+    ) -> int:
+        with self._lock:
+            try:
+                return EventLedger(self._conn).interaction_anchor_seq(
+                    session_id,
+                    request_id,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such table: run_events" in str(exc):
+                    return 0
+                raise
+
     def has_source(
         self,
         session_id: str,

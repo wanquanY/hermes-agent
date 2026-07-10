@@ -288,6 +288,12 @@ class RunService:
             limit=limit,
         )
 
+    def interaction_anchor_seq(self, session_id: str, request_id: str) -> int:
+        return self._events.interaction_anchor_seq(
+            session_id,
+            request_id,
+        )
+
     def list_events_by_mission_activity(
         self,
         mission_id: str,

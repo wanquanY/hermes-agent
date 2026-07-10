@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services.interaction_registry import pending_interactions
 from tui_gateway.services.interaction_registry import persist_interaction_event
 from hermes_agent.orchestration.worker_frame_router import PendingEntry
@@ -48,8 +48,8 @@ def _entry(
 
 def test_interaction_lifecycle_persists_as_internal_events(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
-    db.create_session("conversation-session-1", "hermes")
+    db = open_cli_session_store(db_path)
+    db.sessions.create("conversation-session-1", "hermes")
 
     requested = persist_interaction_event(
         db,
@@ -79,8 +79,8 @@ def test_interaction_lifecycle_persists_as_internal_events(tmp_path: Path) -> No
 
 def test_interaction_request_does_not_self_anchor_without_caller_seq(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
-    db.create_session("conversation-session-1", "hermes")
+    db = open_cli_session_store(db_path)
+    db.sessions.create("conversation-session-1", "hermes")
 
     requested = persist_interaction_event(db, "interaction.requested", _entry("req-1"))
 
@@ -93,9 +93,9 @@ def test_interaction_request_does_not_self_anchor_without_caller_seq(tmp_path: P
 
 
 def test_default_run_events_list_filters_internal_interactions(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conversation-session-1", "hermes")
-    db.append_run_event(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
+    db.runs.append_event(
         "conversation-session-1",
         {
             "type": "message.start",
@@ -105,8 +105,8 @@ def test_default_run_events_list_filters_internal_interactions(tmp_path: Path) -
     )
     persist_interaction_event(db, "interaction.requested", _entry("req-1"))
 
-    default_events = db.list_run_events("conversation-session-1")
-    internal_events = db.list_run_events("conversation-session-1", include_internal=True)
+    default_events = db.runs.list_events("conversation-session-1")
+    internal_events = db.runs.list_events("conversation-session-1", include_internal=True)
 
     assert [event["type"] for event in default_events] == ["message.start"]
     assert [event["type"] for event in internal_events] == [
@@ -116,8 +116,8 @@ def test_default_run_events_list_filters_internal_interactions(tmp_path: Path) -
 
 
 def test_pending_interactions_recovery_excludes_resolved_and_expired(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conversation-session-1", "hermes")
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
 
     persist_interaction_event(db, "interaction.requested", _entry("req-pending", anchor_seq=42))
     persist_interaction_event(db, "interaction.requested", _entry("req-resolved"))
@@ -138,15 +138,23 @@ def test_pending_interactions_recovery_excludes_resolved_and_expired(tmp_path: P
     ]
 
 
-def test_pending_interactions_recovery_uses_run_event_read_model(tmp_path: Path, monkeypatch) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conversation-session-1", "hermes")
+def test_pending_interactions_recovery_uses_run_component(tmp_path: Path, monkeypatch) -> None:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
     persist_interaction_event(db, "interaction.requested", _entry("req-pending", anchor_seq=42))
 
-    def fail_legacy_list(*args, **kwargs):
-        raise AssertionError("legacy db.list_run_events must not be called")
+    original = db.runs.list_events
+    calls: list[tuple[str, bool]] = []
 
-    monkeypatch.setattr(db, "list_run_events", fail_legacy_list)
+    def traced(session_id, *, include_internal=False, **options):
+        calls.append((session_id, include_internal))
+        return original(
+            session_id,
+            include_internal=include_internal,
+            **options,
+        )
+
+    monkeypatch.setattr(db.runs, "list_events", traced)
 
     assert pending_interactions(db, "conversation-session-1") == [
         {
@@ -157,17 +165,17 @@ def test_pending_interactions_recovery_uses_run_event_read_model(tmp_path: Path,
             "seq": 1,
         }
     ]
+    assert calls == [("conversation-session-1", True)]
 
 
-def test_interaction_lifecycle_requires_db_append_run_event() -> None:
-    with pytest.raises(RuntimeError, match="append_run_event"):
+def test_interaction_lifecycle_requires_run_component() -> None:
+    with pytest.raises(RuntimeError, match="run component"):
         persist_interaction_event(None, "interaction.requested", _entry("req-1"))
 
 
 def test_interaction_lifecycle_requires_conversation_session_id() -> None:
     class _DB:
-        def append_run_event(self, session_id, frame):
-            return {"type": frame.get("type")}
+        pass
 
     entry = PendingEntry(
         request_id="req-1",
@@ -181,14 +189,14 @@ def test_interaction_lifecycle_requires_conversation_session_id() -> None:
 
 
 def test_interaction_lifecycle_requires_request_id(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conversation-session-1", "hermes")
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
     with pytest.raises(ValueError, match="request_id"):
         persist_interaction_event(db, "interaction.requested", _entry(""))
 
 
 def test_non_interaction_event_type_is_noop(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conversation-session-1", "hermes")
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
     assert persist_interaction_event(db, "message.complete", _entry("req-1")) == {}
-    assert db.list_run_events("conversation-session-1", include_internal=True) == []
+    assert db.runs.list_events("conversation-session-1", include_internal=True) == []

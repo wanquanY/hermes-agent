@@ -8,15 +8,10 @@ timeline stream.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from hermes_agent.domain.interaction import InternalRunEventType
 from hermes_agent.domain.interaction import InteractionFrameType
-from tui_gateway.services.run_events import list_runtime_events
-
-_log = logging.getLogger(__name__)
-
 PUBLIC_TO_INTERNAL_EVENT_TYPE = {
     InteractionFrameType.REQUESTED.value: InternalRunEventType.INTERACTION_REQUESTED.value,
     InteractionFrameType.RESOLVED.value: InternalRunEventType.INTERACTION_RESOLVED.value,
@@ -44,9 +39,6 @@ class InteractionRegistry:
         internal_type = PUBLIC_TO_INTERNAL_EVENT_TYPE.get(str(event_type or "").strip())
         if not internal_type:
             return {}
-        if db is None or not hasattr(db, "append_run_event"):
-            raise RuntimeError("interaction persistence requires append_run_event support")
-
         session_id = str(
             getattr(entry, "session_key", "")
             or getattr(entry, "conversation_id", "")
@@ -58,6 +50,8 @@ class InteractionRegistry:
         request_id = str(getattr(entry, "request_id", "") or "").strip()
         if not request_id:
             raise ValueError("interaction persistence requires request_id")
+        if db is None:
+            raise RuntimeError("interaction persistence requires run component")
 
         kind = str(getattr(entry, "kind", "") or "").strip()
         status = _status_for_internal_event(internal_type, getattr(entry, "state", ""))
@@ -87,7 +81,7 @@ class InteractionRegistry:
             "runtime_scope_key": str(getattr(entry, "scope_key", "") or session_id),
             "payload": payload,
         }
-        saved = db.append_run_event(session_id, frame)
+        saved = db.runs.append_event(session_id, frame)
         if not isinstance(saved, dict):
             raise RuntimeError(
                 f"interaction persistence returned non-dict result type={internal_type} request_id={request_id}"
@@ -98,37 +92,13 @@ class InteractionRegistry:
         """Return the caller-provided anchor seq for a persisted interaction."""
 
         db = self._db
-        conn = getattr(db, "_conn", None)
-        lock = getattr(db, "_lock", None)
-        if conn is None or lock is None:
+        if db is None:
             return 0
         stable = str(session_id or "").strip()
         rid = str(request_id or "").strip()
         if not stable or not rid:
             return 0
-        try:
-            with lock:
-                row = conn.execute(
-                    """
-                    SELECT anchor_seq
-                      FROM run_events
-                     WHERE session_id = ?
-                       AND interaction_request_id = ?
-                       AND event_type = ?
-                     ORDER BY seq ASC
-                     LIMIT 1
-                    """,
-                    (stable, rid, InternalRunEventType.INTERACTION_REQUESTED.value),
-                ).fetchone()
-        except Exception:
-            _log.debug("interaction anchor lookup failed session=%s rid=%s", stable, rid, exc_info=True)
-            return 0
-        if row is None:
-            return 0
-        try:
-            return int(row["anchor_seq"])
-        except (KeyError, TypeError, ValueError, IndexError):
-            return int(row[0] or 0)
+        return db.runs.interaction_anchor_seq(stable, rid)
 
     def list_pending(self, session_id: str) -> list[dict[str, Any]]:
         """Recover pending interactions from internal run_events for one session."""
@@ -136,8 +106,7 @@ class InteractionRegistry:
         db = self._db
         if db is None:
             return []
-        events = list_runtime_events(
-            db,
+        events = db.runs.list_events(
             session_id,
             include_internal=True,
             limit=5000,
