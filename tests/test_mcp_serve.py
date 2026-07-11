@@ -187,8 +187,9 @@ def mock_session_db(tmp_path, populated_sessions_dir):
     class TestMessageHistoryStore:
         def __init__(self):
             self._db_path = db_path
+            self.messages = self
 
-        def get_messages(self, session_id):
+        def list(self, session_id):
             conn = sqlite3.connect(str(self._db_path))
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -1093,7 +1094,11 @@ class TestEventBridgePollE2E:
 
         # Create a mock message history store that reads our test DB.
         class TestMessageHistoryStore:
-            def get_messages(self, sid):
+            @property
+            def messages(self):
+                return self
+
+            def list(self, sid):
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
@@ -1147,8 +1152,9 @@ class TestEventBridgePollE2E:
         class TestDB:
             def __init__(self):
                 self.call_count = 0
+                self.messages = self
 
-            def get_messages(self, sid):
+            def list(self, sid):
                 self.call_count += 1
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
@@ -1197,7 +1203,11 @@ class TestEventBridgePollE2E:
         ])
 
         class TestDB:
-            def get_messages(self, sid):
+            @property
+            def messages(self):
+                return self
+
+            def list(self, sid):
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(

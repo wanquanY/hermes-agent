@@ -387,7 +387,7 @@ class EventBridge:
             last_seen = self._last_poll_timestamps.get(session_key, 0.0)
 
             try:
-                messages = store.get_messages(session_id)
+                messages = store.messages.list(session_id)
             except Exception:
                 continue
 
@@ -588,7 +588,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
             return json.dumps({"error": "Message history unavailable"})
 
         try:
-            all_messages = store.get_messages(session_id)
+            all_messages = store.messages.list(session_id)
         except Exception as e:
             return json.dumps({"error": f"Failed to read messages: {e}"})
 
@@ -644,7 +644,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
             return json.dumps({"error": "Message history unavailable"})
 
         try:
-            all_messages = store.get_messages(session_id)
+            all_messages = store.messages.list(session_id)
         except Exception as e:
             return json.dumps({"error": f"Failed to read messages: {e}"})
 
