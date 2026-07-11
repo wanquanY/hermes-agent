@@ -4,30 +4,23 @@ import ast
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
-
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services.activity_reconciler import ActivityReconciler
 
 
-class FailingCreateDB(SessionDB):
-    def create_activity(self, **_kwargs: Any) -> dict:
-        raise RuntimeError("create failed")
-
-
 @pytest.fixture()
-def db(tmp_path: Path) -> SessionDB:
-    state = SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    state = open_cli_session_store(tmp_path / "state.db")
     try:
         yield state
     finally:
         state.close()
 
 
-def _activity(db: SessionDB, activity_id: str = "act-1", *, status: str = "pending") -> dict:
-    return db.create_activity(
+def _activity(db: CliSessionStore, activity_id: str = "act-1", *, status: str = "pending") -> dict:
+    return db.activities.create(
         activity_id=activity_id,
         conversation_id=f"conv-{activity_id}",
         kind="mission",
@@ -36,14 +29,14 @@ def _activity(db: SessionDB, activity_id: str = "act-1", *, status: str = "pendi
 
 
 def _insert(
-    db: SessionDB,
+    db: CliSessionStore,
     command_id: str,
     *,
     activity_id: str = "act-1",
     kind: str = "create",
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return db.insert_activity_command(
+    return db.activities.insert_command(
         command_id=command_id,
         activity_id=activity_id,
         kind=kind,
@@ -57,7 +50,7 @@ def _insert(
     )
 
 
-def _set_intent_at(db: SessionDB, command_id: str, value: float) -> None:
+def _set_intent_at(db: CliSessionStore, command_id: str, value: float) -> None:
     with db._lock:
         db._conn.execute(
             "UPDATE activity_commands SET intent_at = ? WHERE command_id = ?",
@@ -65,21 +58,21 @@ def _set_intent_at(db: SessionDB, command_id: str, value: float) -> None:
         )
 
 
-def _command(db: SessionDB, command_id: str) -> dict[str, Any]:
-    row = db.get_activity_command(command_id)
+def _command(db: CliSessionStore, command_id: str) -> dict[str, Any]:
+    row = db.activities.get_command(command_id)
     assert row
     return row
 
 
-def _events(db: SessionDB, session_id: str, *, activity_id: str = "") -> list[dict[str, Any]]:
-    return db.list_run_events(session_id, activity_id=activity_id)
+def _events(db: CliSessionStore, session_id: str, *, activity_id: str = "") -> list[dict[str, Any]]:
+    return db.runs.list_events(session_id, activity_id=activity_id)
 
 
-def _event_types(db: SessionDB, session_id: str, *, activity_id: str = "") -> list[str]:
+def _event_types(db: CliSessionStore, session_id: str, *, activity_id: str = "") -> list[str]:
     return [event["type"] for event in _events(db, session_id, activity_id=activity_id)]
 
 
-def test_reconciler_disabled_via_env_does_nothing(db: SessionDB, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconciler_disabled_via_env_does_nothing(db: CliSessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DOVIE_ACTIVITY_RECONCILER_DISABLED", "true")
     _insert(db, "cmd-create")
     reconciler = ActivityReconciler(db)
@@ -90,7 +83,7 @@ def test_reconciler_disabled_via_env_does_nothing(db: SessionDB, monkeypatch: py
     assert _command(db, "cmd-create")["state"] == "accepted"
 
 
-def test_run_one_cycle_processes_no_commands_when_empty(db: SessionDB) -> None:
+def test_run_one_cycle_processes_no_commands_when_empty(db: CliSessionStore) -> None:
     assert ActivityReconciler(db).run_one_cycle() == {
         "processed": 0,
         "satisfied": 0,
@@ -99,7 +92,7 @@ def test_run_one_cycle_processes_no_commands_when_empty(db: SessionDB) -> None:
     }
 
 
-def test_run_one_cycle_returns_summary_dict(db: SessionDB) -> None:
+def test_run_one_cycle_returns_summary_dict(db: CliSessionStore) -> None:
     _insert(db, "cmd-create")
 
     summary = ActivityReconciler(db).run_one_cycle()
@@ -109,18 +102,18 @@ def test_run_one_cycle_returns_summary_dict(db: SessionDB) -> None:
     assert summary["satisfied"] == 1
 
 
-def test_create_command_creates_activity_row(db: SessionDB) -> None:
+def test_create_command_creates_activity_row(db: CliSessionStore) -> None:
     _insert(db, "cmd-create", activity_id="act-create")
 
     ActivityReconciler(db).run_one_cycle()
 
-    activity = db.get_activity("act-create")
+    activity = db.activities.get("act-create")
     assert activity
     assert activity["kind"] == "mission"
     assert activity["conversation_id"] == "conv-act-create"
 
 
-def test_create_command_emits_activity_command_created(db: SessionDB) -> None:
+def test_create_command_emits_activity_command_created(db: CliSessionStore) -> None:
     _insert(db, "cmd-create", activity_id="act-create")
 
     ActivityReconciler(db).run_one_cycle()
@@ -128,7 +121,7 @@ def test_create_command_emits_activity_command_created(db: SessionDB) -> None:
     assert _event_types(db, "conv-act-create") == ["activity.command.created"]
 
 
-def test_create_command_transitions_to_satisfied(db: SessionDB) -> None:
+def test_create_command_transitions_to_satisfied(db: CliSessionStore) -> None:
     _insert(db, "cmd-create", activity_id="act-create")
 
     ActivityReconciler(db).run_one_cycle()
@@ -136,7 +129,7 @@ def test_create_command_transitions_to_satisfied(db: SessionDB) -> None:
     assert _command(db, "cmd-create")["state"] == "satisfied"
 
 
-def test_create_command_idempotent_when_activity_already_exists(db: SessionDB) -> None:
+def test_create_command_idempotent_when_activity_already_exists(db: CliSessionStore) -> None:
     _activity(db, "act-create")
     _insert(db, "cmd-create", activity_id="act-create")
     reconciler = ActivityReconciler(db)
@@ -146,14 +139,22 @@ def test_create_command_idempotent_when_activity_already_exists(db: SessionDB) -
 
     assert first["satisfied"] == 1
     assert second["processed"] == 0
-    assert len(db.list_activities("conv-act-create")) == 1
+    assert len(db.activities.list("conv-act-create")) == 1
     assert _event_types(db, "conv-act-create", activity_id="act-create") == [
         "activity.command.created"
     ]
 
 
-def test_create_command_failed_db_marks_command_failed(tmp_path: Path) -> None:
-    failing_db = FailingCreateDB(tmp_path / "state.db")
+def test_create_command_failed_db_marks_command_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failing_db = open_cli_session_store(tmp_path / "state.db")
+
+    def fail_create(**_kwargs) -> dict:
+        raise RuntimeError("create failed")
+
+    monkeypatch.setattr(failing_db.activities, "create", fail_create)
     try:
         _insert(failing_db, "cmd-create", activity_id="act-create")
 
@@ -170,7 +171,7 @@ def test_create_command_failed_db_marks_command_failed(tmp_path: Path) -> None:
         failing_db.close()
 
 
-def test_start_command_emits_start_accepted(db: SessionDB) -> None:
+def test_start_command_emits_start_accepted(db: CliSessionStore) -> None:
     _activity(db, "act-start")
     _insert(db, "cmd-start", activity_id="act-start", kind="start")
 
@@ -181,7 +182,7 @@ def test_start_command_emits_start_accepted(db: SessionDB) -> None:
     ]
 
 
-def test_start_command_transitions_to_dispatched(db: SessionDB) -> None:
+def test_start_command_transitions_to_dispatched(db: CliSessionStore) -> None:
     _activity(db, "act-start")
     _insert(db, "cmd-start", activity_id="act-start", kind="start")
 
@@ -210,10 +211,10 @@ def test_start_command_does_not_spawn_worker() -> None:
     assert not violations
 
 
-def test_start_command_dispatched_state_timeout_marks_failed(db: SessionDB) -> None:
+def test_start_command_dispatched_state_timeout_marks_failed(db: CliSessionStore) -> None:
     _activity(db, "act-start")
     _insert(db, "cmd-start", activity_id="act-start", kind="start")
-    db.update_activity_command_state("cmd-start", next_state="dispatched")
+    db.activities.update_command_state("cmd-start", next_state="dispatched")
     _set_intent_at(db, "cmd-start", time.time() - 20)
 
     summary = ActivityReconciler(db, command_timeout_s=5).run_one_cycle()
@@ -225,10 +226,10 @@ def test_start_command_dispatched_state_timeout_marks_failed(db: SessionDB) -> N
     ]
 
 
-def test_start_command_dispatched_within_timeout_stays_pending(db: SessionDB) -> None:
+def test_start_command_dispatched_within_timeout_stays_pending(db: CliSessionStore) -> None:
     _activity(db, "act-start")
     _insert(db, "cmd-start", activity_id="act-start", kind="start")
-    db.update_activity_command_state("cmd-start", next_state="dispatched")
+    db.activities.update_command_state("cmd-start", next_state="dispatched")
 
     summary = ActivityReconciler(db, command_timeout_s=60).run_one_cycle()
 
@@ -238,16 +239,16 @@ def test_start_command_dispatched_within_timeout_stays_pending(db: SessionDB) ->
     assert _events(db, "conv-act-start") == []
 
 
-def test_cancel_command_calls_mark_activity_cancelled(db: SessionDB) -> None:
+def test_cancel_command_calls_mark_activity_cancelled(db: CliSessionStore) -> None:
     _activity(db, "act-cancel")
     _insert(db, "cmd-cancel", activity_id="act-cancel", kind="cancel")
 
     ActivityReconciler(db).run_one_cycle()
 
-    assert db.get_activity("act-cancel")["status"] == "cancelled"
+    assert db.activities.get("act-cancel")["status"] == "cancelled"
 
 
-def test_cancel_command_emits_activity_command_cancelled(db: SessionDB) -> None:
+def test_cancel_command_emits_activity_command_cancelled(db: CliSessionStore) -> None:
     _activity(db, "act-cancel")
     _insert(db, "cmd-cancel", activity_id="act-cancel", kind="cancel")
 
@@ -258,7 +259,7 @@ def test_cancel_command_emits_activity_command_cancelled(db: SessionDB) -> None:
     ]
 
 
-def test_cancel_command_transitions_to_satisfied(db: SessionDB) -> None:
+def test_cancel_command_transitions_to_satisfied(db: CliSessionStore) -> None:
     _activity(db, "act-cancel")
     _insert(db, "cmd-cancel", activity_id="act-cancel", kind="cancel")
 
@@ -267,26 +268,26 @@ def test_cancel_command_transitions_to_satisfied(db: SessionDB) -> None:
     assert _command(db, "cmd-cancel")["state"] == "satisfied"
 
 
-def test_cancel_command_already_terminal_still_satisfies(db: SessionDB) -> None:
+def test_cancel_command_already_terminal_still_satisfies(db: CliSessionStore) -> None:
     _activity(db, "act-cancel", status="cancelled")
     _insert(db, "cmd-cancel", activity_id="act-cancel", kind="cancel")
 
     ActivityReconciler(db).run_one_cycle()
 
     assert _command(db, "cmd-cancel")["state"] == "satisfied"
-    assert db.get_activity("act-cancel")["status"] == "cancelled"
+    assert db.activities.get("act-cancel")["status"] == "cancelled"
 
 
-def test_complete_command_updates_activities_status_to_completed(db: SessionDB) -> None:
+def test_complete_command_updates_activities_status_to_completed(db: CliSessionStore) -> None:
     _activity(db, "act-complete")
     _insert(db, "cmd-complete", activity_id="act-complete", kind="complete")
 
     ActivityReconciler(db).run_one_cycle()
 
-    assert db.get_activity("act-complete")["status"] == "completed"
+    assert db.activities.get("act-complete")["status"] == "completed"
 
 
-def test_complete_command_emits_activity_command_completed(db: SessionDB) -> None:
+def test_complete_command_emits_activity_command_completed(db: CliSessionStore) -> None:
     _activity(db, "act-complete")
     _insert(db, "cmd-complete", activity_id="act-complete", kind="complete")
 
@@ -297,7 +298,7 @@ def test_complete_command_emits_activity_command_completed(db: SessionDB) -> Non
     ]
 
 
-def test_complete_command_transitions_to_satisfied(db: SessionDB) -> None:
+def test_complete_command_transitions_to_satisfied(db: CliSessionStore) -> None:
     _activity(db, "act-complete")
     _insert(db, "cmd-complete", activity_id="act-complete", kind="complete")
 
@@ -306,16 +307,16 @@ def test_complete_command_transitions_to_satisfied(db: SessionDB) -> None:
     assert _command(db, "cmd-complete")["state"] == "satisfied"
 
 
-def test_complete_command_persists_completed_at(db: SessionDB) -> None:
+def test_complete_command_persists_completed_at(db: CliSessionStore) -> None:
     _activity(db, "act-complete")
     _insert(db, "cmd-complete", activity_id="act-complete", kind="complete")
 
     ActivityReconciler(db).run_one_cycle()
 
-    assert db.get_activity("act-complete")["completed_at"] is not None
+    assert db.activities.get("act-complete")["completed_at"] is not None
 
 
-def test_emit_event_rejects_event_type_outside_namespace(db: SessionDB) -> None:
+def test_emit_event_rejects_event_type_outside_namespace(db: CliSessionStore) -> None:
     reconciler = ActivityReconciler(db)
 
     with pytest.raises(ValueError):
@@ -327,7 +328,7 @@ def test_emit_event_rejects_event_type_outside_namespace(db: SessionDB) -> None:
         )
 
 
-def test_emit_event_writes_into_run_events_table(db: SessionDB) -> None:
+def test_emit_event_writes_into_run_events_table(db: CliSessionStore) -> None:
     reconciler = ActivityReconciler(db)
 
     reconciler._emit_event(
@@ -340,7 +341,7 @@ def test_emit_event_writes_into_run_events_table(db: SessionDB) -> None:
     assert _event_types(db, "conv-1") == ["activity.command.created"]
 
 
-def test_emit_event_carries_activity_id_in_frame(db: SessionDB) -> None:
+def test_emit_event_carries_activity_id_in_frame(db: CliSessionStore) -> None:
     reconciler = ActivityReconciler(db)
 
     reconciler._emit_event(
@@ -355,7 +356,7 @@ def test_emit_event_carries_activity_id_in_frame(db: SessionDB) -> None:
     assert event["payload"]["activity_id"] == "act-1"
 
 
-def test_reconciler_processes_multiple_pending_commands_in_order(db: SessionDB) -> None:
+def test_reconciler_processes_multiple_pending_commands_in_order(db: CliSessionStore) -> None:
     _insert(db, "cmd-late", activity_id="act-late")
     _insert(db, "cmd-early", activity_id="act-early")
     _set_intent_at(db, "cmd-late", 20.0)
@@ -372,7 +373,7 @@ def test_reconciler_processes_multiple_pending_commands_in_order(db: SessionDB) 
     ]
 
 
-def test_reconciler_one_bad_handler_does_not_poison_remaining(db: SessionDB) -> None:
+def test_reconciler_one_bad_handler_does_not_poison_remaining(db: CliSessionStore) -> None:
     _insert(
         db,
         "cmd-bad",
