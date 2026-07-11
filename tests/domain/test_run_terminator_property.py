@@ -42,6 +42,7 @@ def _make_conn() -> sqlite3.Connection:
             seq INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             turn_id TEXT,
+            activity_id TEXT,
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,

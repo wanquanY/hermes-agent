@@ -2281,54 +2281,44 @@ def terminate_run(
     # spec §7.2 — RunStateMachine.terminate_run single entrypoint. Perform the
     # atomic terminal transition (idempotent, degrades on SeqAllocatorBusy)
     # BEFORE publishing the notification frame so that subscribers observe the
-    # committed state. If db is unavailable (test paths, legacy callers) the
-    # atomic transition is skipped — the caller still gets a frame published.
+    # committed state. If db is unavailable in isolated test paths, the caller
+    # still gets a notification frame without persistence.
     atomic_result = None
     if db is not None:
-        conn = getattr(db, "_conn", None)
-        if conn is not None and _has_run_state_schema(conn):
-            try:
-                from hermes_agent.domain.run_terminator import (
-                    TerminateCause,
-                    terminate_run as _domain_terminate_run,
-                )
-
-                try:
-                    resolved_cause = TerminateCause(str(cause or "worker_emitted"))
-                except ValueError:
-                    resolved_cause = TerminateCause.WORKER_EMITTED
-                atomic_result = _domain_terminate_run(
-                    conn,
-                    run_id=normalized_run_id,
-                    session_id=stable,
-                    target_status=terminal_status,
-                    cause=resolved_cause,
-                    turn_id=str(turn_id or "").strip(),
-                    activity_id=str(activity_id or "").strip(),
-                    message=message,
-                    payload_extra={
-                        "activity_id": str(activity_id or "").strip(),
-                        "activityId": str(activity_id or "").strip(),
-                    } if str(activity_id or "").strip() else None,
-                )
-            except ValueError:
-                logger.exception(
-                    "run_state_machine.terminate_run rejected run=%s session=%s status=%s",
-                    normalized_run_id,
-                    stable,
-                    terminal_status,
-                )
-                raise
-            except Exception as exc:
-                logger.exception(
-                    "run_state_machine.terminate_run failed run=%s session=%s status=%s",
-                    normalized_run_id,
-                    stable,
-                    terminal_status,
-                )
-                raise RuntimeError(
-                    "run_state_machine.terminate_run failed; refusing legacy terminal fallback"
-                ) from exc
+        try:
+            atomic_result = db.runs.terminate(
+                run_id=normalized_run_id,
+                session_id=stable,
+                target_status=terminal_status,
+                cause=str(cause or "worker_emitted"),
+                turn_id=str(turn_id or "").strip(),
+                activity_id=str(activity_id or "").strip(),
+                message=message,
+                runtime_scope_key=runtime_scope_key or stable,
+                execution_session_id=execution_session_id,
+                payload_extra={
+                    "activity_id": str(activity_id or "").strip(),
+                    "activityId": str(activity_id or "").strip(),
+                } if str(activity_id or "").strip() else None,
+            )
+        except ValueError:
+            logger.exception(
+                "run_state_machine.terminate_run rejected run=%s session=%s status=%s",
+                normalized_run_id,
+                stable,
+                terminal_status,
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "run_state_machine.terminate_run failed run=%s session=%s status=%s",
+                normalized_run_id,
+                stable,
+                terminal_status,
+            )
+            raise RuntimeError(
+                "run_state_machine.terminate_run failed; refusing legacy terminal fallback"
+            ) from exc
 
     payload: dict[str, Any] = {
         "run_id": normalized_run_id,

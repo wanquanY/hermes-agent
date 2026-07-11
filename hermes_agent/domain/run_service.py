@@ -23,7 +23,11 @@ from hermes_agent.domain.session_runtime_state import (
     session_runtime_identity_matches,
     session_runtime_state_from_row,
 )
-from hermes_agent.domain.run_terminator import TerminateCause, terminate_run
+from hermes_agent.domain.run_terminator import (
+    TerminateCause,
+    TerminateResult,
+    terminate_run,
+)
 from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionRunProjection
@@ -510,14 +514,14 @@ class RunService:
         runtime_scope_key: str = "",
         execution_session_id: str = "",
         payload_extra: dict[str, Any] | None = None,
-    ) -> Any:
+    ) -> TerminateResult:
         stable = str(session_id or "").strip()
         normalized_run_id = str(run_id or "").strip()
         if not stable or not normalized_run_id:
             raise ValueError("run_id and session_id are required")
         resolved_cause = cause if isinstance(cause, TerminateCause) else TerminateCause(str(cause))
 
-        def operation(conn: sqlite3.Connection) -> Any:
+        def operation(conn: sqlite3.Connection) -> TerminateResult:
             self._sessions.ensure_runtime_session(stable)
             if self._repository.get_run(normalized_run_id) is None:
                 self._repository.upsert_materialized_state(
