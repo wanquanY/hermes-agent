@@ -2,13 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_leader_runtime_context import resolve_team_leader_runtime_params, resolve_team_runtime_members
 
 
-def _seed_team_with_leader_profile(tmp_path: Path) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    profile = db.upsert_agent_profile(
+def _seed_team_with_leader_profile(tmp_path: Path) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    profile = db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader v1",
@@ -24,13 +24,13 @@ def _seed_team_with_leader_profile(tmp_path: Path) -> SessionDB:
         current_version_id="snapshot-leader",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Team",
         lead_agent_profile_id=profile["id"],
         default_mode="supervised_mission",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id=profile["id"],
@@ -38,7 +38,7 @@ def _seed_team_with_leader_profile(tmp_path: Path) -> SessionDB:
         role="lead",
         capability_tags=["planning"],
     )
-    worker_profile = db.upsert_agent_profile(
+    worker_profile = db.profiles.upsert_agent_profile(
         profile_id="profile-worker",
         slug="worker",
         name="Worker v1",
@@ -54,7 +54,7 @@ def _seed_team_with_leader_profile(tmp_path: Path) -> SessionDB:
         current_version_id="snapshot-worker",
         current_version_number=1,
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-worker",
         team_id="team-1",
         agent_profile_id=worker_profile["id"],
