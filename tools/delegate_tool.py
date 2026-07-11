@@ -1573,6 +1573,8 @@ def _build_child_agent(
         reasoning_callback=child_reasoning_delta_cb,
         session_db=child_session_db,
         parent_session_id=child_parent_session_id,
+        session_kind="execution",
+        conversation_kind="internal",
         providers_allowed=child_providers_allowed,
         providers_ignored=child_providers_ignored,
         providers_order=child_providers_order,

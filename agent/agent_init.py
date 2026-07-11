@@ -196,6 +196,8 @@ def init_agent(
     skip_memory: bool = False,
     session_db=None,
     parent_session_id: str = None,
+    session_kind: str = "hermes_session",
+    conversation_kind: str = "direct",
     iteration_budget: "IterationBudget" = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
@@ -1064,6 +1066,8 @@ def init_agent(
     agent._session_db = session_db
     agent._session_recall_read_model = None
     agent._parent_session_id = parent_session_id
+    agent._session_kind = str(session_kind or "hermes_session")
+    agent._conversation_kind = str(conversation_kind or "direct")
     agent._last_flushed_db_idx = 0  # per-message-buffer DB-write cursor
     agent._last_flushed_db_buffer_id = None
     agent._last_flushed_db_visible_session_id = ""

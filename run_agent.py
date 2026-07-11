@@ -405,6 +405,8 @@ class AIAgent:
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
+        session_kind: str = "hermes_session",
+        conversation_kind: str = "direct",
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
@@ -476,6 +478,8 @@ class AIAgent:
             skip_memory=skip_memory,
             session_db=session_db,
             parent_session_id=parent_session_id,
+            session_kind=session_kind,
+            conversation_kind=conversation_kind,
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
@@ -514,7 +518,7 @@ class AIAgent:
         if self._session_db_created or not self._session_db:
             return
         try:
-            self._session_db.create_session(
+            self._session_db.sessions.create(
                 session_id=self.session_id,
                 source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                 model=self.model,
@@ -522,6 +526,8 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                session_kind=self._session_kind,
+                conversation_kind=self._conversation_kind,
             )
             self._session_db_created = True
         except Exception as e:
