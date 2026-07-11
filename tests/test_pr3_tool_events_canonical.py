@@ -6,7 +6,7 @@ in canonical event form (``tool.start`` / ``tool.complete`` carrying the *real*
 ``tool_events`` row model.  The ``tool_events`` table itself is untouched (it
 remains a read model / backfill source).
 
-These tests construct a real ``SessionDB``, append ``tool.start`` +
+These tests construct a real ``CliSessionStore``, append ``tool.start`` +
 ``tool.complete`` run_events via ``append_run_event`` (which auto-assigns
 authoritative ``seq`` values), and assert that
 ``list_tool_events_as_canonical`` returns events whose ``seq`` is the real
@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.read_models.tool_events import list_tool_events_as_canonical
 from tui_gateway import server
 
@@ -65,10 +65,10 @@ def _tool_event(
     return body
 
 
-def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
-    """Build a real SessionDB and route ``_get_db`` in session_history to it."""
+def _install_db(monkeypatch: Any, tmp_path: Path) -> CliSessionStore:
+    """Build a real CliSessionStore and route ``_get_db`` in session_history to it."""
     session_history = importlib.import_module("tui_gateway.methods.session_history")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(session_history, "_get_db", lambda: db)
     return db
 
@@ -85,10 +85,10 @@ def _call_messages(rid: str, params: dict[str, Any]) -> dict[str, Any]:
 
 def test_canonical_returns_tool_start_and_complete_with_real_run_events_seq(tmp_path):
     """Canonical events carry the real ``run_events.seq``, not ``seq_start``."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -96,7 +96,7 @@ def test_canonical_returns_tool_start_and_complete_with_real_run_events_seq(tmp_
                 payload={"arguments": {"command": "pwd"}},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -135,20 +135,20 @@ def test_canonical_seq_differs_from_tool_events_seq_start_when_multiple_frames_c
     """Triage S5 "dual seq identity": tool_events collapses a start+complete
     pair into one row (seq_start=earliest), but run_events keeps two distinct
     seqs.  The canonical reader must surface both real seqs."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         # Same tool_id → tool_events projects a single row with
         # seq_start=1, seq_last=3 (start=1, progress=2, complete=3).
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=1, payload={"arguments": {"command": "ls"}}),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.progress", seq=2, payload={"preview": "listing"}),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -158,7 +158,7 @@ def test_canonical_seq_differs_from_tool_events_seq_start_when_multiple_frames_c
         )
 
         # The projection collapses to one row.
-        tool_rows = db.list_tool_events("session-1")
+        tool_rows = db.tool_event_projection.list("session-1")
         assert len(tool_rows) == 1
         assert tool_rows[0]["seq_start"] == 1
         assert tool_rows[0]["seq_last"] == 3
@@ -180,11 +180,11 @@ def test_canonical_seq_differs_from_tool_events_seq_start_when_multiple_frames_c
 
 def test_canonical_after_seq_cursor_filters_exclusively(tmp_path):
     """``after_seq`` is an exclusive forward cursor (seq > after_seq)."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         for seq in range(1, 5):
-            db.append_run_event(
+            db.runs.append_event(
                 "session-1",
                 _tool_event(
                     "tool.start",
@@ -205,9 +205,9 @@ def test_canonical_after_seq_cursor_filters_exclusively(tmp_path):
 
 
 def test_canonical_returns_empty_for_unknown_session(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         events = list_tool_events_as_canonical(db._conn, "no-such-session")  # noqa: SLF001
     finally:
         db.close()
@@ -215,7 +215,7 @@ def test_canonical_returns_empty_for_unknown_session(tmp_path):
 
 
 def test_canonical_returns_empty_for_empty_session_id(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
         events = list_tool_events_as_canonical(db._conn, "")  # noqa: SLF001
     finally:
@@ -225,10 +225,10 @@ def test_canonical_returns_empty_for_empty_session_id(tmp_path):
 
 def test_canonical_payload_preserved_from_run_events(tmp_path):
     """The payload dict (arguments/result/summary) flows through unchanged."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -236,7 +236,7 @@ def test_canonical_payload_preserved_from_run_events(tmp_path):
                 payload={"arguments": {"command": "echo hi"}},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -261,20 +261,20 @@ def test_canonical_payload_preserved_from_run_events(tmp_path):
 def test_canonical_event_shape_matches_list_run_events(tmp_path):
     """Canonical tool events must have the same dict shape as list_run_events
     output — same keys, same seq source — so FE can treat them uniformly."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=1, run_id="run-A", turn_id="turn-A"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=2, run_id="run-A", turn_id="turn-A"),
         )
 
-        run_events = db.list_run_events("session-1")
-        tool_events = db.list_tool_events("session-1")  # legacy row model
+        run_events = db.runs.list_events("session-1")
+        tool_events = db.tool_event_projection.list("session-1")  # legacy row model
         canonical = list_tool_events_as_canonical(db._conn, "session-1")  # noqa: SLF001
     finally:
         db.close()
@@ -302,22 +302,22 @@ def test_canonical_event_shape_matches_list_run_events(tmp_path):
 
 def test_canonical_multiple_runs_distinct_run_ids(tmp_path):
     """Events from different runs keep their distinct run_id."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=1, tool_id="t1", run_id="run-A"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=2, tool_id="t1", run_id="run-A"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=3, tool_id="t2", run_id="run-B"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=4, tool_id="t2", run_id="run-B"),
         )
@@ -344,12 +344,12 @@ def test_session_messages_serves_canonical_tool_events(monkeypatch, tmp_path):
     event shapes (real run_events.seq) in the ``toolEvents`` field."""
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=1, run_id="run-1"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=2, run_id="run-1"),
         )
@@ -376,9 +376,9 @@ def test_session_messages_canonical_tool_events_respects_after_seq(monkeypatch, 
     """The ``after_seq`` cursor applies to canonical tool events too."""
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         for seq in range(1, 5):
-            db.append_run_event(
+            db.runs.append_event(
                 "session-1",
                 _tool_event(
                     "tool.start",
@@ -407,7 +407,7 @@ def test_session_messages_canonical_tool_events_respects_after_seq(monkeypatch, 
 def test_session_messages_canonical_tool_events_empty_when_none(monkeypatch, tmp_path):
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         result = _call_messages(
             "empty",
             {"session_id": "session-1", "include_tool_events": True},
@@ -423,10 +423,14 @@ def test_session_messages_refuses_legacy_tool_event_row_model(monkeypatch, tmp_p
     def fail_legacy_tool_events(*args, **kwargs):
         raise AssertionError("legacy db.list_tool_events must not be called")
 
-    monkeypatch.setattr(db, "list_tool_events", fail_legacy_tool_events)
+    monkeypatch.setattr(
+        db.tool_event_projection,
+        "list",
+        fail_legacy_tool_events,
+    )
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=1, run_id="run-1"),
         )
@@ -442,20 +446,19 @@ def test_session_messages_refuses_legacy_tool_event_row_model(monkeypatch, tmp_p
     assert [event["seq"] for event in response["result"]["toolEvents"]] == [1]
 
 
-def test_session_messages_uses_run_event_read_model_for_tool_events(monkeypatch, tmp_path):
-    run_event_service = importlib.import_module("tui_gateway.services.run_events")
+def test_session_messages_uses_run_component_for_tool_events(monkeypatch, tmp_path):
     db = _install_db(monkeypatch, tmp_path)
     calls: list[tuple[str, int]] = []
-    original = run_event_service.RunEventReadModel.list_tool_events
+    original = db.runs.list_tool_events
 
-    def traced(self, session_id, *, after_seq=0, limit=2000):
+    def traced(session_id, *, after_seq=0, limit=2000):
         calls.append((session_id, after_seq))
-        return original(self, session_id, after_seq=after_seq, limit=limit)
+        return original(session_id, after_seq=after_seq, limit=limit)
 
-    monkeypatch.setattr(run_event_service.RunEventReadModel, "list_tool_events", traced)
+    monkeypatch.setattr(db.runs, "list_tool_events", traced)
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.complete", seq=4, run_id="run-1"),
         )
@@ -474,23 +477,34 @@ def test_session_messages_uses_run_event_read_model_for_tool_events(monkeypatch,
     assert [event["seq"] for event in response["result"]["toolEvents"]] == [1]
 
 
-def test_session_messages_returns_empty_tool_events_without_read_model(monkeypatch):
-    """A DB without a SQLite connection cannot serve the P2 read model and must
-    not resurrect legacy ``db.list_tool_events`` fallback behavior."""
+def test_session_messages_fails_when_run_component_cannot_read_tool_events(
+    monkeypatch,
+    tmp_path,
+):
+    """The canonical run component is required; no legacy row fallback exists."""
+    db = _install_db(monkeypatch, tmp_path)
 
-    class ConnectionlessDB:
-        def list_tool_events(self, *args, **kwargs):
-            raise AssertionError("legacy db.list_tool_events must not be called")
+    def fail_canonical_tool_events(*args, **kwargs):
+        raise RuntimeError("canonical tool event reader unavailable")
 
-    session_history = importlib.import_module("tui_gateway.methods.session_history")
-    monkeypatch.setattr(session_history, "_get_db", lambda: ConnectionlessDB())
+    def fail_legacy_tool_events(*args, **kwargs):
+        raise AssertionError("legacy db.list_tool_events must not be called")
 
-    response = server._methods["session.messages"](
-        "legacy-row-model",
-        {"session_id": "session-1", "include_tool_events": True},
+    monkeypatch.setattr(db.runs, "list_tool_events", fail_canonical_tool_events)
+    monkeypatch.setattr(db, "list_tool_events", fail_legacy_tool_events, raising=False)
+    try:
+        db.sessions.create("session-1", "dovie")
+        response = server._methods["session.messages"](
+            "canonical-reader-unavailable",
+            {"session_id": "session-1", "include_tool_events": True},
+        )
+    finally:
+        db.close()
+
+    assert response["error"]["code"] == 5000
+    assert response["error"]["message"] == (
+        "tool event page failed: canonical tool event reader unavailable"
     )
-
-    assert response["error"]["message"] == "session repository unavailable"
 
 
 def test_session_messages_has_no_legacy_tool_events_fallback():
@@ -505,8 +519,8 @@ def test_session_messages_has_no_legacy_tool_events_fallback():
 def test_session_messages_canonical_tool_events_off_by_default(monkeypatch, tmp_path):
     db = _install_db(monkeypatch, tmp_path)
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event("tool.start", seq=1),
         )
