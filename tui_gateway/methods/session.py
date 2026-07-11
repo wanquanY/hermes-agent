@@ -275,39 +275,12 @@ def _ensure_session_create_conversation_participants(
     )
 
 
-def _project_session_index_on_create(
-    db, session_id: str, params: dict, runtime_scope_key: str, transient: bool
-) -> None:
-    """Persist the owning agent profile into the control-plane session_index at
-    create time. This is the keystone of the single-query sidebar read: the
-    session->profile association was previously known only client-side (forcing
-    the per-profile fan-out). Best-effort; never breaks session creation."""
-    upsert = getattr(db, "upsert_session_index", None)
-    if not callable(upsert):
-        return
-    # Group-chat member-chat worker sessions are data plane — the worker runs
-    # in its own session and its reply is relayed into the team conversation
-    # by hermes_state_member_chat. The worker session must NEVER appear as a
-    # sidebar row, even before reconcile_session_index has a chance to purge.
-    if str(session_id or "").startswith("memberchat:"):
-        return
+def _session_owner_profile_id(params: dict, runtime_scope_key: str) -> str:
     profile_id = _requested_agent_profile_id(params)
     scope = str(runtime_scope_key or "")
     if not profile_id and scope.startswith("profile:"):
         profile_id = scope.split("profile:", 1)[1].strip()
-    try:
-        upsert(
-            session_id=session_id,
-            owner_agent_profile_id=profile_id,
-            owner_profile_version_id=_requested_profile_version_id(params),
-            runtime_scope_key=scope,
-            source="tui",
-            transient=bool(transient),
-            session_kind="hermes_session",
-            conversation_kind="direct",
-        )
-    except Exception:
-        pass
+    return profile_id
 
 
 def _requested_tool_progress_mode(params: dict | None = None) -> str:
@@ -1012,6 +985,11 @@ def _(rid, params: dict) -> dict:
                 runtime_scope_key=runtime_scope_key,
                 session_kind="hermes_session",
                 conversation_kind="direct",
+                owner_agent_profile_id=_session_owner_profile_id(
+                    params,
+                    runtime_scope_key,
+                ),
+                owner_profile_version_id=_requested_profile_version_id(params),
             )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
@@ -1028,8 +1006,6 @@ def _(rid, params: dict) -> dict:
                 key,
                 exc,
             )
-        _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
-
     if control_plane_only:
         return _ok(
             rid,
