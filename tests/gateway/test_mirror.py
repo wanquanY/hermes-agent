@@ -258,7 +258,7 @@ class TestAppendToMessageStore:
         ):
             _append_to_message_store("sess_1", {"role": "assistant", "content": "hello"})
 
-        mock_store.append_message.assert_called_once()
+        mock_store.messages.append.assert_called_once()
         mock_store.close.assert_called_once()
 
     def test_connection_closed_even_on_error(self, tmp_path):

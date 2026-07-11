@@ -35,11 +35,11 @@ class GatewayRuntimeStatusCommandService:
         db_total_tokens = 0
         if runner._session_db:
             try:
-                title = runner._session_db.get_session_title(session_entry.session_id)
+                title = runner._session_db.sessions.get_title(session_entry.session_id)
             except Exception:
                 title = None
             try:
-                row = runner._session_db.get_session(session_entry.session_id)
+                row = runner._session_db.sessions.get(session_entry.session_id)
                 if row:
                     db_total_tokens = (
                         (row.get("input_tokens") or 0)

@@ -140,7 +140,7 @@ def _maybe_auto_prune_session_db(runner) -> None:
 
         session_config = (load_config().get("sessions") or {})
         if session_config.get("auto_prune", False):
-            runner._session_db.maybe_auto_prune_and_vacuum(
+            runner._session_db.maintenance.maybe_auto_prune_and_vacuum(
                 retention_days=int(session_config.get("retention_days", 90)),
                 min_interval_hours=int(session_config.get("min_interval_hours", 24)),
                 vacuum=bool(session_config.get("vacuum_after_prune", True)),

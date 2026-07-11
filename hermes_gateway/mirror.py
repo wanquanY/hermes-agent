@@ -157,7 +157,7 @@ def _append_to_message_store(session_id: str, message: dict) -> None:
         from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         store = open_cli_session_store()
-        store.append_message(
+        store.messages.append(
             session_id=session_id,
             role=message.get("role", "assistant"),
             content=message.get("content"),

@@ -51,7 +51,7 @@ class GatewayUsageCommandService:
         if not provider and session_db is not None:
             try:
                 entry_for_billing = self._runner.session_store.get_or_create_session(source)
-                persisted = session_db.get_session(entry_for_billing.session_id) or {}
+                persisted = session_db.sessions.get(entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")

@@ -217,7 +217,7 @@ class TestUsageAccountSection:
     async def test_usage_command_uses_persisted_provider_when_agent_not_running(self, monkeypatch):
         runner = _make_runner(SK)
         runner._session_db = MagicMock()
-        runner._session_db.get_session.return_value = {
+        runner._session_db.sessions.get.return_value = {
             "billing_provider": "openai-codex",
             "billing_base_url": "https://chatgpt.com/backend-api/codex",
         }
