@@ -185,6 +185,7 @@ class RunRepo(Protocol):
         session_id: str,
         target_status: str,
         cause: TerminateCause | str = TerminateCause.WORKER_EMITTED,
+        message: str = "",
     ) -> TerminateResult: ...
 
 
@@ -856,6 +857,7 @@ class RunRepoImpl:
         session_id: str,
         target_status: str,
         cause: TerminateCause | str = TerminateCause.WORKER_EMITTED,
+        message: str = "",
     ) -> TerminateResult:
         return _terminate_run_atomic(
             self._conn,
@@ -863,6 +865,7 @@ class RunRepoImpl:
             session_id=session_id,
             target_status=target_status,
             cause=cause,
+            message=message,
         )
 
 

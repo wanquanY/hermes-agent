@@ -658,6 +658,7 @@ class RunService:
                     str(row["session_id"] or ""),
                     "failed",
                     cause=TerminateCause.WORKER_CRASHED,
+                    message=reason,
                 )
                 self._repository.update_metadata(run_id, metadata)
                 recovered = self._repository.get_run(run_id)
