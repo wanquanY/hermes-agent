@@ -182,7 +182,7 @@ class TeamMissionReadyScheduler:
         reduced = self._db.reduce_team_mission_graph(normalized_mission_id)
         if not reduced:
             return {}
-        graph = reduced.get("graph") if isinstance(reduced.get("graph"), dict) else self._db.get_team_mission_graph(normalized_mission_id)
+        graph = reduced.get("graph") if isinstance(reduced.get("graph"), dict) else self._db.team_mission_graphs.get_team_mission_graph(normalized_mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else {}
         if not isinstance(mission, dict):
             return {}
@@ -193,7 +193,7 @@ class TeamMissionReadyScheduler:
         )
         if reclaimed:
             reduced = self._db.reduce_team_mission_graph(normalized_mission_id)
-            graph = reduced.get("graph") if isinstance(reduced.get("graph"), dict) else self._db.get_team_mission_graph(normalized_mission_id)
+            graph = reduced.get("graph") if isinstance(reduced.get("graph"), dict) else self._db.team_mission_graphs.get_team_mission_graph(normalized_mission_id)
             mission = graph.get("mission") if isinstance(graph, dict) else {}
             if not isinstance(mission, dict):
                 return {}
@@ -272,7 +272,7 @@ class TeamMissionReadyScheduler:
                     }
                 ] if ready_node_ids else []),
                 "errors": [],
-                "graph": self._db.get_team_mission_graph(normalized_mission_id),
+                "graph": self._db.team_mission_graphs.get_team_mission_graph(normalized_mission_id),
             }
         if len(ready_node_ids) > node_limit:
             skipped.append({
@@ -357,7 +357,7 @@ class TeamMissionReadyScheduler:
             "started": started,
             "skipped": skipped,
             "errors": errors,
-            "graph": self._db.get_team_mission_graph(normalized_mission_id),
+            "graph": self._db.team_mission_graphs.get_team_mission_graph(normalized_mission_id),
         }
 
     def _ready_node_ids(

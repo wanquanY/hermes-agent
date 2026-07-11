@@ -504,7 +504,7 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
         objective="deliver the first live event",
         mode="supervised_mission",
     )
-    root_node_id = db.get_team_mission_graph("mission-future")["nodes"][0]["node_id"]
+    root_node_id = db.team_mission_graphs.get_team_mission_graph("mission-future")["nodes"][0]["node_id"]
     db.runs.upsert(
         run_id="run-future",
         session_id="team:mission-future:node:root",

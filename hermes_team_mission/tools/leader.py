@@ -112,7 +112,7 @@ def _session_dovie_attribution_context() -> dict[str, Any]:
 def _active_mission_graph(db, team_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     mission_id = _text(team_context.get("mission_id") or team_context.get("missionId"))
     if mission_id:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         if graph:
             return mission_id, graph
     identifier = _text(
@@ -228,7 +228,7 @@ def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
         return tool_error(f"{ctx} Leader run context: {leader_run_ctx}")
     _db, _run_id, binding, _mission, _node = leader_run_ctx
     mission_id = _text(binding.get("mission_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         success=True,
         mission_id=mission_id,
@@ -380,7 +380,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     created, error = _unwrap_response(create_response)
     if error:
         return tool_error(error)
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     started = created.get("leader_start") if isinstance(created.get("leader_start"), Mapping) else {}
     node = started.get("node") if isinstance(started.get("node"), Mapping) else _root_leader_node(graph)
     mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), Mapping) else {}

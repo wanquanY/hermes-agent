@@ -66,7 +66,7 @@ def _team_mission_from_session(session: dict[str, Any]) -> dict[str, Any]:
     if not mission_id:
         return {}
     try:
-        graph = _get_db().get_team_mission_graph(mission_id)
+        graph = _get_db().team_mission_graphs.get_team_mission_graph(mission_id)
     except Exception:
         return {}
     if not isinstance(graph, dict):

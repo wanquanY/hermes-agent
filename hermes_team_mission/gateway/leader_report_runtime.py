@@ -150,7 +150,7 @@ def submit_mission_leader_report_run(
     mission_id = str(mission_id or "").strip()
     if not mission_id:
         return {"ok": False, "status": "invalid", "error": "mission_id_required"}
-    graph = db.get_team_mission_graph(mission_id) if callable(getattr(db, "get_team_mission_graph", None)) else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     graph = graph if isinstance(graph, dict) else {}
     mission = dict(mission or graph.get("mission") or {})
     result = dict(result or (db.get_team_mission_result(mission_id) if callable(getattr(db, "get_team_mission_result", None)) else {}) or {})

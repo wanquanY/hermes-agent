@@ -977,7 +977,7 @@ class TeamMissionConversationMixin:
         conversation = self.assert_conversation_canonical(
             self._canonicalize_team_mission_conversation(conversation, identifier=identifier)
         )
-        graph = self.get_team_mission_conversation_graph(_text(conversation.get("conversation_id")))
+        graph = self.team_mission_graphs.get_team_mission_conversation_graph(_text(conversation.get("conversation_id")))
         graph_mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), dict) else {}
         if graph_mission:
             conversation = self.assert_conversation_canonical(

@@ -156,7 +156,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "get_session_title",
         "get_team_mission_conversation",
         "get_team_mission_conversation_by_session",
-        "get_team_mission_graph",
+        "team_mission_graphs.get_team_mission_graph",
         "get_team_mission_node",
         "get_team_mission_result",
         "get_team_mission_run_binding",
@@ -689,7 +689,14 @@ class WorkerSupervisor:
             db = _db_for_worker_rpc(frame, args, kwargs)
             if db is None:
                 raise RuntimeError("state.db unavailable")
-            target = getattr(db, db_method_name, None)
+            target: Any = db
+            for path_part in db_method_name.split("."):
+                if not path_part or path_part.startswith("_"):
+                    target = None
+                    break
+                target = getattr(target, path_part, None)
+                if target is None:
+                    break
             if not callable(target):
                 raise AttributeError(f"worker database proxy has no method {db_method_name!r}")
             lock_key = _db_rpc_lock_key(frame, args, kwargs)

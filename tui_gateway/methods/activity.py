@@ -179,10 +179,7 @@ def _mission_id_from_activity_id(activity_id: str) -> str:
 
 
 def _is_terminal_mission(db, mission_id: str) -> bool:
-    get_graph = getattr(db, "get_team_mission_graph", None)
-    if not callable(get_graph):
-        return False
-    graph = get_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict):
         return False

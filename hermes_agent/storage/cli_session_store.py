@@ -51,6 +51,7 @@ from hermes_team_mission.domain.transcript_visibility import (
 from hermes_team_mission.read_models.conversation_deliverables import (
     ConversationDeliverableReadModel,
 )
+from hermes_team_mission.read_models.graph_query import TeamMissionGraphQueryService
 from hermes_team_mission.read_models.node_history import (
     TeamMissionNodeHistoryReadModel,
 )
@@ -134,6 +135,12 @@ class CliSessionStore(TeamMissionStateMixin):
             unit_of_work=self._unit_of_work,
             visibility_policies={"team": TeamMissionTranscriptVisibilityPolicy()},
         )
+        self.team_mission_graphs = TeamMissionGraphQueryService(
+            conn,
+            self.team_mission_rows,
+            self.team_mission_conversation_deliverables,
+            self.messages,
+        )
         self._recall = SessionRecallReadModel(conn)
         self.sessions = SessionService(
             conn,
@@ -170,7 +177,7 @@ class CliSessionStore(TeamMissionStateMixin):
         self.tool_event_projection = ToolEventProjectionReadModel(conn)
         self.team_capabilities = TeamCapabilityService(
             TeamCapabilityRepo(conn, self._execute_write, self._lock),
-            self,
+            self.team_mission_graphs,
         )
         run_team_mission_startup_maintenance(self, logger)
 

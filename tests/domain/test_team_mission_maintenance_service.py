@@ -47,7 +47,7 @@ def test_workspace_rebase_updates_mission_and_conversation_atomically(tmp_path: 
             },
             "changed": 2,
         }
-        assert db.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/new/workspace"
+        assert db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/new/workspace"
         assert db.get_team_mission_conversation("conversation-1")["workspace_path"] == "/new/workspace"
     finally:
         db.close()
@@ -75,7 +75,7 @@ def test_workspace_rebase_rolls_back_both_aggregates_on_failure(
                 "/new/workspace",
             )
 
-        assert db.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/old/workspace"
+        assert db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/old/workspace"
         assert db.get_team_mission_conversation("conversation-1")["workspace_path"] == "/old/workspace"
     finally:
         db.close()

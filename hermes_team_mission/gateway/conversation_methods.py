@@ -213,7 +213,7 @@ def _(rid, params: dict) -> dict:
     mission = {}
     conversation = {}
     if mission_id:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), dict) else {}
     if not mission_id:
         identifier = (
@@ -472,7 +472,7 @@ def _(rid, params: dict) -> dict:
                 conversation_id=conversation_id,
                 snapshot=capability_snapshot,
             )
-            graph = db.get_team_mission_graph(mission_id)
+            graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         except Exception as exc:
             return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
     try:
@@ -528,7 +528,7 @@ def _(rid, params: dict) -> dict:
             position_x=float(root_node.get("position_x") or 0),
             position_y=float(root_node.get("position_y") or 0),
         )
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else {}
     if (
         isinstance(mission, dict)
@@ -562,7 +562,7 @@ def _(rid, params: dict) -> dict:
         start_response = _methods["team_mission.node.start"](rid, start_params)
         if isinstance(start_response, dict) and start_response.get("error"):
             return start_response
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     activity_id = str((activity or {}).get("activity_id") or request_activity_id or f"mission:{mission_id}").strip()
     result = {
         "mission_id": mission_id,
@@ -581,7 +581,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
-    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
     conversation_id = (
@@ -672,7 +672,7 @@ def _(rid, params: dict) -> dict:
         or conversation_session_id
         or ""
     )
-    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
     return _ok(
         rid,
         {

@@ -329,7 +329,7 @@ def recover_legacy_final_deliverables(db: Any, conversation: dict[str, Any] | No
         ) or primary_deliverable_text(payload)
         if not final_deliverable_text:
             continue
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         graph = graph if isinstance(graph, dict) else {}
         node_id = text(payload.get("node_id"))
         node = _node_by_id(graph, node_id)

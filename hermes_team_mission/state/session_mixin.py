@@ -6,7 +6,6 @@ from .session_conversations import TeamMissionConversationMixin
 from .session_events import TeamMissionEventMixin
 from .session_finalizers import TeamMissionFinalizerMixin
 from .session_graph import TeamMissionGraphMixin
-from .session_views import TeamMissionViewMixin
 
 
 class TeamMissionStateMixin(
@@ -14,7 +13,6 @@ class TeamMissionStateMixin(
     TeamMissionConversationMixin,
     TeamMissionGraphMixin,
     TeamMissionEventMixin,
-    TeamMissionViewMixin,
     TeamMissionContextMixin,
     TeamMissionFinalizerMixin,
 ):

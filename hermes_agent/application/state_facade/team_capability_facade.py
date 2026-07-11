@@ -52,7 +52,7 @@ class TeamCapabilityStateMixin:
         resolved_conversation_id = _text(conversation_id)
         if not resolved_conversation_id:
             try:
-                mission = self.get_team_mission_graph(mission_id).get("mission") or {}  # type: ignore[attr-defined]
+                mission = self.team_mission_graphs.get_team_mission_graph(mission_id).get("mission") or {}  # type: ignore[attr-defined]
                 resolved_conversation_id = _text(mission.get("conversation_id"))
             except Exception:
                 resolved_conversation_id = ""
@@ -75,7 +75,7 @@ class TeamCapabilityStateMixin:
         if not mission_id or not binding:
             return
         try:
-            graph = self.get_team_mission_graph(mission_id)  # type: ignore[attr-defined]
+            graph = self.team_mission_graphs.get_team_mission_graph(mission_id)  # type: ignore[attr-defined]
             mission = graph.get("mission") if isinstance(graph, dict) else {}
             if not mission:
                 return

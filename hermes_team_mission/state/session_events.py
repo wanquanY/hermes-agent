@@ -210,7 +210,7 @@ class TeamMissionEventMixin:
                 and _normalize_node_kind(node.get("kind")) == "root"
                 and next_status in {"completed", "failed", "cancelled", "interrupted"}
             ):
-                graph_for_check = self.get_team_mission_graph(mission_id_for_check)
+                graph_for_check = self.team_mission_graphs.get_team_mission_graph(mission_id_for_check)
                 mission_for_check = graph_for_check.get("mission") or {}
                 mission_status = _text(mission_for_check.get("status")).lower()
                 if not _is_terminal_mission_status(mission_status) and mission_status != "waiting_approval":

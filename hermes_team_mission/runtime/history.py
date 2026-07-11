@@ -151,14 +151,14 @@ def _conversation_from_params(db: Any, params: dict[str, Any]) -> dict[str, Any]
 def _resolve_graph(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     requested_mission_id = _text(params.get("mission_id") or params.get("missionId"))
     if requested_mission_id:
-        graph = db.get_team_mission_graph(requested_mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(requested_mission_id)
         if graph:
             return requested_mission_id, graph
 
     conversation = _conversation_from_params(db, params)
     active_mission_id = _text(conversation.get("active_mission_id") or conversation.get("activeMissionId"))
     if active_mission_id:
-        graph = db.get_team_mission_graph(active_mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(active_mission_id)
         if graph:
             return active_mission_id, graph
 

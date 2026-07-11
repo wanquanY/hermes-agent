@@ -62,7 +62,7 @@ def _leader_team_context() -> dict[str, Any] | str:
 def _active_mission_graph(db, team_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     mission_id = _text(team_context.get("mission_id") or team_context.get("missionId"))
     if mission_id:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         if graph:
             return mission_id, graph
     identifier = _text(
@@ -125,7 +125,7 @@ def _leader_run_context(args: dict[str, Any], parent_agent=None) -> tuple[Any, s
         return "Current run is not bound to a Team Mission node."
     mission_id = _text(binding.get("mission_id"))
     node_id = _text(binding.get("node_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return "Bound Team Mission was not found."

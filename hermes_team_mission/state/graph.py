@@ -140,7 +140,7 @@ def _required_execution_completed(
 
 def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
     mission_id = str(mission_id or "").strip()
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else None
     if not isinstance(mission, dict):
         return {}
@@ -206,12 +206,12 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
         finalizer_changes = ensure_team_mission_finalizers(
             db,
             mission=mission,
-            nodes=[node for node in db.get_team_mission_graph(mission_id).get("nodes", []) if isinstance(node, dict)],
+            nodes=[node for node in db.team_mission_graphs.get_team_mission_graph(mission_id).get("nodes", []) if isinstance(node, dict)],
             edges=edges,
         )
     if finalizer_changes:
         changed_nodes.extend(finalizer_changes)
-        graph_after_finalizers = db.get_team_mission_graph(mission_id)
+        graph_after_finalizers = db.team_mission_graphs.get_team_mission_graph(mission_id)
         ready_node_ids = [
             str(node.get("node_id") or "")
             for node in graph_after_finalizers.get("nodes", [])
@@ -219,7 +219,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             and str(node.get("status") or "") in _STARTABLE_NODE_STATUSES
             and not bool((node.get("metadata") or {}).get("manual_start"))
         ]
-    updated_graph = db.get_team_mission_graph(mission_id)
+    updated_graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     updated_nodes = [node for node in updated_graph.get("nodes", []) if isinstance(node, dict)]
     statuses = {str(node.get("status") or "") for node in updated_nodes}
     mode = str(mission.get("mode") or "")
@@ -300,7 +300,7 @@ def reduce_team_mission_graph(db: Any, mission_id: str) -> Dict[str, Any]:
             leader_session_id=str(mission.get("leader_session_id") or ""),
             metadata=dict(mission.get("metadata") or {}),
         )
-        updated_graph = db.get_team_mission_graph(mission_id)
+        updated_graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if is_terminal_mission_status(mission_status):
         finalized_result: Dict[str, Any] = {}
         try:

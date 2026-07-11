@@ -1321,7 +1321,7 @@ def _conversation_runtime_projection(db, conversation: dict | None) -> dict:
     has_active_mission_fn = getattr(db, "has_active_mission", None)
     if callable(has_active_mission_fn) and conversation_id:
         has_active_mission = bool(has_active_mission_fn(conversation_id))
-    graph = db.get_team_mission_graph(mission_id) if mission_id and not runtime_summary else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id and not runtime_summary else {}
     mission = (
         runtime_summary.get("mission") if isinstance(runtime_summary, dict) else {}
     ) or (graph.get("mission") if isinstance(graph, dict) else {})

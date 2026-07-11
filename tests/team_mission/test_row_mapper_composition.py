@@ -63,7 +63,7 @@ def test_cli_store_composes_row_mapper_and_graph_reads_use_it(tmp_path: Path) ->
             status="ready",
         )
 
-        graph = store.get_team_mission_graph("mission-1")
+        graph = store.team_mission_graphs.get_team_mission_graph("mission-1")
 
         assert graph["mission"]["mission_id"] == "mission-1"
         assert [node["node_id"] for node in graph["nodes"]] == ["worker-1"]

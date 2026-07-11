@@ -38,6 +38,7 @@ class WorkerDBProxyMethodError(WorkerDBProxyRemoteError):
 
 
 _BYTES_MARKER = "__worker_db_proxy_bytes__"
+_DB_COMPONENT_NAMES = frozenset({"team_mission_graphs"})
 
 
 def serialize_db_value(value: Any) -> Any:
@@ -110,6 +111,8 @@ class WorkerDBProxy:
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
+        if name in _DB_COMPONENT_NAMES:
+            return _WorkerDBComponentProxy(self, name, conversation_session_id="")
 
         def proxy(*args: Any, **kwargs: Any) -> Any:
             return self._call(name, args, kwargs, conversation_session_id="")
@@ -251,10 +254,43 @@ class _ScopedWorkerDBProxy:
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
+        if name in _DB_COMPONENT_NAMES:
+            return _WorkerDBComponentProxy(
+                self._root,
+                name,
+                conversation_session_id=self._conversation_session_id,
+            )
 
         def proxy(*args: Any, **kwargs: Any) -> Any:
             return self._root._call(
                 name,
+                args,
+                kwargs,
+                conversation_session_id=self._conversation_session_id,
+            )
+
+        return proxy
+
+
+class _WorkerDBComponentProxy:
+    def __init__(
+        self,
+        root: WorkerDBProxy,
+        component: str,
+        *,
+        conversation_session_id: str,
+    ) -> None:
+        self._root = root
+        self._component = component
+        self._conversation_session_id = conversation_session_id
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def proxy(*args: Any, **kwargs: Any) -> Any:
+            return self._root._call(
+                f"{self._component}.{name}",
                 args,
                 kwargs,
                 conversation_session_id=self._conversation_session_id,

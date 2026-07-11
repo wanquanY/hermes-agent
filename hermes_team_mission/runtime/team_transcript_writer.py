@@ -1764,7 +1764,7 @@ class MissionSummaryWriter:
         artifact_refs: list[dict[str, Any]] = []
         if not conversation_session_id or not synthesis_node_id or not summary_text:
             try:
-                graph = db.get_team_mission_graph(mission_id) or {}
+                graph = db.team_mission_graphs.get_team_mission_graph(mission_id) or {}
             except Exception:
                 graph = {}
             mission = _mapping(graph.get("mission"))
@@ -1806,7 +1806,7 @@ class MissionSummaryWriter:
             summary_text = f"Mission {outcome}: no presentable output."
         if not graph:
             try:
-                graph = db.get_team_mission_graph(mission_id) or {}
+                graph = db.team_mission_graphs.get_team_mission_graph(mission_id) or {}
             except Exception:
                 graph = {}
         if not mission:

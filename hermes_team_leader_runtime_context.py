@@ -100,10 +100,10 @@ def _db_from_arg(db: Any | None) -> Any:
 
 
 def _mission_from_db(db: Any, mission_id: str) -> dict[str, Any]:
-    if not db or not mission_id or not hasattr(db, "get_team_mission_graph"):
+    if not db or not mission_id:
         return {}
     try:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     except Exception:
         return {}
     if not isinstance(graph, dict):

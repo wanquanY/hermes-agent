@@ -48,7 +48,7 @@ def recover_conversation_active_run(
     )
     if not mission_id:
         return run_state
-    graph = db.get_team_mission_graph(mission_id) if hasattr(db, "get_team_mission_graph") else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     mission = mission if isinstance(mission, dict) else {}
     terminal_status = _terminal_run_status(mission.get("status") or conversation.get("status"))

@@ -177,7 +177,7 @@ class TeamMissionGraphMixin:
         mission = self._execute_write(_do)
         if mission:
             self.ensure_team_mission_conversation(mission=mission)
-            refreshed = self.get_team_mission_graph(mission_id).get("mission")
+            refreshed = self.team_mission_graphs.get_team_mission_graph(mission_id).get("mission")
             result = refreshed or mission
             self._prune_team_mission_events_if_terminal(mission_id)
             return result
@@ -300,7 +300,7 @@ class TeamMissionGraphMixin:
                     "[doxie-session-index] initialize_mission projection FAILED mission_id=%s error=%s",
                     mission_id, exc,
                 )
-        return self.get_team_mission_graph(mission_id)
+        return self.team_mission_graphs.get_team_mission_graph(mission_id)
 
     def upsert_team_mission_node(
         self,
@@ -621,7 +621,7 @@ class TeamMissionGraphMixin:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -693,7 +693,7 @@ class TeamMissionGraphMixin:
                     },
                 },
             )
-        return self.get_team_mission_graph(mission_id)
+        return self.team_mission_graphs.get_team_mission_graph(mission_id)
 
     def _approval_actions_with_leader_assignee(
         self,
@@ -710,7 +710,7 @@ class TeamMissionGraphMixin:
         """
         if not any(_normalize_node_kind(node.kind) == "approval_gate" for node in actions.nodes):
             return actions
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         graph_nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
         leader_node = next(
             (
@@ -797,7 +797,7 @@ class TeamMissionGraphMixin:
         task_id: str = "",
         event_source: str = "plan.complete",
     ) -> Dict[str, Any]:
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -870,7 +870,7 @@ class TeamMissionGraphMixin:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -1013,7 +1013,7 @@ class TeamMissionGraphMixin:
             "task_id": normalized_task_id,
             "canceled_nodes": canceled_nodes,
             "cancel_run_bindings": cancel_run_bindings,
-            "graph": self.get_team_mission_graph(mission_id),
+            "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
         }
 
     def cancel_team_mission(
@@ -1027,7 +1027,7 @@ class TeamMissionGraphMixin:
         if not mission_id:
             _log.warning("[doxie-cancel] cancel_team_mission ENTRY empty_mission_id")
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             _log.warning(
@@ -1119,7 +1119,7 @@ class TeamMissionGraphMixin:
                 "mission_status": mission_status or "cancelled",
                 "canceled_nodes": [],
                 "cancel_run_bindings": cancel_run_bindings,
-                "graph": self.get_team_mission_graph(mission_id),
+                "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
             }
         cancellation_metadata = {
             "canceled_by": _text(canceled_by),
@@ -1231,7 +1231,7 @@ class TeamMissionGraphMixin:
             "mission_status": "cancelled",
             "canceled_nodes": canceled_nodes,
             "cancel_run_bindings": cancel_run_bindings,
-            "graph": self.get_team_mission_graph(mission_id),
+            "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
         }
 
     def reap_terminal_mission_runs(

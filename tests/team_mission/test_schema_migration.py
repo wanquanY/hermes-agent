@@ -246,7 +246,7 @@ def test_team_mission_schema_preserves_canonical_execution_session_columns(tmp_p
             """,
             ("run-worker",),
         ).fetchone()
-        graph = db.get_team_mission_graph("mission-execution")
+        graph = db.team_mission_graphs.get_team_mission_graph("mission-execution")
     finally:
         db.close()
 

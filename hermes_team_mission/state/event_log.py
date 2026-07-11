@@ -971,15 +971,13 @@ def append_team_mission_event_for_run(
             node = node_getter(mission_id, text(binding.get("node_id"))) or {}
         except Exception:
             node = {}
-    graph_getter = getattr(db, "get_team_mission_graph", None)
     mission = {"mission_id": mission_id}
-    if callable(graph_getter):
-        try:
-            graph = graph_getter(mission_id)
-            if isinstance(graph, dict) and isinstance(graph.get("mission"), dict):
-                mission = graph["mission"]
-        except Exception:
-            mission = {"mission_id": mission_id}
+    try:
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
+        if isinstance(graph, dict) and isinstance(graph.get("mission"), dict):
+            mission = graph["mission"]
+    except Exception:
+        mission = {"mission_id": mission_id}
     identity = runtime_event_identity(
         mission=mission,
         node=node,

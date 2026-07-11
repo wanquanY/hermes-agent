@@ -668,7 +668,7 @@ def compile_team_mission_memory(
     mission_id = text(mission_id)
     if not mission_id:
         return {}
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return {}
@@ -849,7 +849,7 @@ def build_team_mission_memory_pack(
     limit: int = 8,
     include_team_scope: bool = False,
 ) -> Dict[str, Any]:
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return {}
@@ -909,7 +909,7 @@ def build_team_mission_memory_slice(
     limit: int = 5,
     include_team_scope: bool = False,
 ) -> Dict[str, Any]:
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return {}

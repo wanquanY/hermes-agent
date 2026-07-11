@@ -698,7 +698,7 @@ def _(rid, params: dict) -> dict:
     conversation_session_id = _conversation_session_id_from_params(params, {})
     if not mission_id and not conversation_id:
         return _err(rid, 4006, "mission_id or conversation_id required")
-    graph = db.get_team_mission_graph(mission_id) if mission_id else {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if mission_id and (not isinstance(mission, dict) or not mission):
         if not conversation_id:
@@ -1030,7 +1030,7 @@ def _(rid, params: dict) -> dict:
             "leader_turn": leader_turn,
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
-            "graph": db.get_team_mission_graph(mission_id) if mission_id else graph,
+            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else graph,
         },
     )
 
@@ -1078,7 +1078,7 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params)
     conversation_id = _conversation_id_from_params(params)
     if conversation_id:
-        graph = db.get_team_mission_conversation_graph(conversation_id)
+        graph = db.team_mission_graphs.get_team_mission_conversation_graph(conversation_id)
         if not graph:
             return _err(rid, 4040, "team mission conversation not found")
         mission_ids = _graph_mission_ids(graph)
@@ -1100,7 +1100,7 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, result)
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not graph:
         return _err(rid, 4040, "team mission not found")
     return _ok(rid, {"mission_id": mission_id, "graph": graph})
@@ -1171,7 +1171,7 @@ def _(rid, params: dict) -> dict:
     node_id = str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
     if not node_id:
         return _err(rid, 4006, "node_id required")
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return _err(rid, 4040, "team mission not found")
@@ -1212,12 +1212,12 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.node.created", "payload": {"node": node}},
         )
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
     if isinstance(mission, dict) and _is_root_planning_node(node):
         mission = _activate_mission_task(db, mission, node, source="team_mission.node.create")
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if (
         isinstance(mission, dict)
         and _is_root_planning_node(node)
@@ -1264,7 +1264,7 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.edge.created", "payload": {"edge": edge}},
         )
-    return _ok(rid, {"mission_id": mission_id, "edge": edge, "graph": db.get_team_mission_graph(mission_id)})
+    return _ok(rid, {"mission_id": mission_id, "edge": edge, "graph": db.team_mission_graphs.get_team_mission_graph(mission_id)})
 
 
 @method("team_mission.node.update")
@@ -1337,7 +1337,7 @@ def _(rid, params: dict) -> dict:
             "mission_id": mission_id,
             "node": node,
             "scheduled": schedule_result,
-            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or db.get_team_mission_graph(mission_id),
+            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or db.team_mission_graphs.get_team_mission_graph(mission_id),
         },
     )
 
@@ -1350,7 +1350,7 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params)
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else None
     if not isinstance(mission, dict):
         return _err(rid, 4040, "team mission not found")
@@ -1410,7 +1410,7 @@ def _(rid, params: dict) -> dict:
         run_id_log,
         rid,
     )
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else None
     if not isinstance(mission, dict):
         _log.warning(
@@ -1544,7 +1544,7 @@ def _(rid, params: dict) -> dict:
             "node": approved_node,
             "scheduled": schedule_result,
             "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None)
-            or db.get_team_mission_graph(mission_id),
+            or db.team_mission_graphs.get_team_mission_graph(mission_id),
         },
     )
 
@@ -1962,7 +1962,7 @@ def _resolve_cancel_mission_id(db, params: dict) -> str:
         candidate = str(candidate or "").strip()
         if not candidate:
             return ""
-        graph = db.get_team_mission_graph(candidate) if hasattr(db, "get_team_mission_graph") else {}
+        graph = db.team_mission_graphs.get_team_mission_graph(candidate)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return ""
@@ -2086,7 +2086,7 @@ def _(rid, params: dict) -> dict:
             "canceled_nodes": list(result.get("canceled_nodes") or []),
             "canceled_runs": canceled_runs,
             "cancel_errors": cancel_errors,
-            "graph": db.get_team_mission_graph(mission_id),
+            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id),
         },
     )
 
@@ -2184,7 +2184,7 @@ def _(rid, params: dict) -> dict:
         },
         source="team_mission.node.start",
     )
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = dict(node.get("metadata") or {})
     mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
@@ -2198,7 +2198,7 @@ def _(rid, params: dict) -> dict:
         )
     if isinstance(mission, dict) and _is_root_planning_node(node):
         mission = _activate_mission_task(db, mission, node, source="team_mission.node.start")
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if (
         isinstance(mission, dict)
         and _is_root_planning_node(node)

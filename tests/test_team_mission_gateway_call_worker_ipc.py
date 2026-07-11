@@ -103,7 +103,7 @@ def test_team_mission_control_db_writes_through_cli_session_store(monkeypatch, t
             title="Create artifact",
             metadata={"conversation_session_id": "session-1"},
         )
-        graph = db.get_team_mission_graph("mission-1")
+        graph = db.team_mission_graphs.get_team_mission_graph("mission-1")
     finally:
         db.close()
 

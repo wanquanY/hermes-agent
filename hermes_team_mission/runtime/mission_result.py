@@ -90,10 +90,7 @@ def finalize_team_mission_result(db: Any, mission_id: str) -> dict[str, Any]:
     mission_id = _text(mission_id)
     if not mission_id:
         return {}
-    graph_getter = getattr(db, "get_team_mission_graph", None)
-    if not callable(graph_getter):
-        return {}
-    graph = graph_getter(mission_id) or {}
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) or {}
     mission = _mapping(graph.get("mission"))
     status = _text(mission.get("status")).lower()
     if not is_terminal_mission_status(status):

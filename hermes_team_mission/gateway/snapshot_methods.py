@@ -148,7 +148,7 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
     mission_id = str(mission_id or "").strip()
     if not mission_id:
         return {}
-    graph = graph if isinstance(graph, dict) else db.get_team_mission_graph(mission_id)
+    graph = graph if isinstance(graph, dict) else db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not isinstance(graph, dict) or not graph:
         return {}
     mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
@@ -199,7 +199,7 @@ def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, A
     mission_id = _mission_id_from_params(params) or _mission_id_from_activity_id(_activity_id_from_params(params))
     conversation_id = _conversation_id_from_params(params)
     if conversation_id:
-        graph = db.get_team_mission_conversation_graph(conversation_id)
+        graph = db.team_mission_graphs.get_team_mission_conversation_graph(conversation_id)
         if not graph:
             return "", {}, {}
         mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
@@ -211,7 +211,7 @@ def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, A
         ).strip()
         return resolved_mission_id, graph, {"conversation_id": conversation_id}
     if mission_id:
-        return mission_id, db.get_team_mission_graph(mission_id), {}
+        return mission_id, db.team_mission_graphs.get_team_mission_graph(mission_id), {}
     return "", {}, {}
 
 
@@ -265,7 +265,7 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params) or _mission_id_from_activity_id(_activity_id_from_params(params))
     if not mission_id:
         return _err(rid, 4006, "mission_id or activity_id required")
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not graph:
         return _err(rid, 4040, "team mission not found")
     result = _result_for_graph(db, mission_id, graph)
