@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
@@ -18,12 +18,12 @@ PARTICIPANT_ID = "member:member-alpha"
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 @pytest.fixture
-def gateway(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
+def gateway(monkeypatch: pytest.MonkeyPatch, db: CliSessionStore):
     conversation_render_snapshot = importlib.import_module(
         "tui_gateway.methods.conversation_render_snapshot"
     )
@@ -73,8 +73,8 @@ def _workspace(tmp_path: Path, mission_id: str) -> dict[str, str]:
     return {"workspace_id": f"workspace-{mission_id}", "workspace_path": str(path)}
 
 
-def _seed_team(db: SessionDB, tmp_path: Path) -> None:
-    db.upsert_agent_profile(
+def _seed_team(db: CliSessionStore, tmp_path: Path) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader",
@@ -88,7 +88,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-leader",
         current_version_number=1,
     )
-    db.upsert_agent_profile(
+    db.profiles.upsert_agent_profile(
         profile_id="profile-alpha",
         slug="alpha",
         name="Alpha",
@@ -102,13 +102,13 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-alpha",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id=TEAM_ID,
         name="Mission Activity Team",
         description="Team used by mission-as-activity E2E tests.",
         lead_agent_profile_id="profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id=TEAM_ID,
         agent_profile_id="profile-leader",
@@ -117,7 +117,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         capability_tags=["planning"],
         profile_name="Leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-alpha",
         team_id=TEAM_ID,
         agent_profile_id="profile-alpha",
@@ -128,11 +128,11 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
     )
 
 
-def _ensure_session(db: SessionDB) -> None:
-    db.create_session(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
+def _ensure_session(db: CliSessionStore) -> None:
+    db.sessions.create(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
 
 
-def _create_mission(gateway_server: Any, db: SessionDB, tmp_path: Path, mission_id: str) -> dict[str, Any]:
+def _create_mission(gateway_server: Any, db: CliSessionStore, tmp_path: Path, mission_id: str) -> dict[str, Any]:
     _ensure_session(db)
     response = gateway_server._methods["team_mission.create"](
         f"create-{mission_id}",
@@ -154,7 +154,7 @@ def _create_mission(gateway_server: Any, db: SessionDB, tmp_path: Path, mission_
 
 def _create_missions(
     gateway_server: Any,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
     mission_ids: tuple[str, ...] = ("mission-A", "mission-B"),
 ) -> None:
@@ -164,7 +164,7 @@ def _create_missions(
 
 
 def _bind_member_run(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str,
     run_id: str,
@@ -183,7 +183,7 @@ def _bind_member_run(
         runtime_scope_key=session_id,
         metadata={"participant_id": participant_id},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id=run_id,
         session_id=session_id,
         execution_session_id=f"runtime-{run_id}",
@@ -212,12 +212,12 @@ def _message_complete(run_id: str, text: str) -> dict[str, Any]:
     }
 
 
-def _install_run_cancel_fake(monkeypatch: pytest.MonkeyPatch, db: SessionDB) -> list[dict[str, Any]]:
+def _install_run_cancel_fake(monkeypatch: pytest.MonkeyPatch, db: CliSessionStore) -> list[dict[str, Any]]:
     canceled: list[dict[str, Any]] = []
 
     def fake_run_cancel(rid: Any, params: dict[str, Any]) -> dict[str, Any]:
         canceled.append(dict(params))
-        db.upsert_run(
+        db.runs.upsert(
             run_id=params["run_id"],
             session_id=params["conversation_session_id"],
             execution_session_id=params["execution_session_id"],
@@ -233,7 +233,7 @@ def _install_run_cancel_fake(monkeypatch: pytest.MonkeyPatch, db: SessionDB) -> 
 def _cancel_mission(
     gateway_server: Any,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     mission_id: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     canceled = _install_run_cancel_fake(monkeypatch, db)
@@ -258,13 +258,13 @@ def _render(gateway_server: Any) -> dict[str, Any]:
 
 def test_e2e_team_mission_create_inserts_kind_mission_activity(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _seed_team(db, tmp_path)
     result = _create_mission(gateway, db, tmp_path, "mission-A")
 
-    activity = db.get_activity_for_mission("mission-A")
+    activity = db.activities.get_for_mission("mission-A")
     conversation = db.resolve_team_mission_conversation(CONVERSATION_ID)["conversation"]
 
     assert result["mission_id"] == "mission-A"
@@ -280,13 +280,13 @@ def test_e2e_team_mission_create_inserts_kind_mission_activity(
 def test_e2e_mission_cancel_marks_activity_cancelled_conversation_stays_running_if_other_runs(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _create_missions(gateway, db, tmp_path)
     _bind_member_run(db, mission_id="mission-A", run_id="run-A")
     _bind_member_run(db, mission_id="mission-B", run_id="run-B")
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id=CONVERSATION_SESSION_ID,
         source="team_mission",
         session_kind="team_mission",
@@ -302,27 +302,30 @@ def test_e2e_mission_cancel_marks_activity_cancelled_conversation_stays_running_
 
     result, canceled = _cancel_mission(gateway, monkeypatch, db, "mission-A")
 
-    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    row = db.session_index.get(CONVERSATION_SESSION_ID)
     assert result["mission_status"] == "cancelled"
     assert [item["run_id"] for item in canceled] == ["run-A"]
-    assert db.get_activity_for_mission("mission-A")["status"] == "cancelled"
-    assert db.get_activity_for_mission("mission-B")["status"] == "running"
-    assert db.get_run("run-A")["status"] == "cancelled"
-    assert db.get_run("run-B")["status"] == "running"
+    assert db.activities.get_for_mission("mission-A")["status"] == "cancelled"
+    assert db.activities.get_for_mission("mission-B")["status"] == "running"
+    assert db.runs.get("run-A")["status"] == "cancelled"
+    assert db.runs.get("run-B")["status"] == "running"
     assert row is not None
     assert row["running"] is True
     assert row["status"] == "running"
-    assert row["active_run_id"] == "run-B"
+    active_conversation_run = db.runs.get(row["active_run_id"])
+    assert active_conversation_run is not None
+    assert active_conversation_run["session_id"] == CONVERSATION_SESSION_ID
+    assert active_conversation_run["status"] == "running"
 
 
 def test_e2e_multi_parallel_missions_in_same_conversation(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _create_missions(gateway, db, tmp_path)
 
-    active_activities = db.list_active_mission_activities(CONVERSATION_SESSION_ID)
+    active_activities = db.activities.list_active_missions(CONVERSATION_SESSION_ID)
     conversation_missions = db.list_conversation_missions(CONVERSATION_ID)
     conversation = db.resolve_team_mission_conversation(CONVERSATION_ID)["conversation"]
 
@@ -337,11 +340,11 @@ def test_e2e_multi_parallel_missions_in_same_conversation(
 
 def test_e2e_render_snapshot_returns_missions_top_level(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _create_missions(gateway, db, tmp_path)
-    db.append_message(CONVERSATION_SESSION_ID, role="user", content="Keep the conversation visible.")
+    db.messages.append(CONVERSATION_SESSION_ID, role="user", content="Keep the conversation visible.")
 
     snapshot = _render(gateway)
 
@@ -354,7 +357,7 @@ def test_e2e_render_snapshot_returns_missions_top_level(
 
 def test_e2e_member_runs_under_different_missions_have_distinct_node_ids_same_participant(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _create_missions(gateway, db, tmp_path)
@@ -376,11 +379,11 @@ def test_e2e_member_runs_under_different_missions_have_distinct_node_ids_same_pa
     node_b = db.get_team_mission_node("mission-B", "shared-member-node")
     events = {
         event["run_id"]: event
-        for event in db.list_run_events("team:mission-A:node:shared-member-node")
+        for event in db.runs.list_events("team:mission-A:node:shared-member-node")
     }
     events.update({
         event["run_id"]: event
-        for event in db.list_run_events("team:mission-B:node:shared-member-node")
+        for event in db.runs.list_events("team:mission-B:node:shared-member-node")
     })
 
     assert node_a["canonical_node_id"] == "mission-A:shared-member-node"
@@ -393,20 +396,20 @@ def test_e2e_member_runs_under_different_missions_have_distinct_node_ids_same_pa
 def test_e2e_active_mission_id_field_still_set_for_backwards_compat_but_activities_authoritative(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _create_missions(gateway, db, tmp_path)
 
     before = db.resolve_team_mission_conversation(CONVERSATION_ID)["conversation"]
-    before_activities = db.list_active_mission_activities(CONVERSATION_SESSION_ID)
+    before_activities = db.activities.list_active_missions(CONVERSATION_SESSION_ID)
     assert before["active_mission_id"] == "mission-B"
     assert [row["target_mission_id"] for row in before_activities] == ["mission-A", "mission-B"]
 
     _cancel_mission(gateway, monkeypatch, db, "mission-A")
 
     after = db.resolve_team_mission_conversation(CONVERSATION_ID)["conversation"]
-    after_activities = db.list_active_mission_activities(CONVERSATION_SESSION_ID)
+    after_activities = db.activities.list_active_missions(CONVERSATION_SESSION_ID)
     assert after["active_mission_id"] == "mission-B"
     assert [row["target_mission_id"] for row in after_activities] == ["mission-B"]
-    assert db.get_activity_for_mission("mission-A")["status"] == "cancelled"
+    assert db.activities.get_for_mission("mission-A")["status"] == "cancelled"
