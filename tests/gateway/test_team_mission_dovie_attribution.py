@@ -10,7 +10,7 @@ import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers
 from channels.session_context import clear_session_vars, set_session_vars
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 from tui_gateway.run_worker import RunStartFrame, dovie_product_context_from_frame
@@ -214,7 +214,7 @@ def _capture_team_submit_params(monkeypatch: pytest.MonkeyPatch) -> dict[str, An
     return captured
 
 
-def _seed_mission(db: SessionDB, tmp_path: Path, *, metadata: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _seed_mission(db: CliSessionStore, tmp_path: Path, *, metadata: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     members = [_leader_member(tmp_path), _worker_member(tmp_path)]
     db.initialize_team_mission_from_strategy(
         mission_id=MISSION_ID,
@@ -238,7 +238,7 @@ async def test_leader_message_submit_dovie_context_reaches_worker_frame(
     worker_dispatch: _FakeSupervisor,
 ) -> None:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setenv("DOVIE_HERMES_RUNTIME_SCOPE_KEY", f"team:{CONVERSATION_ID}:leader-conversation")
     captured = _capture_team_submit_params(monkeypatch)
@@ -273,7 +273,7 @@ async def test_member_chat_submit_dovie_context_reaches_worker_frame_with_member
     worker_dispatch: _FakeSupervisor,
 ) -> None:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     members = _seed_mission(db, tmp_path)
     captured = _capture_team_submit_params(monkeypatch)
@@ -311,7 +311,7 @@ async def test_mission_message_submit_persists_context_for_node_start_fallback_a
     worker_dispatch: _FakeSupervisor,
 ) -> None:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     members = _seed_mission(db, tmp_path)
     captured = _capture_team_submit_params(monkeypatch)
@@ -331,7 +331,7 @@ async def test_mission_message_submit_persists_context_for_node_start_fallback_a
     )
 
     assert "error" not in response, response
-    persisted = db.get_team_mission_graph(MISSION_ID)["mission"]["metadata"]["dovie_product_context"]
+    persisted = db.team_mission_graphs.get_team_mission_graph(MISSION_ID)["mission"]["metadata"]["dovie_product_context"]
     assert persisted["cloud_query"] == _desktop_product_context()["cloud_query"]
 
     db.upsert_team_mission_node(
@@ -366,7 +366,7 @@ async def test_mission_message_submit_persists_context_for_node_start_fallback_a
 
     root_node = next(
         node
-        for node in db.get_team_mission_graph(MISSION_ID)["nodes"]
+        for node in db.team_mission_graphs.get_team_mission_graph(MISSION_ID)["nodes"]
         if node.get("kind") == "root"
     )
     captured.clear()

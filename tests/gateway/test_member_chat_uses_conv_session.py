@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway import runtime_methods
 
 
@@ -41,8 +41,8 @@ def _submit_member(
     *,
     text: str = "@Alice please review this",
     extra_params: dict | None = None,
-) -> tuple[SessionDB, dict, dict]:
-    db = SessionDB(tmp_path / "state.db")
+) -> tuple[CliSessionStore, dict, dict]:
+    db = open_cli_session_store(tmp_path / "state.db")
     captured: dict = {}
 
     def fake_proxy_run_submit(params: dict) -> dict:
@@ -89,14 +89,14 @@ def _expected_clean_member_dovie_profile(tmp_path: Path) -> dict:
     }
 
 
-def _memberchat_session_ids(db: SessionDB) -> list[str]:
+def _memberchat_session_ids(db: CliSessionStore) -> list[str]:
     rows = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT id FROM sessions WHERE id LIKE 'memberchat:%' ORDER BY id"
     ).fetchall()
     return [str(row["id"]) for row in rows]
 
 
-def _table_exists(db: SessionDB, table_name: str) -> bool:
+def _table_exists(db: CliSessionStore, table_name: str) -> bool:
     row = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (table_name,),
@@ -216,7 +216,7 @@ def test_regular_member_submit_keeps_model_in_worker_params(
 def test_user_message_persists_to_conv_messages(monkeypatch, tmp_path: Path):
     db, _captured, _response = _submit_member(monkeypatch, tmp_path)
 
-    messages = db.get_messages(CONVERSATION_SESSION_ID)
+    messages = db.messages.list(CONVERSATION_SESSION_ID)
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
     assert [msg.get("content") for msg in user_messages] == ["@Alice please review this"]
     metadata = user_messages[0].get("metadata") or {}
@@ -249,7 +249,7 @@ def test_user_message_persists_attachment_metadata_and_forwards_to_worker(
         },
     )
 
-    messages = db.get_messages(CONVERSATION_SESSION_ID)
+    messages = db.messages.list(CONVERSATION_SESSION_ID)
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
     metadata = user_messages[0].get("metadata") or {}
 

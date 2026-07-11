@@ -135,17 +135,17 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         # Isolated state.db.
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from run_agent import AIAgent
 
-        db = SessionDB(db_path=tmp_path / "state.db")
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
         session_id = "sess-e2e-13121"
-        db.create_session(session_id=session_id, source="discord")
+        db.sessions.create(session_id=session_id, source="discord")
 
         # Simulate a session whose FIRST turn completed and was persisted...
-        db.append_message(session_id=session_id, role="user",
+        db.messages.append(session_id=session_id, role="user",
                           content="hello, remember my cat is Mochi")
-        db.append_message(session_id=session_id, role="assistant",
+        db.messages.append(session_id=session_id, role="assistant",
                           content="Noted — Mochi the cat.")
 
         # ...and a SECOND turn that was interrupted mid tool-loop. These rows
@@ -180,7 +180,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         agent._flushed_db_message_session_id = session_id
 
         # Sanity: only the 2 first-turn rows are in the DB before shutdown.
-        before = db.get_messages_as_conversation(session_id)
+        before = db.messages.all_as_conversation(session_id)
         assert len(before) == 2, before
 
         # Drive the gateway shutdown finalization with this real agent.
@@ -190,7 +190,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
 
         # The in-flight turn must now be durable and readable via the SAME
         # path the resume logic uses (SessionStore.load_transcript → DB).
-        after = db.get_messages_as_conversation(session_id)
+        after = db.messages.all_as_conversation(session_id)
         roles = [m.get("role") for m in after]
         contents = [m.get("content") for m in after]
 
@@ -208,12 +208,12 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         duplicate rows when _finalize_shutdown_agents re-flushes."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from run_agent import AIAgent
 
-        db = SessionDB(db_path=tmp_path / "state.db")
+        db = open_cli_session_store(db_path=tmp_path / "state.db")
         session_id = "sess-e2e-idem"
-        db.create_session(session_id=session_id, source="discord")
+        db.sessions.create(session_id=session_id, source="discord")
 
         msgs = [
             {"role": "user", "content": "what is 2+2"},
@@ -232,12 +232,12 @@ class TestShutdownTranscriptSurvivesResumeE2E:
 
         # First flush (simulating finalize_turn).
         agent._flush_messages_to_session_db(msgs)
-        assert len(db.get_messages_as_conversation(session_id)) == 2
+        assert len(db.messages.all_as_conversation(session_id)) == 2
 
         # Shutdown re-flush of the SAME list identity must add nothing.
         from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
         runner._finalize_shutdown_agents({"k": agent})
 
-        after = db.get_messages_as_conversation(session_id)
+        after = db.messages.all_as_conversation(session_id)
         assert len(after) == 2, after

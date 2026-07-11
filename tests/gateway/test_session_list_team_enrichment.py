@@ -3,14 +3,14 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 from tui_gateway.services.workspace import bind_session_workspace
 
 
-def _setup(monkeypatch, tmp_path: Path) -> SessionDB:
+def _setup(monkeypatch, tmp_path: Path) -> CliSessionStore:
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
     monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
     return db
@@ -29,7 +29,7 @@ def _session_index_list() -> list[dict]:
 
 
 def _create_team_sidebar_session(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     conversation_id: str = "conversation-1",
     conversation_session_id: str = "team-session-1",
@@ -47,8 +47,8 @@ def _create_team_sidebar_session(
         created_at=100,
         updated_at=200,
     )
-    db.create_session(conversation_session_id, source="team_mission", transient=False)
-    db.append_message(conversation_session_id, role="user", content="hello team")
+    db.sessions.create(conversation_session_id, source="team_mission", transient=False)
+    db.messages.append(conversation_session_id, role="user", content="hello team")
 
 
 def test_session_list_returns_team_metadata_for_team_session(monkeypatch, tmp_path: Path):
@@ -72,8 +72,8 @@ def test_session_list_returns_team_metadata_for_team_session(monkeypatch, tmp_pa
 
 def test_session_list_returns_null_team_fields_for_direct_session(monkeypatch, tmp_path: Path):
     db = _setup(monkeypatch, tmp_path)
-    db.create_session("direct-session-1", source="cli", transient=False)
-    db.append_message("direct-session-1", role="user", content="hello")
+    db.sessions.create("direct-session-1", source="cli", transient=False)
+    db.messages.append("direct-session-1", role="user", content="hello")
 
     [item] = _session_list()
 
@@ -118,7 +118,7 @@ def test_session_index_list_also_enriched_for_consistency(monkeypatch, tmp_path:
         title="Indexed Team Title",
         active_mission_id="mission-index",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="direct-session-1",
         title="Direct",
         preview="hello",
@@ -173,7 +173,7 @@ def test_session_index_list_embeds_workspace_team_context_and_derived_state(
         title="Approve",
         status="waiting_approval",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="plain-session-index-contract",
         title="Plain",
         source="cli",

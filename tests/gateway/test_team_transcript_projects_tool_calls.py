@@ -23,15 +23,15 @@ from hermes_conversation_message_identity import (
     AssistantMessageIdentity,
     assistant_conversation_message_id_for,
 )
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
 
 
-def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[SessionDB, str, str]:
-    db = SessionDB(tmp_path / "state.db")
+def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[CliSessionStore, str, str]:
+    db = open_cli_session_store(tmp_path / "state.db")
     session_id = f"team-session-{conversation_id}"
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
         conversation_session_id=session_id,
@@ -42,7 +42,7 @@ def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[SessionD
 
 
 def _seed_tool_event(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     session_id: str,
     run_id: str,
@@ -135,7 +135,7 @@ def _message_complete_frame(
     }
 
 
-def _stored_row(db: SessionDB, session_id: str) -> dict[str, Any]:
+def _stored_row(db: CliSessionStore, session_id: str) -> dict[str, Any]:
     with db._lock:  # noqa: SLF001
         row = db._conn.execute(  # noqa: SLF001
             """

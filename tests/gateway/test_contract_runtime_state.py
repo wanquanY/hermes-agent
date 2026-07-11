@@ -166,10 +166,10 @@ def test_profile_runtime_session_exists_is_scoped_to_hermes_runtime_roots(tmp_pa
 
 
 def test_team_mission_workspace_rebase_paths_updates_hermes_state(tmp_path: Path) -> None:
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services.runtime_state import rebase_team_mission_workspace_paths
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
         db.upsert_team_mission(
             mission_id="mission-1",
@@ -192,7 +192,7 @@ def test_team_mission_workspace_rebase_paths_updates_hermes_state(tmp_path: Path
         )
 
         assert result["changed"] >= 2
-        assert db.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/new/workspace"
+        assert db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]["workspace_path"] == "/new/workspace"
         assert db.get_team_mission_conversation("conversation-1")["workspace_path"] == "/new/workspace"
     finally:
         db.close()
