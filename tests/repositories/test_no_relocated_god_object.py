@@ -95,6 +95,7 @@ def test_unreferenced_top_level_state_facade_modules_are_absent() -> None:
         "hermes_state_agent_profiles.py",
         "hermes_state_branch.py",
         "hermes_state_member_chat.py",
+        "hermes_state_participants.py",
         "hermes_state_run_event_codec.py",
         "hermes_state_run_event_index.py",
         "hermes_state_run_event_reference.py",

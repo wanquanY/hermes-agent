@@ -24,7 +24,7 @@ from hermes_conversation_message_identity import (
     assistant_conversation_message_id_for,
 )
 from hermes_state import SessionDB
-from hermes_state_participants import leader_participant_id
+from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
 
 

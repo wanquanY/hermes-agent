@@ -26,7 +26,7 @@ from pathlib import Path
 from hermes_state import SessionDB
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway import runtime_methods
-from hermes_state_participants import member_participant_id
+from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 from tui_gateway.services.run_control import record_event
 
 

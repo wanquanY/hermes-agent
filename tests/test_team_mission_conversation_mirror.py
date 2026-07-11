@@ -1144,7 +1144,7 @@ def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
 
 def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
@@ -1213,8 +1213,8 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
 
 def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
-    from hermes_state_participants import member_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 
     db = SessionDB(tmp_path / "state.db")
     conversation_id = "team-conversation-participant-only"
@@ -1277,7 +1277,7 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
 
 def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
@@ -1348,7 +1348,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
 
 def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path: Path):
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")
@@ -1422,7 +1422,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
     import json
 
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 
     db = SessionDB(tmp_path / "state.db")
     conversation_id = "team-conversation-backfill"
@@ -1519,7 +1519,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
     import json
 
     from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
     db = SessionDB(tmp_path / "state.db")

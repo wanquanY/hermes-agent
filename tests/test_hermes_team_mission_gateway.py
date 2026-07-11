@@ -6492,7 +6492,7 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
         conversation_session_id="team-session-1",
         title="团队会话",
     )
-    from hermes_state_participants import member_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 
     # Worker member present in the authoritative conversation roster.
     db.upsert_conversation_participant(
