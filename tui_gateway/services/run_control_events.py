@@ -6,13 +6,61 @@ from typing import Any
 
 
 def conversation_session_id(params: dict[str, Any]) -> str:
+    raw_payload = params.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else None
+    payload_lookup = payload or {}
     return str(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
+        or payload_lookup.get("conversation_session_id")
+        or payload_lookup.get("conversationSessionId")
+        or payload_lookup.get("session_key")
         or params.get("session_id")
         or params.get("sessionId")
         or ""
     ).strip()
+
+
+def stamp_session_identity(
+    params: dict[str, Any],
+    *,
+    conversation_id: str = "",
+    execution_session_id: str = "",
+) -> dict[str, Any]:
+    """Stamp the two canonical event identities on an outbound frame.
+
+    ``conversation_session_id`` routes the durable visible timeline and
+    ``execution_session_id`` identifies the worker execution container. The
+    canonical ``session_id`` is the conversation id; legacy wire aliases are
+    folded exclusively by :mod:`hermes_agent.gateway.pipeline`.
+    """
+    if not isinstance(params, dict):
+        return params
+    raw_payload = params.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else None
+    payload_lookup = payload or {}
+    conversation_id = str(conversation_id or conversation_session_id(params) or "").strip()
+    execution_id = str(
+        execution_session_id
+        or params.get("execution_session_id")
+        or params.get("executionSessionId")
+        or payload_lookup.get("execution_session_id")
+        or payload_lookup.get("executionSessionId")
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    if conversation_id:
+        params["session_id"] = conversation_id
+        params["conversation_session_id"] = conversation_id
+        if payload is not None:
+            payload["session_id"] = conversation_id
+            payload["conversation_session_id"] = conversation_id
+    if execution_id:
+        params["execution_session_id"] = execution_id
+        if payload is not None:
+            payload["execution_session_id"] = execution_id
+    return params
 
 
 def event_run_id(params: dict[str, Any]) -> str:

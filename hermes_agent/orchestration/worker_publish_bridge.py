@@ -42,6 +42,7 @@ from tui_gateway.run_worker import (
     InteractiveRequestFrame,
     OutgoingFrame,
 )
+from tui_gateway.services.run_control_events import stamp_session_identity
 
 _log = logging.getLogger(__name__)
 
@@ -392,7 +393,17 @@ class WorkerPublishBridge:
             # persist is the canonical truth that gets read on replay.
             if isinstance(params, dict):
                 params = bridge._event_with_active_run_context(params)
-                bridge.emit_threadsafe(EventFrame(params=dict(params)))
+                event_params = dict(params)
+                if isinstance(event_params.get("payload"), dict):
+                    event_params["payload"] = dict(event_params["payload"])
+                bridge.emit_threadsafe(
+                    EventFrame(
+                        params=stamp_session_identity(
+                            event_params,
+                            conversation_id=bridge._conversation_session_id,
+                        )
+                    )
+                )
                 # The Dovie-native blocking primitive (``server._block``)
                 # bypasses ``tools/clarify_gateway.register`` /
                 # ``tools/approval.submit_pending`` (where the dedicated

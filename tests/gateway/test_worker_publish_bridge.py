@@ -158,6 +158,47 @@ async def test_publish_hook_emits_event_and_preserves_original(fake_run_control)
 
 
 @pytest.mark.asyncio
+async def test_publish_hook_stamps_canonical_conversation_and_execution_identity(fake_run_control) -> None:
+    mod, original_calls = fake_run_control
+    sink = _Sink()
+    loop = asyncio.get_running_loop()
+    bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
+    bridge.install(conversation_session_id="stored-1")
+    try:
+        mod.publish_recorded_event(
+            {
+                "type": "message.delta",
+                "session_id": "runtime-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {"delta": "x"},
+            }
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        bridge.uninstall()
+
+    assert original_calls == [
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "payload": {"delta": "x"},
+        }
+    ]
+    events = [f for f in sink.frames if isinstance(f, EventFrame)]
+    assert len(events) == 1
+    params = events[0].params
+    assert params["session_id"] == "stored-1"
+    assert params["execution_session_id"] == "runtime-1"
+    assert params["conversation_session_id"] == "stored-1"
+    assert params["payload"]["session_id"] == "stored-1"
+    assert params["payload"]["conversation_session_id"] == "stored-1"
+    assert params["payload"]["execution_session_id"] == "runtime-1"
+
+
+@pytest.mark.asyncio
 async def test_publish_hook_threadsafe_from_background_thread(fake_run_control) -> None:
     mod, _ = fake_run_control
     sink = _Sink()
@@ -288,7 +329,7 @@ async def test_uninstall_is_idempotent(fake_run_control) -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_modules_dont_crash() -> None:
+async def test_missing_modules_dont_crash(fake_run_control) -> None:
     """When tools.clarify_gateway / tools.approval aren't importable
     (CLI-only contexts), install should still complete and the publish
     hook should be in place."""
@@ -306,8 +347,6 @@ async def test_missing_modules_dont_crash() -> None:
 
     builtins.__import__ = reject
     try:
-        # Also install fake run_control so publish hook does land.
-        rc_mod, _ = _install_fake_run_control()
         sink = _Sink()
         loop = asyncio.get_running_loop()
         bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
@@ -320,4 +359,3 @@ async def test_missing_modules_dont_crash() -> None:
             sys.modules["tools.clarify_gateway"] = saved_clarify
         if saved_approval is not None:
             sys.modules["tools.approval"] = saved_approval
-        sys.modules.pop("tui_gateway.services.run_control", None)
