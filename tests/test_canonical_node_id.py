@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.identities import canonical_node_id
 
 
@@ -14,9 +14,9 @@ def _db_with_bound_node(
     run_id: str = "run-1",
     session_id: str = "session-1",
     participant_id: str = "member:alice",
-) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id, source="team_mission", transient=False)
+) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission(
         mission_id=mission_id,
         conversation_id="conversation-1",
@@ -67,7 +67,7 @@ def test_event_with_participant_and_canonical_node_id_both_present(tmp_path: Pat
         },
     )
 
-    event = db.list_run_events("session-1", run_id="run-1")[0]
+    event = db.runs.list_events("session-1", run_id="run-1")[0]
     payload = event["payload"]
     assert event["participant_id"] == "member:alice"
     assert payload["participant_id"] == "member:alice"
@@ -79,7 +79,7 @@ def test_event_with_participant_and_canonical_node_id_both_present(tmp_path: Pat
 
 def test_legacy_node_id_still_usable_for_in_mission_lookup(tmp_path: Path):
     db = _db_with_bound_node(tmp_path, mission_id="mission-A", session_id="session-A")
-    db.create_session("session-B", source="team_mission", transient=False)
+    db.sessions.create("session-B", source="team_mission", transient=False)
     db.upsert_team_mission(
         mission_id="mission-B",
         conversation_id="conversation-1",

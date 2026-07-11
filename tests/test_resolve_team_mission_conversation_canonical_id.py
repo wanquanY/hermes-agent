@@ -3,12 +3,12 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
 def _seed_team_conversation(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     conversation_id: str = "conversation-1",
     conversation_session_id: str = "team-session-1",
@@ -41,7 +41,7 @@ def _assert_canonical_conversation(conversation: dict, *, conversation_id: str, 
 
 
 def test_resolve_normal_team_mission_returns_canonical_conversation_id(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team_conversation(db)
 
     resolved = db.resolve_team_mission_conversation("conversation-1")
@@ -56,7 +56,7 @@ def test_resolve_normal_team_mission_returns_canonical_conversation_id(tmp_path:
 
 
 def test_resolve_member_chat_only_mission_returns_conversation_id(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="member-chat-mission-1",
         conversation_id="team-conversation-member-1",
@@ -80,7 +80,7 @@ def test_resolve_member_chat_only_mission_returns_conversation_id(tmp_path: Path
 
 
 def test_resolve_with_conversation_session_id_input_returns_conversation_id(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team_conversation(db)
 
     resolved = db.resolve_team_mission_conversation("team-session-1")
@@ -94,7 +94,7 @@ def test_resolve_with_conversation_session_id_input_returns_conversation_id(tmp_
 
 
 def test_resolve_with_team_conversation_prefix_identifier_returns_id(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team_conversation(
         db,
         conversation_id="team-conversation-abc123",
@@ -117,7 +117,7 @@ def test_resolve_missing_conversation_returns_explicit_error_not_silent_empty(mo
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
     response = server._methods["team_mission.conversation.resolve"](

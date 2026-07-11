@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
@@ -15,8 +15,8 @@ activity_methods = importlib.import_module("tui_gateway.methods.activity")
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Iterator[SessionDB]:
-    state = SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> Iterator[CliSessionStore]:
+    state = open_cli_session_store(tmp_path / "state.db")
     try:
         yield state
     finally:
@@ -24,7 +24,7 @@ def db(tmp_path: Path) -> Iterator[SessionDB]:
 
 
 @pytest.fixture(autouse=True)
-def gateway_state(db: SessionDB) -> Iterator[None]:
+def gateway_state(db: CliSessionStore) -> Iterator[None]:
     previous_db = server._db
     previous_db_error = server._db_error
     previous_db_by_home = dict(server._db_by_home)
@@ -61,7 +61,7 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _seed_mission(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str = "mission-1",
     status: str = "completed",
@@ -82,7 +82,7 @@ def _seed_mission(
         title="Node",
         status="done" if status != "running" else "running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id=run_id,
         session_id=f"team:{mission_id}:node:{node_id}",
         runtime_scope_key=f"team:{mission_id}:node:{node_id}",
@@ -98,7 +98,7 @@ def _seed_mission(
 
 
 def _append_prunable_delta(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str = "mission-1",
     run_id: str = "run-1",
@@ -143,7 +143,7 @@ def test_maintenance_returns_5008_when_db_missing(monkeypatch: pytest.MonkeyPatc
 
 
 def test_maintenance_mission_prefix_reaps_terminal_mission_active_runs(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
     _seed_mission(db, status="completed")
 
@@ -152,11 +152,11 @@ def test_maintenance_mission_prefix_reaps_terminal_mission_active_runs(
     )
 
     assert "reaped" in result["actions"]
-    assert db.get_run("run-1")["status"] in {"interrupted", "cancelled", "canceled"}
+    assert db.runs.get("run-1")["status"] in {"interrupted", "cancelled", "canceled"}
 
 
 def test_maintenance_mission_prefix_prunes_terminal_mission_events(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
     _seed_mission(db, status="running")
     _append_prunable_delta(db)
@@ -182,7 +182,7 @@ def test_maintenance_mission_prefix_prunes_terminal_mission_events(
 
 
 def test_maintenance_mission_prefix_no_op_when_mission_running(
-    db: SessionDB,
+    db: CliSessionStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_mission(db, status="running")
@@ -207,7 +207,7 @@ def test_maintenance_mission_prefix_no_op_when_mission_running(
 
 
 def test_maintenance_mission_prefix_returns_actions_list_with_reaped_and_pruned(
-    db: SessionDB,
+    db: CliSessionStore,
 ) -> None:
     _seed_mission(db, status="completed")
 
@@ -220,7 +220,7 @@ def test_maintenance_mission_prefix_returns_actions_list_with_reaped_and_pruned(
 
 
 def test_maintenance_mission_prefix_swallows_reaper_exception_into_errors_list(
-    db: SessionDB,
+    db: CliSessionStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_mission(db, status="completed")

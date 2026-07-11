@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
 from tui_gateway.run_worker import DBRpcRequestFrame
 from hermes_agent.orchestration.worker_db_proxy import WorkerDBProxy
@@ -48,49 +48,49 @@ class _SupervisorIPCWriter:
 
 
 @pytest.fixture
-def team_db(tmp_path: Path) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(CONVERSATION_SESSION_ID, source="team_mission")
-    db.upsert_conversation_participant(
+def team_db(tmp_path: Path) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(CONVERSATION_SESSION_ID, source="team_mission")
+    db.participants.upsert_conversation_participant(
         conversation_session_id=CONVERSATION_SESSION_ID,
         participant_id=LEADER_PARTICIPANT_ID,
         role="leader",
         display_name="Leader Name",
         runtime_scope_key="profile:leader",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=CONVERSATION_SESSION_ID,
         participant_id=ALICE_PARTICIPANT_ID,
         role="member",
         display_name="Alice",
         runtime_scope_key="profile:alice",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=CONVERSATION_SESSION_ID,
         participant_id=BOB_PARTICIPANT_ID,
         role="member",
         display_name="Bob",
         runtime_scope_key="profile:bob",
     )
-    db.append_message(
+    db.messages.append(
         CONVERSATION_SESSION_ID,
         role="user",
         content="@Alice please review the plan.",
         metadata={"participant_id": "user:requester", "display_name": "Requester"},
     )
-    db.append_message(
+    db.messages.append(
         CONVERSATION_SESSION_ID,
         role="assistant",
         content="I will coordinate this review.",
         metadata={"participant_id": LEADER_PARTICIPANT_ID},
     )
-    db.append_message(
+    db.messages.append(
         CONVERSATION_SESSION_ID,
         role="assistant",
         content="Alice prior response should stay assistant.",
         metadata={"participant_id": ALICE_PARTICIPANT_ID},
     )
-    db.append_message(
+    db.messages.append(
         CONVERSATION_SESSION_ID,
         role="assistant",
         content="Bob prior response should become observed speech.",
@@ -101,7 +101,7 @@ def team_db(tmp_path: Path) -> SessionDB:
 
 @pytest.fixture
 def worker_db_proxy(
-    team_db: SessionDB,
+    team_db: CliSessionStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Any:
     from tui_gateway import server as _server
@@ -119,41 +119,41 @@ def worker_db_proxy(
 
 
 def test_get_messages_via_worker_db_proxy_returns_same_data_as_direct(
-    team_db: SessionDB,
+    team_db: CliSessionStore,
     worker_db_proxy: Any,
 ) -> None:
-    direct = team_db.get_messages_as_conversation(CONVERSATION_SESSION_ID)
+    direct = team_db.messages.all_as_conversation(CONVERSATION_SESSION_ID)
 
-    via_ipc = worker_db_proxy.get_messages_as_conversation(CONVERSATION_SESSION_ID)
+    via_ipc = worker_db_proxy.messages.all_as_conversation(CONVERSATION_SESSION_ID)
 
     assert via_ipc == direct
 
 
 def test_list_participants_via_worker_db_proxy_returns_same_data(
-    team_db: SessionDB,
+    team_db: CliSessionStore,
     worker_db_proxy: Any,
 ) -> None:
-    direct = team_db.list_conversation_participants(CONVERSATION_SESSION_ID)
+    direct = team_db.participants.list_conversation_participants(CONVERSATION_SESSION_ID)
 
-    via_ipc = worker_db_proxy.list_conversation_participants(CONVERSATION_SESSION_ID)
+    via_ipc = worker_db_proxy.participants.list_conversation_participants(CONVERSATION_SESSION_ID)
 
     assert via_ipc == direct
 
 
 def test_transform_to_member_perspective_produces_same_output_under_ipc(
-    team_db: SessionDB,
+    team_db: CliSessionStore,
     worker_db_proxy: Any,
 ) -> None:
-    direct_messages = team_db.get_messages_as_conversation(CONVERSATION_SESSION_ID)
-    direct_participants = team_db.list_conversation_participants(CONVERSATION_SESSION_ID)
+    direct_messages = team_db.messages.all_as_conversation(CONVERSATION_SESSION_ID)
+    direct_participants = team_db.participants.list_conversation_participants(CONVERSATION_SESSION_ID)
     direct_projection = transform_to_member_perspective(
         direct_messages,
         viewing_participant_id=ALICE_PARTICIPANT_ID,
         participants=direct_participants,
     )
 
-    ipc_messages = worker_db_proxy.get_messages_as_conversation(CONVERSATION_SESSION_ID)
-    ipc_participants = worker_db_proxy.list_conversation_participants(CONVERSATION_SESSION_ID)
+    ipc_messages = worker_db_proxy.messages.all_as_conversation(CONVERSATION_SESSION_ID)
+    ipc_participants = worker_db_proxy.participants.list_conversation_participants(CONVERSATION_SESSION_ID)
     ipc_projection = transform_to_member_perspective(
         ipc_messages,
         viewing_participant_id=ALICE_PARTICIPANT_ID,

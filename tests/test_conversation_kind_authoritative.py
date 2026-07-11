@@ -3,15 +3,15 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _setup_gateway_db(monkeypatch, tmp_path: Path) -> SessionDB:
+def _setup_gateway_db(monkeypatch, tmp_path: Path) -> CliSessionStore:
     session_methods = importlib.import_module("tui_gateway.methods.session")
     db = _db(tmp_path)
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -19,10 +19,10 @@ def _setup_gateway_db(monkeypatch, tmp_path: Path) -> SessionDB:
     return db
 
 
-def _index_rows(db: SessionDB) -> dict[str, dict]:
+def _index_rows(db: CliSessionStore) -> dict[str, dict]:
     return {
         item["session_id"]: item
-        for item in db.list_session_index(include_transient=True)["sessions"]
+        for item in db.session_index.list(include_transient=True)["sessions"]
     }
 
 
@@ -38,7 +38,7 @@ def _gateway_index_rows() -> dict[str, dict]:
 def test_session_index_conversation_kind_direct_for_plain_session(tmp_path: Path) -> None:
     db = _db(tmp_path)
 
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="plain-session",
         source="cli",
         title="Plain",
@@ -81,7 +81,7 @@ def test_conversation_kind_field_decoupled_from_active_mission_id(
         created_at=1,
         updated_at=2,
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="direct-session",
         source="cli",
         session_kind="hermes_session",
@@ -122,7 +122,7 @@ def test_direct_conversation_never_returns_kind_team_even_if_active_mission_set(
     tmp_path: Path,
 ) -> None:
     db = _setup_gateway_db(monkeypatch, tmp_path)
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="direct-with-mission",
         source="team_mission",
         session_kind="team_mission",
@@ -146,7 +146,7 @@ def test_session_index_list_uses_conversation_kind_for_filtering(
     tmp_path: Path,
 ) -> None:
     db = _setup_gateway_db(monkeypatch, tmp_path)
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="direct-row",
         source="team_mission",
         session_kind="team_mission",
@@ -157,7 +157,7 @@ def test_session_index_list_uses_conversation_kind_for_filtering(
         started_at=1,
         updated_at=1,
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="team-row",
         source="cli",
         session_kind="hermes_session",

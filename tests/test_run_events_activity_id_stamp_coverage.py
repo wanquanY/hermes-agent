@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 from tui_gateway.run_worker import EventFrame, OutgoingFrame, RunTerminalFrame
@@ -18,8 +18,8 @@ from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 def _run_context(
@@ -41,7 +41,7 @@ def _run_context(
     )
 
 
-def _activity_rows(db: SessionDB) -> list[dict[str, Any]]:
+def _activity_rows(db: CliSessionStore) -> list[dict[str, Any]]:
     with db._lock:  # noqa: SLF001
         rows = db._conn.execute(  # noqa: SLF001
             "SELECT session_id, run_id, event_type, activity_id FROM run_events ORDER BY id"
@@ -49,7 +49,7 @@ def _activity_rows(db: SessionDB) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _last_activity_id(db: SessionDB, session_id: str) -> str:
+def _last_activity_id(db: CliSessionStore, session_id: str) -> str:
     with db._lock:  # noqa: SLF001
         row = db._conn.execute(  # noqa: SLF001
             "SELECT activity_id FROM run_events WHERE session_id = ? ORDER BY id DESC LIMIT 1",
@@ -59,12 +59,12 @@ def _last_activity_id(db: SessionDB, session_id: str) -> str:
     return str(row["activity_id"] or "")
 
 
-def _setup_mission(db: SessionDB) -> None:
-    db.create_session("team-session-1", source="team_mission", transient=False)
-    db.create_session("leader-session-1", source="team_mission", transient=False)
-    db.create_session("worker-session-1", source="team_mission", transient=False)
-    db.create_session("verifier-session-1", source="team_mission", transient=False)
-    db.create_session("synthesis-session-1", source="team_mission", transient=False)
+def _setup_mission(db: CliSessionStore) -> None:
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    db.sessions.create("leader-session-1", source="team_mission", transient=False)
+    db.sessions.create("worker-session-1", source="team_mission", transient=False)
+    db.sessions.create("verifier-session-1", source="team_mission", transient=False)
+    db.sessions.create("synthesis-session-1", source="team_mission", transient=False)
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -105,7 +105,7 @@ def _setup_mission(db: SessionDB) -> None:
 def test_leader_submit_stamps_mission_or_chat_prefix(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:
-        db.create_session("team-session-1", source="team_mission", transient=False)
+        db.sessions.create("team-session-1", source="team_mission", transient=False)
         run_control.record_event(
             {"type": "message.start", "run_id": "leader-run-1", "payload": {"text": "go"}},
             db=db,
@@ -113,7 +113,7 @@ def test_leader_submit_stamps_mission_or_chat_prefix(tmp_path: Path) -> None:
         )
         assert _last_activity_id(db, "team-session-1") == "mission:mission-1"
 
-        db.create_session("chat-session-1", source="tui", transient=False)
+        db.sessions.create("chat-session-1", source="tui", transient=False)
         run_control.record_event(
             {"type": "message.start", "run_id": "chat-run-1", "payload": {"text": "hi"}},
             db=db,
@@ -209,7 +209,7 @@ def test_team_mission_live_conversation_mirror_is_disabled(tmp_path: Path) -> No
             },
         )
         assert saved == {}
-        assert db.list_run_events("team-session-1") == []
+        assert db.runs.list_events("team-session-1") == []
     finally:
         db.close()
 
@@ -272,7 +272,7 @@ def test_prompt_submit_stamps_chat_prefix(tmp_path: Path, monkeypatch: pytest.Mo
 
     db = _db(tmp_path)
     try:
-        db.create_session("chat-session-1", source="tui", transient=False)
+        db.sessions.create("chat-session-1", source="tui", transient=False)
         monkeypatch.setattr(server, "_db_for_stable_session", lambda _sid: db)
         monkeypatch.setattr(server, "write_json", lambda _obj: True)
         with server._sessions_lock:  # noqa: SLF001
@@ -295,7 +295,7 @@ def test_prompt_submit_stamps_chat_prefix(tmp_path: Path, monkeypatch: pytest.Mo
 def test_approval_event_stamps_mission_prefix(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:
-        db.create_session("team-session-1", source="team_mission", transient=False)
+        db.sessions.create("team-session-1", source="team_mission", transient=False)
         run_control.record_event(
             {
                 "type": "approval.request",
@@ -313,7 +313,7 @@ def test_approval_event_stamps_mission_prefix(tmp_path: Path) -> None:
 def test_tool_event_stamps_propagates_activity_id_from_run_context(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:
-        db.create_session("team-session-1", source="team_mission", transient=False)
+        db.sessions.create("team-session-1", source="team_mission", transient=False)
         run_control.record_event(
             {
                 "type": "tool.start",

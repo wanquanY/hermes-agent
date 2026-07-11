@@ -4,19 +4,19 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
 
-def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
+def _install_db(monkeypatch: Any, tmp_path: Path) -> CliSessionStore:
     conversation_render_snapshot = importlib.import_module(
         "tui_gateway.methods.conversation_render_snapshot"
     )
     session_history = importlib.import_module("tui_gateway.methods.session_history")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
     monkeypatch.setattr(session_history, "_get_db", lambda: db)
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -24,9 +24,9 @@ def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
     return db
 
 
-def _seed_zero_mission_team_conversation(db: SessionDB) -> None:
-    db.create_session(session_id="team-session-zero", source="team_mission")
-    db.append_message("team-session-zero", role="user", content="team conversation stays open")
+def _seed_zero_mission_team_conversation(db: CliSessionStore) -> None:
+    db.sessions.create(session_id="team-session-zero", source="team_mission")
+    db.messages.append("team-session-zero", role="user", content="team conversation stays open")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-zero",
         conversation_session_id="team-session-zero",
@@ -36,19 +36,19 @@ def _seed_zero_mission_team_conversation(db: SessionDB) -> None:
         created_at=1,
         updated_at=2,
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id="team-session-zero",
         participant_id="user",
         role="user",
         display_name="User",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id="team-session-zero",
         participant_id="leader:conversation-zero",
         role="leader",
         display_name="Leader",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id="team-session-zero",
         participant_id="member:builder",
         role="member",
@@ -57,9 +57,9 @@ def _seed_zero_mission_team_conversation(db: SessionDB) -> None:
     )
 
 
-def _seed_active_mission_team_conversation(db: SessionDB) -> None:
-    db.create_session(session_id="team-session-active", source="team_mission")
-    db.append_message("team-session-active", role="assistant", content="active team render")
+def _seed_active_mission_team_conversation(db: CliSessionStore) -> None:
+    db.sessions.create(session_id="team-session-active", source="team_mission")
+    db.messages.append("team-session-active", role="assistant", content="active team render")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-active",
         conversation_session_id="team-session-active",
@@ -80,10 +80,10 @@ def _seed_active_mission_team_conversation(db: SessionDB) -> None:
     )
 
 
-def _seed_direct_conversation_with_mission_id(db: SessionDB) -> None:
-    db.create_session(session_id="direct-session", source="tui")
-    db.append_message("direct-session", role="user", content="direct conversation")
-    db.upsert_session_index(
+def _seed_direct_conversation_with_mission_id(db: CliSessionStore) -> None:
+    db.sessions.create(session_id="direct-session", source="tui")
+    db.messages.append("direct-session", role="user", content="direct conversation")
+    db.session_index.upsert(
         session_id="direct-session",
         source="team_mission",
         session_kind="team_mission",

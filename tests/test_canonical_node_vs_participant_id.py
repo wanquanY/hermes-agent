@@ -4,20 +4,20 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.identities import canonical_node_id
 from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
 from hermes_team_mission.domain.runtime_identity import node_participant_id
 
 
-def _db(tmp_path: Path, session_id: str = "team-session") -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id, source="team_mission", transient=False)
+def _db(tmp_path: Path, session_id: str = "team-session") -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id, source="team_mission", transient=False)
     return db
 
 
 def _upsert_mission_with_node(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str,
     conversation_id: str,
@@ -138,7 +138,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
 
     db = _db(tmp_path, "team-session-render")
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-render",
             role="assistant",
             content="Alpha rendered from run events.",
@@ -149,7 +149,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
                 "team_mission": {"canonical_node_id": "mission-A:member:member-beta"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-render",
             _message_complete(
                 session_id="team-session-render",
@@ -196,7 +196,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
 def test_member_node_across_two_missions_has_two_node_ids_but_one_participant_id(tmp_path: Path) -> None:
     db = _db(tmp_path, "team-session-cross-mission")
     try:
-        db.upsert_conversation_participant(
+        db.participants.upsert_conversation_participant(
             conversation_session_id="team-session-cross-mission",
             participant_id="member:member-alpha",
             role="member",
@@ -230,7 +230,7 @@ def test_member_node_across_two_missions_has_two_node_ids_but_one_participant_id
         node_b = db.get_team_mission_node("mission-B", "shared-member-node")
         events = {
             event["run_id"]: event
-            for event in db.list_run_events("team-session-cross-mission")
+            for event in db.runs.list_events("team-session-cross-mission")
         }
 
         assert node_a["canonical_node_id"] == "mission-A:shared-member-node"

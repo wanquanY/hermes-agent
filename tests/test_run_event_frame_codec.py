@@ -5,7 +5,7 @@ import time
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.domain.run_event_codec import decode_run_event_row
 
 
@@ -23,12 +23,12 @@ def _message_delta(seq: int, text: str = "hello") -> dict:
 
 
 def test_runtime_source_seq_uses_explicit_column_after_json_cache_is_cleared(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         frame = _message_delta(1, "source")
         frame["payload"]["runtime_source_seq"] = 77
-        db.append_run_event("session-1", frame)
+        db.runs.append_event("session-1", frame)
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
 
         assert row["runtime_source_seq"] == 77
@@ -40,7 +40,7 @@ def test_runtime_source_seq_uses_explicit_column_after_json_cache_is_cleared(tmp
             )
         )
 
-        assert db.has_run_event_source(
+        assert db.runs.has_event_source(
             "session-1",
             run_id="run-1",
             runtime_source_seq=77,
@@ -50,15 +50,15 @@ def test_runtime_source_seq_uses_explicit_column_after_json_cache_is_cleared(tmp
 
 
 def test_payload_contains_uses_run_event_search_index_after_json_cache_is_cleared(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         frame = {
             **_message_delta(1, "subagent output"),
             "type": "subagent.output_delta",
             "payload": {"subagent_id": "sa-index", "text": "subagent output"},
         }
-        db.append_run_event("session-1", frame)
+        db.runs.append_event("session-1", frame)
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
         db._execute_write(
             lambda conn: conn.execute(
@@ -67,7 +67,7 @@ def test_payload_contains_uses_run_event_search_index_after_json_cache_is_cleare
             )
         )
 
-        events = db.list_run_events_filtered(
+        events = db.runs.list_filtered_events(
             "session-1",
             event_type_prefix="subagent.",
             payload_contains="sa-index",
@@ -80,10 +80,10 @@ def test_payload_contains_uses_run_event_search_index_after_json_cache_is_cleare
 
 
 def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_messages(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     large_text = "final answer " * 300
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         now = time.time()
         event = {
             "type": "message.complete",
@@ -97,11 +97,11 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
             "timestamp": now,
             "payload": {"text": large_text, "status": "complete"},
         }
-        db.append_run_event("session-1", event)
+        db.runs.append_event("session-1", event)
         conversation_message_id = assistant_conversation_message_id_for(
             AssistantMessageIdentity("session-1", "run-1", "1")
         )
-        db._upsert_team_message_by_id(  # noqa: SLF001
+        db.messages.upsert_team_message(
             session_id="session-1",
             conversation_message_id=conversation_message_id,
             role="assistant",
@@ -115,10 +115,10 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
             status="completed",
         )
 
-        result = db.reference_run_event_payloads(session_id="session-1")
+        result = db.run_event_maintenance.reference_payloads(session_id="session-1")
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
         decoded = decode_run_event_row(row)
-        events = db.list_run_events("session-1")
+        events = db.runs.list_events("session-1")
     finally:
         db.close()
 
@@ -132,12 +132,12 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
 
 
 def test_reference_run_event_payloads_slim_tool_complete_and_rehydrates_from_tool_events(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     large_result = "tool output " * 300
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         now = time.time()
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             {
                 "type": "tool.complete",
@@ -158,10 +158,10 @@ def test_reference_run_event_payloads_slim_tool_complete_and_rehydrates_from_too
             },
         )
 
-        result = db.reference_run_event_payloads(session_id="session-1")
+        result = db.run_event_maintenance.reference_payloads(session_id="session-1")
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
         decoded = decode_run_event_row(row)
-        events = db.list_run_events("session-1")
+        events = db.runs.list_events("session-1")
     finally:
         db.close()
 
@@ -176,10 +176,10 @@ def test_reference_run_event_payloads_slim_tool_complete_and_rehydrates_from_too
 
 
 def test_append_run_event_double_writes_compressed_frame(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event("session-1", _message_delta(1, "stream text"))
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event("session-1", _message_delta(1, "stream text"))
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
 
         assert row["frame_blob"]
@@ -194,7 +194,7 @@ def test_append_run_event_double_writes_compressed_frame(tmp_path):
                 (row["id"],),
             )
         )
-        events = db.list_run_events("session-1")
+        events = db.runs.list_events("session-1")
     finally:
         db.close()
 
@@ -203,9 +203,9 @@ def test_append_run_event_double_writes_compressed_frame(tmp_path):
 
 
 def test_backfill_run_event_frame_blobs_migrates_legacy_rows(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
+        db.sessions.create("session-1", "dovie")
         frame = _message_delta(1, "legacy text")
         payload = frame["payload"]
         db._execute_write(
@@ -233,7 +233,7 @@ def test_backfill_run_event_frame_blobs_migrates_legacy_rows(tmp_path):
             )
         )
 
-        result = db.backfill_run_event_frame_blobs()
+        result = db.run_event_maintenance.backfill_frames()
         row = db._conn.execute("SELECT * FROM run_events WHERE session_id = ?", ("session-1",)).fetchone()
         db._execute_write(
             lambda conn: conn.execute(
@@ -241,7 +241,7 @@ def test_backfill_run_event_frame_blobs_migrates_legacy_rows(tmp_path):
                 (row["id"],),
             )
         )
-        events = db.list_run_events("session-1")
+        events = db.runs.list_events("session-1")
     finally:
         db.close()
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame
 from tui_gateway.services.run_control import record_event
@@ -32,12 +32,12 @@ def _run_context(
     )
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conv-X", source="team_mission", transient=False)
-    db.create_session("memberchat:Y", source="team_mission", transient=False)
-    db.create_session("team:mission-1:node:root", source="team_mission", transient=False)
-    db.create_session("legacy-session", source="team_mission", transient=False)
+def _db(tmp_path: Path) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conv-X", source="team_mission", transient=False)
+    db.sessions.create("memberchat:Y", source="team_mission", transient=False)
+    db.sessions.create("team:mission-1:node:root", source="team_mission", transient=False)
+    db.sessions.create("legacy-session", source="team_mission", transient=False)
     return db
 
 
@@ -61,8 +61,8 @@ def test_record_event_with_run_context_forces_conversation_session_id(tmp_path: 
 
     record_event(_frame(), db=db, run_context=_run_context())
 
-    conv_events = db.list_run_events("conv-X", run_id="run-1")
-    member_events = db.list_run_events("memberchat:Y", run_id="run-1")
+    conv_events = db.runs.list_events("conv-X", run_id="run-1")
+    member_events = db.runs.list_events("memberchat:Y", run_id="run-1")
     assert len(conv_events) == 1
     assert member_events == []
     assert conv_events[0]["conversation_session_id"] == "conv-X"
@@ -84,8 +84,8 @@ def test_record_event_with_node_run_context_preserves_node_runtime_session(tmp_p
         run_context=context,
     )
 
-    node_events = db.list_run_events("team:mission-1:node:root", run_id="run-1")
-    conv_events = db.list_run_events("conv-X", run_id="run-1")
+    node_events = db.runs.list_events("team:mission-1:node:root", run_id="run-1")
+    conv_events = db.runs.list_events("conv-X", run_id="run-1")
     assert len(node_events) == 1
     assert conv_events == []
     assert node_events[0]["conversation_session_id"] == "team:mission-1:node:root"
@@ -98,7 +98,7 @@ def test_record_event_with_run_context_stamps_participant_id_if_missing(tmp_path
 
     record_event(_frame(), db=db, run_context=_run_context(participant_id="member:alice"))
 
-    event = db.list_run_events("conv-X", run_id="run-1")[0]
+    event = db.runs.list_events("conv-X", run_id="run-1")[0]
     assert event["participant_id"] == "member:alice"
 
 
@@ -111,7 +111,7 @@ def test_record_event_with_run_context_preserves_existing_participant_id(tmp_pat
         run_context=_run_context(participant_id="member:alice"),
     )
 
-    event = db.list_run_events("conv-X", run_id="run-1")[0]
+    event = db.runs.list_events("conv-X", run_id="run-1")[0]
     assert event["participant_id"] == "leader:foo"
 
 
@@ -120,8 +120,8 @@ def test_record_event_without_run_context_unchanged_legacy_path(tmp_path: Path):
 
     record_event(_frame(conversation_session_id="legacy-session"), db=db)
 
-    legacy_events = db.list_run_events("legacy-session", run_id="run-1")
-    conv_events = db.list_run_events("conv-X", run_id="run-1")
+    legacy_events = db.runs.list_events("legacy-session", run_id="run-1")
+    conv_events = db.runs.list_events("conv-X", run_id="run-1")
     assert len(legacy_events) == 1
     assert conv_events == []
     assert legacy_events[0]["conversation_session_id"] == "legacy-session"
