@@ -27,12 +27,12 @@ def _setup_db(monkeypatch, tmp_path: Path):
     Seeds a mission + node + run binding + session so that
     ``team_mission.node.history`` resolves to ``session-worker``.
     """
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
     team_mission_history = team_mission_history_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission_history, "_get_db", lambda: db)
 
@@ -52,9 +52,9 @@ def _setup_db(monkeypatch, tmp_path: Path):
         status="running",
         runtime_scope_key=_RUNTIME_SCOPE_KEY,
     )
-    db.create_session("team-session-1", source="team_mission")
-    db.create_session("session-worker", source="team_mission")
-    db.upsert_run(
+    db.sessions.create("team-session-1", source="team_mission")
+    db.sessions.create("session-worker", source="team_mission")
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key=_RUNTIME_SCOPE_KEY,
@@ -81,7 +81,7 @@ def _append_run_event(db, session_id: str, seq: int, event_type: str = "message.
     on an already-terminal run is treated as duplicate_terminal and skipped,
     which would prevent us from seeding seq 1..5 for cursor tests.
     """
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": event_type,
@@ -97,7 +97,7 @@ def _append_run_event(db, session_id: str, seq: int, event_type: str = "message.
 
 
 def _append_message(db, session_id: str, content: str):
-    return db.append_message(
+    return db.messages.append(
         session_id,
         role="assistant",
         content=content,

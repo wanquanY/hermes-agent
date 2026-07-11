@@ -55,11 +55,11 @@ def _session_context_from_submit(submitted: dict) -> dict:
 
 
 def test_member_submit_inherits_leader_cloud_query_and_sets_executing_profile(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     member = _member(tmp_path)
     db.initialize_team_mission_from_strategy(
@@ -107,11 +107,11 @@ def test_member_submit_inherits_leader_cloud_query_and_sets_executing_profile(mo
 
 
 def test_node_start_inherits_mission_cloud_query_and_sets_executing_profile(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     member = _member(tmp_path)
     db.initialize_team_mission_from_strategy(

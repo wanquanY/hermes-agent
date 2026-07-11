@@ -4,13 +4,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.runtime.failure import REASON_PROVIDER_RATE_LIMITED
 from hermes_team_mission.runtime.scheduler import TeamMissionReadyScheduler
 
 
-def _create_ready_mission(tmp_path: Path) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
+def _create_ready_mission(tmp_path: Path) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -128,7 +128,7 @@ def test_scheduler_uses_provider_retry_after_for_rate_limit_cooldown(tmp_path: P
 
 
 def test_scheduler_reclaims_stale_running_node_and_starts_it_again(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",

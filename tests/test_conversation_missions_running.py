@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _create_conversation(db: SessionDB, conversation_id: str = "conv-1") -> dict:
+def _create_conversation(db: CliSessionStore, conversation_id: str = "conv-1") -> dict:
     return db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
         conversation_session_id=f"{conversation_id}-session",
@@ -97,7 +97,7 @@ def test_sidebar_session_index_running_uses_conversation_missions(tmp_path: Path
     )
     db._conn.commit()  # noqa: SLF001
 
-    rows = db.list_session_index(limit=10)["sessions"]
+    rows = db.session_index.list(limit=10)["sessions"]
     item = next(row for row in rows if row["conversation_id"] == "conv-1")
 
     assert item["running"] is True

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.run_worker import (
     EventFrame,
     LogFrame,
@@ -52,21 +52,21 @@ class _Audit5Backend(WorkerRunBackend):
         activity_id = str(frame.params.get("activity_id") or "audit-5-activity")
 
         def write_initial_state():
-            db.create_session(frame.conversation_session_id, source="worker")
-            db.append_message(
+            db.sessions.create(frame.conversation_session_id, source="worker")
+            db.messages.append(
                 frame.conversation_session_id,
                 role="user",
                 content=frame.prompt,
                 metadata={"source": "audit-5-subprocess"},
             )
-            db.create_activity(
+            db.activities.create(
                 activity_id=activity_id,
                 conversation_id=frame.conversation_session_id,
                 kind="agent_dispatch",
                 target_profile_id=frame.params.get("agent_profile_id") or "audit-profile",
                 prompt_summary=frame.prompt,
             )
-            db.update_activity_status(activity_id, "running", started_at=101.0)
+            db.activities.update_status(activity_id, "running", started_at=101.0)
 
         await asyncio.to_thread(write_initial_state)
 
@@ -84,13 +84,13 @@ class _Audit5Backend(WorkerRunBackend):
         assistant_text = "worker pong"
 
         def write_terminal_state():
-            db.append_message(
+            db.messages.append(
                 frame.conversation_session_id,
                 role="assistant",
                 content=assistant_text,
                 metadata={"usage": {"total_tokens": 2}},
             )
-            db.update_activity_status(
+            db.activities.update_status(
                 activity_id,
                 "completed",
                 result_summary=assistant_text,
@@ -182,7 +182,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
     profile_home = tmp_path / "profile-home"
     control_home.mkdir()
     profile_home.mkdir()
-    db = SessionDB(control_home / "state.db")
+    db = open_cli_session_store(control_home / "state.db")
 
     _install_child_backend(tmp_path / "child-site", monkeypatch)
     monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
@@ -278,13 +278,13 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
     assert terminal.conversation_session_id == conversation_id
     assert terminal.status == "completed"
 
-    messages = db.get_messages_as_conversation(conversation_id)
+    messages = db.messages.all_as_conversation(conversation_id)
     assert [(message["role"], message["content"]) for message in messages] == [
         ("user", "ping from audit-5"),
         ("assistant", "worker pong"),
     ]
 
-    activity = db.get_activity(activity_id)
+    activity = db.activities.get(activity_id)
     assert activity is not None
     assert activity["conversation_id"] == conversation_id
     assert activity["kind"] == "agent_dispatch"

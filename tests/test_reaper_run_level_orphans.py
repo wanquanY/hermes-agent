@@ -3,14 +3,14 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _conversation(db: SessionDB, conversation_id: str = "conv-1") -> None:
+def _conversation(db: CliSessionStore, conversation_id: str = "conv-1") -> None:
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
         conversation_session_id=f"{conversation_id}-session",
@@ -20,7 +20,7 @@ def _conversation(db: SessionDB, conversation_id: str = "conv-1") -> None:
 
 
 def _mission(
-    db: SessionDB,
+    db: CliSessionStore,
     mission_id: str,
     *,
     conversation_id: str = "conv-1",
@@ -42,9 +42,9 @@ def _mission(
     )
 
 
-def _bound_run(db: SessionDB, mission_id: str, run_id: str, *, status: str = "running") -> None:
+def _bound_run(db: CliSessionStore, mission_id: str, run_id: str, *, status: str = "running") -> None:
     session_id = f"team:{mission_id}:node:worker"
-    db.upsert_run(
+    db.runs.upsert(
         run_id=run_id,
         session_id=session_id,
         runtime_scope_key=session_id,
@@ -68,7 +68,7 @@ def test_reaper_skips_run_when_its_mission_active(tmp_path: Path):
     reaped = db.reap_terminal_mission_runs("mission-active")
 
     assert reaped == 0
-    assert db.get_run("run-active")["status"] == "running"
+    assert db.runs.get("run-active")["status"] == "running"
 
 
 def test_reaper_kills_run_when_mission_completed(tmp_path: Path):
@@ -84,7 +84,7 @@ def test_reaper_kills_run_when_mission_completed(tmp_path: Path):
 
     reaped = db.reap_terminal_mission_runs("mission-completed")
 
-    run = db.get_run("run-orphan")
+    run = db.runs.get("run-orphan")
     assert reaped == 1
     assert run["status"] in {"interrupted", "cancelled", "failed"}
     assert run["metadata"]["reaped_reason"] == "terminal_mission_stale_run"
@@ -101,15 +101,15 @@ def test_reaper_skips_running_run_when_other_mission_active_in_conv(tmp_path: Pa
     reaped = db.reap_terminal_mission_runs("mission-done")
 
     assert reaped == 1
-    assert db.get_run("run-latent-orphan")["status"] in {"interrupted", "cancelled", "failed"}
-    assert db.get_run("run-live")["status"] == "running"
+    assert db.runs.get("run-latent-orphan")["status"] in {"interrupted", "cancelled", "failed"}
+    assert db.runs.get("run-live")["status"] == "running"
 
 
 def test_reaper_handles_run_without_mission_id(tmp_path: Path):
     db = _db(tmp_path)
     _conversation(db)
     stale_at = time.time() - 1000
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-legacy",
         session_id="conv-1-session",
         runtime_scope_key="conv-1-session",
@@ -121,7 +121,7 @@ def test_reaper_handles_run_without_mission_id(tmp_path: Path):
 
     reaped = db.reap_terminal_mission_runs("mission-trigger")
 
-    run = db.get_run("run-legacy")
+    run = db.runs.get("run-legacy")
     assert reaped == 1
     assert run["status"] in {"interrupted", "cancelled", "failed"}
     assert run["metadata"]["reaped_reason"].startswith("legacy_run_without_mission:")
@@ -132,7 +132,7 @@ def test_reaper_does_not_run_if_conv_has_active_mission(tmp_path: Path):
     _conversation(db)
     _mission(db, "mission-active", mission_status="running", conversation_status="active")
     stale_at = time.time() - 1000
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-legacy",
         session_id="conv-1-session",
         runtime_scope_key="conv-1-session",
@@ -145,4 +145,4 @@ def test_reaper_does_not_run_if_conv_has_active_mission(tmp_path: Path):
     reaped = db.reap_terminal_mission_runs("mission-active")
 
     assert reaped == 0
-    assert db.get_run("run-legacy")["status"] == "running"
+    assert db.runs.get("run-legacy")["status"] == "running"

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import EventFrame
@@ -33,12 +33,12 @@ class _CaptureTransport:
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 @pytest.fixture
-def gateway_modules(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
+def gateway_modules(monkeypatch: pytest.MonkeyPatch, db: CliSessionStore):
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -62,7 +62,7 @@ def gateway_modules(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
 
 
 @pytest.fixture
-def seeded_team(db: SessionDB, tmp_path: Path) -> dict[str, Any]:
+def seeded_team(db: CliSessionStore, tmp_path: Path) -> dict[str, Any]:
     _seed_team(db, tmp_path)
     return {
         "team_id": "team-1",
@@ -79,8 +79,8 @@ def _workspace(tmp_path: Path) -> dict[str, str]:
     return {"workspace_id": "workspace-1", "workspace_path": str(path)}
 
 
-def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str, name: str) -> None:
-    db.upsert_agent_profile(
+def _seed_profile(db: CliSessionStore, tmp_path: Path, profile_id: str, name: str) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id=profile_id,
         slug=profile_id,
         name=name,
@@ -92,7 +92,7 @@ def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str, name: str) -> 
     )
 
 
-def _seed_team(db: SessionDB, tmp_path: Path) -> None:
+def _seed_team(db: CliSessionStore, tmp_path: Path) -> None:
     _seed_profile(db, tmp_path, "profile-leader", "Leader")
     for profile_id, name in (
         ("profile-alpha", "Alpha"),
@@ -100,7 +100,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         ("profile-gamma", "Gamma"),
     ):
         _seed_profile(db, tmp_path, profile_id, name)
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Team One",
         description="Participant lifecycle test team.",
@@ -111,7 +111,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         ("member-beta", "profile-beta", "reviewer", "Beta"),
         ("member-gamma", "profile-gamma", "qa", "Gamma"),
     ):
-        db.upsert_agent_team_member(
+        db.teams.upsert_agent_team_member(
             member_id=member_id,
             team_id="team-1",
             agent_profile_id=profile_id,
@@ -122,8 +122,8 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         )
 
 
-def _participants_by_id(db: SessionDB, session_id: str) -> dict[str, dict[str, Any]]:
-    return {row["participant_id"]: row for row in db.list_conversation_participants(session_id)}
+def _participants_by_id(db: CliSessionStore, session_id: str) -> dict[str, dict[str, Any]]:
+    return {row["participant_id"]: row for row in db.participants.list_conversation_participants(session_id)}
 
 
 def _create_team_conversation(
@@ -204,7 +204,7 @@ def _participant_id(message: dict[str, Any]) -> str:
     )
 
 
-def test_e2e_session_create_full_flow(gateway_modules, db: SessionDB, tmp_path: Path) -> None:
+def test_e2e_session_create_full_flow(gateway_modules, db: CliSessionStore, tmp_path: Path) -> None:
     server, _team_mission = gateway_modules
 
     response = server.handle_request(
@@ -231,8 +231,8 @@ def test_e2e_session_create_full_flow(gateway_modules, db: SessionDB, tmp_path: 
     assert participants["user"]["role"] == "user"
     assert participants["agent:profile-direct"]["display_name"] == "Direct Agent"
 
-    db.append_message(session_id, role="user", content="Start participant lifecycle.")
-    db.upsert_session_index(
+    db.messages.append(session_id, role="user", content="Start participant lifecycle.")
+    db.session_index.upsert(
         session_id=session_id,
         owner_agent_profile_id="profile-direct",
         runtime_scope_key="profile:profile-direct",
@@ -243,7 +243,7 @@ def test_e2e_session_create_full_flow(gateway_modules, db: SessionDB, tmp_path: 
     index = server._methods["session.index.list"](2, {})
     row = next(item for item in index["result"]["sessions"] if item["id"] == session_id)
     assert row["id"] == session_id
-    assert db.get_participant(row["id"], "user")["role"] == "user"
+    assert db.participants.get_participant(row["id"], "user")["role"] == "user"
 
     snapshot = server._methods["conversation.render_snapshot"](3, {"session_id": session_id})
     assert "error" not in snapshot
@@ -255,7 +255,7 @@ def test_e2e_session_create_full_flow(gateway_modules, db: SessionDB, tmp_path: 
 
 def test_e2e_team_mission_create_full_flow(
     gateway_modules,
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,7 +287,7 @@ def test_e2e_team_mission_create_full_flow(
 @pytest.mark.asyncio
 async def test_e2e_member_chat_emits_participant_id_in_message(
     gateway_modules,
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -372,13 +372,13 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
     ]
     assert payload["participant_id"] == "member:member-alpha"
     assert payload["payload"]["participant_id"] == "member:member-alpha"
-    stored = db.list_run_events(seeded_team["conversation_session_id"], run_id="run-member-alpha")[0]
+    stored = db.runs.list_events(seeded_team["conversation_session_id"], run_id="run-member-alpha")[0]
     assert stored["participant_id"] == "member:member-alpha"
 
 
 def test_e2e_render_snapshot_messages_have_participant_id_per_message(
     gateway_modules,
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -387,13 +387,13 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
     _install_team_resolver(monkeypatch, server, seeded_team)
     session_id = seeded_team["conversation_session_id"]
 
-    db.append_message(
+    db.messages.append(
         session_id,
         role="user",
         content="Please coordinate.",
         metadata={"run_id": "run-user", "turn_id": "turn-user"},
     )
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": "message.complete",
@@ -406,13 +406,13 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         },
         participant_id="user",
     )
-    db.append_message(
+    db.messages.append(
         session_id,
         role="assistant",
         content="Leader will coordinate.",
         metadata={"run_id": "run-leader", "turn_id": "turn-leader"},
     )
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": "message.complete",
@@ -425,13 +425,13 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         },
         participant_id=f"leader:{seeded_team['team_id']}",
     )
-    db.append_message(
+    db.messages.append(
         session_id,
         role="assistant",
         content="Alpha has the build.",
         metadata={"run_id": "run-alpha", "turn_id": "turn-alpha"},
     )
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": "message.complete",
@@ -463,12 +463,12 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
 
 
 def test_e2e_backfill_migration_creates_rows_for_existing_conversations(
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, Any],
 ) -> None:
-    db.create_session("legacy-direct", source="tui")
-    db.create_session(seeded_team["conversation_session_id"], source="team_mission")
-    db.upsert_session_index(
+    db.sessions.create("legacy-direct", source="tui")
+    db.sessions.create(seeded_team["conversation_session_id"], source="team_mission")
+    db.session_index.upsert(
         session_id="legacy-direct",
         owner_agent_profile_id="profile-alpha",
         owner_profile_version_id="version-profile-alpha",
@@ -482,7 +482,7 @@ def test_e2e_backfill_migration_creates_rows_for_existing_conversations(
     )
     db._conn.execute("DELETE FROM conversation_participants")  # noqa: SLF001
 
-    result = db.reconcile_conversation_participants_one_shot()
+    result = db.participants.reconcile()
 
     assert result["ran"] is True
     direct = _participants_by_id(db, "legacy-direct")
@@ -502,13 +502,13 @@ def test_e2e_backfill_migration_creates_rows_for_existing_conversations(
 @pytest.mark.asyncio
 async def test_e2e_approval_observer_still_works_with_new_participants_table(
     gateway_modules,
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, Any],
 ) -> None:
     _server, team_mission = gateway_modules
     _create_team_conversation(team_mission, seeded_team)
     session_id = seeded_team["conversation_session_id"]
-    assert db.list_conversation_participants(session_id)
+    assert db.participants.list_conversation_participants(session_id)
 
     router = WorkerFrameRouter(
         sender=_FakeSender(),
@@ -528,6 +528,6 @@ async def test_e2e_approval_observer_still_works_with_new_participants_table(
         ),
     )
 
-    rows = db.list_session_index(limit=10, include_transient=True)["sessions"]
+    rows = db.session_index.list(limit=10, include_transient=True)["sessions"]
     row = next(item for item in rows if item["session_id"] == session_id)
     assert row["waiting_approval"] == 1

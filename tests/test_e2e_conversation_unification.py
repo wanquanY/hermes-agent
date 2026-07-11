@@ -6,18 +6,18 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 @pytest.fixture
-def gateway(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
+def gateway(monkeypatch: pytest.MonkeyPatch, db: CliSessionStore):
     conversation_render_snapshot = importlib.import_module(
         "tui_gateway.methods.conversation_render_snapshot"
     )
@@ -53,8 +53,8 @@ def _workspace(tmp_path: Path, name: str = "workspace") -> dict[str, str]:
     return {"workspace_id": name, "workspace_path": str(path)}
 
 
-def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str, name: str) -> None:
-    db.upsert_agent_profile(
+def _seed_profile(db: CliSessionStore, tmp_path: Path, profile_id: str, name: str) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id=profile_id,
         slug=profile_id,
         name=name,
@@ -66,16 +66,16 @@ def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str, name: str) -> 
     )
 
 
-def _seed_team(db: SessionDB, tmp_path: Path, *, team_id: str = "team-1") -> None:
+def _seed_team(db: CliSessionStore, tmp_path: Path, *, team_id: str = "team-1") -> None:
     _seed_profile(db, tmp_path, "profile-leader", "Leader")
     _seed_profile(db, tmp_path, "profile-builder", "Builder")
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id=team_id,
         name="Unified Team",
         description="Conversation unification E2E team.",
         lead_agent_profile_id="profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-builder",
         team_id=team_id,
         agent_profile_id="profile-builder",
@@ -88,7 +88,7 @@ def _seed_team(db: SessionDB, tmp_path: Path, *, team_id: str = "team-1") -> Non
 
 def _create_direct_session(
     gateway_server: Any,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
     *,
     session_id_hint: str = "direct-session",
@@ -111,8 +111,8 @@ def _create_direct_session(
     )
     result = _assert_ok(response)
     session_id = str(result.get("conversation_session_id") or result.get("session_id") or session_id_hint)
-    db.append_message(session_id, role="user", content="direct hello")
-    db.upsert_session_index(
+    db.messages.append(session_id, role="user", content="direct hello")
+    db.session_index.upsert(
         session_id=session_id,
         owner_agent_profile_id="profile-direct",
         runtime_scope_key="profile:profile-direct",
@@ -129,7 +129,7 @@ def _create_direct_session(
 
 
 def _create_team_conversation(
-    db: SessionDB,
+    db: CliSessionStore,
     team_mission: Any,
     tmp_path: Path,
     *,
@@ -226,7 +226,7 @@ def _render(gateway_server: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def test_e2e_direct_conversation_creates_routes_renders_correctly_kind_direct(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, _team_mission = gateway
@@ -237,18 +237,18 @@ def test_e2e_direct_conversation_creates_routes_renders_correctly_kind_direct(
     assert snapshot["kind"] == "ordinary"
     assert snapshot["session_id"] == session_id
     assert snapshot["messages"][0]["text"] == "direct hello"
-    assert db.get_session_index(session_id)["conversation_kind"] == "direct"
+    assert db.session_index.get(session_id)["conversation_kind"] == "direct"
 
 
 def test_e2e_team_conversation_creates_routes_renders_correctly_kind_team(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(db, team_mission, tmp_path)
-    db.append_run_event(
+    db.runs.append_event(
         team["session_id"],
         _message_complete("run-leader", "leader complete", participant_id="leader:conversation-team"),
     )
@@ -260,18 +260,18 @@ def test_e2e_team_conversation_creates_routes_renders_correctly_kind_team(
     assert snapshot["mission"]["mission_id"] == team["mission_id"]
     assert snapshot["messages"][0]["text"] == "leader complete"
     assert snapshot["messages"][0]["metadata"]["source"] == "team_mission.runtime_event"
-    assert db.get_session_index(team["session_id"])["conversation_kind"] == "team"
+    assert db.session_index.get(team["session_id"])["conversation_kind"] == "team"
 
 
 def test_e2e_zero_mission_team_conversation_still_renders_after_mission_cancel(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(db, team_mission, tmp_path)
-    db.append_message(team["session_id"], role="user", content="conversation remains visible")
+    db.messages.append(team["session_id"], role="user", content="conversation remains visible")
 
     cancelled = db.cancel_team_mission(
         mission_id=team["mission_id"],
@@ -286,21 +286,21 @@ def test_e2e_zero_mission_team_conversation_still_renders_after_mission_cancel(
     assert snapshot["kind"] == "team_mission"
     assert snapshot["conversation"]["conversation_id"] == team["conversation_id"]
     assert snapshot["messages"][0]["text"] == "conversation remains visible"
-    assert db.get_session_index(team["session_id"])["conversation_kind"] == "team"
+    assert db.session_index.get(team["session_id"])["conversation_kind"] == "team"
     assert resolved["conversation"]["active_mission_id"] == ""
 
 
 def test_e2e_sidebar_session_index_only_contains_team_metadata(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(db, team_mission, tmp_path, conversation_only=True)
-    db.append_message(team["session_id"], role="user", content="visible sidebar row")
-    db.upsert_session_index(
+    db.messages.append(team["session_id"], role="user", content="visible sidebar row")
+    db.session_index.upsert(
         session_id=team["session_id"],
         source="team_mission",
         session_kind="team_mission",
@@ -337,22 +337,22 @@ def test_e2e_sidebar_session_index_only_contains_team_metadata(
 
 def test_e2e_run_events_seq_monotonic_across_leader_member_runs(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(db, team_mission, tmp_path)
-    db.append_run_event(
+    db.runs.append_event(
         team["session_id"],
         _message_complete("run-leader", "leader first", seq=1, participant_id="leader:conversation-team"),
     )
-    db.append_run_event(
+    db.runs.append_event(
         team["session_id"],
         _message_complete("run-member", "member second", seq=1, participant_id="member:member-builder"),
     )
 
-    persisted_events = db.list_run_events(team["session_id"])
+    persisted_events = db.runs.list_events(team["session_id"])
     snapshot = _render(gateway_server, {"conversation_id": team["conversation_id"]})
 
     assert [event["seq"] for event in persisted_events] == [1, 2]
@@ -366,13 +366,13 @@ def test_e2e_run_events_seq_monotonic_across_leader_member_runs(
 
 def test_e2e_team_mission_events_audit_log_separate_from_render(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(db, team_mission, tmp_path)
-    db.append_run_event(
+    db.runs.append_event(
         team["session_id"],
         _message_complete("run-member", "render from run_events", participant_id="member:member-builder"),
     )
@@ -405,7 +405,7 @@ def test_e2e_team_mission_events_audit_log_separate_from_render(
 
 def test_e2e_conversation_kind_decoupled_from_active_mission_lifecycle(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
@@ -424,7 +424,7 @@ def test_e2e_conversation_kind_decoupled_from_active_mission_lifecycle(
         tmp_path,
         session_id_hint="direct-with-mission-link",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id=direct_session_id,
         source="team_mission",
         session_kind="team_mission",
@@ -452,8 +452,8 @@ def test_e2e_conversation_kind_decoupled_from_active_mission_lifecycle(
     team_snapshot = _render(gateway_server, {"session_id": team["session_id"]})
 
     assert direct_snapshot["kind"] == "ordinary"
-    assert db.get_session_index(direct_session_id)["conversation_kind"] == "direct"
+    assert db.session_index.get(direct_session_id)["conversation_kind"] == "direct"
     assert team_snapshot["kind"] == "team_mission"
-    assert db.get_session_index(team["session_id"])["conversation_kind"] == "team"
+    assert db.session_index.get(team["session_id"])["conversation_kind"] == "team"
     resolved = db.resolve_team_mission_conversation(team["conversation_id"])
     assert resolved["conversation"]["active_mission_id"] == ""

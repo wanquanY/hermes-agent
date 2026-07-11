@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
@@ -77,12 +77,12 @@ class _FakeSupervisor:
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 @pytest.fixture
-def gateway(monkeypatch: pytest.MonkeyPatch, db: SessionDB):
+def gateway(monkeypatch: pytest.MonkeyPatch, db: CliSessionStore):
     conversation_render_snapshot = importlib.import_module(
         "tui_gateway.methods.conversation_render_snapshot"
     )
@@ -134,12 +134,12 @@ def _workspace(tmp_path: Path, name: str) -> dict[str, str]:
 
 
 def _seed_profile(
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
     profile_id: str,
     name: str,
 ) -> None:
-    db.upsert_agent_profile(
+    db.profiles.upsert_agent_profile(
         profile_id=profile_id,
         slug=profile_id,
         name=name,
@@ -156,17 +156,17 @@ def _seed_profile(
     )
 
 
-def _seed_team(db: SessionDB, tmp_path: Path) -> None:
+def _seed_team(db: CliSessionStore, tmp_path: Path) -> None:
     _seed_profile(db, tmp_path, "profile-leader", "Leader")
     _seed_profile(db, tmp_path, "profile-alpha", "Alpha")
     _seed_profile(db, tmp_path, "profile-dispatch", "Dispatch Agent")
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id=TEAM_ID,
         name="Three Layer Team",
         description="E2E team for final three-layer architecture validation.",
         lead_agent_profile_id="profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id=TEAM_ID,
         agent_profile_id="profile-leader",
@@ -176,7 +176,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         profile_name="Leader",
         profile_avatar="avatar://profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id=MEMBER_ID,
         team_id=TEAM_ID,
         agent_profile_id="profile-alpha",
@@ -262,12 +262,12 @@ def _message_complete(
     }
 
 
-def _participants_by_id(db: SessionDB, session_id: str) -> dict[str, dict[str, Any]]:
-    return {row["participant_id"]: row for row in db.list_conversation_participants(session_id)}
+def _participants_by_id(db: CliSessionStore, session_id: str) -> dict[str, dict[str, Any]]:
+    return {row["participant_id"]: row for row in db.participants.list_conversation_participants(session_id)}
 
 
-def _activities_by_kind(db: SessionDB, conversation_id: str) -> dict[str, dict[str, Any]]:
-    return {row["kind"]: row for row in db.list_activities(conversation_id)}
+def _activities_by_kind(db: CliSessionStore, conversation_id: str) -> dict[str, dict[str, Any]]:
+    return {row["kind"]: row for row in db.activities.list(conversation_id)}
 
 
 def _published_payloads(transport: _CaptureTransport) -> list[dict[str, Any]]:
@@ -289,7 +289,7 @@ def _render(gateway_server: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def _submit_member_chat(
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     seeded_team: dict[str, str],
     *,
     run_id: str = "run-member-alpha",
@@ -328,7 +328,7 @@ def _submit_member_chat(
 
 
 async def _record_member_reply(
-    db: SessionDB,
+    db: CliSessionStore,
     captured_submit: dict[str, Any],
     *,
     text: str = "Alpha completed the member reply.",
@@ -369,32 +369,32 @@ async def _record_member_reply(
         ),
     )
     run_control.detach_transport(transport)
-    return db.list_run_events(CONVERSATION_SESSION_ID, run_id=captured_submit["run_id"]), transport
+    return db.runs.list_events(CONVERSATION_SESSION_ID, run_id=captured_submit["run_id"]), transport
 
 
 def test_e2e_direct_conversation_three_layer_invariants(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, _team_mission = gateway
 
     session_id = _create_direct_conversation(gateway_server, tmp_path)
 
-    row = db.get_session_index(session_id)
+    row = db.session_index.get(session_id)
     participants = _participants_by_id(db, session_id)
-    assert db.get_session(session_id) is not None
+    assert db.sessions.get(session_id) is not None
     assert row is not None
     assert row["conversation_kind"] == "direct"
     assert set(participants) == {"user", "agent:profile-direct"}
     assert participants["agent:profile-direct"]["role"] == "agent"
-    assert db.list_activities(session_id) == []
-    assert db.list_active_mission_activities(session_id) == []
+    assert db.activities.list(session_id) == []
+    assert db.activities.list_active_missions(session_id) == []
 
 
 def test_e2e_team_conversation_three_layer_invariants(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _gateway_server, team_mission = gateway
@@ -402,9 +402,9 @@ def test_e2e_team_conversation_three_layer_invariants(
 
     team = _create_team_conversation(team_mission, tmp_path)
 
-    row = db.get_session_index(team["session_id"])
+    row = db.session_index.get(team["session_id"])
     participants = _participants_by_id(db, team["session_id"])
-    activity = db.get_activity_for_mission(team["mission_id"])
+    activity = db.activities.get_for_mission(team["mission_id"])
     assert row is not None
     assert row["conversation_kind"] == "team"
     assert row["team_id"] == TEAM_ID
@@ -425,7 +425,7 @@ def test_e2e_team_conversation_three_layer_invariants(
 async def test_e2e_member_chat_three_layer_invariants(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _gateway_server, team_mission = gateway
@@ -454,7 +454,7 @@ async def test_e2e_member_chat_three_layer_invariants(
 async def test_e2e_async_agent_dispatch_three_layer(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _gateway_server, team_mission = gateway
@@ -495,7 +495,7 @@ async def test_e2e_async_agent_dispatch_three_layer(
         RunTerminalFrame(run_id="run-dispatch", status="completed"),
     )
 
-    activity = db.get_activity(result["activity_id"])
+    activity = db.activities.get(result["activity_id"])
     assert result == {
         "activity_id": "activity-dispatch",
         "conversation_id": "conversation-child",
@@ -518,7 +518,7 @@ async def test_e2e_async_agent_dispatch_three_layer(
 async def test_e2e_multi_activity_parallel_in_same_conversation(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _gateway_server, team_mission = gateway
@@ -526,7 +526,7 @@ async def test_e2e_multi_activity_parallel_in_same_conversation(
     team = _create_team_conversation(team_mission, tmp_path)
 
     captured_submit = _submit_member_chat(monkeypatch, db, team, run_id="run-member-parallel")
-    db.create_activity(
+    db.activities.create(
         activity_id="activity-member-chat",
         conversation_id=team["session_id"],
         kind="member_chat",
@@ -560,7 +560,7 @@ async def test_e2e_multi_activity_parallel_in_same_conversation(
 
 def test_e2e_mission_cancel_three_layer(
     gateway,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     _gateway_server, team_mission = gateway
@@ -573,14 +573,14 @@ def test_e2e_mission_cancel_three_layer(
         conversation_id=team["conversation_id"],
         session_id=team["session_id"],
     )
-    db.create_activity(
+    db.activities.create(
         activity_id="activity-member-chat",
         conversation_id=team["session_id"],
         kind="member_chat",
         target_profile_id="profile-alpha",
         status="running",
     )
-    db.create_activity(
+    db.activities.create(
         activity_id="activity-agent-dispatch",
         conversation_id=team["session_id"],
         kind="agent_dispatch",
@@ -594,14 +594,14 @@ def test_e2e_mission_cancel_three_layer(
         reason="final e2e cancel",
     )
 
-    row = db.get_session_index(team["session_id"])
+    row = db.session_index.get(team["session_id"])
     activities = _activities_by_kind(db, team["session_id"])
     assert result["mission_status"] == "cancelled"
     assert row is not None
     assert row["conversation_kind"] == "team"
-    assert db.get_session(team["session_id"]) is not None
-    assert db.get_activity_for_mission(team["mission_id"])["status"] == "cancelled"
-    assert db.get_activity_for_mission(second["mission_id"])["status"] == "running"
+    assert db.sessions.get(team["session_id"]) is not None
+    assert db.activities.get_for_mission(team["mission_id"])["status"] == "cancelled"
+    assert db.activities.get_for_mission(second["mission_id"])["status"] == "running"
     assert activities["member_chat"]["status"] == "running"
     assert activities["agent_dispatch"]["status"] == "running"
 
@@ -609,13 +609,13 @@ def test_e2e_mission_cancel_three_layer(
 def test_e2e_sidebar_single_source_session_index_only(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
     _seed_team(db, tmp_path)
     team = _create_team_conversation(team_mission, tmp_path)
-    db.create_activity(
+    db.activities.create(
         activity_id="activity-sidebar-dispatch",
         conversation_id=team["conversation_id"],
         kind="agent_dispatch",
@@ -623,7 +623,7 @@ def test_e2e_sidebar_single_source_session_index_only(
         status="running",
         prompt_summary="sidebar active dispatch",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id=team["session_id"],
         source="team_mission",
         session_kind="team_mission",
@@ -670,7 +670,7 @@ def test_e2e_sidebar_single_source_session_index_only(
 async def test_e2e_speaker_displays_member_name_not_leader_fallback(
     gateway,
     monkeypatch: pytest.MonkeyPatch,
-    db: SessionDB,
+    db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     gateway_server, team_mission = gateway
@@ -683,7 +683,7 @@ async def test_e2e_speaker_displays_member_name_not_leader_fallback(
         text="Alpha should render as the speaker.",
         canonical_node_id="mission-three-layer:leader-looking-node",
     )
-    db.append_message(
+    db.messages.append(
         team["session_id"],
         role="assistant",
         content="Alpha should render as the speaker.",

@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 CONVERSATION_ID = "conv-1"
 CONVERSATION_SESSION_ID = "conv-1-session"
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _create_conversation(db: SessionDB) -> None:
+def _create_conversation(db: CliSessionStore) -> None:
     db.upsert_team_mission_conversation(
         conversation_id=CONVERSATION_ID,
         conversation_session_id=CONVERSATION_SESSION_ID,
@@ -22,7 +22,7 @@ def _create_conversation(db: SessionDB) -> None:
     )
 
 
-def _mission(db: SessionDB, mission_id: str, *, status: str = "active") -> None:
+def _mission(db: CliSessionStore, mission_id: str, *, status: str = "active") -> None:
     db.upsert_team_mission(
         mission_id=mission_id,
         conversation_id=CONVERSATION_ID,
@@ -41,7 +41,7 @@ def _mission(db: SessionDB, mission_id: str, *, status: str = "active") -> None:
 
 
 def _bound_run(
-    db: SessionDB,
+    db: CliSessionStore,
     mission_id: str,
     run_id: str,
     *,
@@ -58,7 +58,7 @@ def _bound_run(
         status="running",
         runtime_scope_key=session_id,
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id=run_id,
         session_id=session_id,
         runtime_scope_key=session_id,
@@ -74,7 +74,7 @@ def _bound_run(
     )
 
 
-def _conversation_mission_statuses(db: SessionDB) -> dict[str, str]:
+def _conversation_mission_statuses(db: CliSessionStore) -> dict[str, str]:
     return {
         row["mission_id"]: row["status"]
         for row in db.list_conversation_missions(CONVERSATION_ID)
@@ -90,8 +90,8 @@ def test_cancel_mission_only_terminates_that_mission(tmp_path: Path):
     result = db.cancel_team_mission(mission_id="mission-A", canceled_by="user")
 
     assert result["mission_status"] == "cancelled"
-    assert db.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
-    assert db.get_team_mission_graph("mission-B")["mission"]["status"] == "active"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-B")["mission"]["status"] == "active"
     assert _conversation_mission_statuses(db) == {
         "mission-B": "active",
         "mission-A": "cancelled",
@@ -110,7 +110,7 @@ def test_cancel_mission_terminates_its_runs(tmp_path: Path):
     result = db.cancel_team_mission(mission_id="mission-A", canceled_by="user")
 
     assert [binding["run_id"] for binding in result["cancel_run_bindings"]] == ["run-x"]
-    assert db.get_run("run-x")["status"] == "cancelled"
+    assert db.runs.get("run-x")["status"] == "cancelled"
 
 
 def test_cancel_mission_does_not_touch_sibling_runs(tmp_path: Path):
@@ -124,9 +124,9 @@ def test_cancel_mission_does_not_touch_sibling_runs(tmp_path: Path):
     result = db.cancel_team_mission(mission_id="mission-A", canceled_by="user")
 
     assert [binding["run_id"] for binding in result["cancel_run_bindings"]] == ["run-x"]
-    assert db.get_run("run-x")["status"] == "cancelled"
-    assert db.get_run("run-y")["status"] == "running"
-    assert db.get_team_mission_graph("mission-B")["mission"]["status"] == "active"
+    assert db.runs.get("run-x")["status"] == "cancelled"
+    assert db.runs.get("run-y")["status"] == "running"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-B")["mission"]["status"] == "active"
 
 
 def test_cancel_last_active_mission_does_not_cancel_conv(tmp_path: Path):
@@ -153,7 +153,7 @@ def test_cancel_already_cancelled_mission_is_idempotent(tmp_path: Path):
 
     assert first["mission_status"] == "cancelled"
     assert second["mission_status"] == "cancelled"
-    assert db.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
     assert db.get_team_mission_conversation(CONVERSATION_ID)["status"] == "active"
     assert _conversation_mission_statuses(db) == {"mission-A": "cancelled"}
 

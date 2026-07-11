@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _bound_node_db(tmp_path: Path, *, output_contract: dict | None = None) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
+def _bound_node_db(tmp_path: Path, *, output_contract: dict | None = None) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-failure",
         team_id="team-1",
@@ -25,7 +25,7 @@ def _bound_node_db(tmp_path: Path, *, output_contract: dict | None = None) -> Se
         status="running",
         output_contract=output_contract or {},
     )
-    db.upsert_run(run_id="run-worker", session_id="session-worker", status="running")
+    db.runs.upsert(run_id="run-worker", session_id="session-worker", status="running")
     db.bind_team_mission_run(
         mission_id="mission-failure",
         node_id="node-worker",
