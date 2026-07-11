@@ -66,3 +66,34 @@ def test_repair_removes_only_dangling_non_authoritative_records(tmp_path):
         assert store._conn.execute("PRAGMA foreign_key_check").fetchall() == []  # noqa: SLF001
     finally:
         store.close()
+
+
+def test_auto_prune_reports_stable_result_contract(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+    try:
+        store.sessions.create("old-session", source="cli")
+        store.sessions.end("old-session", "user_exit")
+        store._conn.execute(  # noqa: SLF001
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 100 * 86400, "old-session"),
+        )
+        store._conn.commit()  # noqa: SLF001
+
+        first = store.maintenance.maybe_auto_prune_and_vacuum(
+            retention_days=90,
+            vacuum=False,
+        )
+        second = store.maintenance.maybe_auto_prune_and_vacuum(
+            retention_days=90,
+            vacuum=False,
+        )
+
+        assert first == {"skipped": False, "pruned": 1, "vacuumed": False}
+        assert second == {
+            "skipped": True,
+            "pruned": 0,
+            "vacuumed": False,
+            "reason": "interval",
+        }
+    finally:
+        store.close()

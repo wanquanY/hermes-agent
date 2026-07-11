@@ -126,15 +126,26 @@ class StorageMaintenanceService:
         except (TypeError, ValueError):
             last = 0.0
         if last and now - last < max(0, int(min_interval_hours or 0)) * 3600:
-            return {"skipped": True, "reason": "interval"}
+            return {
+                "skipped": True,
+                "pruned": 0,
+                "vacuumed": False,
+                "reason": "interval",
+            }
         pruned = self.prune_sessions(
             older_than_days=max(1, int(retention_days or 90)),
             sessions_dir=sessions_dir,
         )
+        vacuumed = False
         if vacuum and pruned:
             self.vacuum()
+            vacuumed = True
         self._metadata.set("last_auto_prune", str(now))
-        return {"skipped": False, "pruned_sessions": pruned}
+        return {
+            "skipped": False,
+            "pruned": pruned,
+            "vacuumed": vacuumed,
+        }
 
 
 __all__ = ["StorageMaintenanceService"]
