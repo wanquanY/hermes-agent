@@ -223,7 +223,7 @@ def _insert_activity_command(
     if err:
         return None, err
     return (
-        db.insert_activity_command(
+        db.activities.insert_command(
             command_id=command_id,
             activity_id=activity_id,
             kind=kind,
@@ -447,10 +447,10 @@ def activity_cancel(rid, params: dict) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    cancelled_ok = db.mark_activity_cancelled(activity_id)
+    cancelled_ok = db.activities.mark_cancelled(activity_id)
     if not cancelled_ok:
         return _ok(rid, {"ok": False, "reason": "already_terminal"})
-    activity = db.get_activity(activity_id) if callable(getattr(db, "get_activity", None)) else None
+    activity = db.activities.get(activity_id)
     conversation_id = str((activity or {}).get("conversation_id") or "").strip()
     worker_signaled = _run_sync(
         _signal_activity_cancel(activity_id, conversation_id),
@@ -542,7 +542,7 @@ def activity_list(rid, params: dict[str, Any]) -> dict:
     db = _get_db()
     return _ok(
         rid,
-        db.list_activities(
+        db.activities.list(
             conversation_id,
             status=params.get("status"),
             limit=params.get("limit"),
@@ -558,7 +558,7 @@ def activity_get(rid, params: dict[str, Any]) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    return _ok(rid, db.get_activity(activity_id))
+    return _ok(rid, db.activities.get(activity_id))
 
 
 @method("activity.mark_read")
@@ -569,4 +569,4 @@ def activity_mark_read(rid, params: dict[str, Any]) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    return _ok(rid, {"ok": db.mark_activity_read(activity_id)})
+    return _ok(rid, {"ok": db.activities.mark_read(activity_id)})
