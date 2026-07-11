@@ -3,13 +3,13 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 def _workspace(tmp_path: Path) -> dict:
@@ -18,8 +18,8 @@ def _workspace(tmp_path: Path) -> dict:
     return {"workspace_id": "workspace-1", "workspace_path": str(path)}
 
 
-def _seed_team(db: SessionDB, tmp_path: Path) -> None:
-    db.upsert_agent_profile(
+def _seed_team(db: CliSessionStore, tmp_path: Path) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader",
@@ -32,7 +32,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-leader",
         current_version_number=1,
     )
-    db.upsert_agent_profile(
+    db.profiles.upsert_agent_profile(
         profile_id="profile-builder",
         slug="builder",
         name="Builder",
@@ -45,13 +45,13 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-builder",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Team",
         description="Test team.",
         lead_agent_profile_id="profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id="profile-leader",
@@ -60,7 +60,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         profile_name="Leader",
         profile_avatar="avatar://leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-builder",
         team_id="team-1",
         agent_profile_id="profile-builder",
@@ -71,10 +71,10 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
     )
 
 
-def _participants_by_id(db: SessionDB, session_id: str) -> dict[str, dict]:
+def _participants_by_id(db: CliSessionStore, session_id: str) -> dict[str, dict]:
     return {
         row["participant_id"]: row
-        for row in db.list_conversation_participants(session_id)
+        for row in db.participants.list_conversation_participants(session_id)
     }
 
 
@@ -214,7 +214,7 @@ def test_member_chat_start_ensures_member_participant_idempotent(monkeypatch, tm
     assert captured["conversation_session_id"] == "team-session-1"
     rows = [
         row
-        for row in db.list_conversation_participants("team-session-1")
+        for row in db.participants.list_conversation_participants("team-session-1")
         if row["participant_id"] == "member:member-builder"
     ]
     assert len(rows) == 1
@@ -229,10 +229,10 @@ def test_render_snapshot_includes_participants_list(monkeypatch, tmp_path: Path)
     importlib.import_module("tui_gateway.methods.session_history")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     db = _db(tmp_path)
-    db.create_session("conv-1", source="tui")
-    db.ensure_user_participant("conv-1")
-    db.ensure_agent_participant("conv-1", agent_profile_id="profile-1", display_name="Agent")
-    db.append_message("conv-1", role="user", content="hello")
+    db.sessions.create("conv-1", source="tui")
+    db.participants.ensure_user_participant("conv-1")
+    db.participants.ensure_agent_participant("conv-1", agent_profile_id="profile-1", display_name="Agent")
+    db.messages.append("conv-1", role="user", content="hello")
     monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
 
@@ -251,9 +251,9 @@ def test_render_snapshot_includes_participants_list(monkeypatch, tmp_path: Path)
 def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> None:
     db = _db(tmp_path)
     _seed_team(db, tmp_path)
-    db.create_session("legacy-direct", source="tui")
-    db.create_session("team-session-1", source="team_mission")
-    db.upsert_session_index(
+    db.sessions.create("legacy-direct", source="tui")
+    db.sessions.create("team-session-1", source="team_mission")
+    db.session_index.upsert(
         session_id="legacy-direct",
         owner_agent_profile_id="profile-builder",
         owner_profile_version_id="version-builder",
@@ -267,7 +267,7 @@ def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> 
     )
     db._conn.execute("DELETE FROM conversation_participants")  # noqa: SLF001
 
-    result = db.reconcile_conversation_participants_one_shot()
+    result = db.participants.reconcile()
 
     assert result["ran"] is True
     assert result["inserted"] >= 5
@@ -280,13 +280,13 @@ def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> 
 
 def test_one_shot_migration_idempotent(tmp_path: Path) -> None:
     db = _db(tmp_path)
-    db.create_session("legacy-direct", source="tui")
+    db.sessions.create("legacy-direct", source="tui")
     db._conn.execute("DELETE FROM conversation_participants")  # noqa: SLF001
 
-    first = db.reconcile_conversation_participants_one_shot()
-    before = db.list_conversation_participants("legacy-direct")
-    second = db.reconcile_conversation_participants_one_shot()
-    after = db.list_conversation_participants("legacy-direct")
+    first = db.participants.reconcile()
+    before = db.participants.list_conversation_participants("legacy-direct")
+    second = db.participants.reconcile()
+    after = db.participants.list_conversation_participants("legacy-direct")
 
     assert first["inserted"] == 2
     assert second["ran"] is False
@@ -310,7 +310,11 @@ def test_participant_create_failure_does_not_block_conversation_create(monkeypat
     def fail_user_participant(*_args, **_kwargs):
         raise RuntimeError("participant write failed")
 
-    monkeypatch.setattr(db, "ensure_user_participant", fail_user_participant)
+    monkeypatch.setattr(
+        db.participants,
+        "ensure_user_participant",
+        fail_user_participant,
+    )
 
     response = server.handle_request({
         "id": "r1",
@@ -324,4 +328,4 @@ def test_participant_create_failure_does_not_block_conversation_create(monkeypat
     })
 
     assert "error" not in response
-    assert db.get_session(response["result"]["conversation_session_id"]) is not None
+    assert db.sessions.get(response["result"]["conversation_session_id"]) is not None

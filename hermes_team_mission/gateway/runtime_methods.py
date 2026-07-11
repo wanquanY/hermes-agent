@@ -143,13 +143,11 @@ def _ensure_team_dispatch_activity(
     normalized_activity_id = str(activity_id or "").strip()
     if not normalized_activity_id:
         return {}
-    existing = db.get_activity(normalized_activity_id) if callable(getattr(db, "get_activity", None)) else None
+    activities = db.activities
+    existing = activities.get(normalized_activity_id)
     if isinstance(existing, dict) and existing:
         return existing
-    create = getattr(db, "create_activity", None)
-    if not callable(create):
-        return {}
-    return create(
+    return activities.create(
         activity_id=normalized_activity_id,
         conversation_id=conversation_session_id or conversation_id,
         kind="team_dispatch",
@@ -359,7 +357,7 @@ def _clear_stuck_member_session_run(db, conversation_session_id: str) -> None:
         if not run_id or status in terminal:
             continue
         try:
-            db.upsert_run(
+            db.runs.upsert(
                 run_id=run_id,
                 session_id=conversation_session_id,
                 runtime_scope_key=str((row["runtime_scope_key"] if hasattr(row, "keys") else row[2]) or ""),
@@ -451,7 +449,7 @@ def _submit_message_to_member(
         source="team_mission.member_chat.start",
     )
     try:
-        db.upsert_conversation_participant(
+        db.participants.upsert_conversation_participant(
             conversation_session_id=conversation_session_id,
             participant_id=member_participant_id(target_member_id),
             role="member",
@@ -1671,7 +1669,7 @@ def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_i
     has materialized rows pointing back at them.
     """
     try:
-        msgs = db.get_messages(conversation_session_id) or []
+        msgs = db.messages.list(conversation_session_id) or []
     except Exception:
         return []
     turn_id = str(turn_id or "").strip()
@@ -1907,10 +1905,7 @@ def _(rid, params: dict) -> dict:
     view_retracted_total = 0
     view_retracted_by_session: dict[str, int] = {}
     if affected_source_ids:
-        try:
-            participants = db.list_conversation_participants(conversation_session_id) or []
-        except Exception:
-            participants = []
+        participants = db.participants.list_conversation_participants(conversation_session_id) or []
         seen_view_sessions: set[str] = set()
         for participant in participants:
             if not isinstance(participant, dict):
@@ -1924,13 +1919,10 @@ def _(rid, params: dict) -> dict:
             if view_session_id in seen_view_sessions:
                 continue
             seen_view_sessions.add(view_session_id)
-            try:
-                count = db.recall_member_chat_view_messages(
-                    member_chat_session_id=view_session_id,
-                    source_message_ids=affected_source_ids,
-                )
-            except Exception:
-                count = 0
+            count = db.member_chat_views.recall_member_chat_view_messages(
+                member_chat_session_id=view_session_id,
+                source_message_ids=affected_source_ids,
+            )
             if count:
                 view_retracted_by_session[view_session_id] = int(count)
                 view_retracted_total += int(count)
@@ -2230,8 +2222,8 @@ def _(rid, params: dict) -> dict:
     ).strip()
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
-    if not db.get_session(conversation_session_id):
-        db.create_session(conversation_session_id, source="team_mission", transient=False)
+    if not db.sessions.get(conversation_session_id):
+        db.sessions.create(conversation_session_id, source="team_mission", transient=False)
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,

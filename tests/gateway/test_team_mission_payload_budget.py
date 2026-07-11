@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.context.worker_context import TOOL_ARGS_BUDGET_CHARS
 from tools.registry import registry
 
@@ -57,7 +57,7 @@ def _context(tmp_path: Path, *, member_count: int = 2):
             "default_toolsets": ["file_readonly", "terminal"],
             "strengths": ["small payloads", "explicit handoff"],
         })
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     graph = db.initialize_team_mission_from_strategy(
         mission_id="mission-budget",
         title="Payload budget mission",
@@ -153,7 +153,7 @@ def test_plan_complete_excludes_full_graph_and_stays_under_8kb(tmp_path: Path):
     assert "edges" not in result
     assert "task_brief" not in json.dumps(result, ensure_ascii=False)
     assert result["graph_summary"]["node_count"] >= 2
-    assert db.get_team_mission_graph("mission-budget")["mission"]["status"] == "waiting_approval"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-budget")["mission"]["status"] == "waiting_approval"
     assert _byte_len(result) < 8192
 
 
@@ -172,7 +172,7 @@ def test_graph_summary_under_8kb_with_many_nodes(tmp_path: Path):
 
 def test_tool_args_over_budget_does_not_execute_mutation(tmp_path: Path):
     db, _root, agent = _context(tmp_path)
-    before_node_ids = {node["node_id"] for node in db.get_team_mission_graph("mission-budget")["nodes"]}
+    before_node_ids = {node["node_id"] for node in db.team_mission_graphs.get_team_mission_graph("mission-budget")["nodes"]}
 
     result = _json_error(
         registry.dispatch(
@@ -189,7 +189,7 @@ def test_tool_args_over_budget_does_not_execute_mutation(tmp_path: Path):
             parent_agent=agent,
         )
     )
-    after_node_ids = {node["node_id"] for node in db.get_team_mission_graph("mission-budget")["nodes"]}
+    after_node_ids = {node["node_id"] for node in db.team_mission_graphs.get_team_mission_graph("mission-budget")["nodes"]}
 
     assert "too large" in result["error"]
     assert before_node_ids == after_node_ids
@@ -201,7 +201,7 @@ def test_idempotency_key_reuses_existing_node(tmp_path: Path):
 
     first = _create_worker(agent, node_id="node-idempotent-a", idempotency_key="create-worker-once")
     second = _create_worker(agent, node_id="node-idempotent-a", idempotency_key="create-worker-once")
-    nodes = db.get_team_mission_graph("mission-budget")["nodes"]
+    nodes = db.team_mission_graphs.get_team_mission_graph("mission-budget")["nodes"]
 
     assert first["node_id"] == "node-idempotent-a"
     assert second["node_id"] == "node-idempotent-a"

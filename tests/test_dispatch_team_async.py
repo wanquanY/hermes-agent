@@ -8,15 +8,15 @@ from typing import Any
 import pytest
 
 import tools.dispatch_team_async as dispatch_tool
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tools.registry import registry
 from tui_gateway.methods.dispatch import dispatch_team_async
 from tui_gateway.run_worker import DBRpcRequestFrame
 from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 def _ids(*values: str):
@@ -37,7 +37,7 @@ def _params(**overrides: Any) -> dict[str, Any]:
 
 
 class _TeamMissionCreate:
-    def __init__(self, db: SessionDB | None = None) -> None:
+    def __init__(self, db: CliSessionStore | None = None) -> None:
         self.db = db
         self.calls: list[tuple[Any, dict[str, Any]]] = []
         self.pending_row: dict[str, Any] | None = None
@@ -45,7 +45,7 @@ class _TeamMissionCreate:
     def __call__(self, rid, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((rid, params))
         if self.db is not None:
-            self.pending_row = self.db.get_activity("act-1")
+            self.pending_row = self.db.activities.get("act-1")
         return {
             "jsonrpc": "2.0",
             "id": rid,
@@ -94,7 +94,7 @@ async def test_dispatch_team_returns_activity_id_and_mission_id(tmp_path: Path) 
     )
 
     assert result == {"activity_id": "act-1", "mission_id": "mission-1"}
-    assert db.get_activity("act-1")["status"] == "running"
+    assert db.activities.get("act-1")["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -109,7 +109,7 @@ async def test_dispatch_team_links_target_mission_id_after_create(tmp_path: Path
         time_fn=lambda: 123.0,
     )
 
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "running"
     assert row["target_team_id"] == "team-1"
     assert row["target_mission_id"] == "mission-1"
@@ -136,7 +136,7 @@ async def test_dispatch_team_missing_team_id_marks_activity_failed(tmp_path: Pat
         "error": "target_team_id required",
     }
     assert create.calls == []
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "failed"
     assert row["result_summary"] == "target_team_id required"
     assert row["completed_at"] == 123.0
@@ -153,7 +153,7 @@ async def test_dispatch_team_with_parent_activity_id_links_correctly(tmp_path: P
         uuid_factory=_ids("act-1", "mission-1"),
     )
 
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["parent_activity_id"] == "leader-activity"
     assert row["conversation_id"] == "conv-parent"
 

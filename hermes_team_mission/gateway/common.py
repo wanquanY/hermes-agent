@@ -79,14 +79,15 @@ def _team_detail_projection_for_conversation(db, conversation: dict | None = Non
     ).strip()
     if not team_id:
         return {}
-    if not hasattr(db, "get_agent_team_with_members") and not hasattr(db, "get_agent_team"):
+    teams = getattr(db, "teams", None)
+    if teams is None:
         return {}
-    team = db.get_agent_team_with_members(team_id) if hasattr(db, "get_agent_team_with_members") else db.get_agent_team(team_id)
+    team = teams.get_agent_team_with_members(team_id)
     if not isinstance(team, dict) or not team:
         return {}
     members = team.get("members") if isinstance(team.get("members"), list) else []
-    if not members and hasattr(db, "list_agent_team_members"):
-        members = db.list_agent_team_members(team_id)
+    if not members:
+        members = teams.list_agent_team_members(team_id)
     return _registry_team_for_projection(
         team,
         members=members if isinstance(members, list) else [],
@@ -155,7 +156,7 @@ def _conversation_title_from_submit(db, params: dict, text: str) -> str:
     if not message_title:
         return ""
     try:
-        return db.sanitize_title(message_title[:100].rstrip()) or ""
+        return db.sessions.sanitize_title(message_title[:100].rstrip()) or ""
     except Exception:
         return ""
 
@@ -168,8 +169,8 @@ def _ensure_team_mission_runtime_session_shell(conversation_session_id: str) -> 
     if runtime_db is None:
         return "team mission runtime state db unavailable"
     try:
-        if not runtime_db.get_session(conversation_session_id):
-            runtime_db.create_session(conversation_session_id, source="team_mission", transient=False)
+        if not runtime_db.sessions.get(conversation_session_id):
+            runtime_db.sessions.create(conversation_session_id, source="team_mission", transient=False)
     except Exception:
         return "team mission runtime session shell unavailable"
     return ""
@@ -402,7 +403,7 @@ def _members_with_capability_snapshot(members: list, snapshot: dict) -> list:
 def _resolve_team_capability_snapshot_for_params(db, params: dict, *, team_id: str = "") -> dict:
     snapshot_id = _team_capability_snapshot_id(params)
     if snapshot_id:
-        return db.get_team_capability_snapshot(snapshot_id)
+        return db.team_capabilities.get(snapshot_id)
     resolved_team_id = str(team_id or params.get("team_id") or params.get("teamId") or "").strip()
     if not resolved_team_id:
         return {}
@@ -420,7 +421,7 @@ def _resolve_team_capability_snapshot_from_registry(
     if not resolved_team_id:
         return {}
     registry_payload = _team_capability_registry_payload(db, params, team_id=resolved_team_id)
-    return db.resolve_team_capability_snapshot(
+    return db.team_capabilities.resolve(
         team_id=resolved_team_id,
         source_packet=registry_payload,
         force_refresh=force_refresh,
@@ -443,10 +444,11 @@ def _team_id_for_profile(params: dict, *, mission: dict | None = None, conversat
 
 def _archived_team_write_error(db, team_id: str) -> str:
     resolved_team_id = str(team_id or "").strip()
-    if not resolved_team_id or not hasattr(db, "get_agent_team"):
+    teams = getattr(db, "teams", None)
+    if not resolved_team_id or teams is None:
         return ""
     try:
-        team = db.get_agent_team(resolved_team_id)
+        team = teams.get_agent_team(resolved_team_id)
     except Exception:
         return ""
     if isinstance(team, dict) and str(team.get("status") or "").strip().lower() == "archived":
@@ -456,9 +458,10 @@ def _archived_team_write_error(db, team_id: str) -> str:
 
 def _team_default_mode(db, team_id: str) -> str:
     resolved_team_id = str(team_id or "").strip()
-    if not resolved_team_id or not hasattr(db, "get_agent_team"):
+    teams = getattr(db, "teams", None)
+    if not resolved_team_id or teams is None:
         return ""
-    team = db.get_agent_team(resolved_team_id)
+    team = teams.get_agent_team(resolved_team_id)
     if not isinstance(team, dict) or not team:
         return ""
     return str(team.get("default_mode") or team.get("defaultMode") or "").strip()
@@ -503,9 +506,10 @@ def _profile_id_from_team_member(member: dict) -> str:
 
 def _profile_for_team_member(db, member: dict) -> dict:
     profile_id = _profile_id_from_team_member(member)
-    if not profile_id or not hasattr(db, "get_agent_profile"):
+    profiles = getattr(db, "profiles", None)
+    if not profile_id or profiles is None:
         return {}
-    profile = db.get_agent_profile(profile_id)
+    profile = profiles.get_agent_profile(profile_id)
     return profile if isinstance(profile, dict) else {}
 
 
@@ -513,9 +517,10 @@ def _team_capability_registry_payload(db, params: dict, *, team_id: str = "") ->
     resolved_team_id = str(team_id or params.get("team_id") or params.get("teamId") or "").strip()
     if not resolved_team_id:
         raise ValueError("team_id required")
-    if not hasattr(db, "get_agent_team"):
+    teams = getattr(db, "teams", None)
+    if teams is None:
         raise ValueError("team registry unavailable")
-    team = db.get_agent_team(resolved_team_id)
+    team = teams.get_agent_team(resolved_team_id)
     if not isinstance(team, dict) or not team:
         raise ValueError(f"team not found: {resolved_team_id}")
     runtime_members = resolve_team_runtime_members({"team_id": resolved_team_id}, db=db)
@@ -593,7 +598,7 @@ def _bind_team_capability_snapshot_for_mission(db, *, mission_id: str, conversat
     snapshot_id = str((snapshot or {}).get("snapshot_id") or "").strip()
     if not snapshot_id:
         return {}
-    return db.bind_team_capability_snapshot(
+    return db.team_capabilities.bind(
         mission_id=mission_id,
         conversation_id=conversation_id,
         snapshot_id=snapshot_id,
@@ -1955,13 +1960,13 @@ def _ensure_team_conversation_session(db, conversation_session_id: str) -> bool:
     conversation_session_id = str(conversation_session_id or "").strip()
     if not conversation_session_id:
         raise ValueError("conversation_session_id required")
-    if db.get_session(conversation_session_id):
+    if db.sessions.get(conversation_session_id):
         return False
     ensure_session = getattr(db, "ensure_session", None)
     if callable(ensure_session):
         ensure_session(conversation_session_id, source="team_mission", transient=False)
     else:
-        db.create_session(conversation_session_id, source="team_mission", transient=False)
+        db.sessions.create(conversation_session_id, source="team_mission", transient=False)
     return True
 
 

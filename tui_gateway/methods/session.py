@@ -253,30 +253,26 @@ def _ensure_session_create_conversation_participants(
     scope = str(runtime_scope_key or "").strip()
     if not profile_id and scope.startswith("profile:"):
         profile_id = scope.split("profile:", 1)[1].strip()
-    ensure_user = getattr(db, "ensure_user_participant", None)
-    ensure_agent = getattr(db, "ensure_agent_participant", None)
-    if callable(ensure_user):
-        ensure_user(session_id, user_id="default")
-    if callable(ensure_agent):
-        ensure_agent(
-            session_id,
-            agent_profile_id=profile_id,
-            display_name=str(
-                params.get("agent_profile_name")
-                or params.get("agentProfileName")
-                or params.get("profile_name")
-                or params.get("profileName")
-                or ""
-            ).strip(),
-            avatar=str(
-                params.get("agent_profile_avatar")
-                or params.get("agentProfileAvatar")
-                or params.get("profile_avatar")
-                or params.get("profileAvatar")
-                or params.get("avatar")
-                or ""
-            ).strip(),
-        )
+    db.participants.ensure_user_participant(session_id, user_id="default")
+    db.participants.ensure_agent_participant(
+        session_id,
+        agent_profile_id=profile_id,
+        display_name=str(
+            params.get("agent_profile_name")
+            or params.get("agentProfileName")
+            or params.get("profile_name")
+            or params.get("profileName")
+            or ""
+        ).strip(),
+        avatar=str(
+            params.get("agent_profile_avatar")
+            or params.get("agentProfileAvatar")
+            or params.get("profile_avatar")
+            or params.get("profileAvatar")
+            or params.get("avatar")
+            or ""
+        ).strip(),
+    )
 
 
 def _project_session_index_on_create(

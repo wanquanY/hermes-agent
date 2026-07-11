@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
 
-def _seed_participants(db: SessionDB) -> None:
-    db.create_session("team-session-1", source="team_mission", transient=False)
-    db.upsert_conversation_participant(
+def _seed_participants(db: CliSessionStore) -> None:
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    db.participants.upsert_conversation_participant(
         conversation_session_id="team-session-1",
         participant_id="leader:conv-1",
         role="leader",
@@ -18,7 +18,7 @@ def _seed_participants(db: SessionDB) -> None:
         runtime_scope_key="team:conv-1:leader-conversation",
         display_name="Lead",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id="team-session-1",
         participant_id="member:m-alice",
         role="member",
@@ -31,7 +31,7 @@ def _seed_participants(db: SessionDB) -> None:
 
 def test_conversation_participants_rpc_lists_roster(tmp_path: Path, monkeypatch):
     gateway = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_participants(db)
     monkeypatch.setattr(gateway, "_get_db", lambda: db)
 
@@ -52,7 +52,7 @@ def test_conversation_participants_rpc_lists_roster(tmp_path: Path, monkeypatch)
 
 def test_conversation_participants_rpc_accepts_session_alias(tmp_path: Path, monkeypatch):
     gateway = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_participants(db)
     monkeypatch.setattr(gateway, "_get_db", lambda: db)
 

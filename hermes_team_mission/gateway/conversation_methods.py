@@ -141,7 +141,7 @@ def _(rid, params: dict) -> dict:
         return _db_unavailable_error(rid, code=5008)
     snapshot_id = _team_capability_snapshot_id(params) or str(params.get("snapshot_id") or params.get("snapshotId") or "").strip()
     if snapshot_id:
-        snapshot = db.get_team_capability_snapshot(snapshot_id)
+        snapshot = db.team_capabilities.get(snapshot_id)
         if not snapshot:
             return _err(rid, 4040, "team capability snapshot not found")
         return _ok(rid, {"snapshot": snapshot})
@@ -227,17 +227,17 @@ def _(rid, params: dict) -> dict:
         mission_id = str(mission.get("mission_id") or "").strip()
     try:
         team_id = _team_id_for_profile(params, mission=mission, conversation=conversation)
-        snapshot = db.get_team_capability_snapshot(snapshot_id) if snapshot_id else {}
+        snapshot = db.team_capabilities.get(snapshot_id) if snapshot_id else {}
         binding = {}
         source = "snapshot_id" if snapshot else ""
         if mission_id:
-            binding = db.get_team_capability_snapshot_binding(mission_id)
+            binding = db.team_capabilities.get_binding(mission_id)
             if not snapshot:
-                snapshot = db.get_bound_team_capability_snapshot(mission_id)
+                snapshot = db.team_capabilities.get_bound(mission_id)
                 if snapshot:
                     source = "mission_binding"
         if not snapshot:
-            snapshot = db.get_latest_team_capability_snapshot(team_id) if team_id else {}
+            snapshot = db.team_capabilities.get_latest(team_id) if team_id else {}
             if snapshot:
                 source = "latest_team_snapshot"
         registry_error = ""
@@ -477,7 +477,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 5008, f"team capability snapshot bind failed: {exc}")
     try:
         if request_activity_id:
-            activity = db.bind_activity_to_mission(
+            activity = db.activities.bind_to_mission(
                 activity_id=request_activity_id,
                 conversation_id=conversation_session_id,
                 mission_id=mission_id,
@@ -486,7 +486,7 @@ def _(rid, params: dict) -> dict:
                 prompt_summary=str(params.get("title") or params.get("objective") or params.get("prompt") or ""),
             )
         else:
-            activity = db.ensure_mission_activity(
+            activity = db.activities.ensure_mission(
                 conversation_id=conversation_session_id,
                 mission_id=mission_id,
                 status="running",
@@ -681,7 +681,7 @@ def _(rid, params: dict) -> dict:
             "conversation_session_id": conversation_session_id,
             "created": created,
             "conversation": conversation,
-            "session": db.get_session(conversation_session_id) or {},
+            "session": db.sessions.get(conversation_session_id) or {},
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
             "graph": graph if isinstance(graph, dict) else {},
@@ -767,7 +767,7 @@ def _(rid, params: dict) -> dict:
                 "participants": [],
             },
         )
-    participants = db.list_conversation_participants(conversation_session_id)
+    participants = db.participants.list_conversation_participants(conversation_session_id)
     return _ok(
         rid,
         {
