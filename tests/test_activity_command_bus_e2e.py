@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 from tui_gateway.services.activity_reconciler import ActivityReconciler
 
@@ -26,8 +26,8 @@ def _assert_ok(response: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def gateway_db(tmp_path: Path) -> Iterator[SessionDB]:
-    """Real SessionDB swapped into the gateway server module globals.
+def gateway_db(tmp_path: Path) -> Iterator[CliSessionStore]:
+    """Real CliSessionStore swapped into the gateway server module globals.
 
     Saves/restores the original db so we don't poison other tests in the
     same session.
@@ -37,7 +37,7 @@ def gateway_db(tmp_path: Path) -> Iterator[SessionDB]:
     previous_db_by_home = dict(server._db_by_home)
     previous_db_error_by_home = dict(server._db_error_by_home)
     previous_sessions = dict(server._sessions)
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     server._db = db
     server._db_error = None
     server._db_by_home = {}
@@ -55,12 +55,12 @@ def gateway_db(tmp_path: Path) -> Iterator[SessionDB]:
 
 
 @pytest.fixture
-def reconciler(gateway_db: SessionDB) -> ActivityReconciler:
+def reconciler(gateway_db: CliSessionStore) -> ActivityReconciler:
     """Reconciler bound to the e2e-fixture db, sync-driven via run_one_cycle()."""
     return ActivityReconciler(gateway_db)
 
 
-def _list_command_events(db: SessionDB) -> list[dict[str, Any]]:
+def _list_command_events(db: CliSessionStore) -> list[dict[str, Any]]:
     """Return all activity.command.* events sorted by seq."""
     with db._lock:
         rows = db._conn.execute(
@@ -71,18 +71,18 @@ def _list_command_events(db: SessionDB) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _command(db: SessionDB, command_id: str) -> dict[str, Any]:
-    row = db.get_activity_command(command_id)
+def _command(db: CliSessionStore, command_id: str) -> dict[str, Any]:
+    row = db.activities.get_command(command_id)
     assert row
     return row
 
 
-def _commands_for_activity(db: SessionDB, activity_id: str) -> list[dict[str, Any]]:
-    return db.list_activity_commands_for_activity(activity_id, limit=50)
+def _commands_for_activity(db: CliSessionStore, activity_id: str) -> list[dict[str, Any]]:
+    return db.activities.list_commands(activity_id, limit=50)
 
 
 def _command_by_source(
-    db: SessionDB,
+    db: CliSessionStore,
     activity_id: str,
     source: str,
 ) -> dict[str, Any]:
@@ -95,7 +95,7 @@ def _command_by_source(
     return matches[0]
 
 
-def _set_intent_at(db: SessionDB, command_id: str, value: float) -> None:
+def _set_intent_at(db: CliSessionStore, command_id: str, value: float) -> None:
     with db._lock:
         db._conn.execute(
             "UPDATE activity_commands SET intent_at = ? WHERE command_id = ?",
@@ -104,34 +104,34 @@ def _set_intent_at(db: SessionDB, command_id: str, value: float) -> None:
 
 
 def _create_activity_row(
-    db: SessionDB,
+    db: CliSessionStore,
     activity_id: str,
     *,
     conversation_id: str | None = None,
     kind: str = "mission",
     status: str = "pending",
 ) -> dict[str, Any]:
-    activity = db.create_activity(
+    activity = db.activities.create(
         activity_id=activity_id,
         conversation_id=conversation_id or f"session-{activity_id}",
         kind=kind,
         status=status,
     )
     if status != "pending":
-        db.update_activity_status(activity_id, status)
-        activity = db.get_activity(activity_id)
+        db.activities.update_status(activity_id, status)
+        activity = db.activities.get(activity_id)
     return activity
 
 
 def _insert_command(
-    db: SessionDB,
+    db: CliSessionStore,
     command_id: str,
     *,
     activity_id: str,
     kind: str = "create",
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return db.insert_activity_command(
+    return db.activities.insert_command(
         command_id=command_id,
         activity_id=activity_id,
         kind=kind,
@@ -151,8 +151,8 @@ def _workspace_payload(tmp_path: Path, name: str = "workspace-1") -> dict[str, s
     return {"workspace_id": name, "workspace_path": str(workspace)}
 
 
-def _seed_registry_team(db: SessionDB, tmp_path: Path) -> None:
-    db.upsert_agent_profile(
+def _seed_registry_team(db: CliSessionStore, tmp_path: Path) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader",
@@ -166,7 +166,7 @@ def _seed_registry_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-leader",
         current_version_number=1,
     )
-    db.upsert_agent_profile(
+    db.profiles.upsert_agent_profile(
         profile_id="profile-builder",
         slug="builder",
         name="Builder",
@@ -180,7 +180,7 @@ def _seed_registry_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-builder",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Test Team",
         description="Team for activity command bus e2e tests.",
@@ -188,7 +188,7 @@ def _seed_registry_team(db: SessionDB, tmp_path: Path) -> None:
         default_mode="supervised_mission",
         policy={},
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id="profile-leader",
@@ -196,7 +196,7 @@ def _seed_registry_team(db: SessionDB, tmp_path: Path) -> None:
         role="lead",
         capability_tags=["planning"],
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-builder",
         team_id="team-1",
         agent_profile_id="profile-builder",
@@ -238,10 +238,10 @@ def _root_node_id(graph: dict[str, Any]) -> str:
     return str(node["node_id"])
 
 
-def _install_ready_prompt_session(db: SessionDB) -> None:
+def _install_ready_prompt_session(db: CliSessionStore) -> None:
     ready = threading.Event()
     ready.set()
-    db.create_session("prompt-session", source="tui")
+    db.sessions.create("prompt-session", source="tui")
     server._sessions["runtime-prompt"] = {
         "agent": None,
         "agent_ready": ready,
@@ -263,7 +263,7 @@ def _install_ready_prompt_session(db: SessionDB) -> None:
 
 
 def test_create_lifecycle_rpc_to_satisfied_with_event(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """create RPC -> command(accepted) -> reconciler -> command(satisfied) +
@@ -293,7 +293,7 @@ def test_create_lifecycle_rpc_to_satisfied_with_event(
 
     assert summary["satisfied"] == 1
     assert _command(gateway_db, "cmd-create-e2e")["state"] == "satisfied"
-    assert gateway_db.get_activity("act-create-e2e")["activity_id"] == "act-create-e2e"
+    assert gateway_db.activities.get("act-create-e2e")["activity_id"] == "act-create-e2e"
     events = _list_command_events(gateway_db)
     assert len(events) == 1
     assert events[0]["event_type"] == "activity.command.created"
@@ -301,7 +301,7 @@ def test_create_lifecycle_rpc_to_satisfied_with_event(
 
 
 def test_start_lifecycle_accepted_then_dispatched_then_timeout_to_failed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """start RPC -> accepted -> cycle -> dispatched + start.accepted event ->
@@ -346,7 +346,7 @@ def test_start_lifecycle_accepted_then_dispatched_then_timeout_to_failed(
 
 
 def test_cancel_lifecycle_rpc_to_satisfied_with_event(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """activity.command.cancel RPC -> command(accepted) -> reconciler ->
@@ -368,7 +368,7 @@ def test_cancel_lifecycle_rpc_to_satisfied_with_event(
 
     assert summary["satisfied"] == 1
     assert _command(gateway_db, "cmd-cancel-e2e")["state"] == "satisfied"
-    assert gateway_db.get_activity("act-mission-cancel-e2e")["status"] == "cancelled"
+    assert gateway_db.activities.get("act-mission-cancel-e2e")["status"] == "cancelled"
     events = _list_command_events(gateway_db)
     assert [event["event_type"] for event in events] == [
         "activity.command.cancelled"
@@ -377,7 +377,7 @@ def test_cancel_lifecycle_rpc_to_satisfied_with_event(
 
 
 def test_complete_lifecycle_rpc_to_satisfied_with_event(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """activity.complete RPC -> command(accepted) -> reconciler ->
@@ -400,7 +400,7 @@ def test_complete_lifecycle_rpc_to_satisfied_with_event(
 
     assert summary["satisfied"] == 1
     assert _command(gateway_db, "cmd-complete-e2e")["state"] == "satisfied"
-    activity = gateway_db.get_activity("act-complete-e2e")
+    activity = gateway_db.activities.get("act-complete-e2e")
     assert activity["status"] == "completed"
     assert activity["completed_at"] is not None
     events = _list_command_events(gateway_db)
@@ -415,7 +415,7 @@ def test_complete_lifecycle_rpc_to_satisfied_with_event(
 
 
 def test_reconciler_double_cycle_does_not_double_emit_events(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """同一 satisfied 命令被 reconciler 二次扫描时, 不会重复写 event."""
@@ -441,7 +441,7 @@ def test_reconciler_double_cycle_does_not_double_emit_events(
 
 
 def test_activity_create_with_same_command_id_returns_already_existed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     """RPC 层 idempotency: 第二次 create 同 command_id 返 already_existed=True."""
     params = {
@@ -462,7 +462,7 @@ def test_activity_create_with_same_command_id_returns_already_existed(
 
 
 def test_reconciler_idempotent_when_activity_row_pre_exists(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """create 命令但 activities 行已存在(race created), reconciler 不应报错
@@ -485,7 +485,7 @@ def test_reconciler_idempotent_when_activity_row_pre_exists(
 
     assert summary["satisfied"] == 1
     assert _command(gateway_db, "cmd-race-created")["state"] == "satisfied"
-    assert len(gateway_db.list_activities("session-race")) == 1
+    assert len(gateway_db.activities.list("session-race")) == 1
 
 
 # -- Group C: legacy bridge end to end --------------------------------------
@@ -493,7 +493,7 @@ def test_reconciler_idempotent_when_activity_row_pre_exists(
 
 
 def test_team_mission_create_writes_legacy_audit_row(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     """call team_mission.create RPC -> activity_commands 表多一行
@@ -509,7 +509,7 @@ def test_team_mission_create_writes_legacy_audit_row(
 
 
 def test_team_mission_create_binds_request_activity_to_mission(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     """team_mission.create binds the stable request Activity to its spawned mission."""
@@ -537,7 +537,7 @@ def test_team_mission_create_binds_request_activity_to_mission(
     )
 
     assert result["activity_id"] == "act-team_dispatch-create-e2e"
-    activity = gateway_db.get_activity("act-team_dispatch-create-e2e")
+    activity = gateway_db.activities.get("act-team_dispatch-create-e2e")
     assert activity
     assert activity["kind"] == "team_dispatch"
     assert activity["target_mission_id"] == "mission-activity-first"
@@ -553,7 +553,7 @@ def test_team_mission_create_binds_request_activity_to_mission(
 
 
 def test_team_mission_cancel_writes_legacy_audit_row_and_returns_4040_for_unknown(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     """call team_mission.cancel(mission_id='unknown') -> 4040 +
     activity_commands 行(legacy_bridge 仍写入审计, kind=cancel)."""
@@ -574,7 +574,7 @@ def test_team_mission_cancel_writes_legacy_audit_row_and_returns_4040_for_unknow
 
 
 def test_team_mission_node_start_writes_legacy_audit_row(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     tmp_path: Path,
 ) -> None:
     """call team_mission.node.start -> activity_commands 行 kind=start."""
@@ -603,7 +603,7 @@ def test_team_mission_node_start_writes_legacy_audit_row(
 
 
 def test_team_mission_message_submit_writes_legacy_audit_row_kind_start(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     """call team_mission.message.submit -> activity_commands 行 kind=start
     activity_id=chat:<conversation_session_id> for callers without a request Activity."""
@@ -629,7 +629,7 @@ def test_team_mission_message_submit_writes_legacy_audit_row_kind_start(
 
 
 def test_team_mission_message_submit_uses_request_activity_owner(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     """Activity-first team task requests use the client request Activity as owner."""
     response = _call(
@@ -645,7 +645,7 @@ def test_team_mission_message_submit_uses_request_activity_owner(
     )
 
     assert response["error"]["code"] in {4004, 4094, 5008}
-    activity = gateway_db.get_activity("act-team_dispatch-submit-e2e")
+    activity = gateway_db.activities.get("act-team_dispatch-submit-e2e")
     assert activity
     assert activity["kind"] == "team_dispatch"
     assert activity["conversation_id"] == "team-session-message-e2e"
@@ -660,7 +660,7 @@ def test_team_mission_message_submit_uses_request_activity_owner(
 
 
 def test_prompt_submit_writes_legacy_audit_row_with_chat_activity_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     """call prompt.submit -> activity_commands 行 kind=start
     activity_id=chat:<session_id>."""
@@ -690,15 +690,15 @@ def test_prompt_submit_writes_legacy_audit_row_with_chat_activity_id(
 
 
 def test_state_machine_rejects_illegal_transition(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
-    """直接 db.update_activity_command_state(satisfied -> dispatched) 应失败
+    """直接 db.activities.update_command_state(satisfied -> dispatched) 应失败
     (legal transitions enforce 在 1.A 的 with_state)."""
     _insert_command(gateway_db, "cmd-illegal", activity_id="act-illegal")
     reconciler.run_one_cycle()
 
-    row = gateway_db.update_activity_command_state(
+    row = gateway_db.activities.update_command_state(
         "cmd-illegal",
         next_state="dispatched",
     )
@@ -708,7 +708,7 @@ def test_state_machine_rejects_illegal_transition(
 
 
 def test_satisfied_command_is_never_picked_up_again(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """satisfied 命令在后续 cycle 中不会被 list_pending 返回."""
@@ -719,11 +719,11 @@ def test_satisfied_command_is_never_picked_up_again(
 
     assert _command(gateway_db, "cmd-terminal-satisfied")["state"] == "satisfied"
     assert second["processed"] == 0
-    assert gateway_db.list_pending_activity_commands() == []
+    assert gateway_db.activities.list_pending_commands() == []
 
 
 def test_failed_command_is_never_picked_up_again(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """failed 命令在后续 cycle 中不会被 list_pending 返回."""
@@ -740,7 +740,7 @@ def test_failed_command_is_never_picked_up_again(
     assert first["failed"] == 1
     assert _command(gateway_db, "cmd-failed")["state"] == "failed"
     assert second["processed"] == 0
-    assert gateway_db.list_pending_activity_commands() == []
+    assert gateway_db.activities.list_pending_commands() == []
 
 
 # -- Group E: multi-command queue and ordering ------------------------------
@@ -748,7 +748,7 @@ def test_failed_command_is_never_picked_up_again(
 
 
 def test_multiple_pending_commands_processed_in_intent_at_order(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """3 个不同 intent_at 的命令, reconciler 按时间顺序处理."""
@@ -772,7 +772,7 @@ def test_multiple_pending_commands_processed_in_intent_at_order(
 
 
 def test_one_failing_handler_does_not_stop_other_commands_in_same_cycle(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """一个命令 handler 抛异常(被 try/except 捕获), 其他命令仍在同 cycle 完成."""
@@ -806,7 +806,7 @@ def test_one_failing_handler_does_not_stop_other_commands_in_same_cycle(
 
 
 def test_event_carries_activity_id_in_run_events_column(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """Phase 0 (activity_id 列) + 1.C (event emit) 集成:
@@ -864,7 +864,7 @@ def test_event_carries_activity_id_in_run_events_column(
 
 
 def test_event_namespace_isolated_from_legacy_activity_running(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
     reconciler: ActivityReconciler,
 ) -> None:
     """所有 reconciler emit 的事件 event_type 都是 activity.command.* 前缀,
