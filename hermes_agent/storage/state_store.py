@@ -4,7 +4,6 @@
 from pathlib import Path
 
 from hermes_agent.application.state_facade.message_facade import MessageStateFacadeMixin
-from hermes_agent.application.state_facade.run_facade import RunStateMixin
 from hermes_agent.application.state_facade.session_facade import SessionStateFacadeMixin
 from hermes_agent.application.state_facade.storage_engine_facade import (
     DEFAULT_DB_PATH,
@@ -27,7 +26,6 @@ class HermesStateStore(
     TeamMissionStateMixin,
     SessionStateFacadeMixin,
     MessageStateFacadeMixin,
-    RunStateMixin,
     StateMaintenanceMixin,
     SessionHandoffStateMixin,
 ):

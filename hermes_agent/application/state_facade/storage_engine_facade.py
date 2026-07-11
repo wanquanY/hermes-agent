@@ -58,7 +58,6 @@ from hermes_agent.domain.run_event_codec import update_run_event_frame_columns
 from hermes_agent.domain.run_event_index import project_run_event_search_index
 from hermes_agent.domain.run_event_index import runtime_source_seq_from_event
 from hermes_agent.domain.session_runtime_state import session_info_record
-from hermes_agent.application.state_facade.run_facade import RunStateMixin
 from hermes_agent.read_models.tool_events import backfill_tool_events_from_run_events
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
