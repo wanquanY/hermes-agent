@@ -35,7 +35,7 @@ def get_activity_tool(args: dict, **kwargs) -> dict[str, Any]:
     proxy = get_default_worker_db_proxy()
     if proxy is None:
         raise RuntimeError("get_activity requires worker DB IPC")
-    row = proxy.get_activity(activity_id)
+    row = proxy.activities.get(activity_id)
     if not row:
         return {"activity_id": activity_id, "found": False}
     result = dict(row)

@@ -11,7 +11,7 @@ from agent.activity_event_bus import (
     set_default_activity_event_bus,
 )
 from agent.conversation_loop import _drain_activity_events_for_api
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.run_worker import (
     ActivityEventFrame,
     EventFrame,
@@ -59,11 +59,11 @@ class _FakeSender:
         return True
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _make_router(db: SessionDB):
+def _make_router(db: CliSessionStore):
     sender = _FakeSender()
     events: list[dict[str, Any]] = []
 
@@ -79,15 +79,15 @@ def _make_router(db: SessionDB):
     return router, sender, events
 
 
-def _activity(db: SessionDB, activity_id: str = "act-1") -> None:
-    db.create_activity(
+def _activity(db: CliSessionStore, activity_id: str = "act-1") -> None:
+    db.activities.create(
         activity_id=activity_id,
         conversation_id="conv-parent",
         kind="agent_dispatch",
         target_profile_id="profile-worker",
         prompt_summary="Do the long task",
     )
-    db.update_activity_status(activity_id, "running", started_at=100.0)
+    db.activities.update_status(activity_id, "running", started_at=100.0)
 
 
 def test_activity_event_bus_push_and_drain() -> None:
@@ -186,7 +186,7 @@ async def test_dispatched_worker_completion_marks_activity_completed(
 
     await router.on_run_terminal("conv-child", RunTerminalFrame(run_id="run-1", status="completed"))
 
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "completed"
     assert row["result_summary"] == "All tests passed with a long explanation."
     result_json = json.loads(row["result_json"])
@@ -221,7 +221,7 @@ async def test_dispatched_worker_failure_marks_activity_failed_with_error(
         RunTerminalFrame(run_id="run-1", status="failed", message="worker exploded"),
     )
 
-    row = db.get_activity("act-1")
+    row = db.activities.get("act-1")
     assert row["status"] == "failed"
     assert row["result_summary"] == "worker exploded"
     assert events[-1]["payload"]["type"] == "activity.failed"
@@ -232,8 +232,8 @@ async def test_dispatched_worker_failure_marks_activity_failed_with_error(
 def test_get_activity_tool_handler_returns_status_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
     import tools.get_activity as get_activity
 
-    class _Proxy:
-        def get_activity(self, activity_id: str):
+    class _Activities:
+        def get(self, activity_id: str):
             assert activity_id == "act-1"
             return {
                 "activity_id": "act-1",
@@ -241,6 +241,9 @@ def test_get_activity_tool_handler_returns_status_and_result(monkeypatch: pytest
                 "result_summary": "done",
                 "result_json": '{"ok":true}',
             }
+
+    class _Proxy:
+        activities = _Activities()
 
     monkeypatch.setattr(get_activity, "get_default_worker_db_proxy", lambda: _Proxy())
 
