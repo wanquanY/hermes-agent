@@ -4,9 +4,6 @@ import json
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
-from hermes_agent.domain.run_event_codec import decode_run_event_row
-from hermes_agent.repositories.message_content_codec import decode_message_content
-from hermes_team_mission.runtime.team_transcript_writer import is_node_transcript_message
 
 
 def _text(value: Any) -> str:
@@ -94,15 +91,6 @@ def _metadata_node_id(metadata: Any) -> str:
     )
 
 
-def _row_value(row: Any, key: str, fallback: Any = "") -> Any:
-    if row is None:
-        return fallback
-    try:
-        return row[key]
-    except Exception:
-        return fallback
-
-
 def _trace_history(stage: str, **fields: Any) -> None:
     emit_dovie_diagnostic("[team-mission-node-history]", {"stage": stage, **fields})
 
@@ -177,64 +165,6 @@ def _resolve_graph(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any]
     return requested_mission_id, {}
 
 
-def _message_from_row(db: Any, row: Any) -> dict[str, Any]:
-    content = decode_message_content(_row_value(row, "content", ""))
-    role = _text(_row_value(row, "role", "assistant"))
-    if role not in {"assistant", "system", "tool", "user"}:
-        role = "assistant"
-    metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
-    row_id = int(_row_value(row, "id", 0) or 0)
-    message = {
-        "id": row_id,
-        "role": role,
-        "message_id": _text(_row_value(row, "platform_message_id", "")) or str(_row_value(row, "id", "")),
-        "timestamp": float(_row_value(row, "timestamp", 0) or 0),
-        "text": str(content or ""),
-        "metadata": metadata if isinstance(metadata, dict) else {},
-    }
-    conversation_message_id = _text(_row_value(row, "conversation_message_id", ""))
-    if conversation_message_id:
-        message["conversation_message_id"] = conversation_message_id
-    participant_id = _text(_row_value(row, "participant_id", ""))
-    if participant_id:
-        message["participant_id"] = participant_id
-    tool_call_id = _text(_row_value(row, "tool_call_id", ""))
-    if tool_call_id:
-        message["tool_call_id"] = tool_call_id
-    tool_calls = _row_value(row, "tool_calls", "")
-    if tool_calls:
-        parsed_tool_calls = _json_loads(tool_calls, [])
-        if isinstance(parsed_tool_calls, list):
-            message["tool_calls"] = parsed_tool_calls
-    reasoning = _text(
-        _row_value(row, "reasoning", "")
-        or _row_value(row, "reasoning_content", "")
-        or _row_value(row, "reasoning_details", "")
-    )
-    if reasoning:
-        message["reasoning"] = reasoning
-    if role == "tool":
-        name = _text(_row_value(row, "tool_name", ""))
-        if name:
-            message["name"] = name
-        if message["text"]:
-            message["result_text"] = message["text"]
-    return message
-
-
-def _message_matches_node_filter(message: dict[str, Any], *, activity_id: str, node_id: str) -> bool:
-    if not is_node_transcript_message(message):
-        return False
-    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-    if activity_id and _metadata_activity_id(metadata) != activity_id:
-        return False
-    if node_id:
-        message_node_id = _metadata_node_id(metadata)
-        if message_node_id and message_node_id != node_id:
-            return False
-    return True
-
-
 def _fetch_recent_messages(
     db: Any,
     session_id: str,
@@ -245,118 +175,16 @@ def _fetch_recent_messages(
     after_id: int = 0,
     before_id: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
-    if not session_id or not hasattr(db, "_conn"):
+    if not session_id:
         return [], 0
-    bounded_limit = _bounded_int(limit, default=50, minimum=1, maximum=500)
-    after_id = _cursor_value(after_id)
-    before_id = _cursor_value(before_id)
-    with db._lock:
-        active_column = db._conn.execute("PRAGMA table_info(messages)").fetchall()
-        has_active = any(_text(_row_value(row, "name")) == "active" for row in active_column)
-        active_clause = "AND active = 1" if has_active else ""
-        if activity_id:
-            # activity_id branch: full scan + Python-side node filter, then slice.
-            cursor_clause = ""
-            cursor_params: list[Any] = []
-            if after_id > 0:
-                cursor_clause = "AND id > ?"
-                cursor_params.append(after_id)
-            elif before_id > 0:
-                cursor_clause = "AND id < ?"
-                cursor_params.append(before_id)
-            rows = db._conn.execute(
-                f"""
-                SELECT *
-                FROM messages
-                WHERE session_id = ?
-                  {active_clause}
-                  {cursor_clause}
-                  AND metadata_json LIKE ?
-                ORDER BY id ASC
-                """,
-                (session_id, *cursor_params, f"%{activity_id}%"),
-            ).fetchall()
-            filtered = [
-                message
-                for message in (_message_from_row(db, row) for row in rows)
-                if _message_matches_node_filter(message, activity_id=activity_id, node_id=node_id)
-            ]
-            if after_id > 0:
-                # forward cursor: oldest-first, take the first N (earliest new)
-                return filtered[:bounded_limit], len(filtered)
-            if before_id > 0:
-                # backward cursor: ASC order, take the newest N under the cursor
-                return filtered[-bounded_limit:], len(filtered)
-            return filtered[-bounded_limit:], len(filtered)
-        total = db._conn.execute(
-            f"SELECT count(*) AS count FROM messages WHERE session_id = ? {active_clause}",
-            (session_id,),
-        ).fetchone()
-        if after_id > 0:
-            # forward cursor: only messages with id > after_id, oldest first
-            rows = db._conn.execute(
-                f"""
-                SELECT *
-                FROM messages
-                WHERE session_id = ? {active_clause}
-                  AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (session_id, after_id, bounded_limit),
-            ).fetchall()
-        elif before_id > 0:
-            # backward cursor: messages with id < before_id, newest first, then reverse to ASC
-            rows = db._conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT *
-                    FROM messages
-                    WHERE session_id = ? {active_clause}
-                      AND id < ?
-                    ORDER BY id DESC
-                    LIMIT ?
-                ) ORDER BY id ASC
-                """,
-                (session_id, before_id, bounded_limit),
-            ).fetchall()
-        else:
-            # default: recent N by id DESC, then reverse to ASC
-            rows = db._conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT *
-                    FROM messages
-                    WHERE session_id = ? {active_clause}
-                    ORDER BY id DESC
-                    LIMIT ?
-                ) ORDER BY id ASC
-                """,
-                (session_id, bounded_limit),
-            ).fetchall()
-    return [_message_from_row(db, row) for row in rows], int(_row_value(total, "count", len(rows)) or len(rows))
-
-
-def _event_from_row(row: Any, session_id: str) -> dict[str, Any]:
-    event = decode_run_event_row(row)
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    if not isinstance(event, dict):
-        event = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else payload
-    return {
-        **event,
-        "type": _text(event.get("type") or _row_value(row, "event_type", "")),
-        "session_id": _text(event.get("session_id") or _row_value(row, "execution_session_id", "")),
-        "conversation_session_id": _text(event.get("conversation_session_id")) or session_id,
-        "execution_session_id": _text(event.get("execution_session_id") or _row_value(row, "execution_session_id", "")),
-        "runtime_scope_key": _text(event.get("runtime_scope_key") or _row_value(row, "runtime_scope_key", "")),
-        "run_id": _text(event.get("run_id") or _row_value(row, "run_id", "")),
-        "turn_id": _text(event.get("turn_id") or _row_value(row, "turn_id", "")),
-        "seq": int(event.get("seq") or _row_value(row, "seq", 0) or 0),
-        "payload": event_payload,
-    }
+    return db.team_mission_node_history.list_messages(
+        session_id,
+        limit=_bounded_int(limit, default=50, minimum=1, maximum=500),
+        activity_id=_text(activity_id),
+        node_id=_text(node_id),
+        after_id=_cursor_value(after_id),
+        before_id=_cursor_value(before_id),
+    )
 
 
 def _fetch_recent_run_events(
@@ -372,82 +200,27 @@ def _fetch_recent_run_events(
     after_seq: int = 0,
     before_seq: int = 0,
 ) -> list[dict[str, Any]]:
-    if not session_id or not hasattr(db, "_conn"):
+    if not session_id:
         return []
     bounded_limit = _bounded_int(limit, default=0, minimum=0, maximum=5000)
     if bounded_limit <= 0:
         return []
-    after_seq = _cursor_value(after_seq)
-    before_seq = _cursor_value(before_seq)
-    normalized_run_id = _text(run_id)
-    include_types = sorted(event_types or set())
-    exclude_types = sorted(exclude_event_types or set())
-    clauses = [
-        "session_id = ?",
-        "(? = '' OR run_id = ?)",
-        "(? = 1 OR event_type NOT LIKE 'mission.%')",
-    ]
-    params: list[Any] = [session_id, normalized_run_id, normalized_run_id, 1 if include_control_events else 0]
-    if include_types:
-        clauses.append(f"event_type IN ({','.join('?' for _ in include_types)})")
-        params.extend(include_types)
-    if exclude_types:
-        clauses.append(f"event_type NOT IN ({','.join('?' for _ in exclude_types)})")
-        params.extend(exclude_types)
-    normalized_activity_id = _text(activity_id)
-    if normalized_activity_id:
-        clauses.append("activity_id = ?")
-        params.append(normalized_activity_id)
-    where_clause = "\n                  AND ".join(clauses)
-    with db._lock:
-        if after_seq > 0:
-            # forward cursor: seq > after_seq, oldest first (no DESC subquery)
-            params.append(after_seq)
-            params.append(bounded_limit)
-            rows = db._conn.execute(
-                f"""
-                SELECT *
-                FROM run_events
-                WHERE {where_clause}
-                  AND seq > ?
-                ORDER BY seq ASC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
-        elif before_seq > 0:
-            # backward cursor: seq < before_seq, newest first, then reverse to ASC
-            params.append(before_seq)
-            params.append(bounded_limit)
-            rows = db._conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT *
-                    FROM run_events
-                    WHERE {where_clause}
-                      AND seq < ?
-                    ORDER BY seq DESC
-                    LIMIT ?
-                ) ORDER BY seq ASC
-                """,
-                tuple(params),
-            ).fetchall()
-        else:
-            # default: recent N by seq DESC, then reverse to ASC
-            params.append(bounded_limit)
-            rows = db._conn.execute(
-                f"""
-                SELECT * FROM (
-                    SELECT *
-                    FROM run_events
-                    WHERE {where_clause}
-                    ORDER BY seq DESC
-                    LIMIT ?
-                ) ORDER BY seq ASC
-                """,
-                tuple(params),
-            ).fetchall()
-    return [_event_from_row(row, session_id) for row in rows]
+    normalized_after_seq = _cursor_value(after_seq)
+    normalized_before_seq = (
+        0 if normalized_after_seq > 0 else _cursor_value(before_seq)
+    )
+    return db.runs.list_events(
+        session_id,
+        after_seq=normalized_after_seq,
+        before_seq=normalized_before_seq,
+        run_id=_text(run_id),
+        activity_id=_text(activity_id),
+        event_types=tuple(sorted(event_types or set())),
+        exclude_event_types=tuple(sorted(exclude_event_types or set())),
+        exclude_event_type_prefixes=() if include_control_events else ("mission.",),
+        limit=bounded_limit,
+        include_internal=True,
+    )
 
 
 def get_team_mission_node_runtime_history(db: Any, params: dict[str, Any]) -> dict[str, Any]:

@@ -48,6 +48,9 @@ from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 from hermes_team_mission.domain.transcript_visibility import (
     TeamMissionTranscriptVisibilityPolicy,
 )
+from hermes_team_mission.read_models.node_history import (
+    TeamMissionNodeHistoryReadModel,
+)
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 
@@ -100,6 +103,7 @@ class CliSessionStore(TeamMissionStateMixin):
             self._lock,
         )
         self.team_missions = TeamMissionReadModel(conn)
+        self.team_mission_node_history = TeamMissionNodeHistoryReadModel(conn)
         self._session_deletion = SessionDeletionService(
             conn,
             session_repo=self._session_repo,

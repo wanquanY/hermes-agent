@@ -36,6 +36,16 @@ _logger = logging.getLogger(__name__)
 INTERNAL_EVENT_PREFIX = "_internal."
 
 
+def _normalized_text_values(values: Iterable[str]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in values
+            if str(value or "").strip()
+        )
+    )
+
+
 class AppendResult(str, Enum):
     APPLIED = "applied"
     IDEMPOTENT_SKIP = "idempotent_skip"
@@ -602,6 +612,9 @@ class EventLedger:
         runtime_scope_key: str = "",
         run_id: str = "",
         activity_id: str = "",
+        event_types: Iterable[str] = (),
+        exclude_event_types: Iterable[str] = (),
+        exclude_event_type_prefixes: Iterable[str] = (),
         include_internal: bool = False,
         limit: int = 2000,
     ) -> list[Any]:
@@ -637,6 +650,21 @@ class EventLedger:
         if normalized_activity_id:
             clauses.append("activity_id = ?")
             params.append(normalized_activity_id)
+        included_types = _normalized_text_values(event_types)
+        if included_types:
+            clauses.append(
+                f"event_type IN ({','.join('?' for _ in included_types)})"
+            )
+            params.extend(included_types)
+        excluded_types = _normalized_text_values(exclude_event_types)
+        if excluded_types:
+            clauses.append(
+                f"event_type NOT IN ({','.join('?' for _ in excluded_types)})"
+            )
+            params.extend(excluded_types)
+        for prefix in _normalized_text_values(exclude_event_type_prefixes):
+            clauses.append("event_type NOT LIKE ?")
+            params.append(f"{prefix}%")
         if active_only:
             statuses = [str(status or "").strip() for status in active_statuses if str(status or "").strip()]
             if not statuses:

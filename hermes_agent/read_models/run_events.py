@@ -36,6 +36,9 @@ class RunEventReadModel:
         runtime_scope_key: str = "",
         run_id: str = "",
         activity_id: str = "",
+        event_types: tuple[str, ...] = (),
+        exclude_event_types: tuple[str, ...] = (),
+        exclude_event_type_prefixes: tuple[str, ...] = (),
         limit: int = 2000,
         include_internal: bool = False,
     ) -> list[dict[str, Any]]:
@@ -53,6 +56,9 @@ class RunEventReadModel:
                     runtime_scope_key=runtime_scope_key,
                     run_id=run_id,
                     activity_id=activity_id,
+                    event_types=event_types,
+                    exclude_event_types=exclude_event_types,
+                    exclude_event_type_prefixes=exclude_event_type_prefixes,
                     limit=limit,
                     include_internal=include_internal,
                 )
