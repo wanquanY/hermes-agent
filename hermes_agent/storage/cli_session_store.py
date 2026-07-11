@@ -57,6 +57,9 @@ from hermes_team_mission.read_models.node_history import (
 )
 from hermes_team_mission.read_models.row_mapper import TeamMissionRowMapper
 from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
+from hermes_team_mission.runtime.transcript_projection_service import (
+    TeamTranscriptProjectionService,
+)
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 
@@ -135,6 +138,10 @@ class CliSessionStore(TeamMissionStateMixin):
             self._session_repo,
             unit_of_work=self._unit_of_work,
             visibility_policies={"team": TeamMissionTranscriptVisibilityPolicy()},
+        )
+        self.team_transcript_projections = TeamTranscriptProjectionService(
+            self,
+            self._unit_of_work,
         )
         self.team_mission_graphs = TeamMissionGraphQueryService(
             conn,

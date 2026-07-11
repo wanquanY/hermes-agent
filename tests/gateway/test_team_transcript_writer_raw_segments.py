@@ -6,15 +6,15 @@ from typing import Any
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
 
 
-def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[SessionDB, str, str]:
-    db = SessionDB(tmp_path / "state.db")
+def _create_team_session(tmp_path: Path, conversation_id: str) -> tuple[CliSessionStore, str, str]:
+    db = open_cli_session_store(tmp_path / "state.db")
     session_id = f"team-session-{conversation_id}"
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
         conversation_session_id=session_id,
@@ -93,7 +93,7 @@ def _frame(
     return frame
 
 
-def _insert_raw_run_events(db: SessionDB, session_id: str, events: list[dict[str, Any]]) -> None:
+def _insert_raw_run_events(db: CliSessionStore, session_id: str, events: list[dict[str, Any]]) -> None:
     def insert(conn):
         for event in events:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -138,7 +138,7 @@ def _conversation_message_id(session_id: str, run_id: str, message_seq_in_run: s
     )
 
 
-def _stored_messages_by_timestamp(db: SessionDB, session_id: str) -> list[dict[str, Any]]:
+def _stored_messages_by_timestamp(db: CliSessionStore, session_id: str) -> list[dict[str, Any]]:
     with db._lock:  # noqa: SLF001 - test verifies storage ordering contract.
         rows = db._conn.execute(  # noqa: SLF001 - test verifies storage ordering contract.
             """
@@ -237,9 +237,9 @@ def test_team_transcript_projects_pre_tool_assistant_segment_from_raw_stream(tmp
             message_seq_in_run=3,
         ),
     ]:
-        db.append_run_event(session_id, event)
+        db.runs.append_event(session_id, event)
 
-    messages = db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    messages = db.messages.all_as_conversation(session_id, include_storage_metadata=True)
 
     assert [message["role"] for message in messages] == ["assistant", "assistant"]
     assert [message["content"] for message in messages] == ["Opening before tools.", "Final answer."]
@@ -384,9 +384,9 @@ def test_team_transcript_raw_segment_reconstruction_deduplicates_double_written_
             message_seq_in_run=3,
         ),
     ]:
-        db.append_run_event(session_id, event)
+        db.runs.append_event(session_id, event)
 
-    messages = db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    messages = db.messages.all_as_conversation(session_id, include_storage_metadata=True)
 
     assert [message["content"] for message in messages] == [
         "好的，我来发起一个简单的任务。",
@@ -432,31 +432,27 @@ def test_team_transcript_raw_segment_backfill_orders_reconstruction_before_exist
     )
     final_conversation_message_id = _conversation_message_id(session_id, run_id, "3")
 
-    def insert_existing_final(conn):
-        return db._upsert_team_message_by_id_locked(  # noqa: SLF001 - simulates legacy projected final row.
-            conn,
-            session_id=session_id,
-            conversation_message_id=final_conversation_message_id,
-            role="assistant",
-            content="Existing final.",
-            participant_id=participant_id,
-            metadata={
-                "source": "team_mission.runtime_event",
-                "message_kind": "assistant_reply",
-                "run_id": run_id,
-                "turn_id": turn_id,
+    db.messages.upsert_team_message(
+        session_id=session_id,
+        conversation_message_id=final_conversation_message_id,
+        role="assistant",
+        content="Existing final.",
+        participant_id=participant_id,
+        metadata={
+            "source": "team_mission.runtime_event",
+            "message_kind": "assistant_reply",
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "activity_kind": "leader_chat",
+            "transcript_activity_kind": "leader_chat",
+            "team_mission": {
+                "activity_id": activity_id,
                 "activity_kind": "leader_chat",
-                "transcript_activity_kind": "leader_chat",
-                "team_mission": {
-                    "activity_id": activity_id,
-                    "activity_kind": "leader_chat",
-                },
             },
-            status="completed",
-            timestamp=complete_event["timestamp"],
-        )
-
-    db._execute_write(insert_existing_final)  # noqa: SLF001 - seeds ordering regression state.
+        },
+        status="completed",
+        timestamp=complete_event["timestamp"],
+    )
     _insert_raw_run_events(
         db,
         session_id,
@@ -490,7 +486,7 @@ def test_team_transcript_raw_segment_backfill_orders_reconstruction_before_exist
         ],
     )
 
-    db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    db.team_transcript_projections.backfill([session_id])
     stored_messages = _stored_messages_by_timestamp(db, session_id)
 
     assert [message["content"] for message in stored_messages] == [
@@ -572,7 +568,8 @@ def test_team_transcript_raw_segment_reconstruction_is_idempotent_for_reproject_
         ],
     )
 
-    messages = db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    db.team_transcript_projections.backfill([session_id])
+    messages = db.messages.all_as_conversation(session_id, include_storage_metadata=True)
     row_ids = [message["message_id"] for message in messages]
 
     assert [message["content"] for message in messages] == ["Backfilled opening.", "Backfilled final."]
@@ -586,7 +583,7 @@ def test_team_transcript_raw_segment_reconstruction_is_idempotent_for_reproject_
         )
 
     db._execute_write(reproject)  # noqa: SLF001 - verifies duplicate projection idempotency.
-    messages_after_reproject = db.get_conversation_message_read_model(
+    messages_after_reproject = db.messages.all_as_conversation(
         session_id,
         include_storage_metadata=True,
     )
@@ -606,7 +603,8 @@ def test_team_transcript_raw_segment_reconstruction_is_idempotent_for_reproject_
         )
 
     db._execute_write(reset_complete_projection)  # noqa: SLF001 - forces a backfill rerun.
-    messages_after_backfill = db.get_conversation_message_read_model(
+    db.team_transcript_projections.backfill([session_id])
+    messages_after_backfill = db.messages.all_as_conversation(
         session_id,
         include_storage_metadata=True,
     )
@@ -664,9 +662,9 @@ def test_team_transcript_single_segment_turn_stays_unchanged_without_reconstruct
             message_seq_in_run=1,
         ),
     ]:
-        db.append_run_event(session_id, event)
+        db.runs.append_event(session_id, event)
 
-    messages = db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    messages = db.messages.all_as_conversation(session_id, include_storage_metadata=True)
 
     assert len(messages) == 1
     assert messages[0]["content"] == "Only segment."
@@ -681,7 +679,7 @@ def test_team_transcript_message_seq_zero_uses_explicit_zero_identity(tmp_path: 
     activity_id = f"chat:{session_id}"
     client_message_id = f"{turn_id}:assistant-segment:0"
 
-    event = db.append_run_event(
+    event = db.runs.append_event(
         session_id,
         _frame(
             session_id=session_id,
@@ -699,7 +697,7 @@ def test_team_transcript_message_seq_zero_uses_explicit_zero_identity(tmp_path: 
 
     expected = _conversation_message_id(session_id, run_id, "0")
     old_fallback = _conversation_message_id(session_id, run_id, client_message_id)
-    messages = db.get_conversation_message_read_model(session_id, include_storage_metadata=True)
+    messages = db.messages.all_as_conversation(session_id, include_storage_metadata=True)
 
     assert event["_projected_message_id"] == expected
     assert expected != old_fallback

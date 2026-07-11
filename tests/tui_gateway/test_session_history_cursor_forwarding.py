@@ -69,3 +69,41 @@ def test_session_messages_forwards_before_seq_to_run_event_read_model(
     ]
     assert response["result"]["runEvents"] == [{"seq": 1}, {"seq": 2}]
     assert response["result"]["maxSeq"] == 2
+
+
+def test_session_messages_backfills_team_projection_before_paging(monkeypatch) -> None:
+    order: list[str] = []
+
+    class TeamSessions(_Sessions):
+        @staticmethod
+        def get(session_id: str) -> dict:
+            return {"id": session_id, "conversation_kind": "team"}
+
+    class TeamMessages(_Messages):
+        @staticmethod
+        def page_as_conversation(*_args, **_kwargs) -> dict:
+            order.append("page")
+            return {"messages": [], "pageInfo": {}}
+
+    class TeamTranscriptProjections:
+        @staticmethod
+        def backfill(session_ids: list[str]) -> dict[str, int]:
+            order.append("backfill")
+            assert session_ids == ["team-session-1"]
+            return {"projected_messages": 1, "merged_artifacts": 0}
+
+    db = SimpleNamespace(
+        sessions=TeamSessions(),
+        messages=TeamMessages(),
+        branches=_Branches(),
+        team_transcript_projections=TeamTranscriptProjections(),
+    )
+    monkeypatch.setattr(session_history, "_get_db", lambda: db)
+
+    response = server._methods["session.messages"](
+        1,
+        {"session_id": "team-session-1"},
+    )
+
+    assert "error" not in response
+    assert order == ["backfill", "page"]
