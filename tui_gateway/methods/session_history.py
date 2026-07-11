@@ -118,12 +118,9 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5000, f"messages page failed: {exc}")
     activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
     include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
-    # PR-2 §4.2: run_events cursor.  after_seq is a forward cursor (only
-    # events with seq > after_seq); before_seq is a backward cursor for
-    # loading earlier history (only events with seq < before_seq).  The DB
-    # layer's list_run_events only supports after_seq natively, so before_seq
-    # is applied as a post-filter here.  These two are independent of the
-    # message-dimension cursor_id pagination above.
+    # run_events uses an independent canonical seq cursor. after_seq pages
+    # forward; before_seq returns the immediately preceding window in ASC
+    # display order. Message row pagination remains an orthogonal cursor.
     after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
     before_seq = _coerce_int(params.get("before_seq", params.get("beforeSeq")), default=0)
     cursor_active = after_seq > 0 or before_seq > 0
@@ -135,6 +132,7 @@ def _(rid, params: dict) -> dict:
                 db,
                 target,
                 after_seq=after_seq,
+                before_seq=before_seq,
                 runtime_scope_key=_requested_runtime_scope_key(params),
                 activity_id=activity_id,
                 limit=_bounded_page_limit(
@@ -143,10 +141,6 @@ def _(rid, params: dict) -> dict:
                     maximum=5000,
                 ),
             )
-            # PR-2 §4.2: before_seq is not a DB-level filter — apply it
-            # as a Python post-filter so callers can page backwards.
-            if before_seq > 0:
-                run_events = [e for e in run_events if int((e or {}).get("seq") or 0) < before_seq]
             # PR-2 §4.2: when no cursor is supplied the legacy behavior
             # returns the full event set.  Mark it deprecated so callers
             # migrate to the cursor path.
