@@ -1016,8 +1016,8 @@ class TestRunJobSessionPersistence:
         assert kwargs["session_db"] is fake_db
         assert kwargs["platform"] == "cron"
         assert kwargs["session_id"].startswith("cron_test-job_")
-        fake_db.end_session.assert_called_once()
-        call_args = fake_db.end_session.call_args
+        fake_db.sessions.end.assert_called_once()
+        call_args = fake_db.sessions.end.call_args
         assert call_args[0][0].startswith("cron_test-job_")
         assert call_args[0][1] == "cron_complete"
         fake_db.close.assert_called_once()

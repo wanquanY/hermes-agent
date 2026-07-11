@@ -991,10 +991,10 @@ def _append_dovie_session_message(
     session_store = None
     try:
         session_store = open_cli_session_store()
-        session_store.ensure_session(target_session_id, source="tui", model=job.get("model"))
+        session_store.sessions.ensure(target_session_id, source="tui", model=job.get("model"))
         trigger_content = _dovie_trigger_content(job)
         if trigger_content:
-            session_store.append_message(
+            session_store.messages.append(
                 target_session_id,
                 "user",
                 trigger_content,
@@ -1006,7 +1006,7 @@ def _append_dovie_session_message(
                     "result_binding_mode": mode,
                 },
             )
-        session_store.append_message(
+        session_store.messages.append(
             target_session_id,
             "assistant",
             content,
@@ -2133,7 +2133,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             _VAR_MAP[_var_name].set("")
         if _session_store:
             try:
-                _session_store.end_session(_cron_session_id, "cron_complete")
+                _session_store.sessions.end(_cron_session_id, "cron_complete")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
             try:
