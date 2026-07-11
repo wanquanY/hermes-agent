@@ -327,7 +327,7 @@ def test_zero_debt_status_separates_verdict_from_closure() -> None:
     assert rows["P2"]["machine_verdict"] == "pass"
     assert rows["P2"]["closure"] == "fail"
     assert rows["P2"]["machine_failed_checks"] == []
-    assert "human_signoff:exists" in rows["P2"]["closure_failed_checks"]
+    assert "human_signoff:not_pending" in rows["P2"]["closure_failed_checks"]
     assert "p2:aggregate_table_single_owner" not in rows["P2"]["machine_failed_checks"]
     assert "p2:no_sessiondb_production" not in rows["P2"]["machine_failed_checks"]
     assert "p2:no_legacy_identity_alias_internal" not in rows["P2"]["machine_failed_checks"]

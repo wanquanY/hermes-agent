@@ -401,12 +401,23 @@ git diff --check
 
 ## P2 - Data Plane Repository Ownership
 
-Status: not started. P2 may not begin until
-`scripts/zero_debt/phase_closure.py --phase P1` passes. Read-only preflight is
-recorded in `docs/audits/zero_debt_phase_p2_preflight.md`.
-`scripts/zero_debt/verdict.py --phase P2` is implemented as a blocking
-data-plane ownership gate and is expected to fail until the P2 vertical slices
-remove current production debt.
+Status: machine complete, awaiting user real-device sign-off. P2 began only
+after `scripts/zero_debt/phase_closure.py --phase P1` passed. The original
+read-only preflight remains recorded in
+`docs/audits/zero_debt_phase_p2_preflight.md` as historical evidence.
+
+Current machine evidence:
+
+- `scripts/zero_debt/verdict.py --phase P2`: pass (15 checks).
+- P2 aggregate regression: 355 passed.
+- Required gateway/storage/TUI regression: 6371 passed, 53 skipped.
+- Production has no `SessionDB` dependency or internal legacy identity alias owner.
+- `scripts/zero_debt/phase_closure.py --phase P2` remains blocked until
+  `docs/audits/zero_debt_phase_p2_human_signoff.md` records explicit approval.
+
+Real-device procedure:
+
+- `docs/audits/zero_debt_phase_p2_real_device_runbook.md`
 
 ### Goal
 
