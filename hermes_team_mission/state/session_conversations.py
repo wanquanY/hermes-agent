@@ -417,7 +417,7 @@ class TeamMissionConversationMixin:
             )
             # CR-P4.1: active_mission_id is accepted only as a compatibility
             # input; the legacy column is no longer written.
-            return self._team_mission_conversation_from_row(conn.execute(
+            return self.team_mission_rows.conversation_from_row(conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -912,7 +912,7 @@ class TeamMissionConversationMixin:
         if not conversation_id:
             return {}
         with self._lock:
-            return self._team_mission_conversation_from_row(self._conn.execute(
+            return self.team_mission_rows.conversation_from_row(self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -927,7 +927,7 @@ class TeamMissionConversationMixin:
         if not conversation_session_id:
             return {}
         with self._lock:
-            return self._team_mission_conversation_from_row(self._conn.execute(
+            return self.team_mission_rows.conversation_from_row(self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -946,7 +946,7 @@ class TeamMissionConversationMixin:
             conversation = {}
         if not conversation:
             with self._lock:
-                mission = self._team_mission_from_row(self._conn.execute(
+                mission = self.team_mission_rows.mission_from_row(self._conn.execute(
                     "SELECT * FROM team_missions WHERE mission_id = ?",
                     (identifier,),
                 ).fetchone())
@@ -960,7 +960,7 @@ class TeamMissionConversationMixin:
                 ).fetchall()
             mission = None
             for _row in _rows:
-                _m = self._team_mission_from_row(_row)
+                _m = self.team_mission_rows.mission_from_row(_row)
                 if _m:
                     mission = _m
                     break
@@ -1041,7 +1041,7 @@ class TeamMissionConversationMixin:
             ).fetchall()
         conversations = [
             conversation for conversation in (
-                self._team_mission_conversation_from_row(row)
+                self.team_mission_rows.conversation_from_row(row)
                 for row in rows
             ) if conversation is not None
         ]
@@ -1266,9 +1266,9 @@ class TeamMissionConversationMixin:
                     """,
                     (conversation_session_id, "%final_deliverable%"),
                 ).fetchall()
-            last_message = _message_summary_from_message(self._team_mission_message_from_row(last_message_row))
+            last_message = _message_summary_from_message(self.team_mission_rows.message_from_row(last_message_row))
             for row in final_rows:
-                message = self._team_mission_message_from_row(row)
+                message = self.team_mission_rows.message_from_row(row)
                 deliverable = _final_deliverable_from_message(message)
                 if not deliverable:
                     continue
@@ -1313,7 +1313,7 @@ class TeamMissionConversationMixin:
         artifact_refs_by_task: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
         all_artifact_refs: List[Dict[str, Any]] = []
         for row in memory_rows:
-            item = self._team_mission_memory_item_from_row(row)
+            item = self.team_mission_rows.memory_item_from_row(row)
             if not item:
                 continue
             refs = _dedupe_artifact_refs(list(item.get("artifact_refs") or []))
@@ -1374,7 +1374,7 @@ class TeamMissionConversationMixin:
         if not conversation_id:
             return {}
         with self._lock:
-            conversation = self._team_mission_conversation_from_row(self._conn.execute(
+            conversation = self.team_mission_rows.conversation_from_row(self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -1387,7 +1387,7 @@ class TeamMissionConversationMixin:
                 return {}
             missions = [
                 mission for mission in (
-                    self._team_mission_from_row(row)
+                    self.team_mission_rows.mission_from_row(row)
                     for row in self._conn.execute(
                         """
                         SELECT *
@@ -1456,7 +1456,7 @@ class TeamMissionConversationMixin:
 
         nodes_by_mission: Dict[str, List[Dict[str, Any]]] = {mission_id: [] for mission_id in mission_ids}
         for row in node_rows:
-            node = self._team_mission_node_from_row(row)
+            node = self.team_mission_rows.node_from_row(row)
             if not node:
                 continue
             nodes_by_mission.setdefault(_text(node.get("mission_id")), []).append(node)
@@ -1467,12 +1467,12 @@ class TeamMissionConversationMixin:
         seen_run_session_ids: set[str] = set()
         results_by_mission: Dict[str, Dict[str, Any]] = {}
         for row in result_rows:
-            result = self._team_mission_result_from_row(row)
+            result = self.team_mission_rows.result_from_row(row)
             mission_id = _text(result.get("mission_id") or result.get("missionId"))
             if mission_id:
                 results_by_mission[mission_id] = result
         for row in binding_rows:
-            binding = self._team_mission_run_binding_from_row(row)
+            binding = self.team_mission_rows.run_binding_from_row(row)
             if not binding:
                 continue
             bindings.append(binding)
@@ -1484,7 +1484,7 @@ class TeamMissionConversationMixin:
                     run_session_ids.append(value)
 
         for mission_id, mission_nodes in list(nodes_by_mission.items()):
-            nodes_by_mission[mission_id] = self._team_mission_nodes_with_runtime_bindings(
+            nodes_by_mission[mission_id] = self.team_mission_rows.nodes_with_runtime_bindings(
                 mission_nodes,
                 bindings_by_mission.get(mission_id) or [],
             )
@@ -1952,7 +1952,7 @@ class TeamMissionConversationMixin:
         if not mission_id:
             return {}
         with self._lock:
-            mission = self._team_mission_from_row(self._conn.execute(
+            mission = self.team_mission_rows.mission_from_row(self._conn.execute(
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone())

@@ -199,7 +199,7 @@ def upsert_team_mission_memory_item(
                 invalidated_at,
             ),
         )
-        return db._team_mission_memory_item_from_row(conn.execute(
+        return db.team_mission_rows.memory_item_from_row(conn.execute(
             "SELECT * FROM team_mission_memory_items WHERE id = ?",
             (normalized_id,),
         ).fetchone()) or {}
@@ -265,7 +265,7 @@ def list_team_mission_memory_items(
         ).fetchall()
     return [
         item for item in (
-            db._team_mission_memory_item_from_row(row)
+            db.team_mission_rows.memory_item_from_row(row)
             for row in rows
         ) if item is not None
     ]
@@ -289,7 +289,7 @@ def update_team_mission_memory_item(
             "SELECT * FROM team_mission_memory_items WHERE id = ?",
             (memory_id,),
         ).fetchone()
-    existing = db._team_mission_memory_item_from_row(row)
+    existing = db.team_mission_rows.memory_item_from_row(row)
     if not existing:
         return {}
     next_status = text(status) or existing["status"]
@@ -368,7 +368,7 @@ def upsert_team_mission_memory_edge(
                 created,
             ),
         )
-        return db._team_mission_memory_edge_from_row(conn.execute(
+        return db.team_mission_rows.memory_edge_from_row(conn.execute(
             "SELECT * FROM team_mission_memory_edges WHERE id = ?",
             (normalized_edge_id,),
         ).fetchone()) or {}
@@ -410,7 +410,7 @@ def list_team_mission_memory_edges(
         ).fetchall()
     return [
         edge for edge in (
-            db._team_mission_memory_edge_from_row(row)
+            db.team_mission_rows.memory_edge_from_row(row)
             for row in rows
         ) if edge is not None
     ]

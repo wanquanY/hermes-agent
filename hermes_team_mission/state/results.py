@@ -5,6 +5,10 @@ import sqlite3
 import time
 from typing import Any, Dict, List
 
+from hermes_team_mission.read_models.row_mapper import (
+    mission_result_from_row as row_to_mission_result,
+)
+
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
 from hermes_team_mission.domain.utils import stable_id
 
@@ -33,45 +37,6 @@ def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
         return row[key]
     except Exception:
         return default
-
-
-def row_to_mission_result(row: sqlite3.Row | None) -> Dict[str, Any]:
-    if row is None:
-        return {}
-    artifact_refs = _json_loads(_row_value(row, "artifact_refs_json", ""), [])
-    artifact_refs = artifact_refs if isinstance(artifact_refs, list) else []
-    node_results = _json_loads(_row_value(row, "node_results_json", ""), [])
-    node_results = node_results if isinstance(node_results, list) else []
-    metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    result_id = text(_row_value(row, "result_id"))
-    mission_id = text(_row_value(row, "mission_id"))
-    activity_id = text(_row_value(row, "activity_id"))
-    return {
-        "result_id": result_id,
-        "resultId": result_id,
-        "mission_id": mission_id,
-        "missionId": mission_id,
-        "activity_id": activity_id,
-        "activityId": activity_id,
-        "status": text(_row_value(row, "status")),
-        "outcome": text(_row_value(row, "outcome")),
-        "summary_text": text(_row_value(row, "summary_text")),
-        "summaryText": text(_row_value(row, "summary_text")),
-        "node_results": node_results,
-        "nodeResults": node_results,
-        "artifact_refs": artifact_refs,
-        "artifactRefs": artifact_refs,
-        "leader_report_run_id": text(_row_value(row, "leader_report_run_id")),
-        "leaderReportRunId": text(_row_value(row, "leader_report_run_id")),
-        "leader_report_message_id": text(_row_value(row, "leader_report_message_id")),
-        "leaderReportMessageId": text(_row_value(row, "leader_report_message_id")),
-        "metadata": metadata,
-        "created_at": float(_row_value(row, "created_at", 0) or 0),
-        "createdAt": float(_row_value(row, "created_at", 0) or 0),
-        "updated_at": float(_row_value(row, "updated_at", 0) or 0),
-        "updatedAt": float(_row_value(row, "updated_at", 0) or 0),
-    }
 
 
 def upsert_team_mission_result(

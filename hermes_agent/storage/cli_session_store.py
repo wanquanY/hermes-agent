@@ -51,6 +51,7 @@ from hermes_team_mission.domain.transcript_visibility import (
 from hermes_team_mission.read_models.node_history import (
     TeamMissionNodeHistoryReadModel,
 )
+from hermes_team_mission.read_models.row_mapper import TeamMissionRowMapper
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 
@@ -70,6 +71,7 @@ class CliSessionStore(TeamMissionStateMixin):
         self._lock = lock_for_connection(conn)
         self._unit_of_work = SqliteUnitOfWork(conn, self._lock)
         self._session_repo = SessionRepoImpl(conn)
+        self.team_mission_rows = TeamMissionRowMapper()
         self.telegram_topics = TelegramTopicStore(
             conn,
             self._execute_write,

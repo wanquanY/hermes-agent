@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-# ruff: noqa: F401,F403,F405
-from .session_common import *
+import json
+import sqlite3
+from typing import Any
+
 from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_team_mission.context.conversation_projection import dedupe_artifact_refs
+from hermes_team_mission.domain.assignees import assignee_public_fields
+from hermes_team_mission.domain.assignees import resolve_node_assignee
+from hermes_team_mission.domain.identities import canonical_node_id
+from hermes_team_mission.domain.node_kinds import metadata_with_normalized_node_kind
+from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 
 
-class TeamMissionRowsMixin:
-    def _team_mission_runtime_event_identity(
+class TeamMissionRowMapper:
+    """Maps canonical Team Mission storage rows to public dictionaries."""
+
+    def conversation_from_row(
         self,
-        *,
-        mission: Dict[str, Any] | None,
-        node: Dict[str, Any] | None,
-        binding: Dict[str, Any] | None,
-    ) -> Dict[str, str]:
-        return _team_mission_runtime_event_identity(
-            mission=mission,
-            node=node,
-            binding=binding,
-        )
-
-    def _team_mission_conversation_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
         if row is None:
             return None
         metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
@@ -49,7 +49,7 @@ class TeamMissionRowsMixin:
             "message_count": message_count,
         }
 
-    def _team_mission_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def mission_from_row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
         return {
@@ -69,13 +69,17 @@ class TeamMissionRowsMixin:
             "metadata": _json_loads(row["metadata_json"], {}),
         }
 
-    def _team_mission_node_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def node_from_row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
         metadata = _json_loads(row["metadata_json"], {})
         raw_kind = str(row["kind"] or "")
-        kind = _normalize_node_kind(raw_kind)
-        metadata = _metadata_with_normalized_node_kind(metadata, raw_kind=raw_kind, canonical_kind=kind)
+        kind = normalize_team_mission_node_kind(raw_kind)
+        metadata = metadata_with_normalized_node_kind(
+            metadata,
+            raw_kind=raw_kind,
+            canonical_kind=kind,
+        )
         runtime_conversation_session_id = _text(_row_value(row, "runtime_conversation_session_id", ""))
         execution_session_id = _text(_row_value(row, "execution_session_id", ""))
         # CR-P3.3: graph identity only; for speaker use participant_id.
@@ -88,11 +92,11 @@ class TeamMissionRowsMixin:
             "status": str(row["status"] or ""),
             "assignee_profile_id": str(row["assignee_profile_id"] or ""),
             "assignee_profile_version_id": str(row["assignee_profile_version_id"] or ""),
-            "canonical_node_id": _text(_row_value(row, "canonical_node_id", "")) or _conversation_graph_node_id(
+            "canonical_node_id": _text(_row_value(row, "canonical_node_id", "")) or canonical_node_id(
                 _text(_row_value(row, "mission_id", "")),
                 _text(_row_value(row, "node_id", "")),
             ),
-            "canonicalNodeId": _text(_row_value(row, "canonical_node_id", "")) or _conversation_graph_node_id(
+            "canonicalNodeId": _text(_row_value(row, "canonical_node_id", "")) or canonical_node_id(
                 _text(_row_value(row, "mission_id", "")),
                 _text(_row_value(row, "node_id", "")),
             ),
@@ -114,26 +118,26 @@ class TeamMissionRowsMixin:
             "runtimeScopeKey": str(row["runtime_scope_key"] or ""),
             "output_contract": _json_loads(row["output_contract_json"], {}),
             "metadata": metadata,
-            **_assignee_public_fields(metadata),
+            **assignee_public_fields(metadata),
             "position_x": float(row["position_x"] or 0),
             "position_y": float(row["position_y"] or 0),
             "created_at": float(row["created_at"] or 0),
             "updated_at": float(row["updated_at"] or 0),
         }
 
-    def _team_mission_node_with_resolved_assignee(
+    def node_with_resolved_assignee(
         self,
-        node: Dict[str, Any] | None,
+        node: dict[str, Any] | None,
         *,
-        mission_metadata: Dict[str, Any] | None = None,
-        leader_node: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+        mission_metadata: dict[str, Any] | None = None,
+        leader_node: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(node, dict) or not node:
             return {}
-        resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = _resolve_node_assignee(
+        resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = resolve_node_assignee(
             mission_id=str(node.get("mission_id") or ""),
             node_id=str(node.get("node_id") or ""),
-            kind=_normalize_node_kind(node.get("kind")),
+            kind=normalize_team_mission_node_kind(node.get("kind")),
             incoming_profile_id=str(node.get("assignee_profile_id") or ""),
             incoming_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
             incoming_runtime_scope_key=str(node.get("runtime_scope_key") or ""),
@@ -149,18 +153,25 @@ class TeamMissionRowsMixin:
             "runtime_scope_key": resolved_runtime_scope_key,
             "metadata": resolved_metadata,
         }
-        resolved_node.update(_assignee_public_fields(resolved_metadata))
+        resolved_node.update(assignee_public_fields(resolved_metadata))
         return resolved_node
 
-    def _team_mission_nodes_with_resolved_assignees(
+    def nodes_with_resolved_assignees(
         self,
-        nodes: List[Dict[str, Any]],
+        nodes: list[dict[str, Any]],
         *,
-        mission_metadata: Dict[str, Any] | None = None,
-    ) -> List[Dict[str, Any]]:
-        leader_node = next((_node for _node in nodes if _normalize_node_kind(_node.get("kind")) == "root"), {})
+        mission_metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        leader_node = next(
+            (
+                node
+                for node in nodes
+                if normalize_team_mission_node_kind(node.get("kind")) == "root"
+            ),
+            {},
+        )
         return [
-            self._team_mission_node_with_resolved_assignee(
+            self.node_with_resolved_assignee(
                 node,
                 mission_metadata=mission_metadata,
                 leader_node=leader_node,
@@ -168,7 +179,7 @@ class TeamMissionRowsMixin:
             for node in nodes
         ]
 
-    def _team_mission_edge_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def edge_from_row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
         return {
@@ -181,7 +192,10 @@ class TeamMissionRowsMixin:
             "created_at": float(row["created_at"] or 0),
         }
 
-    def _team_mission_run_binding_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def run_binding_from_row(
+        self,
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
         if row is None:
             return None
         execution_session_id = _text(_row_value(row, "execution_session_id", ""))
@@ -198,11 +212,11 @@ class TeamMissionRowsMixin:
             "updated_at": float(row["updated_at"] or 0),
         }
 
-    def _team_mission_latest_run_bindings_by_node(
+    def latest_run_bindings_by_node(
         self,
-        bindings: List[Dict[str, Any]],
-    ) -> Dict[str, Dict[str, Any]]:
-        latest: Dict[str, Dict[str, Any]] = {}
+        bindings: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
         for binding in bindings:
             if not isinstance(binding, dict):
                 continue
@@ -227,11 +241,11 @@ class TeamMissionRowsMixin:
                 latest[node_id] = binding
         return latest
 
-    def _team_mission_node_with_runtime_binding(
+    def node_with_runtime_binding(
         self,
-        node: Dict[str, Any] | None,
-        binding: Dict[str, Any] | None,
-    ) -> Dict[str, Any]:
+        node: dict[str, Any] | None,
+        binding: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not isinstance(node, dict) or not node:
             return {}
         if not isinstance(binding, dict) or not binding:
@@ -245,7 +259,7 @@ class TeamMissionRowsMixin:
         runtime_scope_key = _text(node.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key"))
         run_id = _text(binding.get("run_id"))
         # CR-P3.3: graph identity only; for speaker use participant_id.
-        canonical_node_id = _text(node.get("canonical_node_id")) or _conversation_graph_node_id(
+        canonical_id = _text(node.get("canonical_node_id")) or canonical_node_id(
             _text(node.get("mission_id") or binding.get("mission_id")),
             node_id,
         )
@@ -257,16 +271,14 @@ class TeamMissionRowsMixin:
 
         return {
             **node,
-            "canonical_node_id": canonical_node_id,
-            "canonicalNodeId": canonical_node_id,
+            "canonical_node_id": canonical_id,
+            "canonicalNodeId": canonical_id,
             "task_frame_id": task_frame_id,
             "taskFrameId": task_frame_id,
             "run_id": run_id,
             "runId": run_id,
             "session_id": session_id,
             "sessionId": session_id,
-            "conversation_session_id": session_id,
-            "conversationSessionId": session_id,
             "conversation_session_id": session_id,
             "conversationSessionId": session_id,
             "actual_conversation_session_id": session_id,
@@ -281,21 +293,24 @@ class TeamMissionRowsMixin:
             "runtimeBinding": binding,
         }
 
-    def _team_mission_nodes_with_runtime_bindings(
+    def nodes_with_runtime_bindings(
         self,
-        nodes: List[Dict[str, Any]],
-        bindings: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        latest_by_node = self._team_mission_latest_run_bindings_by_node(bindings)
+        nodes: list[dict[str, Any]],
+        bindings: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        latest_by_node = self.latest_run_bindings_by_node(bindings)
         return [
-            self._team_mission_node_with_runtime_binding(
+            self.node_with_runtime_binding(
                 node,
                 latest_by_node.get(_text(node.get("node_id"))),
             )
             for node in nodes
         ]
 
-    def _team_mission_memory_item_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def memory_item_from_row(
+        self,
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
         if row is None:
             return None
         return {
@@ -320,7 +335,7 @@ class TeamMissionRowsMixin:
             "invalidated_at": row["invalidated_at"],
         }
 
-    def _team_mission_message_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
+    def message_from_row(self, row: sqlite3.Row | None) -> dict[str, Any]:
         if row is None:
             return {}
         message = dict(row)
@@ -332,7 +347,10 @@ class TeamMissionRowsMixin:
                 message["metadata"] = metadata
         return message
 
-    def _team_mission_memory_edge_from_row(self, row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    def memory_edge_from_row(
+        self,
+        row: sqlite3.Row | None,
+    ) -> dict[str, Any] | None:
         if row is None:
             return None
         return {
@@ -344,8 +362,142 @@ class TeamMissionRowsMixin:
             "created_at": float(row["created_at"] or 0),
         }
 
-    def _team_mission_deliverable_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
-        return _deliverable_state.row_to_deliverable(row)
+    def deliverable_from_row(self, row: sqlite3.Row | None) -> dict[str, Any]:
+        return deliverable_from_row(row)
 
-    def _team_mission_result_from_row(self, row: sqlite3.Row | None) -> Dict[str, Any]:
-        return _result_state.row_to_mission_result(row)
+    def result_from_row(self, row: sqlite3.Row | None) -> dict[str, Any]:
+        return mission_result_from_row(row)
+
+
+def deliverable_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    deliverable_id = _text(_row_value(row, "deliverable_id"))
+    mission_id = _text(_row_value(row, "mission_id"))
+    node_id = _text(_row_value(row, "node_id"))
+    run_id = _text(_row_value(row, "run_id"))
+    task_id = _text(_row_value(row, "task_id"))
+    payload = _json_loads(_row_value(row, "payload_json", ""), {})
+    artifact_refs = dedupe_artifact_refs(
+        _records(_json_loads(_row_value(row, "artifact_refs_json", ""), []))
+    )
+    next_context = _mapping(
+        _json_loads(_row_value(row, "next_context_json", ""), {})
+    )
+    output_contract = _mapping(
+        _json_loads(_row_value(row, "output_contract_json", ""), {})
+    )
+    return {
+        "deliverable_id": deliverable_id,
+        "deliverableId": deliverable_id,
+        "mission_id": mission_id,
+        "missionId": mission_id,
+        "node_id": node_id,
+        "nodeId": node_id,
+        "run_id": run_id,
+        "runId": run_id,
+        "task_id": task_id,
+        "taskId": task_id,
+        "status": _text(_row_value(row, "status")),
+        "result": _text(_row_value(row, "result")),
+        "summary": _text(_row_value(row, "summary")),
+        "payload": payload if isinstance(payload, dict) else {},
+        "artifact_refs": artifact_refs,
+        "artifactRefs": artifact_refs,
+        "next_context": next_context,
+        "nextContext": next_context,
+        "output_contract": output_contract,
+        "outputContract": output_contract,
+        "source": _text(_row_value(row, "source")),
+        "confidence": float(_row_value(row, "confidence", 0) or 0),
+        "visibility": _text(_row_value(row, "visibility")),
+        "created_at": float(_row_value(row, "created_at", 0) or 0),
+        "createdAt": float(_row_value(row, "created_at", 0) or 0),
+        "updated_at": float(_row_value(row, "updated_at", 0) or 0),
+        "updatedAt": float(_row_value(row, "updated_at", 0) or 0),
+    }
+
+
+def mission_result_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    artifact_refs = _json_loads(_row_value(row, "artifact_refs_json", ""), [])
+    artifact_refs = artifact_refs if isinstance(artifact_refs, list) else []
+    node_results = _json_loads(_row_value(row, "node_results_json", ""), [])
+    node_results = node_results if isinstance(node_results, list) else []
+    metadata = _json_loads(_row_value(row, "metadata_json", ""), {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    result_id = _text(_row_value(row, "result_id"))
+    mission_id = _text(_row_value(row, "mission_id"))
+    activity_id = _text(_row_value(row, "activity_id"))
+    summary_text = _text(_row_value(row, "summary_text"))
+    return {
+        "result_id": result_id,
+        "resultId": result_id,
+        "mission_id": mission_id,
+        "missionId": mission_id,
+        "activity_id": activity_id,
+        "activityId": activity_id,
+        "status": _text(_row_value(row, "status")),
+        "outcome": _text(_row_value(row, "outcome")),
+        "summary_text": summary_text,
+        "summaryText": summary_text,
+        "node_results": node_results,
+        "nodeResults": node_results,
+        "artifact_refs": artifact_refs,
+        "artifactRefs": artifact_refs,
+        "leader_report_run_id": _text(
+            _row_value(row, "leader_report_run_id")
+        ),
+        "leaderReportRunId": _text(_row_value(row, "leader_report_run_id")),
+        "leader_report_message_id": _text(
+            _row_value(row, "leader_report_message_id")
+        ),
+        "leaderReportMessageId": _text(
+            _row_value(row, "leader_report_message_id")
+        ),
+        "metadata": metadata,
+        "created_at": float(_row_value(row, "created_at", 0) or 0),
+        "createdAt": float(_row_value(row, "created_at", 0) or 0),
+        "updated_at": float(_row_value(row, "updated_at", 0) or 0),
+        "updatedAt": float(_row_value(row, "updated_at", 0) or 0),
+    }
+
+
+def _json_loads(value: Any, fallback: Any) -> Any:
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+__all__ = [
+    "TeamMissionRowMapper",
+    "deliverable_from_row",
+    "mission_result_from_row",
+]

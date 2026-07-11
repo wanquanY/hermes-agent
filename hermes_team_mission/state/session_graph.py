@@ -169,7 +169,7 @@ class TeamMissionGraphMixin:
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
                 ),
             )
-            return self._team_mission_from_row(conn.execute(
+            return self.team_mission_rows.mission_from_row(conn.execute(
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone()) or {}
@@ -362,8 +362,8 @@ class TeamMissionGraphMixin:
                 """,
                 (mission_id, "root"),
             ).fetchone()
-            existing_node = self._team_mission_node_from_row(existing) or {}
-            leader_node = self._team_mission_node_from_row(leader_row) or {}
+            existing_node = self.team_mission_rows.node_from_row(existing) or {}
+            leader_node = self.team_mission_rows.node_from_row(leader_row) or {}
             resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = _resolve_node_assignee(
                 mission_id=mission_id,
                 node_id=node_id,
@@ -450,7 +450,7 @@ class TeamMissionGraphMixin:
                     updated,
                 ),
             )
-            return self._team_mission_node_from_row(conn.execute(
+            return self.team_mission_rows.node_from_row(conn.execute(
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()) or {}
@@ -490,15 +490,15 @@ class TeamMissionGraphMixin:
                 """,
                 (mission_id, node_id),
             ).fetchone()
-        mission = self._team_mission_from_row(mission_row) or {}
-        resolved_node = self._team_mission_node_with_resolved_assignee(
-            self._team_mission_node_from_row(row) or {},
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {}
+        resolved_node = self.team_mission_rows.node_with_resolved_assignee(
+            self.team_mission_rows.node_from_row(row) or {},
             mission_metadata=dict(mission.get("metadata") or {}),
-            leader_node=self._team_mission_node_from_row(leader_row) or {},
+            leader_node=self.team_mission_rows.node_from_row(leader_row) or {},
         )
-        return self._team_mission_node_with_runtime_binding(
+        return self.team_mission_rows.node_with_runtime_binding(
             resolved_node,
-            self._team_mission_run_binding_from_row(binding_row) or {},
+            self.team_mission_rows.run_binding_from_row(binding_row) or {},
         )
 
     def claim_team_mission_node_start(
@@ -520,7 +520,7 @@ class TeamMissionGraphMixin:
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()
-            node = self._team_mission_node_from_row(row)
+            node = self.team_mission_rows.node_from_row(row)
             if not node:
                 return {}
             if str(node.get("status") or "") != "ready":
@@ -549,11 +549,11 @@ class TeamMissionGraphMixin:
                 ),
             )
             if cursor.rowcount <= 0:
-                return self._team_mission_node_from_row(conn.execute(
+                return self.team_mission_rows.node_from_row(conn.execute(
                     "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                     (mission_id, node_id),
                 ).fetchone()) or {}
-            return self._team_mission_node_from_row(conn.execute(
+            return self.team_mission_rows.node_from_row(conn.execute(
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()) or {}
@@ -603,7 +603,7 @@ class TeamMissionGraphMixin:
                     created,
                 ),
             )
-            return self._team_mission_edge_from_row(conn.execute(
+            return self.team_mission_rows.edge_from_row(conn.execute(
                 "SELECT * FROM team_mission_edges WHERE edge_id = ?",
                 (normalized_edge_id,),
             ).fetchone()) or {}
@@ -1480,7 +1480,7 @@ class TeamMissionGraphMixin:
                         str(node_id or ""),
                     ),
                 )
-            return self._team_mission_run_binding_from_row(conn.execute(
+            return self.team_mission_rows.run_binding_from_row(conn.execute(
                 "SELECT * FROM team_mission_run_bindings WHERE run_id = ?",
                 (run_id,),
             ).fetchone()) or {}
@@ -1496,7 +1496,7 @@ class TeamMissionGraphMixin:
                 "SELECT * FROM team_mission_run_bindings WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-        return self._team_mission_run_binding_from_row(row) or {}
+        return self.team_mission_rows.run_binding_from_row(row) or {}
 
     def team_mission_run_session_ids(self, session_ids: list[str]) -> set[str]:
         normalized = [str(session_id or "").strip() for session_id in session_ids]

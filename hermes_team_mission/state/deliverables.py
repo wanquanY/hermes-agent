@@ -7,6 +7,10 @@ import sqlite3
 import time
 from typing import Any, Dict, List
 
+from hermes_team_mission.read_models.row_mapper import (
+    deliverable_from_row as row_to_deliverable,
+)
+
 from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
 
 
@@ -220,49 +224,6 @@ def derived_degraded_deliverable_from_text(
         "source": normalized_source,
         "confidence": 0.7 if normalized_source == DELIVERABLE_SOURCE_LEGACY_IMPORTED else (0.58 if has_structured_evidence else 0.42),
         "visibility": DELIVERABLE_VISIBILITY_HANDOFF,
-    }
-
-
-def row_to_deliverable(row: sqlite3.Row | None) -> Dict[str, Any]:
-    if row is None:
-        return {}
-    deliverable_id = text(_row_value(row, "deliverable_id"))
-    mission_id = text(_row_value(row, "mission_id"))
-    node_id = text(_row_value(row, "node_id"))
-    run_id = text(_row_value(row, "run_id"))
-    task_id = text(_row_value(row, "task_id"))
-    payload = _json_loads(_row_value(row, "payload_json", ""), {})
-    artifact_refs = dedupe_artifact_refs(_records(_json_loads(_row_value(row, "artifact_refs_json", ""), [])))
-    next_context = _record(_json_loads(_row_value(row, "next_context_json", ""), {}))
-    output_contract = _record(_json_loads(_row_value(row, "output_contract_json", ""), {}))
-    return {
-        "deliverable_id": deliverable_id,
-        "deliverableId": deliverable_id,
-        "mission_id": mission_id,
-        "missionId": mission_id,
-        "node_id": node_id,
-        "nodeId": node_id,
-        "run_id": run_id,
-        "runId": run_id,
-        "task_id": task_id,
-        "taskId": task_id,
-        "status": text(_row_value(row, "status")),
-        "result": text(_row_value(row, "result")),
-        "summary": text(_row_value(row, "summary")),
-        "payload": payload if isinstance(payload, dict) else {},
-        "artifact_refs": artifact_refs,
-        "artifactRefs": artifact_refs,
-        "next_context": next_context,
-        "nextContext": next_context,
-        "output_contract": output_contract,
-        "outputContract": output_contract,
-        "source": text(_row_value(row, "source")),
-        "confidence": float(_row_value(row, "confidence", 0) or 0),
-        "visibility": text(_row_value(row, "visibility")),
-        "created_at": float(_row_value(row, "created_at", 0) or 0),
-        "createdAt": float(_row_value(row, "created_at", 0) or 0),
-        "updated_at": float(_row_value(row, "updated_at", 0) or 0),
-        "updatedAt": float(_row_value(row, "updated_at", 0) or 0),
     }
 
 

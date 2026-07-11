@@ -3,5 +3,6 @@
 from hermes_team_mission.read_models.node_history import (
     TeamMissionNodeHistoryReadModel,
 )
+from hermes_team_mission.read_models.row_mapper import TeamMissionRowMapper
 
-__all__ = ["TeamMissionNodeHistoryReadModel"]
+__all__ = ["TeamMissionNodeHistoryReadModel", "TeamMissionRowMapper"]

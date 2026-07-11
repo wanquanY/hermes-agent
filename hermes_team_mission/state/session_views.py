@@ -167,13 +167,13 @@ class TeamMissionViewMixin:
         if not mission_id:
             return {}
         with self._lock:
-            mission = self._team_mission_from_row(self._conn.execute(
+            mission = self.team_mission_rows.mission_from_row(self._conn.execute(
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone())
             if mission is None:
                 return {}
-            conversation = self._team_mission_conversation_from_row(self._conn.execute(
+            conversation = self.team_mission_rows.conversation_from_row(self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -184,20 +184,20 @@ class TeamMissionViewMixin:
             ).fetchone()) if _text(mission.get("conversation_id")) else None
             nodes = [
                 node for node in (
-                    self._team_mission_node_from_row(row)
+                    self.team_mission_rows.node_from_row(row)
                     for row in self._conn.execute(
                         "SELECT * FROM team_mission_nodes WHERE mission_id = ? ORDER BY created_at ASC, node_id ASC",
                         (mission_id,),
                     ).fetchall()
                 ) if node is not None
             ]
-            nodes = self._team_mission_nodes_with_resolved_assignees(
+            nodes = self.team_mission_rows.nodes_with_resolved_assignees(
                 nodes,
                 mission_metadata=dict(mission.get("metadata") or {}),
             )
             edges = [
                 edge for edge in (
-                    self._team_mission_edge_from_row(row)
+                    self.team_mission_rows.edge_from_row(row)
                     for row in self._conn.execute(
                         "SELECT * FROM team_mission_edges WHERE mission_id = ? ORDER BY created_at ASC, edge_id ASC",
                         (mission_id,),
@@ -206,17 +206,17 @@ class TeamMissionViewMixin:
             ]
             run_bindings = [
                 binding for binding in (
-                    self._team_mission_run_binding_from_row(row)
+                    self.team_mission_rows.run_binding_from_row(row)
                     for row in self._conn.execute(
                         "SELECT * FROM team_mission_run_bindings WHERE mission_id = ? ORDER BY created_at ASC, run_id ASC",
                         (mission_id,),
                     ).fetchall()
                 ) if binding is not None
             ]
-            nodes = self._team_mission_nodes_with_runtime_bindings(nodes, run_bindings)
+            nodes = self.team_mission_rows.nodes_with_runtime_bindings(nodes, run_bindings)
             deliverables = [
                 deliverable for deliverable in (
-                    self._team_mission_deliverable_from_row(row)
+                    self.team_mission_rows.deliverable_from_row(row)
                     for row in self._conn.execute(
                         """
                         SELECT *
@@ -228,7 +228,7 @@ class TeamMissionViewMixin:
                     ).fetchall()
                 ) if deliverable
             ]
-            result = self._team_mission_result_from_row(self._conn.execute(
+            result = self.team_mission_rows.result_from_row(self._conn.execute(
                 "SELECT * FROM team_mission_results WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone())
@@ -263,7 +263,7 @@ class TeamMissionViewMixin:
         if not conversation_id:
             return {}
         with self._lock:
-            conversation = self._team_mission_conversation_from_row(self._conn.execute(
+            conversation = self.team_mission_rows.conversation_from_row(self._conn.execute(
                 f"""
                 SELECT team_mission_conversations.*,
                        {self._PROJECTED_ACTIVE_MISSION_ID_SQL}
@@ -276,7 +276,7 @@ class TeamMissionViewMixin:
                 return {}
             missions = [
                 mission for mission in (
-                    self._team_mission_from_row(row)
+                    self.team_mission_rows.mission_from_row(row)
                     for row in self._conn.execute(
                         """
                         SELECT *

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
 from .session_common import *
+from hermes_team_mission.domain.runtime_identity import runtime_event_identity
 
 
 class TeamMissionEventMixin:
@@ -257,10 +258,10 @@ class TeamMissionEventMixin:
             ).fetchone() if binding is not None else None
         if binding is None:
             return {}
-        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
-        node = self._team_mission_node_from_row(node_row) or {}
-        binding_value = self._team_mission_run_binding_from_row(binding) or {}
-        identity = _team_mission_runtime_event_identity(
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {"mission_id": mission_id}
+        node = self.team_mission_rows.node_from_row(node_row) or {}
+        binding_value = self.team_mission_rows.run_binding_from_row(binding) or {}
+        identity = runtime_event_identity(
             mission=mission,
             node=node,
             binding=binding_value,
@@ -400,8 +401,8 @@ class TeamMissionEventMixin:
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone()
-        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
-        identity = _team_mission_runtime_event_identity(
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {"mission_id": mission_id}
+        identity = runtime_event_identity(
             mission=mission,
             node=node,
             binding=binding,

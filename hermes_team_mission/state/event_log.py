@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List
 
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
+from hermes_team_mission.domain.runtime_identity import runtime_event_identity
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 
 
@@ -979,17 +980,11 @@ def append_team_mission_event_for_run(
                 mission = graph["mission"]
         except Exception:
             mission = {"mission_id": mission_id}
-    identity_builder = getattr(db, "_team_mission_runtime_event_identity", None)
-    if not callable(identity_builder):
-        _emit_team_event_log_diagnostic(
-            "runtime-event-drop-no-identity-builder",
-            mission_id=mission_id,
-            run_id=run_id,
-            node_id=text(binding.get("node_id")),
-            **_text_stream_summary(event),
-        )
-        return {}
-    identity = identity_builder(mission=mission, node=node, binding=binding)
+    identity = runtime_event_identity(
+        mission=mission,
+        node=node,
+        binding=binding,
+    )
     _emit_team_event_log_diagnostic(
         "runtime-event-project-start",
         mission_id=mission_id,

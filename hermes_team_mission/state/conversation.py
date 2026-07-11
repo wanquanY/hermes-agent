@@ -433,7 +433,7 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
             """,
             (cleaned_title, json.dumps(metadata, ensure_ascii=False, sort_keys=True), updated_at, conversation_id),
         )
-        return db._team_mission_conversation_from_row(conn.execute(
+        return db.team_mission_rows.conversation_from_row(conn.execute(
             "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
             (conversation_id,),
         ).fetchone()) or {}
