@@ -152,6 +152,14 @@ class RunRepo(Protocol):
         activity_id: str = "",
     ) -> dict[str, Any]: ...
 
+    def mark_projected_message(
+        self,
+        *,
+        session_id: str,
+        seq: int,
+        conversation_message_id: str,
+    ) -> bool: ...
+
     def list_events(
         self,
         session_id: str,
@@ -783,6 +791,29 @@ class RunRepoImpl:
             }
         saved["_persistence_disposition"] = "duplicate_terminal"
         return saved
+
+    def mark_projected_message(
+        self,
+        *,
+        session_id: str,
+        seq: int,
+        conversation_message_id: str,
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        stable_message_id = str(conversation_message_id or "").strip()
+        if not stable or int(seq or 0) <= 0 or not stable_message_id:
+            return False
+        row = self._conn.execute(
+            "SELECT id FROM run_events WHERE session_id = ? AND seq = ? LIMIT 1",
+            (stable, int(seq)),
+        ).fetchone()
+        if row is None:
+            return False
+        self._ledger.mark_projected_message(
+            row_id=int(row["id"]),
+            conversation_message_id=stable_message_id,
+        )
+        return True
 
     def list_events(
         self,

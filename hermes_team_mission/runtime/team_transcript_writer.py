@@ -763,9 +763,7 @@ def _project_reconstructed_assistant_segments_locked(
     participant_id: str,
     run_context: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
-    if not callable(upsert_locked):
-        return []
+    upsert_locked = db.messages.upsert_team_message_locked
     reconstructed: list[dict[str, Any]] = []
     for segment in _raw_assistant_segments_for_run_locked(
         conn,
@@ -816,7 +814,6 @@ def _project_reconstructed_assistant_segments_locked(
         if run_context:
             metadata["run_context"] = run_context
         saved = upsert_locked(
-            conn,
             session_id=session_id,
             conversation_message_id=conversation_message_id,
             role="assistant",
@@ -842,10 +839,7 @@ def _upsert_team_message_by_id(
     status: str = "",
     reasoning: Any = "",
 ) -> dict[str, Any]:
-    upsert = getattr(db, "_upsert_team_message_by_id", None)
-    if not callable(upsert):
-        raise RuntimeError("session store does not support team transcript message upsert")
-    return upsert(
+    return db.messages.upsert_team_message(
         session_id=session_id,
         conversation_message_id=conversation_message_id,
         role=role,
@@ -1312,9 +1306,7 @@ class RuntimeTranscriptWriter:
                 exc,
             )
         status = _text(payload.get("status")) or "completed"
-        upsert_locked = getattr(db, "_upsert_team_message_by_id_locked", None)
-        if not callable(upsert_locked):
-            return {}
+        upsert_locked = db.messages.upsert_team_message_locked
         # NOTE (2026-07-05): a prior attempt to populate messages.tool_calls
         # from tool_events here caused LLM provider 400s ("assistant message
         # with tool_calls must be followed by tool messages responding to
@@ -1325,7 +1317,6 @@ class RuntimeTranscriptWriter:
         # tool-response projection is in place (see workflow output for
         # the full architectural fix).
         saved = upsert_locked(
-            conn,
             session_id=conversation_session_id,
             conversation_message_id=conversation_message_id,
             role="assistant",
@@ -1700,7 +1691,7 @@ def _summary_payload_from_run_events(
     if not session_id or not run_id:
         return "", []
     try:
-        events = db.list_run_events(session_id, run_id=run_id, limit=5000) or []
+        events = db.runs.list_events(session_id, run_id=run_id, limit=5000) or []
     except Exception:
         return "", []
     artifact_refs: list[dict[str, Any]] = []

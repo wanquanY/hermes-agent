@@ -41,12 +41,16 @@ class RunService:
         conn: sqlite3.Connection,
         unit_of_work: SqliteUnitOfWork,
         sessions: SessionRepoImpl,
+        *,
+        message_complete_projector: Callable[[str, dict[str, Any]], dict[str, Any]]
+        | None = None,
     ) -> None:
         self._conn = conn
         self._unit_of_work = unit_of_work
         self._sessions = sessions
         self._repository = RunRepoImpl(conn)
         self._events = RunEventReadModel(conn)
+        self._message_complete_projector = message_complete_projector
         self.retention = RunEventRetentionService(conn, unit_of_work)
         self._event_listener_lock = threading.RLock()
         self._event_listeners: dict[str, Callable[[dict[str, Any]], None]] = {}
@@ -79,6 +83,7 @@ class RunService:
             )
             if str(saved.get("type") or "") == "session.info":
                 self._sessions.project_runtime_state_event(saved)
+            saved = self._project_message_complete(stable, saved)
             self._project_saved(saved)
             return saved
 
@@ -147,6 +152,39 @@ class RunService:
             }
         )
         return frame
+
+    def _project_message_complete(
+        self,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._message_complete_projector is None:
+            return event
+        if str(event.get("type") or "").strip() != "message.complete":
+            return event
+        if str(event.get("_persistence_disposition") or "") == "ignored_after_terminal":
+            return event
+        projected = self._message_complete_projector(session_id, event)
+        if not isinstance(projected, dict):
+            raise TypeError("message_complete_projector must return a dict")
+        conversation_message_id = str(
+            projected.get("conversation_message_id")
+            or projected.get("conversationMessageId")
+            or ""
+        ).strip()
+        if not conversation_message_id:
+            return event
+        self._repository.mark_projected_message(
+            session_id=session_id,
+            seq=int(event.get("seq") or 0),
+            conversation_message_id=conversation_message_id,
+        )
+        saved = dict(event)
+        saved["_projected_message_id"] = conversation_message_id
+        report_ready = projected.get("_team_mission_report_ready")
+        if isinstance(report_ready, dict):
+            saved["_team_mission_report_ready"] = dict(report_ready)
+        return saved
 
     def register_event_listener(
         self,

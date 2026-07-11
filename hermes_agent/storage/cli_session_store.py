@@ -56,6 +56,7 @@ from hermes_team_mission.read_models.node_history import (
     TeamMissionNodeHistoryReadModel,
 )
 from hermes_team_mission.read_models.row_mapper import TeamMissionRowMapper
+from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
 from hermes_team_mission.state.maintenance import run_team_mission_startup_maintenance
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
 
@@ -168,7 +169,19 @@ class CliSessionStore(TeamMissionStateMixin):
             self.messages.list,
             self.messages.append,
         )
-        self.runs = RunService(conn, self._unit_of_work, self._session_repo)
+        self.runs = RunService(
+            conn,
+            self._unit_of_work,
+            self._session_repo,
+            message_complete_projector=lambda session_id, event: (
+                RuntimeTranscriptWriter.project_message_complete_event_locked(
+                    self,
+                    conn,
+                    session_id=session_id,
+                    event=event,
+                )
+            ),
+        )
         self.run_event_maintenance = RunEventMaintenanceService(
             conn,
             self._unit_of_work,
