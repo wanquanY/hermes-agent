@@ -178,6 +178,7 @@ class CliSessionStore(TeamMissionStateMixin):
         self.team_capabilities = TeamCapabilityService(
             TeamCapabilityRepo(conn, self._execute_write, self._lock),
             self.team_mission_graphs,
+            self.upsert_team_mission,
         )
         run_team_mission_startup_maintenance(self, logger)
 

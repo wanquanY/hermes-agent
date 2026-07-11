@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
 from hermes_team_capability_snapshot import text
@@ -10,8 +10,6 @@ from hermes_team_capability_snapshot import text
 
 class TeamMissionMetadataPort(Protocol):
     def get_team_mission_graph(self, mission_id: str) -> dict[str, Any]: ...
-
-    def upsert_team_mission(self, **mission: Any) -> dict[str, Any]: ...
 
 
 class TeamCapabilityService:
@@ -26,9 +24,11 @@ class TeamCapabilityService:
         self,
         repository: TeamCapabilityRepo,
         missions: TeamMissionMetadataPort,
+        update_mission: Callable[..., dict[str, Any]],
     ) -> None:
         self._repository = repository
         self._missions = missions
+        self._update_mission = update_mission
 
     def get(self, snapshot_id: str) -> dict[str, Any]:
         return self._repository.get_team_capability_snapshot(snapshot_id)
@@ -106,7 +106,7 @@ class TeamCapabilityService:
             "source_digest": text(binding.get("source_digest")),
             "pinned_at": float(binding.get("pinned_at") or 0),
         }
-        self._missions.upsert_team_mission(
+        self._update_mission(
             mission_id=resolved_mission_id,
             conversation_id=text(mission.get("conversation_id")),
             team_id=text(mission.get("team_id")),

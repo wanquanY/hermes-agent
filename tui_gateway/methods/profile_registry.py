@@ -303,7 +303,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes profile registry db unavailable")
     try:
-        profile = db.upsert_agent_profile(**_profile_payload(params or {}))
+        profile = db.profiles.upsert_agent_profile(**_profile_payload(params or {}))
         return _ok(rid, {"profile": profile})
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
@@ -324,9 +324,9 @@ def _(rid, params: dict) -> dict:
         or (params or {}).get("id")
     )
     slug = _text((params or {}).get("slug") or (params or {}).get("agentProfileSlug") or (params or {}).get("agent_profile_slug"))
-    profile = db.get_agent_profile(profile_id) if profile_id else {}
-    if not profile and slug and callable(getattr(db, "get_agent_profile_by_slug", None)):
-        profile = db.get_agent_profile_by_slug(slug)
+    profile = db.profiles.get_agent_profile(profile_id) if profile_id else {}
+    if not profile and slug:
+        profile = db.profiles.get_agent_profile_by_slug(slug)
     if not profile:
         return _err(rid, 4040, "profile not found")
     return _ok(rid, {"profile": _profile_for_projection(profile, _projection(params, default="detail"))})
@@ -339,7 +339,7 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"profiles": []})
     include_archived = _bool((params or {}).get("include_archived", (params or {}).get("includeArchived")))
     projection = _projection(params)
-    profiles = db.list_agent_profiles(include_archived=include_archived)
+    profiles = db.profiles.list_agent_profiles(include_archived=include_archived)
     return _ok(rid, {"profiles": [_profile_for_projection(profile, projection) for profile in profiles]})
 
 
@@ -355,7 +355,7 @@ def _(rid, params: dict) -> dict:
         or (params or {}).get("agentProfileId")
         or (params or {}).get("id")
     )
-    profile = db.archive_agent_profile(profile_id)
+    profile = db.profiles.archive_agent_profile(profile_id)
     if not profile:
         return _err(rid, 4040, "profile not found")
     return _ok(rid, {"profile": profile})
@@ -383,7 +383,7 @@ def _(rid, params: dict) -> dict:
     if not profile_id:
         _growth_diagnostic("rpc_missing_profile_id", rid=rid)
         return _err(rid, 4006, "agent profile id required")
-    summary = db.agent_profile_growth_summary(
+    summary = db.profiles.agent_profile_growth_summary(
         profile_id,
         agent_profile_version_id=version_id,
         range_preset=range_preset,
@@ -416,7 +416,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes profile registry db unavailable")
     try:
-        draft = db.upsert_agent_profile_draft(**_draft_payload(params or {}))
+        draft = db.profiles.upsert_agent_profile_draft(**_draft_payload(params or {}))
         return _ok(rid, {"draft": draft})
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
@@ -430,7 +430,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes profile registry db unavailable")
     draft_id = _text((params or {}).get("draft_id") or (params or {}).get("draftId") or (params or {}).get("id"))
-    draft = db.get_agent_profile_draft(draft_id)
+    draft = db.profiles.get_agent_profile_draft(draft_id)
     if not draft:
         return _err(rid, 4040, "profile draft not found")
     return _ok(rid, {"draft": draft})
@@ -446,7 +446,7 @@ def _(rid, params: dict) -> dict:
         statuses = [item.strip() for item in raw_statuses.split(",") if item.strip()]
     else:
         statuses = _string_array(raw_statuses)
-    drafts = db.list_agent_profile_drafts(
+    drafts = db.profiles.list_agent_profile_drafts(
         include_published=_bool((params or {}).get("include_published", (params or {}).get("includePublished"))),
         include_discarded=_bool((params or {}).get("include_discarded", (params or {}).get("includeDiscarded"))),
         statuses=statuses,
@@ -463,7 +463,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes profile registry db unavailable")
     draft_id = _text((params or {}).get("draft_id") or (params or {}).get("draftId") or (params or {}).get("id"))
-    draft = db.discard_agent_profile_draft(draft_id)
+    draft = db.profiles.discard_agent_profile_draft(draft_id)
     if not draft:
         return _err(rid, 4040, "profile draft not found")
     return _ok(rid, {"draft": draft})

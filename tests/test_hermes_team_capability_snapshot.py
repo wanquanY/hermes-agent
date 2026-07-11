@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def _source_packet(description: str = "A balanced engineering team") -> dict:
@@ -47,10 +47,10 @@ def _source_packet(description: str = "A balanced engineering team") -> dict:
 
 
 def test_team_capability_snapshot_is_canonical_hermes_state(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
-    snapshot = db.resolve_team_capability_snapshot(source_packet=_source_packet())
-    reused = db.resolve_team_capability_snapshot(source_packet=_source_packet())
+    snapshot = db.team_capabilities.resolve(source_packet=_source_packet())
+    reused = db.team_capabilities.resolve(source_packet=_source_packet())
 
     assert snapshot["snapshot_id"] == reused["snapshot_id"]
     assert snapshot["team_id"] == "team-1"
@@ -68,11 +68,11 @@ def test_team_capability_snapshot_is_canonical_hermes_state(tmp_path: Path):
 
 
 def test_team_capability_snapshot_stale_then_refresh_creates_new_version(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
-    first = db.resolve_team_capability_snapshot(source_packet=_source_packet("Initial team"))
-    stale = db.resolve_team_capability_snapshot(source_packet=_source_packet("Changed team"))
-    refreshed = db.resolve_team_capability_snapshot(source_packet=_source_packet("Changed team"), force_refresh=True)
+    first = db.team_capabilities.resolve(source_packet=_source_packet("Initial team"))
+    stale = db.team_capabilities.resolve(source_packet=_source_packet("Changed team"))
+    refreshed = db.team_capabilities.resolve(source_packet=_source_packet("Changed team"), force_refresh=True)
 
     assert stale["snapshot_id"] == first["snapshot_id"]
     assert stale["status"] == "stale"
@@ -83,7 +83,7 @@ def test_team_capability_snapshot_stale_then_refresh_creates_new_version(tmp_pat
 
 
 def test_team_capability_snapshot_binding_is_pinned_to_mission(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -92,9 +92,9 @@ def test_team_capability_snapshot_binding_is_pinned_to_mission(tmp_path: Path):
         objective="Build a tool",
         mode="supervised_mission",
     )
-    snapshot = db.resolve_team_capability_snapshot(source_packet=_source_packet())
+    snapshot = db.team_capabilities.resolve(source_packet=_source_packet())
 
-    binding = db.bind_team_capability_snapshot(
+    binding = db.team_capabilities.bind(
         mission_id="mission-1",
         conversation_id="conversation-1",
         snapshot_id=snapshot["snapshot_id"],
@@ -102,6 +102,6 @@ def test_team_capability_snapshot_binding_is_pinned_to_mission(tmp_path: Path):
 
     assert binding["mission_id"] == "mission-1"
     assert binding["snapshot_id"] == snapshot["snapshot_id"]
-    assert db.get_bound_team_capability_snapshot("mission-1")["snapshot_id"] == snapshot["snapshot_id"]
-    mission = db.get_team_mission_graph("mission-1")["mission"]
+    assert db.team_capabilities.get_bound("mission-1")["snapshot_id"] == snapshot["snapshot_id"]
+    mission = db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]
     assert mission["metadata"]["team_capability_snapshot"]["snapshot_id"] == snapshot["snapshot_id"]
