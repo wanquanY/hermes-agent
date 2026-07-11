@@ -77,6 +77,33 @@ class StorageMaintenanceService:
             lambda _conn: self._session_repo.finalize_orphaned_compression_sessions()
         )
 
+    def repair_orphaned_foreign_key_rows(self) -> int:
+        """Remove dangling non-authoritative index and cache records."""
+
+        def affected(cursor: sqlite3.Cursor) -> int:
+            return max(0, int(cursor.rowcount or 0))
+
+        def repair(conn: sqlite3.Connection) -> int:
+            repaired = self._session_repo.repair_orphaned_branch_references()
+            repaired += affected(
+                conn.execute(
+                    """
+                    DELETE FROM team_capability_snapshot_bindings
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM team_missions m
+                        WHERE m.mission_id = team_capability_snapshot_bindings.mission_id
+                    )
+                       OR NOT EXISTS (
+                        SELECT 1 FROM team_capability_snapshots s
+                        WHERE s.snapshot_id = team_capability_snapshot_bindings.snapshot_id
+                    )
+                    """
+                )
+            )
+            return repaired
+
+        return self._unit_of_work.execute(repair)
+
     def vacuum(self) -> None:
         with self._lock:
             try:

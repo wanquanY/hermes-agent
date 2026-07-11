@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -342,6 +343,53 @@ class SessionService:
 
     def update_system_prompt(self, session_id: str, prompt: str) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.update_system_prompt(session_id, prompt))
+
+    def get_scoped_system_prompt(self, session_id: str, scope_key: str) -> str | None:
+        """Return the system-prompt snapshot for one execution scope."""
+        stable = str(session_id or "").strip()
+        scope = str(scope_key or "").strip()
+        if not stable or not scope:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT system_prompt
+                  FROM session_system_prompts
+                 WHERE session_id = ? AND scope_key = ?
+                """,
+                (stable, scope),
+            ).fetchone()
+        if row is None or row["system_prompt"] is None:
+            return None
+        return str(row["system_prompt"])
+
+    def update_scoped_system_prompt(
+        self,
+        session_id: str,
+        scope_key: str,
+        prompt: str,
+    ) -> None:
+        """Store the system-prompt snapshot for one execution scope."""
+        stable = str(session_id or "").strip()
+        scope = str(scope_key or "").strip()
+        if not stable or not scope:
+            return
+
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO session_system_prompts
+                    (session_id, scope_key, system_prompt, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, scope_key)
+                DO UPDATE SET
+                    system_prompt = excluded.system_prompt,
+                    updated_at = excluded.updated_at
+                """,
+                (stable, scope, str(prompt or ""), time.time()),
+            )
+
+        self._unit_of_work.execute(write)
 
     def request_handoff(self, session_id: str, platform: str) -> bool:
         return self._unit_of_work.execute(lambda _conn: self._repo.request_handoff(session_id, platform))

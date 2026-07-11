@@ -18,6 +18,7 @@ from hermes_agent.domain.run_lifecycle import (
     orphaned_active_run_decision,
 )
 from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
+from hermes_agent.domain.session_runtime_state import session_runtime_state_from_row
 from hermes_agent.domain.run_terminator import TerminateCause, terminate_run
 from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
@@ -221,6 +222,17 @@ class RunService:
     def get(self, run_id: str) -> dict[str, Any] | None:
         run = self._repository.get_run(run_id)
         return asdict(run) if run is not None else None
+
+    def runtime_state(self, session_id: str) -> dict[str, Any]:
+        """Return the latest projected runtime state for a conversation session."""
+        stable = str(session_id or "").strip()
+        if not stable:
+            return {}
+        row = self._conn.execute(
+            "SELECT * FROM session_runtime_state WHERE session_id = ?",
+            (stable,),
+        ).fetchone()
+        return session_runtime_state_from_row(row)
 
     def list(
         self,

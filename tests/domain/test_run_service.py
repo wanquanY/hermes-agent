@@ -38,8 +38,12 @@ def test_session_info_projection_crosses_run_to_session_boundary(tmp_path):
             "SELECT * FROM session_runtime_state WHERE session_id = ?",
             ("conversation-1",),
         ).fetchone()
+        state = service.runtime_state("conversation-1")
         assert row["source_seq"] == saved["seq"]
         assert row["execution_session_id"] == "exec-1"
         assert row["run_id"] == "run-1"
+        assert state["source_seq"] == saved["seq"]
+        assert state["execution_session_id"] == "exec-1"
+        assert state["run_id"] == "run-1"
     finally:
         conn.close()
