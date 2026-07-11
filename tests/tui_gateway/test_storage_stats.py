@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services.persistence.gateway_store import GatewayStateStore
 from tui_gateway.services.storage_stats import collect_storage_stats
 
@@ -8,22 +8,22 @@ from tui_gateway.services.storage_stats import collect_storage_stats
 def test_collect_storage_stats_reports_runtime_tables_artifacts_and_logs(tmp_path):
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
-    db = SessionDB(hermes_home / "state.db")
+    db = open_cli_session_store(hermes_home / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_message(
+        db.sessions.create("session-1", "dovie")
+        db.messages.append(
             "session-1",
             "user",
             "hello",
             metadata={"client_message_id": "client-1"},
         )
-        db.append_message(
+        db.messages.append(
             "session-1",
             "assistant",
             "world",
             reasoning="thinking",
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             {
                 "type": "message.delta",
