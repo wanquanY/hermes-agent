@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_agent.repositories import (
     Activity,
     ActivitySpec,
@@ -123,9 +123,9 @@ def test_impl_is_structural_team_mission_repo():
 
 
 def test_production_schema_supports_v3_activity_repository(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s1", "test")
+        db.sessions.create("s1", "test")
         repo = TeamMissionRepoImpl(db._conn)
 
         activity = repo.append_activity(
