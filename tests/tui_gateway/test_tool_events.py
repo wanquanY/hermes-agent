@@ -104,6 +104,9 @@ def test_agent_profile_test_uses_dedicated_stream_events():
         subagent_id="child-1",
         goal="hello",
         tool_count=0,
+        mode="append",
+        delta="\npartial answer",
+        offset=0,
     )
     bridge.on_tool_progress(
         "sid",
@@ -170,6 +173,9 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert "context" not in events[3]["payload"]
     assert "dispatch_message" not in events[3]["payload"]
     assert events[4]["payload"]["text"] == "\npartial answer"
+    assert events[4]["payload"]["mode"] == "append"
+    assert events[4]["payload"]["delta"] == "\npartial answer"
+    assert events[4]["payload"]["offset"] == 0
     assert events[4]["payload"]["tool_name"] == "test_agent_profile"
     assert events[5]["payload"]["text"] == "preparing draft runtime"
     assert events[6]["payload"]["tool_name"] == "terminal"

@@ -1186,14 +1186,27 @@ def _build_child_output_delta_callback(
             kw["tool_call_id"] = normalized_delegate_call_id
         return kw
 
+    stream_offset = 0
+
     def _callback(text: Optional[str]) -> None:
+        nonlocal stream_offset
         if text is None:
             return
         delta = str(text)
         if not delta:
             return
         try:
-            parent_cb("subagent.output_delta", tool_name or None, delta, None, **_identity_kwargs())
+            parent_cb(
+                "subagent.output_delta",
+                tool_name or None,
+                delta,
+                None,
+                **_identity_kwargs(),
+                mode="append",
+                delta=delta,
+                offset=stream_offset,
+            )
+            stream_offset += len(delta.encode("utf-16-le")) // 2
         except Exception as exc:
             logger.debug("Parent output-delta callback failed: %s", exc)
 
@@ -1254,14 +1267,27 @@ def _build_child_reasoning_delta_callback(
             kw["tool_call_id"] = normalized_delegate_call_id
         return kw
 
+    stream_offset = 0
+
     def _callback(text: Optional[str]) -> None:
+        nonlocal stream_offset
         if text is None:
             return
         delta = str(text)
         if not delta:
             return
         try:
-            parent_cb("subagent.reasoning_delta", tool_name or None, delta, None, **_identity_kwargs())
+            parent_cb(
+                "subagent.reasoning_delta",
+                tool_name or None,
+                delta,
+                None,
+                **_identity_kwargs(),
+                mode="append",
+                delta=delta,
+                offset=stream_offset,
+            )
+            stream_offset += len(delta.encode("utf-16-le")) // 2
         except Exception as exc:
             logger.debug("Parent reasoning-delta callback failed: %s", exc)
 
