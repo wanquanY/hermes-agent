@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tools.registry import registry
 
 
@@ -38,7 +38,7 @@ def _task_brief(label: str = "deliverable") -> dict:
 def _create_supervised_planning_context(tmp_path: Path):
     import tools.team_mission_planning_tools  # noqa: F401
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     graph = db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         title="Supervised mission",
@@ -73,7 +73,7 @@ def _create_supervised_planning_context(tmp_path: Path):
 def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path: Path):
     import tools.team_mission_planning_tools  # noqa: F401
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     graph = db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
         title="Supervised mission",
@@ -128,6 +128,30 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
             parent_agent=agent,
         )
     )
+    verifier = _json_tool_result(
+        registry.dispatch(
+            "team_mission_node_create",
+            {
+                "node_id": "node-verifier",
+                "kind": "verifier",
+                "title": "Verifier",
+                "objective": "Verify the worker deliverable",
+                "status": "todo",
+                "task_brief": _task_brief("deliverable verification"),
+            },
+            parent_agent=agent,
+        )
+    )
+    _json_tool_result(
+        registry.dispatch(
+            "team_mission_edge_create",
+            {
+                "from_node_id": "node-worker",
+                "to_node_id": "node-verifier",
+            },
+            parent_agent=agent,
+        )
+    )
     synthesis = _json_tool_result(
         registry.dispatch(
             "team_mission_node_create",
@@ -146,7 +170,7 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
         registry.dispatch(
             "team_mission_edge_create",
             {
-                "from_node_id": "node-worker",
+                "from_node_id": "node-verifier",
                 "to_node_id": "node-synthesis",
             },
             parent_agent=agent,
@@ -169,6 +193,7 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
     assert node_worker["metadata"]["task_brief"]["goal"] == "Deliver a complete worker deliverable for the team mission."
     assert node_worker["output_contract"]["requires_clarification_when_blocked"] is True
     assert edge["dovie_event"] == "team_mission_edge_created"
+    assert verifier["node_id"] == "node-verifier"
     synthesis_node = db.get_team_mission_node("mission-1", "node-synthesis")
     assert synthesis_node["assignee_member_id"] == "leader"
     assert synthesis_node["assignee_profile_id"] == "profile-leader"
@@ -178,7 +203,7 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
     assert completed["approval_requests"][0]["scope"] == "whole_graph"
     assert "graph" not in completed
 
-    final_graph = db.get_team_mission_graph("mission-1")
+    final_graph = db.team_mission_graphs.get_team_mission_graph("mission-1")
     assert final_graph["mission"]["status"] == "waiting_approval"
     approval = next(node for node in final_graph["nodes"] if node["kind"] == "approval_gate")
     assert approval["assignee_member_id"] == "leader"
@@ -193,7 +218,7 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
 def test_team_mission_planning_tools_reject_unbound_run(tmp_path: Path):
     import tools.team_mission_planning_tools  # noqa: F401
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     agent = SimpleNamespace(_session_db=db, _hermes_active_run_id="missing-run")
 
     result = json.loads(
