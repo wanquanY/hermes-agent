@@ -23,6 +23,9 @@ class SessionListQuery:
     order_by_last_active: bool = False
     page_cursor: dict[str, Any] | None = None
     id_query: str | None = None
+    min_message_count: int = 0
+    archived: str = "false"
+    include_internal: bool = False
 
 
 class SessionListReadModel:
@@ -35,9 +38,20 @@ class SessionListReadModel:
         where_clauses: list[str] = []
         params: list[Any] = []
 
+        archived_mode = str(query.archived or "false").strip().lower()
+        if archived_mode not in {"false", "true", "only", "all"}:
+            raise ValueError(f"unsupported archived filter: {query.archived!r}")
+        if not query.include_internal:
+            where_clauses.extend(
+                [
+                    "COALESCE(s.session_kind, 'hermes_session') != 'execution'",
+                    "COALESCE(s.conversation_kind, 'direct') IN ('direct', 'team')",
+                ]
+            )
+
         if not query.include_children:
             where_clauses.append(
-                "(s.parent_session_id IS NULL"
+                "(s.parent_session_id IS NULL OR s.parent_session_id = ''"
                 " OR EXISTS (SELECT 1 FROM session_lineage l"
                 "            WHERE l.session_id = s.id"
                 "            AND l.branch_origin = 'user_message_action')"
@@ -54,6 +68,12 @@ class SessionListReadModel:
             placeholders = ",".join("?" for _ in query.exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(query.exclude_sources)
+        if int(query.min_message_count or 0) > 0:
+            where_clauses.append("COALESCE(s.message_count, 0) >= ?")
+            params.append(max(0, int(query.min_message_count)))
+        if archived_mode != "all":
+            where_clauses.append("COALESCE(s.archived, 0) = ?")
+            params.append(1 if archived_mode in {"true", "only"} else 0)
 
         id_needle = str(query.id_query or "").strip().lower()
         id_like_pattern = (
@@ -222,6 +242,7 @@ class SessionListReadModel:
             "started_at": item.get("started_at") or 0,
             "id": item.get("id") or "",
         }
+        item["archived"] = bool(item.get("archived") or 0)
         return item
 
     def _project_compression_tip(self, row: dict[str, Any]) -> dict[str, Any]:

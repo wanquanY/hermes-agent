@@ -103,7 +103,18 @@ class SessionService:
 
     def resolve_id(self, session_id: str) -> str | None:
         stable = str(session_id or "").strip()
-        return stable if stable and self.get(stable) is not None else None
+        if not stable:
+            return None
+        if self.get(stable) is not None:
+            return stable
+        escaped = stable.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\' "
+                "ORDER BY started_at DESC LIMIT 2",
+                (f"{escaped}%",),
+            ).fetchall()
+        return str(rows[0]["id"]) if len(rows) == 1 else None
 
     def end(self, session_id: str, reason: str) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.close(session_id, str(reason or "")))
@@ -192,8 +203,37 @@ class SessionService:
     def compression_tip(self, session_id: str) -> str:
         return self._recall.get_compression_tip(session_id)
 
-    def list_rich(self, **query: Any) -> list[dict[str, Any]]:
-        return self._recall.list_sessions_rich(**query)
+    def list_rich(
+        self,
+        source: str | None = None,
+        exclude_sources: list[str] | tuple[str, ...] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        include_children: bool = False,
+        project_compression_tips: bool = True,
+        order_by_last_active: bool = False,
+        page_cursor: dict[str, Any] | None = None,
+        id_query: str | None = None,
+        min_message_count: int = 0,
+        archived: str = "false",
+        include_internal: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self._list.list(
+            SessionListQuery(
+                source=source,
+                exclude_sources=tuple(exclude_sources or ()),
+                limit=limit,
+                offset=offset,
+                include_children=include_children,
+                project_compression_tips=project_compression_tips,
+                order_by_last_active=order_by_last_active,
+                page_cursor=page_cursor,
+                id_query=id_query,
+                min_message_count=min_message_count,
+                archived=archived,
+                include_internal=include_internal,
+            )
+        )
 
     def list(
         self,
@@ -229,7 +269,7 @@ class SessionService:
         offset: int = 0,
         **_query: Any,
     ) -> list[dict[str, Any]]:
-        return self._recall.list_sessions_rich(
+        return self.list_rich(
             source=source,
             limit=limit,
             offset=offset,
@@ -242,10 +282,10 @@ class SessionService:
         if not needle:
             return []
         bounded_limit = max(1, min(_to_int(limit, 20), 100))
-        candidates = self._recall.list_sessions_rich(
+        candidates = self.list_rich(
             limit=max(bounded_limit * 4, bounded_limit),
             offset=0,
-            include_children=True,
+            include_children=False,
             order_by_last_active=True,
             id_query=needle,
             archived="all",
@@ -288,7 +328,9 @@ class SessionService:
         ]
 
     def update_token_counts(self, session_id: str, **counts: Any) -> None:
-        self._unit_of_work.execute(lambda _conn: self._repo.update_usage(session_id, counts))
+        self._unit_of_work.execute(
+            lambda _conn: self._repo.update_token_counts(session_id, **counts)
+        )
 
     def update_runtime_config(
         self,

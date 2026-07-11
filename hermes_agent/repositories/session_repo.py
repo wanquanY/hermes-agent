@@ -730,7 +730,7 @@ class SessionRepoImpl:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
-                   model = COALESCE(model, ?),
+                   model = COALESCE(NULLIF(model, ''), ?),
                    api_call_count = ?
                    WHERE id = ?"""
         else:
@@ -751,7 +751,7 @@ class SessionRepoImpl:
                    billing_provider = COALESCE(billing_provider, ?),
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
-                   model = COALESCE(model, ?),
+                   model = COALESCE(NULLIF(model, ''), ?),
                    api_call_count = COALESCE(api_call_count, 0) + ?
                    WHERE id = ?"""
         self._conn.execute(
