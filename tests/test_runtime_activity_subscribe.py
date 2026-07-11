@@ -8,7 +8,6 @@ from typing import Any, Iterator
 import pytest
 
 from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
-from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from tui_gateway import server
 from tui_gateway.services import run_control
 from tui_gateway.services.activity_reconciler import ActivityReconciler
@@ -672,30 +671,6 @@ def test_subscribe_picks_up_events_emitted_by_reconciler(db: CliSessionStore) ->
     )
 
     assert [event["type"] for event in result["events"]] == ["activity.command.created"]
-
-
-def test_subscribe_picks_up_events_for_team_mission_create_via_legacy_bridge(
-    db: CliSessionStore,
-) -> None:
-    command_id = record_legacy_activity_command(
-        db,
-        activity_id="mission:test-legacy",
-        kind="create",
-        payload={
-            "kind": "mission",
-            "conversation_id": "conversation-legacy",
-            "conversation_session_id": "session-legacy",
-        },
-        source="team_mission.create",
-    )
-    assert command_id
-    ActivityReconciler(db).run_one_cycle()
-
-    result = _assert_ok(
-        _call("runtime.activity.subscribe", {"activity_id": "mission:test-legacy"})
-    )
-
-    assert [event["payload"]["command_id"] for event in result["events"]] == [command_id]
 
 
 def test_subscribe_activity_id_filter_isolates_different_activities(db: CliSessionStore) -> None:

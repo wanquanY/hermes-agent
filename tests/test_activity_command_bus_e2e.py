@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -79,20 +78,6 @@ def _command(db: CliSessionStore, command_id: str) -> dict[str, Any]:
 
 def _commands_for_activity(db: CliSessionStore, activity_id: str) -> list[dict[str, Any]]:
     return db.activities.list_commands(activity_id, limit=50)
-
-
-def _command_by_source(
-    db: CliSessionStore,
-    activity_id: str,
-    source: str,
-) -> dict[str, Any]:
-    matches = [
-        row
-        for row in _commands_for_activity(db, activity_id)
-        if row.get("metadata", {}).get("source") == source
-    ]
-    assert len(matches) == 1
-    return matches[0]
 
 
 def _set_intent_at(db: CliSessionStore, command_id: str, value: float) -> None:
@@ -230,32 +215,6 @@ def _create_mission(
             },
         )
     )
-
-
-def _root_node_id(graph: dict[str, Any]) -> str:
-    nodes = graph.get("graph", {}).get("nodes") or []
-    node = next(item for item in nodes if item.get("kind") == "root")
-    return str(node["node_id"])
-
-
-def _install_ready_prompt_session(db: CliSessionStore) -> None:
-    ready = threading.Event()
-    ready.set()
-    db.sessions.create("prompt-session", source="tui")
-    server._sessions["runtime-prompt"] = {
-        "agent": None,
-        "agent_ready": ready,
-        "agent_error": "",
-        "session_key": "prompt-session",
-        "history": [],
-        "history_lock": threading.Lock(),
-        "history_version": 0,
-        "running": False,
-        "transient": False,
-        "attached_images": [],
-        "image_counter": 0,
-        "cols": 80,
-    }
 
 
 # -- Group A: single-command lifecycle end to end ---------------------------
@@ -488,24 +447,8 @@ def test_reconciler_idempotent_when_activity_row_pre_exists(
     assert len(gateway_db.activities.list("session-race")) == 1
 
 
-# -- Group C: legacy bridge end to end --------------------------------------
-"""Group C covers legacy RPC wrappers writing audit-only activity commands."""
-
-
-def test_team_mission_create_writes_legacy_audit_row(
-    gateway_db: CliSessionStore,
-    tmp_path: Path,
-) -> None:
-    """call team_mission.create RPC -> activity_commands 表多一行
-    kind=create source=team_mission.create."""
-    _seed_registry_team(gateway_db, tmp_path)
-
-    _create_mission(tmp_path)
-
-    row = _command_by_source(gateway_db, "mission:mission-1", "team_mission.create")
-    assert row["kind"] == "create"
-    assert row["state"] == "accepted"
-    assert row["payload"]["mission_id"] == "mission-1"
+# -- Group C: Team Mission activity ownership -------------------------------
+"""Group C verifies Team Mission binds work to canonical Activities."""
 
 
 def test_team_mission_create_binds_request_activity_to_mission(
@@ -544,88 +487,6 @@ def test_team_mission_create_binds_request_activity_to_mission(
     assert activity["conversation_id"] == "team-session-activity-first"
     assert activity["status"] == "running"
     assert mission_id_for_activity("act-team_dispatch-create-e2e", db=gateway_db) == "mission-activity-first"
-    row = _command_by_source(
-        gateway_db,
-        "act-team_dispatch-create-e2e",
-        "team_mission.create",
-    )
-    assert row["payload"]["request_activity_id"] == "act-team_dispatch-create-e2e"
-
-
-def test_team_mission_cancel_writes_legacy_audit_row_and_returns_4040_for_unknown(
-    gateway_db: CliSessionStore,
-) -> None:
-    """call team_mission.cancel(mission_id='unknown') -> 4040 +
-    activity_commands 行(legacy_bridge 仍写入审计, kind=cancel)."""
-    response = _call(
-        "team_mission.cancel",
-        {"mission_id": "unknown", "canceled_by": "user", "reason": "stop"},
-    )
-
-    assert response["error"]["code"] == 4040
-    if not _commands_for_activity(gateway_db, "mission:unknown"):
-        pytest.xfail(
-            "Phase 1.F contract gap: team_mission.cancel returns 4040 before "
-            "recording legacy_bridge audit for unknown mission_id."
-        )
-    row = _command_by_source(gateway_db, "mission:unknown", "team_mission.cancel")
-    assert row["kind"] == "cancel"
-    assert row["state"] == "accepted"
-
-
-def test_team_mission_node_start_writes_legacy_audit_row(
-    gateway_db: CliSessionStore,
-    tmp_path: Path,
-) -> None:
-    """call team_mission.node.start -> activity_commands 行 kind=start."""
-    _seed_registry_team(gateway_db, tmp_path)
-    graph = _create_mission(tmp_path)
-    node_id = _root_node_id(graph)
-
-    response = _call(
-        "team_mission.node.start",
-        {
-            "mission_id": "mission-1",
-            "node_id": node_id,
-            "workspace": {"workspace_id": "bad", "workspace_path": ""},
-            "record_user_task_message": False,
-        },
-    )
-
-    assert response["error"]["code"] in {4004, 5000, 5008}
-    row = _command_by_source(
-        gateway_db,
-        f"act-node:mission-1:{node_id}",
-        "team_mission.node.start",
-    )
-    assert row["kind"] == "start"
-    assert row["payload"]["node_id"] == node_id
-
-
-def test_team_mission_message_submit_writes_legacy_audit_row_kind_start(
-    gateway_db: CliSessionStore,
-) -> None:
-    """call team_mission.message.submit -> activity_commands 行 kind=start
-    activity_id=chat:<conversation_session_id> for callers without a request Activity."""
-    response = _call(
-        "team_mission.message.submit",
-        {
-            "conversation_id": "conversation-message-e2e",
-            "conversation_session_id": "team-session-message-e2e",
-            "team_id": "team-1",
-            "text": "hello leader",
-            "workspace": {"workspace_id": "bad", "workspace_path": ""},
-        },
-    )
-
-    assert response["error"]["code"] in {4004, 4094, 5008}
-    row = _command_by_source(
-        gateway_db,
-        "chat:team-session-message-e2e",
-        "team_mission.message.submit",
-    )
-    assert row["kind"] == "start"
-    assert row["payload"]["conversation_session_id"] == "team-session-message-e2e"
 
 
 def test_team_mission_message_submit_uses_request_activity_owner(
@@ -650,39 +511,6 @@ def test_team_mission_message_submit_uses_request_activity_owner(
     assert activity["kind"] == "team_dispatch"
     assert activity["conversation_id"] == "team-session-message-e2e"
     assert activity["status"] == "running"
-    row = _command_by_source(
-        gateway_db,
-        "act-team_dispatch-submit-e2e",
-        "team_mission.message.submit",
-    )
-    assert row["kind"] == "start"
-    assert row["payload"]["request_activity_id"] == "act-team_dispatch-submit-e2e"
-
-
-def test_prompt_submit_writes_legacy_audit_row_with_chat_activity_id(
-    gateway_db: CliSessionStore,
-) -> None:
-    """call prompt.submit -> activity_commands 行 kind=start
-    activity_id=chat:<session_id>."""
-    _install_ready_prompt_session(gateway_db)
-
-    result = _assert_ok(
-        _call(
-            "prompt.submit",
-            {
-                "_run_registry_reserved": True,
-                "session_id": "runtime-prompt",
-                "text": "hello",
-                "client_run_id": "run-prompt",
-                "turn_id": "turn-prompt",
-            },
-        )
-    )
-
-    row = _command_by_source(gateway_db, "chat:prompt-session", "prompt.submit")
-    assert row["kind"] == "start"
-    assert row["payload"] == {"session_id": "prompt-session", "text_len": 5}
-    assert result["conversation_session_id"] == "prompt-session"
 
 
 # -- Group D: state machine integrity ---------------------------------------

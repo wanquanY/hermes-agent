@@ -6,7 +6,7 @@ from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
 def _seed_team(db, tmp_path):
-    db.upsert_agent_profile(
+    db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader",
@@ -16,13 +16,13 @@ def _seed_team(db, tmp_path):
         current_version_id="version-leader",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Team",
         lead_agent_profile_id="profile-leader",
         default_mode="supervised_mission",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id="profile-leader",
@@ -35,12 +35,12 @@ def _seed_team(db, tmp_path):
 def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch, tmp_path):
     import tools.team_mission_leader_tools  # noqa: F401
     from channels import session_context
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tools.registry import registry
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team(db, tmp_path)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     workspace = tmp_path / "workspace"
@@ -111,7 +111,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
     assert result["task_status"] == "planning"
     assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert submitted["dovie_product_context"]["team_mission"]["node_phase"] == "planning"
-    graph = db.get_team_mission_graph(result["mission_id"])
+    graph = db.team_mission_graphs.get_team_mission_graph(result["mission_id"])
     assert graph["mission"]["mode"] == "supervised_mission"
     assert graph["mission"]["status"] == "planning"
     assert graph["mission"]["metadata"]["conversation_mode"] == "discussion"
