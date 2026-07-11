@@ -159,8 +159,6 @@ class TestSyncSessionKeyAfterAutoCompress:
 
         # Track if _sync_session_key_after_compress was called
         sync_calls = []
-        original_sync = server._sync_session_key_after_compress
-
         def _tracking_sync(sid, sess, **kwargs):
             sync_calls.append((sid, sess.get("session_key")))
             # Just update the key directly (skip approval routing etc.)
@@ -182,14 +180,21 @@ class TestSyncSessionKeyAfterAutoCompress:
                 self._target()
 
         server._sessions["test-sid"] = session
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
-        monkeypatch.setattr(prompt_methods.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(
+            prompt_methods,
+            "threading",
+            types.SimpleNamespace(Thread=_ImmediateThread),
+        )
 
         try:
             server.handle_request({
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "test-sid", "text": "hello"},
+                "params": {
+                    "session_id": "test-sid",
+                    "text": "hello",
+                    "_run_registry_reserved": True,
+                },
             })
 
             # Sync should have been called
@@ -217,9 +222,10 @@ class TestPendingTitleValueError:
     def test_valueerror_clears_pending_title(self, monkeypatch):
         """ValueError from set_session_title should drop pending_title."""
         from tui_gateway import server
+        from tui_gateway.methods import prompt as prompt_methods
 
         mock_db = MagicMock()
-        mock_db.set_session_title.side_effect = ValueError("duplicate title")
+        mock_db.sessions.set_title.side_effect = ValueError("duplicate title")
 
         class _Agent:
             session_id = "test-session"
@@ -251,13 +257,21 @@ class TestPendingTitleValueError:
                 self._target()
 
         server._sessions["sid"] = session
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(
+            prompt_methods,
+            "threading",
+            types.SimpleNamespace(Thread=_ImmediateThread),
+        )
 
         try:
             server.handle_request({
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "hello"},
+                "params": {
+                    "session_id": "sid",
+                    "text": "hello",
+                    "_run_registry_reserved": True,
+                },
             })
 
             # pending_title should be cleared on ValueError, not left wedged
@@ -271,9 +285,10 @@ class TestPendingTitleValueError:
     def test_other_exception_keeps_pending_title_for_retry(self, monkeypatch):
         """Non-ValueError exceptions should keep pending_title for retry."""
         from tui_gateway import server
+        from tui_gateway.methods import prompt as prompt_methods
 
         mock_db = MagicMock()
-        mock_db.set_session_title.side_effect = RuntimeError("transient DB lock")
+        mock_db.sessions.set_title.side_effect = RuntimeError("transient DB lock")
 
         class _Agent:
             session_id = "test-session"
@@ -305,13 +320,21 @@ class TestPendingTitleValueError:
                 self._target()
 
         server._sessions["sid"] = session
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(
+            prompt_methods,
+            "threading",
+            types.SimpleNamespace(Thread=_ImmediateThread),
+        )
 
         try:
             server.handle_request({
                 "id": "1",
                 "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "hello"},
+                "params": {
+                    "session_id": "sid",
+                    "text": "hello",
+                    "_run_registry_reserved": True,
+                },
             })
 
             # Non-ValueError should keep pending_title for retry
@@ -426,48 +449,38 @@ class TestGatewaySurfacesNullResponse:
 # ===========================================================================
 
 class TestFinalizeOrphanedCompressionSessions:
-    """The prune migration marks ghost compression continuations as ended."""
+    """The maintenance pass finalizes empty orphan continuation shells."""
 
-    def test_marks_ghost_continuation_with_compression_parent(self, tmp_path):
-        """Ghost session with compression-ended parent + messages → finalized."""
+    def test_marks_empty_continuation_with_parent(self, tmp_path):
+        """An empty child left behind by failed continuation setup is finalized."""
         db = _make_session_db(tmp_path)
 
         # Parent session (ended by compression — this is the key condition)
-        db.create_session(session_id="parent", source="tui", model="test")
-        db.end_session("parent", "compression")
+        db.sessions.create(session_id="parent", source="tui", model="test")
+        db.sessions.end("parent", "compression")
 
-        # Ghost continuation (has messages, never finalized)
-        db.create_session(
+        # Empty continuation shell that was never initialized.
+        db.sessions.create(
             session_id="ghost-cont",
             source="tui",
             model="test",
             parent_session_id="parent",
         )
-        db.append_message("ghost-cont", role="user", content="hello")
-        db.append_message("ghost-cont", role="assistant", content="hi")
 
-        # Make it old enough (fake started_at)
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "ghost-cont"),  # ~9 days old
-            )
-        )
-
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 1
 
-        session = db.get_session("ghost-cont")
+        session = db.sessions.get("ghost-cont")
         assert session["ended_at"] is not None
-        assert session["end_reason"] == "orphaned_compression"
+        assert session["end_reason"] == "compression_orphan"
 
     def test_skips_session_without_parent(self, tmp_path):
         """Ghost session without parent_session_id is NOT a compression
         continuation — should not be touched by this prune."""
         db = _make_session_db(tmp_path)
 
-        db.create_session(session_id="ghost-notitle", source="tui", model="test")
-        db.append_message("ghost-notitle", role="user", content="test")
+        db.sessions.create(session_id="ghost-notitle", source="tui", model="test")
+        db.messages.append("ghost-notitle", role="user", content="test")
 
         db._execute_write(
             lambda conn: conn.execute(
@@ -476,7 +489,7 @@ class TestFinalizeOrphanedCompressionSessions:
             )
         )
 
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 0
 
     def test_skips_recent_sessions(self, tmp_path):
@@ -484,17 +497,17 @@ class TestFinalizeOrphanedCompressionSessions:
         db = _make_session_db(tmp_path)
 
         # Create parent first to satisfy FK constraint
-        db.create_session(session_id="some-parent", source="tui", model="test")
-        db.create_session(
+        db.sessions.create(session_id="some-parent", source="tui", model="test")
+        db.sessions.create(
             session_id="recent",
             source="tui",
             model="test",
             parent_session_id="some-parent",
         )
-        db.append_message("recent", role="user", content="hello")
+        db.messages.append("recent", role="user", content="hello")
         # started_at is now() — within 7 days
 
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 0
 
     def test_skips_sessions_with_end_reason(self, tmp_path):
@@ -502,17 +515,17 @@ class TestFinalizeOrphanedCompressionSessions:
         db = _make_session_db(tmp_path)
 
         # Create parent first to satisfy FK constraint
-        db.create_session(session_id="parent", source="tui", model="test")
-        db.end_session("parent", "compression")
+        db.sessions.create(session_id="parent", source="tui", model="test")
+        db.sessions.end("parent", "compression")
 
-        db.create_session(
+        db.sessions.create(
             session_id="already-ended",
             source="tui",
             model="test",
             parent_session_id="parent",
         )
-        db.append_message("already-ended", role="user", content="hello")
-        db.end_session("already-ended", "user_exit")
+        db.messages.append("already-ended", role="user", content="hello")
+        db.sessions.end("already-ended", "user_exit")
 
         db._execute_write(
             lambda conn: conn.execute(
@@ -521,7 +534,7 @@ class TestFinalizeOrphanedCompressionSessions:
             )
         )
 
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 0
 
     def test_skips_session_with_non_compression_parent(self, tmp_path):
@@ -530,16 +543,16 @@ class TestFinalizeOrphanedCompressionSessions:
         db = _make_session_db(tmp_path)
 
         # Parent ended by user_exit, not compression
-        db.create_session(session_id="parent", source="tui", model="test")
-        db.end_session("parent", "user_exit")
+        db.sessions.create(session_id="parent", source="tui", model="test")
+        db.sessions.end("parent", "user_exit")
 
-        db.create_session(
+        db.sessions.create(
             session_id="child",
             source="tui",
             model="test",
             parent_session_id="parent",
         )
-        db.append_message("child", role="user", content="hello")
+        db.messages.append("child", role="user", content="hello")
 
         db._execute_write(
             lambda conn: conn.execute(
@@ -548,25 +561,24 @@ class TestFinalizeOrphanedCompressionSessions:
             )
         )
 
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 0
 
-    def test_skips_sessions_without_messages(self, tmp_path):
-        """Empty sessions (no messages) are NOT targeted by this prune —
-        those are handled by prune_empty_ghost_sessions()."""
+    def test_skips_sessions_with_messages(self, tmp_path):
+        """A continuation with durable transcript content is not an orphan shell."""
         db = _make_session_db(tmp_path)
 
         # Create parent first to satisfy FK constraint
-        db.create_session(session_id="parent", source="tui", model="test")
-        db.end_session("parent", "compression")
+        db.sessions.create(session_id="parent", source="tui", model="test")
+        db.sessions.end("parent", "compression")
 
-        db.create_session(
+        db.sessions.create(
             session_id="empty-ghost",
             source="tui",
             model="test",
             parent_session_id="parent",
         )
-        # No messages appended
+        db.messages.append("empty-ghost", role="user", content="preserve me")
 
         db._execute_write(
             lambda conn: conn.execute(
@@ -575,27 +587,26 @@ class TestFinalizeOrphanedCompressionSessions:
             )
         )
 
-        count = db.finalize_orphaned_compression_sessions()
+        count = db.maintenance.finalize_orphaned_compression_sessions()
         assert count == 0
 
-    def test_titled_ghost_with_parent_is_caught(self, tmp_path):
-        """Ghost continuation that HAS a title (propagated from parent by
-        _compress_context) is still caught via parent with end_reason='compression'."""
+    def test_titled_continuation_with_messages_is_preserved(self, tmp_path):
+        """Title propagation does not make a populated continuation disposable."""
         db = _make_session_db(tmp_path)
 
         # Create parent first — ended by compression
-        db.create_session(session_id="parent", source="tui", model="test")
-        db.set_session_title("parent", "Chat")
-        db.end_session("parent", "compression")
+        db.sessions.create(session_id="parent", source="tui", model="test")
+        db.sessions.set_title("parent", "Chat")
+        db.sessions.end("parent", "compression")
 
-        db.create_session(
+        db.sessions.create(
             session_id="titled-ghost",
             source="tui",
             model="test",
             parent_session_id="parent",
         )
-        db.set_session_title("titled-ghost", "Chat (2)")
-        db.append_message("titled-ghost", role="user", content="continued...")
+        db.sessions.set_title("titled-ghost", "Chat (2)")
+        db.messages.append("titled-ghost", role="user", content="continued...")
 
         db._execute_write(
             lambda conn: conn.execute(
@@ -604,8 +615,9 @@ class TestFinalizeOrphanedCompressionSessions:
             )
         )
 
-        count = db.finalize_orphaned_compression_sessions()
-        assert count == 1
+        count = db.maintenance.finalize_orphaned_compression_sessions()
+        assert count == 0
 
-        session = db.get_session("titled-ghost")
-        assert session["end_reason"] == "orphaned_compression"
+        session = db.sessions.get("titled-ghost")
+        assert session["ended_at"] is None
+        assert session["end_reason"] is None
