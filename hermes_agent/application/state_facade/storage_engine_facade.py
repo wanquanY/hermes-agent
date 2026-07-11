@@ -45,9 +45,13 @@ from hermes_agent.repositories.message_repo import MessageRepoImpl, MessageRepos
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.storage.fts_schema import FTS_SQL, FTS_TRIGRAM_SQL
-from hermes_agent.storage.sqlite_wal import WAL_INCOMPAT_MARKERS as _WAL_INCOMPAT_MARKERS
 from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
 from hermes_agent.storage.sqlite_wal import wal_fallback_warned_paths as _wal_fallback_warned_paths
+from hermes_agent.storage.session_store_health import (
+    format_session_db_unavailable,
+    get_last_init_error,
+    set_last_init_error as _set_last_init_error,
+)
 from hermes_agent.storage.state_schema import DEFERRED_INDEX_SQL
 from hermes_agent.storage.state_schema import SCHEMA_SQL
 from hermes_agent.storage.state_maintenance import StateMaintenanceMixin
@@ -91,68 +95,6 @@ def _sqlite_row_value(row: sqlite3.Row | tuple[Any, ...] | None, key: str, index
             return row[index]  # type: ignore[index]
         except (IndexError, TypeError):
             return default
-
-
-# Last HermesStateStore() init error, per-process.  Surfaced in /resume and
-# related slash-command error strings so users know WHY the DB is
-# unavailable instead of getting a bare "Session store not available."
-# Only HermesStateStore.__init__ writes to this; kanban_db.connect() failures
-# do not update it (by design — kanban failures are reported via their
-# own caller's error handling, not via /resume-style slash commands).
-_last_init_error: Optional[str] = None
-_last_init_error_lock = threading.Lock()
-
-def _set_last_init_error(msg: Optional[str]) -> None:
-    """Record (or clear) the most recent state.db init failure.
-
-    Thread-safe via _last_init_error_lock.  Callers pass a message to
-    record a failure or None to clear.  HermesStateStore.__init__ only calls
-    this to SET on failure — it deliberately does NOT clear on success,
-    because in a multi-threaded caller (e.g. gateway / web_server per-
-    request HermesStateStore() instantiation), a concurrent successful open
-    racing past a different thread's failure would erase the cause
-    string that thread's /resume handler is about to format.  Explicit
-    clears (e.g. test fixtures) are still supported by passing None.
-    """
-    global _last_init_error
-    with _last_init_error_lock:
-        _last_init_error = msg
-
-
-def get_last_init_error() -> Optional[str]:
-    """Return the most recent state.db init failure, if any.
-
-    Slash-command handlers (``/resume``, ``/title``, ``/history``, ``/branch``)
-    call this to surface the underlying cause in their error messages when
-    ``_session_db is None``.  Returns ``None`` if HermesStateStore initialized
-    successfully (or hasn't been attempted).
-    """
-    return _last_init_error
-
-
-def format_session_db_unavailable(prefix: str = "Session database not available") -> str:
-    """Format a user-facing 'session store unavailable' message with cause.
-
-    When ``HermesStateStore()`` init fails, callers set ``_session_db = None`` and
-    several slash commands (/resume, /title, /history, /branch) previously
-    responded with a bare ``"Session store not available."`` — no
-    indication of WHY.  This helper includes the captured cause (typically
-    ``"locking protocol"`` from NFS/SMB) and points users at the known
-    culprit so they can fix it themselves.
-
-    Example output:
-        Session store not available: locking protocol (state.db may be
-        on NFS/SMB — see https://www.sqlite.org/wal.html).
-    """
-    cause = get_last_init_error()
-    if not cause:
-        return f"{prefix}."
-    hint = ""
-    if any(marker in cause.lower() for marker in _WAL_INCOMPAT_MARKERS):
-        hint = " (state.db may be on NFS/SMB/FUSE — see https://www.sqlite.org/wal.html)"
-    return f"{prefix}: {cause}{hint}."
-
-
 
 
 class StorageEngineMixin:
