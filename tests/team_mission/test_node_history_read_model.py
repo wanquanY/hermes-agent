@@ -105,3 +105,4 @@ def test_runtime_history_has_no_storage_internals() -> None:
     assert "._lock" not in source
     assert "decode_run_event_row" not in source
     assert "decode_message_content" not in source
+    assert "hasattr(db," not in source

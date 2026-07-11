@@ -132,15 +132,15 @@ def _conversation_from_params(db: Any, params: dict[str, Any]) -> dict[str, Any]
         or params.get("conversation_team_session_id")
         or params.get("conversationTeamSessionId")
     )
-    if conversation_id and hasattr(db, "get_team_mission_conversation"):
+    if conversation_id:
         conversation = db.get_team_mission_conversation(conversation_id)
         if conversation:
             return conversation
-    if conversation_session_id and hasattr(db, "get_team_mission_conversation_by_session"):
+    if conversation_session_id:
         conversation = db.get_team_mission_conversation_by_session(conversation_session_id)
         if conversation:
             return conversation
-    if conversation_id and hasattr(db, "resolve_team_mission_conversation"):
+    if conversation_id:
         resolved = db.resolve_team_mission_conversation(conversation_id)
         conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
         if isinstance(conversation, dict) and conversation:
