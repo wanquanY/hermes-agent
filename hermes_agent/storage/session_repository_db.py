@@ -68,12 +68,17 @@ def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.
         factory=SessionRepositoryConnection,
     )
     conn.row_factory = sqlite3.Row
-    _configure_connection(conn, db_label=str(path))
-    ensure_session_repository_schema(conn)
-    MigrationRunner(conn.cursor()).run_all()
-    reconcile_session_repository_data(conn)
-    ensure_message_fts(conn)
-    return conn
+    try:
+        _configure_connection(conn, db_label=str(path))
+        _validate_existing_runtime_identity_schema(conn)
+        ensure_session_repository_schema(conn)
+        MigrationRunner(conn.cursor()).run_all()
+        reconcile_session_repository_data(conn)
+        ensure_message_fts(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _configure_connection(conn: sqlite3.Connection, *, db_label: str) -> None:
@@ -279,6 +284,18 @@ def ensure_runtime_repository_schema(conn: sqlite3.Connection) -> None:
                 f"runtime repository schema is not canonical for {table_name}: "
                 f"columns={sorted(columns)}"
             )
+
+
+def _validate_existing_runtime_identity_schema(conn: sqlite3.Connection) -> None:
+    """Reject noncanonical runtime tables before reconcile can mask them."""
+    for table_name in ("runs", "run_events", "session_runtime_state"):
+        columns = _table_columns(conn, table_name)
+        if not columns or "execution_session_id" in columns:
+            continue
+        raise RuntimeError(
+            f"runtime repository schema is not canonical for {table_name}: "
+            f"columns={sorted(columns)}"
+        )
 
 
 def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
