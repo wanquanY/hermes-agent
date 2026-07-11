@@ -253,9 +253,7 @@ def test_clarify_respond_with_local_pending_stays_on_control_plane():
             }
         )
     finally:
-        with clarify_gateway._lock:
-            clarify_gateway._entries.pop(clarify_id, None)
-            clarify_gateway._session_index.pop("team-session-x", None)
+        clarify_gateway.clear_session("team-session-x")
 
 
 @pytest.mark.parametrize(
@@ -396,21 +394,21 @@ def test_team_mission_create_does_not_proxy_from_nested_members():
 
 
 def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_path, monkeypatch):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     control_home = tmp_path / "control"
     profile_home = tmp_path / "profile"
     control_home.mkdir()
     profile_home.mkdir()
-    control_db = SessionDB(control_home / "state.db")
-    profile_db = SessionDB(profile_home / "state.db")
+    control_db = open_cli_session_store(control_home / "state.db")
+    profile_db = open_cli_session_store(profile_home / "state.db")
     stable = "team:mission-1:node:node-verifier"
     runtime_sid = "runtime-verifier"
     run_id = "run-verifier"
 
-    control_db.create_session(stable, source="team_mission", transient=False)
-    control_db.upsert_run(
+    control_db.sessions.create(stable, source="team_mission", transient=False)
+    control_db.runs.upsert(
         run_id=run_id,
         session_id=stable,
         runtime_scope_key="profile:agent-7",
@@ -455,27 +453,27 @@ def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_p
         with server._sessions_lock:
             server._sessions.pop(runtime_sid, None)
 
-    assert control_db.get_run(run_id)["status"] == "completed"
+    assert control_db.runs.get(run_id)["status"] == "completed"
     assert [
         event["type"]
-        for event in control_db.list_run_events(stable, run_id=run_id)
+        for event in control_db.runs.list_events(stable, run_id=run_id)
     ] == ["message.complete"]
-    assert profile_db.get_run(run_id) is None
-    assert profile_db.list_run_events(stable, run_id=run_id) == []
+    assert profile_db.runs.get(run_id) is None
+    assert profile_db.runs.list_events(stable, run_id=run_id) == []
 
 
 def test_team_mission_agent_uses_control_db_while_profile_context_is_active(tmp_path, monkeypatch):
     import hermes_cli.runtime_provider as runtime_provider
     import run_agent
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     control_home = tmp_path / "control"
     profile_home = tmp_path / "profile"
     control_home.mkdir()
     profile_home.mkdir()
-    control_db = SessionDB(control_home / "state.db")
-    profile_db = SessionDB(profile_home / "state.db")
+    control_db = open_cli_session_store(control_home / "state.db")
+    profile_db = open_cli_session_store(profile_home / "state.db")
     stable = "team-session-team-conversation-1"
     captured: dict[str, object] = {}
 
@@ -511,10 +509,10 @@ def test_team_mission_agent_uses_control_db_while_profile_context_is_active(tmp_
 
 
 def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -557,10 +555,10 @@ def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
 
 
 def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -623,10 +621,10 @@ def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
 
 
 def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -692,10 +690,10 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
 
 
 def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -770,10 +768,10 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
 
 
 def test_run_control_session_subscription_ignores_team_mission_projection_events(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -833,10 +831,10 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
 
 
 def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:
@@ -884,10 +882,10 @@ def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_
 
 
 def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     delivered = []
 
     class CapturingTransport:

@@ -2710,13 +2710,6 @@ def subscribe_session_with_id(
                 _start_subscription_poller_locked()
         memory_key = _memory_session_key(stable, db)
         memory_events = list(_events_by_session.get(memory_key, ()))
-        if stable:
-            scoped_suffix = f"\x1f{stable}"
-            for key, scoped_events in _events_by_session.items():
-                if key == memory_key:
-                    continue
-                if key == stable or str(key).endswith(scoped_suffix):
-                    memory_events.extend(scoped_events)
     events: list[dict[str, Any]] = []
     if db is not None:
         try:
