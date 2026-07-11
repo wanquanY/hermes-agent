@@ -5,7 +5,7 @@ from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_path: Path):
-    from hermes_state import SCHEMA_VERSION
+    from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
 
     db_path = tmp_path / "state.db"
     db = open_cli_session_store(db_path)
@@ -84,7 +84,7 @@ def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_pat
         assert "final_deliverables" not in projection
         assert len(row["event_json"]) < len(legacy_event_json) // 3
         version = migrated._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]  # noqa: SLF001
-        assert version == SCHEMA_VERSION
+        assert version == CURRENT_SCHEMA_VERSION
     finally:
         migrated.close()
 

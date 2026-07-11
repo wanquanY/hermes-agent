@@ -26,7 +26,7 @@ def _get_db():
 
 
 def _session_repo_for_db(db):
-    return _session_methods._session_repo_for_db(db)
+    return db.sessions
 
 
 def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
@@ -38,7 +38,7 @@ def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
         found = repo.get_by_title(target)
     if not found:
         return "", _err(rid, 4007, "session not found")
-    return found.session_id, None
+    return str(found["id"]), None
 
 
 def _coerce_int(value, *, default: int = 0) -> int:

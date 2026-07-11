@@ -5,13 +5,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SCHEMA_VERSION, SessionDB
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services import run_control
 
 
-def _db(tmp_path: Path, session_id: str = "team-session-1") -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id, source="team_mission", transient=False)
+def _db(tmp_path: Path, session_id: str = "team-session-1") -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id, source="team_mission", transient=False)
     return db
 
 
@@ -40,7 +41,7 @@ def _message_event(
 def test_append_message_stores_participant_id(tmp_path: Path):
     db = _db(tmp_path)
     try:
-        message_id = db.append_message(
+        message_id = db.messages.append(
             "team-session-1",
             role="assistant",
             content="hello",
@@ -59,16 +60,16 @@ def test_append_message_stores_participant_id(tmp_path: Path):
 def test_get_messages_returns_participant_id(tmp_path: Path):
     db = _db(tmp_path)
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="hello",
             participant_id="member:alice",
         )
 
-        raw = db.get_messages("team-session-1")[0]
-        conversation = db.get_messages_as_conversation("team-session-1")[0]
-        page = db.get_messages_page_as_conversation("team-session-1")["messages"][0]
+        raw = db.messages.list("team-session-1")[0]
+        conversation = db.messages.all_as_conversation("team-session-1")[0]
+        page = db.messages.page_as_conversation("team-session-1")["messages"][0]
 
         assert raw["participant_id"] == "member:alice"
         assert conversation["participant_id"] == "member:alice"
@@ -82,7 +83,11 @@ class _MirrorDb:
         self.appended_messages: list[dict[str, Any]] = []
         self.appended_events: list[dict[str, Any]] = []
 
-    def append_run_event(self, session_id: str, event: dict[str, Any], participant_id: str = "") -> dict[str, Any]:
+    @property
+    def runs(self):
+        return self
+
+    def append_event(self, session_id: str, event: dict[str, Any], participant_id: str = "") -> dict[str, Any]:
         saved = {
             **event,
             "conversation_session_id": session_id,
@@ -120,6 +125,10 @@ class _MirrorDb:
             },
             "nodes": [{"node_id": "node-final", "kind": "synthesis"}],
         }
+
+    @property
+    def team_mission_graphs(self):
+        return self
 
     def latest_team_mission_deliverable_for_run(self, run_id: str) -> dict[str, Any]:
         return {}
@@ -196,7 +205,7 @@ def test_messages_schema_migration_idempotent(tmp_path: Path):
     db_path = tmp_path / "legacy.db"
     _create_legacy_v29_db(db_path)
 
-    first = SessionDB(db_path)
+    first = open_cli_session_store(db_path)
     try:
         columns = {
             row["name"]: row
@@ -205,11 +214,11 @@ def test_messages_schema_migration_idempotent(tmp_path: Path):
         assert columns["participant_id"]["type"] == "TEXT"
         assert columns["participant_id"]["notnull"] == 1
         assert columns["participant_id"]["dflt_value"] == "''"
-        assert first._conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION  # noqa: SLF001
+        assert first._conn.execute("SELECT version FROM schema_version").fetchone()["version"] == CURRENT_SCHEMA_VERSION  # noqa: SLF001
     finally:
         first.close()
 
-    second = SessionDB(db_path)
+    second = open_cli_session_store(db_path)
     try:
         participant_columns = [
             row["name"]
@@ -230,7 +239,7 @@ def test_team_conversation_render_history_messages_have_participant_id(tmp_path:
 
     db = _db(tmp_path)
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="history reply",

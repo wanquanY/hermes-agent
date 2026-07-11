@@ -4,8 +4,8 @@ import importlib
 import sqlite3
 from pathlib import Path
 
-from hermes_state import SCHEMA_VERSION
-from hermes_state import SessionDB
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -175,12 +175,12 @@ def test_identity_fk_migration_preserves_runtime_identity_and_removes_orphans(tm
     db_path = tmp_path / "state.db"
     _create_legacy_v39_db(db_path)
 
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.close()
 
     conn = _connect(db_path)
     try:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
         assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1

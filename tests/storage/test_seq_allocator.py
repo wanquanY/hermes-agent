@@ -10,8 +10,8 @@ import pytest
 from hermes_agent.domain import seq_allocator
 from hermes_agent.domain.exceptions import SeqAllocatorBusy
 from hermes_agent.domain.seq_allocator import allocate_only
-from hermes_state import SCHEMA_VERSION
-from hermes_state import SessionDB
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control
 
 
@@ -73,7 +73,7 @@ def test_seq_counter_migration_backfills_existing_sessions(tmp_path: Path) -> No
     db_path = tmp_path / "state.db"
     _create_legacy_v43_db(db_path)
 
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     try:
         rows = {
             str(row["session_id"]): int(row["next_seq"])
@@ -83,18 +83,18 @@ def test_seq_counter_migration_backfills_existing_sessions(tmp_path: Path) -> No
     finally:
         db.close()
 
-    assert version == SCHEMA_VERSION
+    assert version == CURRENT_SCHEMA_VERSION
     assert rows["s-with-events"] == 6
     assert rows["s-empty"] == 1
 
 
 def test_append_run_event_uses_allocator_not_inbound_runtime_seq(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s1", source="test")
+        db.sessions.create("s1", source="test")
 
-        first = db.append_run_event("s1", _event(seq=100, run_id="run-1", index=1))
-        second = db.append_run_event("s1", _event(seq=500, run_id="run-2", index=2))
+        first = db.runs.append_event("s1", _event(seq=100, run_id="run-1", index=1))
+        second = db.runs.append_event("s1", _event(seq=500, run_id="run-2", index=2))
 
         rows = db._conn.execute(
             """
@@ -105,7 +105,7 @@ def test_append_run_event_uses_allocator_not_inbound_runtime_seq(tmp_path: Path)
             """,
             ("s1",),
         ).fetchall()
-        next_seq = db.next_run_event_seq("s1")
+        next_seq = db.runs.next_event_seq("s1")
         counter = db._conn.execute(
             "SELECT next_seq FROM seq_counter WHERE session_id = ?",
             ("s1",),
@@ -123,29 +123,29 @@ def test_append_run_event_uses_allocator_not_inbound_runtime_seq(tmp_path: Path)
 
 
 def test_next_run_event_seq_does_not_fallback_to_run_events_max(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s-missing-counter", source="test")
-        db.append_run_event("s-missing-counter", _event(seq=100, run_id="run-1", index=1))
+        db.sessions.create("s-missing-counter", source="test")
+        db.runs.append_event("s-missing-counter", _event(seq=100, run_id="run-1", index=1))
         db._conn.execute("DELETE FROM seq_counter WHERE session_id = ?", ("s-missing-counter",))
 
-        assert db.next_run_event_seq("s-missing-counter") == 0
-        assert db.next_run_event_seq("s-missing-counter", fallback_seq=99) == 99
+        assert db.runs.next_event_seq("s-missing-counter") == 0
+        assert db.runs.next_event_seq("s-missing-counter", fallback_seq=99) == 99
     finally:
         db.close()
 
 
 def test_append_run_event_allocates_unique_seq_under_parallel_writes(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     total_workers = 12
     per_worker = 15
     total_events = total_workers * per_worker
 
     try:
-        db.create_session("s-parallel", source="test")
+        db.sessions.create("s-parallel", source="test")
 
         def append_one(index: int) -> int:
-            saved = db.append_run_event(
+            saved = db.runs.append_event(
                 "s-parallel",
                 _event(seq=10_000 + index, run_id=f"run-{index}", index=index),
             )
@@ -159,7 +159,7 @@ def test_append_run_event_allocates_unique_seq_under_parallel_writes(tmp_path: P
             ("s-parallel",),
         ).fetchall()
         stored = [int(row["seq"]) for row in rows]
-        next_seq = db.next_run_event_seq("s-parallel")
+        next_seq = db.runs.next_event_seq("s-parallel")
     finally:
         db.close()
 
@@ -169,18 +169,18 @@ def test_append_run_event_allocates_unique_seq_under_parallel_writes(tmp_path: P
 
 
 def test_allocate_only_shares_session_seq_domain_with_run_events(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s-activity", source="test")
+        db.sessions.create("s-activity", source="test")
 
         first_activity_seq = db._execute_write(
             lambda conn: allocate_only(conn, session_id="s-activity", updated_at=1000)
         )
-        run_event = db.append_run_event("s-activity", _event(seq=9000, run_id="run-1", index=1))
+        run_event = db.runs.append_event("s-activity", _event(seq=9000, run_id="run-1", index=1))
         second_activity_seq = db._execute_write(
             lambda conn: allocate_only(conn, session_id="s-activity", updated_at=1002)
         )
-        next_seq = db.next_run_event_seq("s-activity")
+        next_seq = db.runs.next_event_seq("s-activity")
     finally:
         db.close()
 
@@ -191,9 +191,9 @@ def test_allocate_only_shares_session_seq_domain_with_run_events(tmp_path: Path)
 
 
 def test_seq_allocator_busy_raises_typed_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s-busy", source="test")
+        db.sessions.create("s-busy", source="test")
 
         def always_busy(*_args: Any, **_kwargs: Any) -> int:
             raise sqlite3.OperationalError("database is locked")
@@ -208,7 +208,7 @@ def test_seq_allocator_busy_raises_typed_error(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_session_db_sets_sqlite_busy_timeout(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
         timeout = int(db._conn.execute("PRAGMA busy_timeout").fetchone()[0])
     finally:
@@ -218,10 +218,10 @@ def test_session_db_sets_sqlite_busy_timeout(tmp_path: Path) -> None:
 
 
 def test_publish_run_terminal_event_does_not_preassign_runtime_seq(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("s-terminal", source="test")
-        db.upsert_run(
+        db.sessions.create("s-terminal", source="test")
+        db.runs.upsert(
             run_id="run-terminal",
             session_id="s-terminal",
             runtime_scope_key="s-terminal",
