@@ -7,7 +7,7 @@ member-chat view synchronization.
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def test_project_messages_for_viewer_leader_perspective():
@@ -72,9 +72,9 @@ def test_sync_member_chat_conversation_view_role_remap(tmp_path: Path):
     speech (so the LLM doesn't mimic them), the member's own past replies
     stay as real assistant turns, and the in-flight user request + own
     member-chat reply are skipped (the worker handles those locally)."""
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conv", source="team_mission", transient=False)
-    db.create_session("memberchat:conv:m-alice", source="team_mission_member_chat", transient=False)
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conv", source="team_mission", transient=False)
+    db.sessions.create("memberchat:conv:m-alice", source="team_mission_member_chat", transient=False)
 
     # Source conv transcript:
     #  - regular user msg                                      -> mirror as user
@@ -83,28 +83,28 @@ def test_sync_member_chat_conversation_view_role_remap(tmp_path: Path):
     #  - Alice's own reply (kind=member_chat,m=alice)          -> skip (worker has it)
     #  - in-flight user @-request targeting Alice              -> skip (run.submit text)
     #  - earlier Alice direct assistant turn (member_id=alice) -> assistant
-    db.append_message("conv", role="user", content="嗨大家好")
-    db.append_message("conv", role="assistant", content="我是 leader 小多,需要什么帮助?",
+    db.messages.append("conv", role="user", content="嗨大家好")
+    db.messages.append("conv", role="assistant", content="我是 leader 小多,需要什么帮助?",
                       metadata={"team_mission": {"display_name": "小多", "kind": "leader"}})
-    db.append_message("conv", role="assistant", content="我是 Hermes Agent - Bob's wrong reply",
+    db.messages.append("conv", role="assistant", content="我是 Hermes Agent - Bob's wrong reply",
                       metadata={"team_mission": {"kind": "member_chat", "member_id": "m-bob",
                                                   "display_name": "Bob"}})
-    db.append_message("conv", role="assistant", content="(alice's own reply - already on worker)",
+    db.messages.append("conv", role="assistant", content="(alice's own reply - already on worker)",
                       metadata={"team_mission": {"kind": "member_chat", "member_id": "m-alice",
                                                   "display_name": "Alice"}})
-    db.append_message("conv", role="user", content="@Alice 现在的问题是什么",
+    db.messages.append("conv", role="user", content="@Alice 现在的问题是什么",
                       metadata={"team_mission": {"kind": "member_chat_user",
                                                   "target_member_id": "m-alice"}})
-    db.append_message("conv", role="assistant", content="(alice's older direct turn)",
+    db.messages.append("conv", role="assistant", content="(alice's older direct turn)",
                       metadata={"team_mission": {"member_id": "m-alice",
                                                   "display_name": "Alice"}})
 
-    appended = db.sync_member_chat_conversation_view(
+    appended = db.member_chat_views.sync_member_chat_conversation_view(
         conversation_session_id="conv",
         member_chat_session_id="memberchat:conv:m-alice",
         member_id="m-alice",
     )
-    msgs = db.get_messages("memberchat:conv:m-alice")
+    msgs = db.messages.list("memberchat:conv:m-alice")
     rendered = [(m.get("role"), str(m.get("content") or "")) for m in msgs]
     assert appended == 4, rendered  # user + leader + bob + alice-direct
     assert ("user", "嗨大家好") in rendered
@@ -118,12 +118,12 @@ def test_sync_member_chat_conversation_view_role_remap(tmp_path: Path):
 
 def test_sync_member_chat_conversation_view_is_idempotent(tmp_path: Path):
     """Re-syncing only appends NEW source messages - no duplication."""
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conv", source="team_mission", transient=False)
-    db.create_session("memberchat:conv:m-alice", source="team_mission_member_chat", transient=False)
-    db.append_message("conv", role="user", content="第一条")
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conv", source="team_mission", transient=False)
+    db.sessions.create("memberchat:conv:m-alice", source="team_mission_member_chat", transient=False)
+    db.messages.append("conv", role="user", content="第一条")
 
-    first = db.sync_member_chat_conversation_view(
+    first = db.member_chat_views.sync_member_chat_conversation_view(
         conversation_session_id="conv",
         member_chat_session_id="memberchat:conv:m-alice",
         member_id="m-alice",
@@ -131,23 +131,23 @@ def test_sync_member_chat_conversation_view_is_idempotent(tmp_path: Path):
     assert first == 1
 
     # Re-run with no new source messages -> 0 appended
-    second = db.sync_member_chat_conversation_view(
+    second = db.member_chat_views.sync_member_chat_conversation_view(
         conversation_session_id="conv",
         member_chat_session_id="memberchat:conv:m-alice",
         member_id="m-alice",
     )
     assert second == 0
-    assert len(db.get_messages("memberchat:conv:m-alice")) == 1
+    assert len(db.messages.list("memberchat:conv:m-alice")) == 1
 
     # Add a new source message -> only it gets mirrored
-    db.append_message("conv", role="user", content="第二条")
-    third = db.sync_member_chat_conversation_view(
+    db.messages.append("conv", role="user", content="第二条")
+    third = db.member_chat_views.sync_member_chat_conversation_view(
         conversation_session_id="conv",
         member_chat_session_id="memberchat:conv:m-alice",
         member_id="m-alice",
     )
     assert third == 1
-    assert len(db.get_messages("memberchat:conv:m-alice")) == 2
+    assert len(db.messages.list("memberchat:conv:m-alice")) == 2
 
 
 def test_viewer_projection_preserves_own_tool_calls_and_tool_responses():

@@ -4,7 +4,6 @@
 from pathlib import Path
 
 from hermes_agent.application.state_facade.activity_facade import ActivitiesMixin
-from hermes_agent.application.state_facade.member_chat_facade import MemberChatStateMixin
 from hermes_agent.application.state_facade.message_facade import MessageStateFacadeMixin
 from hermes_agent.application.state_facade.participant_facade import ParticipantsMixin
 from hermes_agent.application.state_facade.run_facade import RunStateMixin
@@ -28,7 +27,6 @@ __path__ = [str(Path(__file__).with_name("hermes_state"))]
 class HermesStateStore(
     StorageEngineMixin,
     TeamMissionStateMixin,
-    MemberChatStateMixin,
     ParticipantsMixin,
     ActivitiesMixin,
     SessionStateFacadeMixin,

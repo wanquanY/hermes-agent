@@ -53,7 +53,6 @@ from hermes_agent.storage.state_schema import SCHEMA_SQL
 from hermes_agent.storage.state_maintenance import StateMaintenanceMixin
 from hermes_constants import get_hermes_home
 from hermes_agent.application.state_facade.activity_facade import ActivitiesMixin
-from hermes_agent.application.state_facade.member_chat_facade import MemberChatStateMixin
 from hermes_agent.application.state_facade.message_facade import MessageStateFacadeMixin
 from hermes_agent.application.state_facade.participant_facade import ParticipantsMixin
 from hermes_agent.domain.run_event_codec import decode_run_event_row
