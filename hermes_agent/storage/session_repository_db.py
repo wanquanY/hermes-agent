@@ -16,7 +16,10 @@ from typing import Any
 from hermes_constants import get_hermes_home
 from hermes_agent.domain.seq_allocator import ensure_seq_counter_table
 from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
-from hermes_agent.repositories.session_repo import ensure_session_lineage_repository_schema
+from hermes_agent.repositories.session_repo import (
+    SessionRepoImpl,
+    ensure_session_lineage_repository_schema,
+)
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import ensure_team_registry_repository_schema
 from hermes_agent.storage.state_schema import RUNTIME_DEFERRED_INDEX_SQL, SCHEMA_SQL
@@ -230,15 +233,19 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             value TEXT NOT NULL
         );
 
+        """
+    )
+    # Existing tables are not changed by CREATE TABLE IF NOT EXISTS. Reconcile
+    # every declarative column before creating indexes or running read models.
+    reconcile_declared_columns(conn.cursor())
+    conn.executescript(
+        """
         CREATE INDEX IF NOT EXISTS idx_session_index_updated
             ON session_index(updated_at DESC, started_at DESC, session_id DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_session_id
             ON messages(session_id, id);
         """
     )
-    # Existing tables are not changed by CREATE TABLE IF NOT EXISTS. Reconcile
-    # every declarative column before creating indexes or running read models.
-    reconcile_declared_columns(conn.cursor())
     ensure_session_lineage_repository_schema(conn)
     ensure_runtime_repository_schema(conn)
     ensure_agent_profile_repository_schema(conn)
@@ -250,6 +257,12 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
 def reconcile_session_repository_data(conn: sqlite3.Connection) -> None:
     """Run data reconciliations only after all versioned migrations complete."""
 
+    normalized_index_rows = SessionRepoImpl(conn).normalize_index_conversation_kind()
+    if normalized_index_rows:
+        logger.info(
+            "Session repository normalized %d legacy session index classifications",
+            normalized_index_rows,
+        )
     classification = reconcile_team_mission_session_classification(conn)
     if any(classification.values()):
         logger.info(
