@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import time
 
 from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway import server
 
 session_methods = importlib.import_module("tui_gateway.methods.session")
+live_session_methods = importlib.import_module("tui_gateway.methods.live_session")
+insights_methods = importlib.import_module("tui_gateway.methods.insights_rollback")
 
 
 def _install_db(monkeypatch, db) -> None:
@@ -154,3 +157,46 @@ def test_session_title_route_resolves_and_updates_through_session_component(
     assert response["result"] == {"pending": False, "title": "After"}
     assert stored is not None
     assert stored["title"] == "After"
+
+
+def test_live_session_title_reads_through_session_component(monkeypatch):
+    class SessionQueries:
+        def get_title(self, session_id: str) -> str:
+            assert session_id == "stored-session"
+            return "Persisted title"
+
+    state = type("StateRoot", (), {"sessions": SessionQueries()})()
+    monkeypatch.setattr(live_session_methods, "_get_db", lambda: state)
+
+    title = live_session_methods._session_live_title(
+        {"pending_title": "Pending title"},
+        "stored-session",
+    )
+
+    assert title == "Persisted title"
+
+
+def test_insights_route_reads_through_session_component(monkeypatch):
+    now = time.time()
+
+    class SessionQueries:
+        def list_rich(self, *, limit: int):
+            assert limit == 500
+            return [
+                {"started_at": now, "message_count": 3},
+                {"started_at": now - 60 * 86400, "message_count": 20},
+            ]
+
+    state = type("StateRoot", (), {"sessions": SessionQueries()})()
+    monkeypatch.setattr(insights_methods, "_get_db", lambda: state)
+
+    response = server.handle_request(
+        {
+            "id": "insights",
+            "method": "insights.get",
+            "params": {"days": 30},
+        }
+    )
+
+    assert "error" not in response, response
+    assert response["result"] == {"days": 30, "sessions": 1, "messages": 3}

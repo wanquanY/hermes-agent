@@ -76,7 +76,7 @@ def _session_live_title(session: dict, key: str) -> str:
     db = _get_db()
     if db is not None:
         try:
-            title = str(db.get_session_title(key) or title or "").strip()
+            title = str(db.sessions.get_title(key) or title or "").strip()
         except Exception:
             pass
     return title

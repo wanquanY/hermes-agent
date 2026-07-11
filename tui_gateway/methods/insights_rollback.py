@@ -19,7 +19,7 @@ def _(rid, params: dict) -> dict:
         cutoff = time.time() - days * 86400
         rows = [
             s
-            for s in db.list_sessions_rich(limit=500)
+            for s in db.sessions.list_rich(limit=500)
             if (s.get("started_at") or 0) >= cutoff
         ]
         return _ok(
