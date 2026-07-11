@@ -267,6 +267,90 @@ async def test_on_run_terminal_skips_publish_on_completed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_activity_terminal_is_persisted_through_activity_service(monkeypatch) -> None:
+    from tui_gateway import server
+
+    class Activities:
+        def __init__(self) -> None:
+            self.row = {
+                "activity_id": "activity-1",
+                "kind": "agent",
+                "status": "running",
+                "title": "Delegated task",
+            }
+            self.completed: list[dict] = []
+
+        def get(self, activity_id: str):
+            return dict(self.row) if activity_id == "activity-1" else {}
+
+        def mark_completed(self, activity_id: str, **kwargs) -> bool:
+            self.completed.append({"activity_id": activity_id, **kwargs})
+            self.row.update(status="completed", **kwargs)
+            return True
+
+    class DB:
+        def __init__(self) -> None:
+            self.activities = Activities()
+
+    db = DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    router, _sup, events, terminals = _make_router()
+    router.record_run_start(
+        scope_key="profile:x",
+        run_id="run-1",
+        conversation_session_id="sess-1",
+        turn_id="turn-1",
+        dispatch_activity_id="activity-1",
+    )
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(
+            params={
+                "type": "message.complete",
+                "run_id": "run-1",
+                "payload": {"text": "done", "usage": {"total_tokens": 7}},
+            }
+        ),
+    )
+
+    await router.on_run_terminal(
+        "profile:x",
+        "sess-1",
+        RunTerminalFrame(
+            run_id="run-1",
+            status="completed",
+            conversation_session_id="sess-1",
+            turn_id="turn-1",
+        ),
+    )
+
+    assert db.activities.completed == [
+        {
+            "activity_id": "activity-1",
+            "result_summary": "done",
+            "result_json": {
+                "last_message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "metadata": {
+                        "run_id": "run-1",
+                        "turn_id": None,
+                        "status": None,
+                        "usage": {"total_tokens": 7},
+                        "source_event": "message.complete",
+                    },
+                },
+                "usage": {"total_tokens": 7},
+                "run_id": "run-1",
+            },
+        }
+    ]
+    assert any(event.get("type") == "activity.completed" for event in events)
+    assert terminals == []
+
+
+@pytest.mark.asyncio
 async def test_on_run_terminal_publishes_on_failed() -> None:
     """A failed/cancelled exit must synthesize a terminal event — the
     agent may have died before its own terminal publish reached the
