@@ -18,7 +18,11 @@ from hermes_agent.domain.run_lifecycle import (
     orphaned_active_run_decision,
 )
 from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
-from hermes_agent.domain.session_runtime_state import session_runtime_state_from_row
+from hermes_agent.domain.session_runtime_state import (
+    session_info_record,
+    session_runtime_identity_matches,
+    session_runtime_state_from_row,
+)
 from hermes_agent.domain.run_terminator import TerminateCause, terminate_run
 from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
@@ -64,6 +68,9 @@ class RunService:
                 stable,
                 started_at=float((event or {}).get("timestamp") or time.time()),
             )
+            duplicate = self._duplicate_session_info(stable, event)
+            if duplicate is not None:
+                return duplicate
             saved = self._repository.append_runtime_event(
                 stable,
                 event,
@@ -76,6 +83,8 @@ class RunService:
             return saved
 
         saved = self._unit_of_work.execute(operation)
+        if str(saved.get("_persistence_disposition") or "") == "duplicate_session_info":
+            return saved
         normalized_run_id = str((saved or {}).get("run_id") or "").strip()
         persisted_run = self._repository.get_run(normalized_run_id) if normalized_run_id else None
         self.retention.maintain_after_append(
@@ -86,6 +95,58 @@ class RunService:
         )
         self._notify_event_appended(saved)
         return saved
+
+    def _duplicate_session_info(
+        self,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        frame = dict(event or {})
+        if str(frame.get("type") or "").strip() != "session.info":
+            return None
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        inbound_session_id = str(frame.get("session_id") or payload.get("session_id") or "").strip()
+        execution_session_id = str(
+            frame.get("execution_session_id")
+            or payload.get("execution_session_id")
+            or (inbound_session_id if inbound_session_id != session_id else "")
+        ).strip()
+        runtime_scope_key = str(
+            frame.get("runtime_scope_key")
+            or payload.get("runtime_scope_key")
+            or session_id
+        ).strip()
+        run_id = str(frame.get("run_id") or payload.get("run_id") or "").strip()
+        turn_id = str(frame.get("turn_id") or payload.get("turn_id") or "").strip()
+        row = self._conn.execute(
+            "SELECT * FROM session_runtime_state WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        record = session_info_record(
+            session_id=session_id,
+            payload=payload,
+            runtime_scope_key=runtime_scope_key,
+            execution_session_id=execution_session_id,
+            run_id=run_id,
+            turn_id=turn_id,
+        )
+        if not session_runtime_identity_matches(row, record):
+            return None
+        state = session_runtime_state_from_row(row)
+        frame.update(
+            {
+                "conversation_session_id": session_id,
+                "session_id": session_id,
+                "execution_session_id": execution_session_id,
+                "runtime_scope_key": runtime_scope_key,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "seq": int(state.get("source_seq") or 0),
+                "_persistence_disposition": "duplicate_session_info",
+                "_session_runtime_state": state,
+            }
+        )
+        return frame
 
     def register_event_listener(
         self,

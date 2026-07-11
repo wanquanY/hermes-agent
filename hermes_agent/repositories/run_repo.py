@@ -15,6 +15,12 @@ from hermes_agent.domain.run_event_index import (
     project_run_event_search_index_from_row,
     runtime_source_seq_from_event,
 )
+from hermes_agent.domain.run_event_stream import (
+    is_coalescible_stream_delta,
+    merge_stream_payload,
+    stream_compaction_boundaries,
+    stream_events_can_coalesce,
+)
 from hermes_agent.domain.seq_allocator import allocate_run_event_seq
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_agent.domain.run_state_machine import error_for_status
@@ -452,9 +458,11 @@ class RunRepoImpl:
         frame["payload"] = payload
         run_id = _event_text(frame, payload, "run_id", "runId")
         turn_id = _event_text(frame, payload, "turn_id", "turnId")
+        inbound_session_id = _first_text(frame.get("session_id"), payload.get("session_id"))
         execution_session_id = _first_text(
             frame.get("execution_session_id"),
             payload.get("execution_session_id"),
+            inbound_session_id if inbound_session_id != stable else "",
         )
         runtime_scope_key = _first_text(
             frame.get("runtime_scope_key"),
@@ -519,7 +527,6 @@ class RunRepoImpl:
         )
         if event_activity_id:
             frame["activity_id"] = event_activity_id
-        frame_blob, frame_format = encode_run_event_frame(frame)
         interaction_request_id = _first_text(
             payload.get("interaction_request_id"),
             payload.get("request_id"),
@@ -536,34 +543,53 @@ class RunRepoImpl:
             and terminal_status is None
             and event_opens_active_run(event_type)
         )
-        self._ledger.append_runtime_frame(
+        inserted_row = self._try_coalesce_runtime_stream(
             session_id=stable,
+            frame=frame,
             run_id=run_id,
             turn_id=turn_id,
             execution_session_id=execution_session_id,
             runtime_scope_key=runtime_scope_key,
             participant_id=event_participant_id,
-            activity_id=event_activity_id or None,
-            event_type=event_type,
+            activity_id=event_activity_id,
             seq=canonical_seq,
             timestamp=timestamp,
-            payload_json=_json_dumps(payload),
-            event_json=_json_dumps(frame),
             status="ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
-            frame_blob=frame_blob,
-            frame_format=frame_format,
-            retention_class=self._retention.classify_event_type(event_type),
-            interaction_request_id=interaction_request_id or None,
-            interaction_kind=interaction_kind or None,
-            interaction_status=interaction_status or None,
-            anchor_seq=anchor_seq,
-            projection_state="raw",
             runtime_source_seq=runtime_source_seq,
         )
-        inserted_row = self._conn.execute(
-            "SELECT * FROM run_events WHERE session_id = ? AND seq = ?",
-            (stable, canonical_seq),
-        ).fetchone()
+        if inserted_row is None:
+            frame_blob, frame_format = encode_run_event_frame(frame)
+            self._ledger.append_runtime_frame(
+                session_id=stable,
+                run_id=run_id,
+                turn_id=turn_id,
+                execution_session_id=execution_session_id,
+                runtime_scope_key=runtime_scope_key,
+                participant_id=event_participant_id,
+                activity_id=event_activity_id or None,
+                event_type=event_type,
+                seq=canonical_seq,
+                timestamp=timestamp,
+                payload_json=_json_dumps(payload),
+                event_json=_json_dumps(frame),
+                status="ignored_after_terminal" if ignored_after_terminal else terminal_status or "",
+                frame_blob=frame_blob,
+                frame_format=frame_format,
+                retention_class=self._retention.classify_event_type(event_type),
+                interaction_request_id=interaction_request_id or None,
+                interaction_kind=interaction_kind or None,
+                interaction_status=interaction_status or None,
+                anchor_seq=anchor_seq,
+                projection_state="raw",
+                runtime_source_seq=runtime_source_seq,
+            )
+            inserted_row = self._conn.execute(
+                "SELECT * FROM run_events WHERE session_id = ? AND seq = ?",
+                (stable, canonical_seq),
+            ).fetchone()
+        else:
+            frame = decode_run_event_row(inserted_row)
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         if inserted_row is None:
             raise RuntimeError(f"run event append failed for {stable}/{canonical_seq}")
         project_run_event_search_index_from_row(self._conn, inserted_row)
@@ -613,6 +639,121 @@ class RunRepoImpl:
                     metadata=metadata,
                 )
         return frame
+
+    def _try_coalesce_runtime_stream(
+        self,
+        *,
+        session_id: str,
+        frame: dict[str, Any],
+        run_id: str,
+        turn_id: str,
+        execution_session_id: str,
+        runtime_scope_key: str,
+        participant_id: str,
+        activity_id: str,
+        seq: int,
+        timestamp: float,
+        status: str,
+        runtime_source_seq: int,
+    ) -> Any | None:
+        if not is_coalescible_stream_delta(frame):
+            return None
+        event_type = str(frame.get("type") or "").strip()
+        boundaries = tuple(sorted(stream_compaction_boundaries(event_type)))
+        placeholders = ",".join("?" for _ in boundaries)
+        boundary = self._conn.execute(
+            f"""
+            SELECT COALESCE(MAX(seq), 0) AS boundary_seq
+              FROM run_events
+             WHERE session_id = ?
+               AND (? = '' OR run_id = ?)
+               AND (? = '' OR turn_id = ?)
+               AND event_type IN ({placeholders})
+            """,
+            (session_id, run_id, run_id, turn_id, turn_id, *boundaries),
+        ).fetchone()
+        boundary_seq = int(boundary["boundary_seq"] if boundary is not None else 0)
+        candidates = self._conn.execute(
+            """
+            SELECT * FROM run_events
+             WHERE session_id = ?
+               AND event_type = ?
+               AND (? = '' OR run_id = ?)
+               AND (? = '' OR turn_id = ?)
+               AND COALESCE(runtime_scope_key, '') = ?
+               AND seq > ?
+             ORDER BY seq DESC, id DESC
+             LIMIT 128
+            """,
+            (
+                session_id,
+                event_type,
+                run_id,
+                run_id,
+                turn_id,
+                turn_id,
+                runtime_scope_key,
+                boundary_seq,
+            ),
+        ).fetchall()
+        previous_row = None
+        previous_event: dict[str, Any] = {}
+        for candidate in candidates:
+            decoded = decode_run_event_row(candidate)
+            if stream_events_can_coalesce(decoded, frame):
+                previous_row = candidate
+                previous_event = decoded
+                break
+        if previous_row is None:
+            return None
+        occupied = self._conn.execute(
+            "SELECT 1 FROM run_events WHERE session_id = ? AND seq = ? AND id != ? LIMIT 1",
+            (session_id, seq, int(previous_row["id"])),
+        ).fetchone()
+        if occupied is not None:
+            return None
+
+        merged_payload = merge_stream_payload(previous_event, frame)
+        merged = {
+            **previous_event,
+            "session_id": session_id,
+            "conversation_session_id": session_id,
+            "execution_session_id": execution_session_id,
+            "runtime_scope_key": runtime_scope_key,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "participant_id": participant_id,
+            "seq": seq,
+            "timestamp": timestamp,
+            "payload": merged_payload,
+        }
+        if activity_id:
+            merged["activity_id"] = activity_id
+        if runtime_source_seq > 0:
+            merged["runtime_source_seq"] = runtime_source_seq
+        frame_blob, frame_format = encode_run_event_frame(merged)
+        self._ledger.rewrite_runtime_frame_row(
+            row_id=int(previous_row["id"]),
+            run_id=run_id,
+            turn_id=turn_id,
+            execution_session_id=execution_session_id,
+            runtime_scope_key=runtime_scope_key,
+            participant_id=participant_id,
+            activity_id=activity_id or None,
+            seq=seq,
+            timestamp=timestamp,
+            payload_json=_json_dumps(merged_payload),
+            event_json=_json_dumps(merged),
+            status=status,
+            frame_blob=frame_blob,
+            frame_format=frame_format,
+            retention_class=self._retention.classify_event_type(event_type),
+            runtime_source_seq=runtime_source_seq,
+        )
+        return self._conn.execute(
+            "SELECT * FROM run_events WHERE id = ?",
+            (int(previous_row["id"]),),
+        ).fetchone()
 
     def _existing_terminal_event(
         self,
