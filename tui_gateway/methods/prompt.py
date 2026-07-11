@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import time
+import uuid
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
@@ -200,6 +202,112 @@ def _fail_unavailable_runtime_agent(
             ),
             turn_id=turn_id,
             message=message,
+        )
+
+
+def _persist_prompt_user_turn(
+    *,
+    sid: str,
+    session: dict,
+    conversation_session_id: str,
+    runtime_scope_key: str,
+    run_id: str,
+    turn_id: str,
+    client_message_id: str,
+    text: Any,
+    persist_user_message: str,
+    attachments: list[dict],
+    draft_text: str,
+    model: str,
+    model_descriptor: dict,
+    dovie_product_context: str,
+) -> None:
+    if session.get("transient"):
+        return
+    canonical_session_id = str(conversation_session_id or "").strip()
+    if not canonical_session_id or not run_id or not turn_id:
+        return
+    content = str(persist_user_message or text or "")
+    if not content.strip() and not attachments:
+        return
+    db = _db_for_stable_session(canonical_session_id)
+    if db is None:
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persist-skipped",
+            run_id=run_id,
+            turn_id=turn_id,
+            reason="db-unavailable",
+        )
+        return
+    try:
+        if db.sessions.get(canonical_session_id) is None:
+            db.sessions.create(canonical_session_id, source="tui", transient=False)
+    except Exception as exc:
+        logger.warning(
+            "prompt.submit user turn session ensure failed sid=%s conversation_session_id=%s: %s",
+            sid,
+            canonical_session_id,
+            exc,
+            exc_info=True,
+        )
+    metadata: dict[str, Any] = {
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "turn_message_index": 0,
+        "persist_message_key": f"run:{run_id}|turn:{turn_id}|idx:0",
+        "runtime_scope_key": runtime_scope_key or canonical_session_id,
+        "conversation_session_id": canonical_session_id,
+        "prompt_submit_owned": True,
+    }
+    if client_message_id:
+        metadata["client_message_id"] = client_message_id
+    if attachments:
+        metadata["attachments"] = attachments
+    if draft_text:
+        metadata["draft_text"] = draft_text
+    if model:
+        metadata["model"] = model
+    if model_descriptor:
+        metadata["model_descriptor"] = model_descriptor
+    if dovie_product_context:
+        metadata["dovie_product_context"] = dovie_product_context
+    try:
+        message_id = db.messages.append(
+            session_id=canonical_session_id,
+            role="user",
+            content=content,
+            metadata=metadata,
+        )
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persisted",
+            run_id=run_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            content_len=len(content),
+            client_message_id=client_message_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "prompt.submit user turn persistence failed sid=%s conversation_session_id=%s run_id=%s turn_id=%s: %s",
+            sid,
+            canonical_session_id,
+            run_id,
+            turn_id,
+            exc,
+            exc_info=True,
+        )
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persist-failed",
+            run_id=run_id,
+            turn_id=turn_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
         )
 
 
@@ -474,6 +582,22 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 },
                 db=db,
             )
+            _persist_prompt_user_turn(
+                sid=sid,
+                session=session,
+                conversation_session_id=conversation_session_id,
+                runtime_scope_key=effective_runtime_scope_key,
+                run_id=run_id,
+                turn_id=turn_id,
+                client_message_id=client_message_id,
+                text=text,
+                persist_user_message=persist_user_message,
+                attachments=submitted_attachments,
+                draft_text=str(params.get("draft_text") or text or ""),
+                model=requested_model,
+                model_descriptor=model_descriptor,
+                dovie_product_context=dovie_product_context,
+            )
 
     if requested_model:
         try:
@@ -673,7 +797,7 @@ def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict |
     if db is None:
         return ""
     try:
-        messages = db.get_messages_as_conversation(
+        messages = db.messages.all_as_conversation(
             session_id,
             include_ancestors=False,
             include_storage_metadata=True,
@@ -1643,7 +1767,7 @@ def _run_prompt_submit(
                     if _pdb:
                         _session_key = session.get("session_key") or sid
                         try:
-                            if _pdb.set_session_title(_session_key, _pending):
+                            if _pdb.sessions.set_title(_session_key, _pending):
                                 session["pending_title"] = None
                         except ValueError as exc:
                             # Invalid/duplicate title — non-retryable, drop it.

@@ -1458,7 +1458,7 @@ class AIAgent:
         if not session_id or not self._session_db:
             return
         try:
-            self._session_db.create_session(session_id, source="team_mission", transient=False)
+            self._session_db.sessions.create(session_id, source="team_mission", transient=False)
         except Exception:
             # create_session is INSERT OR IGNORE for the real DB; proxy/test
             # doubles may still raise. The append path below will surface any
@@ -1866,6 +1866,15 @@ class AIAgent:
                 if prior.get("role") == "user":
                     current_turn_metadata = _turn_metadata(prior.get("metadata"))
                     break
+            assistant_segment_index = 0
+            for prior in messages[start_idx:flush_from]:
+                if not isinstance(prior, dict) or prior.get("_synthetic_continuation"):
+                    continue
+                prior_role = prior.get("role")
+                if prior_role == "user":
+                    assistant_segment_index = 0
+                elif prior_role == "assistant":
+                    assistant_segment_index += 1
             for msg_idx, msg in enumerate(messages[flush_from:], start=flush_from):
                 # In-memory trajectory artifacts (truncation continuation prompt,
                 # large-tool-call recovery) are added so the LLM can continue the
@@ -1891,6 +1900,7 @@ class AIAgent:
                 target_session_id = visible_session_id
                 if role == "user":
                     current_turn_metadata = _turn_metadata(msg_metadata)
+                    assistant_segment_index = 0
                 elif role in {"assistant", "tool"}:
                     if active_turn_metadata:
                         msg_metadata = self._merge_message_metadata(msg_metadata, active_turn_metadata)
@@ -1902,6 +1912,17 @@ class AIAgent:
                         identity_value = str(context_metadata.get(identity_key) or "").strip()
                         if identity_value:
                             msg_metadata[identity_key] = identity_value
+                if role == "assistant":
+                    raw_segment_index = msg_metadata.get("assistant_segment_index")
+                    try:
+                        persisted_segment_index = max(0, int(raw_segment_index))
+                    except (TypeError, ValueError):
+                        persisted_segment_index = assistant_segment_index
+                        msg_metadata["assistant_segment_index"] = persisted_segment_index
+                    assistant_segment_index = max(
+                        assistant_segment_index,
+                        persisted_segment_index + 1,
+                    )
                 if role in {"user", "assistant", "tool"}:
                     msg_metadata = self._message_persist_identity_metadata(
                         msg_metadata,
@@ -1989,7 +2010,7 @@ class AIAgent:
                     tool_calls_data = msg["tool_calls"]
                 msg_participant_id = self._flush_message_participant_id(role, msg, msg_metadata)
                 append_attempts += 1
-                appended_id = self._session_db.append_message(
+                appended_id = self._session_db.messages.append(
                     session_id=target_session_id,
                     role=role,
                     content=content,
@@ -2956,7 +2977,7 @@ class AIAgent:
                 session_db = getattr(self, "_session_db", None)
                 session_id = getattr(self, "session_id", None)
                 if session_db and session_id:
-                    session_db.end_session(session_id, "agent_close")
+                    session_db.sessions.end(session_id, "agent_close")
         except Exception:
             pass
 

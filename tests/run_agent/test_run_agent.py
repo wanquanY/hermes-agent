@@ -2743,6 +2743,32 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_run_conversation_persists_user_turn_before_model_call(self, agent):
+        self._setup_agent(agent)
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        persist_calls = []
+
+        def persist_session(messages, conversation_history=None):
+            persist_calls.append([dict(message) for message in messages])
+
+        def api_call(api_kwargs):
+            assert persist_calls
+            assert [message["role"] for message in persist_calls[0]] == ["user"]
+            assert persist_calls[0][0]["content"] == "hello"
+            return resp
+
+        agent._interruptible_api_call = api_call
+        agent._persist_session = persist_session
+
+        with (
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "Final answer"
+        assert len(persist_calls) >= 2
+
     def test_plain_assistant_content_is_not_emitted_as_reasoning_progress(self, agent):
         self._setup_agent(agent)
         progress_events = []
@@ -5331,7 +5357,7 @@ class TestPersistUserMessageOverride:
         agent._persist_session(messages, [])
 
         assert messages[0]["content"] == "Hello there"
-        first_db_write = agent._session_db.append_message.call_args_list[0].kwargs
+        first_db_write = agent._session_db.messages.append.call_args_list[0].kwargs
         assert first_db_write["content"] == "Hello there"
 
 

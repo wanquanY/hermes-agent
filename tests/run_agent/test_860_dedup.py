@@ -114,6 +114,96 @@ class TestFlushDeduplication:
             rows = db.get_messages(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
+    def test_turn_start_persist_then_final_flush_keeps_one_ordered_turn(self):
+        """Early user persistence and final turn flush share one DB transcript."""
+        from agent.turn_message_buffer import TurnMessageBuffer
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = open_cli_session_store(db_path=db_path)
+            agent = self._make_agent(db)
+            agent._hermes_active_run_id = "run-first"
+            agent._hermes_active_turn_id = "turn-first"
+
+            messages = TurnMessageBuffer.from_history([])
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "第一轮问题",
+                    "metadata": {
+                        "run_id": "run-first",
+                        "turn_id": "turn-first",
+                        "client_message_id": "client-first",
+                    },
+                }
+            )
+            agent._persist_session(messages, [])
+
+            messages.append({"role": "assistant", "content": "第一轮回答"})
+            agent._persist_session(messages, [])
+
+            rows = db.messages.list(agent.session_id)
+            assert [row["role"] for row in rows] == ["user", "assistant"]
+            assert [row["content"] for row in rows] == ["第一轮问题", "第一轮回答"]
+            assert [row["metadata"]["persist_message_key"] for row in rows] == [
+                "run:run-first|turn:turn-first|idx:0",
+                "run:run-first|turn:turn-first|idx:1",
+            ]
+
+    def test_prompt_submit_user_prepersist_is_idempotent_with_agent_flush(self):
+        """Gateway-owned user persistence must not duplicate agent turn flush."""
+        from agent.turn_message_buffer import TurnMessageBuffer
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = open_cli_session_store(db_path=db_path)
+            agent = self._make_uninitialized_agent(db)
+            db.sessions.create(agent.session_id, source="tui", transient=False)
+            agent._hermes_active_run_id = "run-first"
+            agent._hermes_active_turn_id = "turn-first"
+
+            prepersisted_id = db.messages.append(
+                session_id=agent.session_id,
+                role="user",
+                content="第一轮问题",
+                metadata={
+                    "run_id": "run-first",
+                    "turn_id": "turn-first",
+                    "client_message_id": "client-first",
+                    "turn_message_index": 0,
+                    "persist_message_key": "run:run-first|turn:turn-first|idx:0",
+                    "prompt_submit_owned": True,
+                },
+            )
+
+            messages = TurnMessageBuffer.from_history([])
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "第一轮问题",
+                    "metadata": {
+                        "run_id": "run-first",
+                        "turn_id": "turn-first",
+                        "client_message_id": "client-first",
+                    },
+                }
+            )
+            agent._persist_session(messages, [])
+
+            messages.append({"role": "assistant", "content": "第一轮回答"})
+            agent._persist_session(messages, [])
+
+            rows = db.messages.list(agent.session_id)
+            assert [row["role"] for row in rows] == ["user", "assistant"]
+            assert [row["content"] for row in rows] == ["第一轮问题", "第一轮回答"]
+            assert rows[0]["id"] == prepersisted_id
+            assert [row["metadata"]["persist_message_key"] for row in rows] == [
+                "run:run-first|turn:turn-first|idx:0",
+                "run:run-first|turn:turn-first|idx:1",
+            ]
+
     def test_team_conversation_flush_uses_active_run_identity(self):
         """Team worker flush must not inherit run ids from projected history."""
         from hermes_state import SessionDB

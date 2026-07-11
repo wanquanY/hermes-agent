@@ -786,6 +786,18 @@ def run_conversation(
 
     active_system_prompt = agent._cached_system_prompt
 
+    # Crash-resilience: persist the inbound user turn as soon as the session row
+    # exists. The final turn flush below will append assistant/tool rows by using
+    # the same TurnMessageBuffer boundary and persist_message_key idempotency.
+    try:
+        agent._persist_session(messages, conversation_history)
+    except Exception:
+        logger.warning(
+            "Early turn-start session persistence failed for session=%s",
+            agent.session_id or "none",
+            exc_info=True,
+        )
+
     # ── Preflight context compression ──
     # Before entering the main loop, check if the loaded conversation
     # history already exceeds the model's context threshold.  This handles
