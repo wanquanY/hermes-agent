@@ -313,7 +313,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                     )
                 except Exception:
                     participants = []
-                from hermes_team_mission.state.session_views import (
+                from hermes_team_mission.domain.member_perspective import (
                     transform_to_member_perspective,
                 )
 
@@ -344,7 +344,7 @@ def _is_team_member_identity_contract_message(message: Any) -> bool:
     if not isinstance(message, dict):
         return False
     try:
-        from hermes_team_mission.state.session_views import (
+        from hermes_team_mission.domain.member_perspective import (
             is_team_member_identity_contract_message,
         )
     except Exception:

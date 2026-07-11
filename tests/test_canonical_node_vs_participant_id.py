@@ -6,8 +6,8 @@ from typing import Any
 
 from hermes_state import SessionDB
 from hermes_team_mission.domain.identities import canonical_node_id
-from hermes_team_mission.state.session_common import node_to_participant_id
-from hermes_team_mission.state.session_views import transform_to_member_perspective
+from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
+from hermes_team_mission.domain.runtime_identity import node_participant_id
 
 
 def _db(tmp_path: Path, session_id: str = "team-session") -> SessionDB:
@@ -86,8 +86,8 @@ def test_canonical_node_id_is_graph_identity_only() -> None:
     }
 
     assert canonical_node_id("mission-A", "member:member-beta") == "mission-A:member:member-beta"
-    assert node_to_participant_id(misleading_node) == "member:member-alpha"
-    assert node_to_participant_id({"canonical_node_id": "member:member-beta"}) == ""
+    assert node_participant_id(misleading_node) == "member:member-alpha"
+    assert node_participant_id({"canonical_node_id": "member:member-beta"}) == ""
 
 
 def test_speaker_resolution_uses_participant_id_not_node_id() -> None:

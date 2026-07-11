@@ -13,7 +13,7 @@ import pytest_asyncio
 from agent.activity_event_bus import ActivityEventBus
 from agent.conversation_loop import _drain_activity_events_for_api
 from hermes_state import SessionDB
-from hermes_team_mission.state.session_views import transform_to_member_perspective
+from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope

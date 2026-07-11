@@ -117,13 +117,14 @@ def _participant_id_from_runtime_context(
         or binding_metadata.get("participantId")
         or run_context.get("participant_id")
         or run_context.get("participantId")
-        or _node_participant_id(node)
+        or node_participant_id(node)
         or mission_metadata.get("participant_id")
         or mission_metadata.get("participantId")
     )
 
 
-def _node_participant_id(node: dict[str, Any]) -> str:
+def node_participant_id(node: dict[str, Any] | None) -> str:
+    node = _mapping(node)
     metadata = _mapping(node.get("metadata"))
     return _text(
         node.get("participant_id")
@@ -198,4 +199,4 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
-__all__ = ["runtime_event_identity"]
+__all__ = ["node_participant_id", "runtime_event_identity"]

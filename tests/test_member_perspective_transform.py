@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_team_mission.state.session_views import transform_to_member_perspective
+from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
 
 
 def _body_after_identity_contract(messages):
