@@ -300,8 +300,8 @@ class SessionRecallReadModel:
         sort_norm = str(sort or "").strip().lower()
         order_by = "m.timestamp DESC, m.id DESC" if sort_norm == "newest" else "m.timestamp ASC, m.id ASC" if sort_norm == "oldest" else "m.timestamp DESC, m.id DESC"
         query_text = str(query or "").strip()
-        fts_query = _sanitize_fts5_query(query_text)
-        if _contains_cjk(query_text):
+        fts_query = sanitize_fts5_query(query_text)
+        if contains_cjk(query_text):
             return self._search_messages_cjk_like(
                 query_text,
                 source_filter=source_filter,
@@ -773,7 +773,7 @@ def _escape_like(value: str) -> str:
     return str(value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _contains_cjk(text: str) -> bool:
+def contains_cjk(text: str) -> bool:
     return any(
         0x4E00 <= ord(ch) <= 0x9FFF
         or 0x3400 <= ord(ch) <= 0x4DBF
@@ -827,7 +827,7 @@ def _cjk_like_predicate(tokens: list[_SearchToken]) -> str:
     return f"{positive_sql} AND {negative_sql}"
 
 
-def _sanitize_fts5_query(query: str) -> str:
+def sanitize_fts5_query(query: str) -> str:
     quoted_parts: list[str] = []
 
     def preserve(match: re.Match[str]) -> str:

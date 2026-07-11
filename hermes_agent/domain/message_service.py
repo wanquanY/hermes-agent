@@ -238,7 +238,7 @@ class MessageService:
         self,
         session_id: str,
         role: str,
-        content: Any,
+        content: Any = None,
         **fields: Any,
     ) -> int:
         stable = str(session_id or "").strip()

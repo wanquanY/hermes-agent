@@ -35,8 +35,8 @@ from hermes_agent.domain.session_index_reconciler import SessionIndexReconciler
 from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.session_recall import (
-    _contains_cjk as _recall_contains_cjk,
-    _sanitize_fts5_query as _recall_sanitize_fts5_query,
+    contains_cjk as _recall_contains_cjk,
+    sanitize_fts5_query as _recall_sanitize_fts5_query,
 )
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel

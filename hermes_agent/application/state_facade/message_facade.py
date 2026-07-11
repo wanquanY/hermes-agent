@@ -9,8 +9,8 @@ from agent.memory_manager import sanitize_context
 from hermes_agent.read_models.message_history import MessageHistoryReadModel, MessagePageQuery
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.session_recall import (
-    _contains_cjk as _recall_contains_cjk,
-    _sanitize_fts5_query as _recall_sanitize_fts5_query,
+    contains_cjk as _recall_contains_cjk,
+    sanitize_fts5_query as _recall_sanitize_fts5_query,
 )
 from hermes_agent.repositories.message_repo import MessageRepoImpl, MessageRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl

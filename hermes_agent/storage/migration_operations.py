@@ -29,7 +29,7 @@ _REQUIRED_COLUMN_MIGRATION_TYPES = {
 
 
 def reconcile_declared_columns(cursor: sqlite3.Cursor) -> None:
-    expected = _parse_schema_columns(SCHEMA_SQL)
+    expected = parse_schema_columns(SCHEMA_SQL)
     for table_name, declared_columns in expected.items():
         rows = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
         live_columns = {
@@ -306,7 +306,7 @@ def _add_column(
         cursor.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {declaration}')
 
 
-def _parse_schema_columns(schema_sql: str) -> dict[str, dict[str, str]]:
+def parse_schema_columns(schema_sql: str) -> dict[str, dict[str, str]]:
     reference = sqlite3.connect(":memory:")
     try:
         reference.executescript(schema_sql)
