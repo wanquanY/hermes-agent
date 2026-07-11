@@ -1,8 +1,7 @@
 import os
 from types import SimpleNamespace
 
-from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway import server
 from tui_gateway.methods import session as session_methods
 
@@ -17,61 +16,30 @@ def test_read_only_profile_data_methods_do_not_take_env_lock(monkeypatch, tmp_pa
         def release(self):
             raise AssertionError("read-only session.messages must not release profile env lock")
 
-    class _DB:
-        def __init__(self):
-            self._conn = connect_session_repository_db(tmp_path / "profile-state.db")
-            SessionRepoImpl(self._conn).create(
-                SessionSpec(session_id="stored-session", source="tui")
-            )
-            self._conn.execute(
-                """
-                CREATE TABLE messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT,
-                    participant_id TEXT NOT NULL DEFAULT '',
-                    tool_call_id TEXT,
-                    tool_calls TEXT,
-                    tool_name TEXT,
-                    timestamp REAL NOT NULL,
-                    token_count INTEGER,
-                    finish_reason TEXT,
-                    reasoning TEXT,
-                    reasoning_content TEXT,
-                    reasoning_details TEXT,
-                    codex_reasoning_items TEXT,
-                    codex_message_items TEXT,
-                    platform_message_id TEXT,
-                    conversation_message_id TEXT NOT NULL DEFAULT '',
-                    metadata_json TEXT,
-                    active INTEGER NOT NULL DEFAULT 1
-                )
-                """
-            )
-            self._conn.execute(
-                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                ("stored-session", "user", "hello", 1.0),
-            )
-
     monkeypatch.setattr(server, "_profile_env_lock", _ExplodingEnvLock())
-    monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
+    db = open_cli_session_store(tmp_path / "profile-state.db")
+    db.sessions.create("stored-session", source="tui")
+    db.messages.append("stored-session", role="user", content="hello", timestamp=1.0)
+    monkeypatch.setattr(session_methods, "_get_db", lambda: db)
 
     profile_home = tmp_path / "profile-home"
-    resp = server.handle_request(
-        {
-            "id": "messages",
-            "method": "session.messages",
-            "params": {
-                "session_id": "stored-session",
-                "includeRunEvents": True,
-                "dovie_profile": {
-                    "hermesHomePath": str(profile_home),
-                    "env": {"DOVIE_TEST_PROFILE_ENV": "must-not-leak"},
+    try:
+        resp = server.handle_request(
+            {
+                "id": "messages",
+                "method": "session.messages",
+                "params": {
+                    "session_id": "stored-session",
+                    "includeRunEvents": True,
+                    "dovie_profile": {
+                        "hermesHomePath": str(profile_home),
+                        "env": {"DOVIE_TEST_PROFILE_ENV": "must-not-leak"},
+                    },
                 },
-            },
-        }
-    )
+            }
+        )
+    finally:
+        db.close()
 
     assert "error" not in resp
     assert resp["result"]["messages"] == [

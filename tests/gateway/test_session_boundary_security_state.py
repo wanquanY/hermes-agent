@@ -210,7 +210,7 @@ async def test_branch_preserves_persisted_assistant_metadata():
     result = await session_navigation_for(runner).handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
-    append_calls = runner._session_db.append_message.call_args_list
+    append_calls = runner._session_db.messages.append.call_args_list
     assert len(append_calls) == 2
     assistant_kwargs = append_calls[1].kwargs
     assert assistant_kwargs["role"] == "assistant"

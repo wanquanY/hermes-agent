@@ -3323,7 +3323,7 @@ class TestSessionIdHeader:
             {"role": "assistant", "content": "stored reply 1"},
         ]
         mock_db = MagicMock()
-        mock_db.get_messages_as_conversation.return_value = db_history
+        mock_db.messages.all_as_conversation.return_value = db_history
         auth_adapter._session_db = mock_db
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
