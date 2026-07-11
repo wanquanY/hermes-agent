@@ -79,16 +79,17 @@ def has_pending_prompt(request_id: str) -> bool:
         return False
 
 
-def resolve_approval_session_key(params: dict) -> str:
-    """Best-effort, non-raising variant of _approval_session_key for the runtime
-    proxy's local-pending check. Returns "" when it cannot resolve a session key."""
-    requested = str(
+def _requested_approval_session_id(params: dict) -> str:
+    return str(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
         or ""
     ).strip()
+
+
+def _live_approval_session_key(requested: str) -> str:
     if not requested:
         return ""
     session = _sessions.get(requested)
@@ -97,13 +98,24 @@ def resolve_approval_session_key(params: dict) -> str:
     for runtime_sid, live_session in list(_sessions.items()):
         if str((live_session or {}).get("session_key") or "") == requested:
             return str((live_session or {}).get("session_key") or runtime_sid)
+    return ""
+
+
+def _stored_approval_session_exists(requested: str) -> bool:
+    db = _db_for_stable_session(requested)
+    return bool(db is not None and db.sessions.get(requested))
+
+
+def resolve_approval_session_key(params: dict) -> str:
+    """Resolve a stable approval session without raising to runtime routing."""
+    requested = _requested_approval_session_id(params)
+    live_key = _live_approval_session_key(requested)
+    if live_key:
+        return live_key
     try:
-        db = _db_for_stable_session(requested)
-        if db is not None and db.get_session(requested):
-            return requested
+        return requested if requested and _stored_approval_session_exists(requested) else ""
     except Exception:
         return ""
-    return ""
 
 
 def _respond(rid, params, key):
@@ -253,45 +265,20 @@ def _err_with_data(rid, code: int, msg: str, data: dict) -> dict:
 
 
 def _approval_session_key(params: dict, rid):
-    """[DEPRECATED — PR-5] Legacy three-branch session-key resolver.
-
-    Retained for ``approval.policy.get`` / ``approval.policy.set`` /
-    ``approval.pending.list`` which still address by session. The
-    ``approval.respond`` path now prefers ``request_id``-addressed
-    resolution via ``find_gateway_approval_by_request_id`` and only
-    falls back to this resolver when no ``request_id`` is present.
-
-    Will be cleaned up in a follow-up PR once the policy methods migrate
-    to request_id addressing.
-    """
-    requested = str(
-        params.get("conversation_session_id")
-        or params.get("conversationSessionId")
-        or params.get("session_id")
-        or params.get("sessionId")
-        or ""
-    ).strip()
+    """Resolve policy and legacy approval requests to a stable session key."""
+    requested = _requested_approval_session_id(params)
     if not requested:
         return "", _err(rid, 4006, "session_id or conversation_session_id required")
 
-    session = _sessions.get(requested)
-    if session:
-        return str(session.get("session_key") or requested), None
+    live_key = _live_approval_session_key(requested)
+    if live_key:
+        return live_key, None
 
-    for runtime_sid, live_session in list(_sessions.items()):
-        if str((live_session or {}).get("session_key") or "") == requested:
-            return str((live_session or {}).get("session_key") or runtime_sid), None
-
-    db = _db_for_stable_session(requested)
-    if db is not None:
-        try:
-            stored = db.get_session(requested)
-        except AttributeError:
-            stored = None
-        except Exception as exc:
-            return "", _err(rid, 5004, str(exc))
-        if stored:
+    try:
+        if _stored_approval_session_exists(requested):
             return requested, None
+    except Exception as exc:
+        return "", _err(rid, 5004, str(exc))
 
     return "", _err(rid, 4001, "session not found")
 
