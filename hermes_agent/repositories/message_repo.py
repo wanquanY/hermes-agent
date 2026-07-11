@@ -104,13 +104,6 @@ class MessageRepo(Protocol):
         source_message_ids: list[int],
     ) -> int: ...
 
-    def annotate_stripped_speaker_prefix(
-        self,
-        session_id: str,
-        conversation_message_id: str,
-        stripped_speaker_prefix: str,
-    ) -> dict[str, Any]: ...
-
     def copy_branch_prefix(
         self,
         source_session_ids: list[str],
@@ -309,46 +302,6 @@ class MessageRepoImpl:
             )
             affected += int(cursor.rowcount or 0)
         return affected
-
-    def annotate_stripped_speaker_prefix(
-        self,
-        session_id: str,
-        conversation_message_id: str,
-        stripped_speaker_prefix: str,
-    ) -> dict[str, Any]:
-        stable_sid = str(session_id or "").strip()
-        stable_message_id = str(conversation_message_id or "").strip()
-        stable_prefix = str(stripped_speaker_prefix or "").strip()
-        if not stable_sid or not stable_message_id or not stable_prefix:
-            return {}
-        row = self._conn.execute(
-            """
-            SELECT id, metadata_json
-              FROM messages
-             WHERE session_id = ?
-               AND conversation_message_id = ?
-             ORDER BY id DESC
-             LIMIT 1
-            """,
-            (stable_sid, stable_message_id),
-        ).fetchone()
-        if row is None:
-            return {}
-        current_raw = row["metadata_json"] if isinstance(row, sqlite3.Row) else row[1]
-        try:
-            metadata = json.loads(current_raw) if current_raw else {}
-        except json.JSONDecodeError:
-            metadata = {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        metadata["stripped_speaker_prefix"] = stable_prefix
-        metadata["strippedSpeakerPrefix"] = stable_prefix
-        message_id = int(row["id"] if isinstance(row, sqlite3.Row) else row[0])
-        self._conn.execute(
-            "UPDATE messages SET metadata_json = ? WHERE id = ?",
-            (json.dumps(metadata, ensure_ascii=False), message_id),
-        )
-        return metadata
 
     def copy_branch_prefix(
         self,

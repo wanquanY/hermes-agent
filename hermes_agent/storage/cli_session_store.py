@@ -180,6 +180,13 @@ class CliSessionStore(TeamMissionStateMixin):
             conn,
             self._unit_of_work,
             self._session_repo,
+            event_normalizer=lambda session_id, event: (
+                RuntimeTranscriptWriter.normalize_message_complete_event(
+                    self,
+                    session_id=session_id,
+                    event=event,
+                )
+            ),
             message_complete_projector=lambda session_id, event: (
                 RuntimeTranscriptWriter.project_message_complete_event_locked(
                     self,

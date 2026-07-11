@@ -46,6 +46,8 @@ class RunService:
         unit_of_work: SqliteUnitOfWork,
         sessions: SessionRepoImpl,
         *,
+        event_normalizer: Callable[[str, dict[str, Any]], dict[str, Any]]
+        | None = None,
         message_complete_projector: Callable[[str, dict[str, Any]], dict[str, Any]]
         | None = None,
     ) -> None:
@@ -54,6 +56,7 @@ class RunService:
         self._sessions = sessions
         self._repository = RunRepoImpl(conn)
         self._events = RunEventReadModel(conn)
+        self._event_normalizer = event_normalizer
         self._message_complete_projector = message_complete_projector
         self.retention = RunEventRetentionService(conn, unit_of_work)
         self._event_listener_lock = threading.RLock()
@@ -76,12 +79,17 @@ class RunService:
                 stable,
                 started_at=float((event or {}).get("timestamp") or time.time()),
             )
-            duplicate = self._duplicate_session_info(stable, event)
+            normalized_event = dict(event or {})
+            if self._event_normalizer is not None:
+                normalized_event = self._event_normalizer(stable, normalized_event)
+                if not isinstance(normalized_event, dict):
+                    raise TypeError("event_normalizer must return a dict")
+            duplicate = self._duplicate_session_info(stable, normalized_event)
             if duplicate is not None:
                 return duplicate
             saved = self._repository.append_runtime_event(
                 stable,
-                event,
+                normalized_event,
                 participant_id=participant_id,
                 activity_id=activity_id,
             )

@@ -871,8 +871,12 @@ class TestAgentCacheSpilloverLive:
         runner._running_agents = {}
         return runner
 
-    def _real_agent(self):
+    def _real_agent(self, monkeypatch):
         """A genuine AIAgent; no API calls are made during these tests."""
+        monkeypatch.setattr(
+            "agent.context_compressor.get_model_context_length",
+            lambda *_args, **_kwargs: 200_000,
+        )
         from run_agent import AIAgent
         return AIAgent(
             model="anthropic/claude-sonnet-4", api_key="test",
@@ -889,7 +893,7 @@ class TestAgentCacheSpilloverLive:
         monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
-        agents = [self._real_agent() for _ in range(CAP)]
+        agents = [self._real_agent(monkeypatch) for _ in range(CAP)]
         for i, a in enumerate(agents):
             with runner._agent_cache_lock:
                 runner._agent_cache[f"s{i}"] = (a, "sig")
@@ -897,7 +901,7 @@ class TestAgentCacheSpilloverLive:
         assert len(runner._agent_cache) == CAP
 
         # Spillover insertion.
-        newcomer = self._real_agent()
+        newcomer = self._real_agent(monkeypatch)
         with runner._agent_cache_lock:
             runner._agent_cache["new"] = (newcomer, "sig")
             agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
@@ -922,12 +926,12 @@ class TestAgentCacheSpilloverLive:
         monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
-        agents = [self._real_agent() for _ in range(CAP)]
+        agents = [self._real_agent(monkeypatch) for _ in range(CAP)]
         for i, a in enumerate(agents):
             runner._agent_cache[f"s{i}"] = (a, "sig")
             runner._running_agents[f"s{i}"] = a  # every session mid-turn
 
-        newcomer = self._real_agent()
+        newcomer = self._real_agent(monkeypatch)
         with caplog.at_level(_logging.WARNING, logger="hermes_gateway.agent_cache"):
             with runner._agent_cache_lock:
                 runner._agent_cache["new"] = (newcomer, "sig")
@@ -958,13 +962,13 @@ class TestAgentCacheSpilloverLive:
         monkeypatch.setattr(agent_cache, "AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
-        a0 = self._real_agent()
-        a1 = self._real_agent()
+        a0 = self._real_agent(monkeypatch)
+        a1 = self._real_agent(monkeypatch)
         runner._agent_cache["sA"] = (a0, "sig")
         runner._agent_cache["sB"] = (a1, "sig")
 
         # 3rd session forces sA (oldest) out.
-        a2 = self._real_agent()
+        a2 = self._real_agent(monkeypatch)
         with runner._agent_cache_lock:
             runner._agent_cache["sC"] = (a2, "sig")
             agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()
@@ -975,7 +979,7 @@ class TestAgentCacheSpilloverLive:
         _t.sleep(0.3)
 
         # Now sA's user sends another message → a fresh agent goes in.
-        a0_new = self._real_agent()
+        a0_new = self._real_agent(monkeypatch)
         with runner._agent_cache_lock:
             runner._agent_cache["sA"] = (a0_new, "sig")
             agent_cache.agent_cache_for(runner).enforce_agent_cache_cap()

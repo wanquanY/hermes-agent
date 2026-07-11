@@ -33,6 +33,14 @@ TERMINAL_MISSION_SUMMARY_OUTCOMES = frozenset({
     "canceled",
     "interrupted",
 })
+_MESSAGE_COMPLETE_TEXT_KEYS = (
+    "text",
+    "final_response",
+    "finalResponse",
+    "summary",
+    "message",
+    "content",
+)
 
 
 def _text(value: Any) -> str:
@@ -56,6 +64,30 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _known_participant_display_names(db: Any, session_id: str) -> list[str]:
+    participants = getattr(db, "participants", None)
+    lister = getattr(participants, "list_conversation_participants", None)
+    if not callable(lister):
+        return []
+    names = {
+        _text(participant.get("display_name") or participant.get("displayName"))
+        for participant in lister(session_id) or []
+        if isinstance(participant, dict)
+    }
+    return sorted((name for name in names if name), key=len, reverse=True)
+
+
+def _strip_known_speaker_prefix(
+    text: str,
+    known_names: list[str],
+) -> tuple[str, str]:
+    for name in known_names:
+        prefix = f"[{name}]"
+        if text.startswith(prefix):
+            return text[len(prefix):].lstrip(), name
+    return text, ""
 
 
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
@@ -1177,6 +1209,41 @@ class UserSubmissionWriter:
 
 class RuntimeTranscriptWriter:
     @staticmethod
+    def normalize_message_complete_event(
+        db: Any,
+        *,
+        session_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        frame = dict(event or {})
+        if _text(frame.get("type")) != "message.complete":
+            return frame
+        payload = _event_payload(frame)
+        participant_id = _event_participant_id(frame, payload)
+        if not participant_id.startswith("member:"):
+            return frame
+        conversation_session_id = _event_conversation_session_id(
+            frame,
+            payload,
+            session_id,
+        )
+        original_text = _event_text(frame, payload)
+        stripped_text, speaker_name = _strip_known_speaker_prefix(
+            original_text,
+            _known_participant_display_names(db, conversation_session_id),
+        )
+        if not speaker_name:
+            return frame
+        normalized_payload = dict(payload)
+        for key in _MESSAGE_COMPLETE_TEXT_KEYS:
+            if str(normalized_payload.get(key) or "") == original_text:
+                normalized_payload[key] = stripped_text
+        normalized_payload["stripped_speaker_prefix"] = speaker_name
+        normalized_payload["strippedSpeakerPrefix"] = speaker_name
+        frame["payload"] = normalized_payload
+        return frame
+
+    @staticmethod
     def project_message_complete_event_locked(
         db: Any,
         conn: Any,
@@ -1196,6 +1263,11 @@ class RuntimeTranscriptWriter:
         if not conversation_session_id or conversation_session_id.startswith("team:mission:"):
             return {}
         text = _event_text(event, payload)
+        participant_id = _event_participant_id(event, payload)
+        stripped_speaker_prefix = _text(
+            payload.get("stripped_speaker_prefix")
+            or payload.get("strippedSpeakerPrefix")
+        )
         if not text:
             return {}
         message_seq = _event_message_seq(event, payload)
@@ -1210,7 +1282,6 @@ class RuntimeTranscriptWriter:
             )
         )
         activity_id = _event_activity_id(event, payload)
-        participant_id = _event_participant_id(event, payload)
         run_context = _mapping(payload.get("run_context") or payload.get("runContext"))
         client_message_id = _text(payload.get("client_message_id") or payload.get("clientMessageId"))
         team_metadata = {
@@ -1272,6 +1343,9 @@ class RuntimeTranscriptWriter:
             metadata["client_message_id"] = client_message_id
         if run_context:
             metadata["run_context"] = run_context
+        if stripped_speaker_prefix:
+            metadata["stripped_speaker_prefix"] = stripped_speaker_prefix
+            metadata["strippedSpeakerPrefix"] = stripped_speaker_prefix
         final_identity = _assistant_raw_segment_identity(event, payload)
         try:
             reconstructed = _project_reconstructed_assistant_segments_locked(
