@@ -21,9 +21,15 @@ def _restore_stdout():
 
 
 @pytest.fixture()
-def server():
+def server(tmp_path):
+    hermes_home = tmp_path / "hermes-home"
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        "hermes_constants": MagicMock(
+            get_hermes_home=MagicMock(return_value=hermes_home),
+            get_hermes_dir=MagicMock(
+                side_effect=lambda current, _legacy=None: hermes_home / current
+            ),
+        ),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),
@@ -47,63 +53,34 @@ def capture(server):
 
 
 def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
-    from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    conn = connect_session_repository_db(tmp_path / "resume-state.db")
-    repo = SessionRepoImpl(conn)
+    db = open_cli_session_store(tmp_path / "resume-state.db")
     for session_id, title in rows:
-        repo.create(SessionSpec(session_id=session_id, source="tui", title=title))
-    _seed_resume_messages(conn, rows, history_reader)
-    return types.SimpleNamespace(_conn=conn)
+        db.sessions.create(session_id, source="tui", title=title)
+    _seed_resume_messages(db, rows, history_reader)
+    return db
 
 
-def _seed_resume_messages(conn, rows=(), history_reader=None) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            participant_id TEXT NOT NULL DEFAULT '',
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL,
-            token_count INTEGER,
-            finish_reason TEXT,
-            reasoning TEXT,
-            reasoning_content TEXT,
-            reasoning_details TEXT,
-            codex_reasoning_items TEXT,
-            codex_message_items TEXT,
-            platform_message_id TEXT,
-            conversation_message_id TEXT NOT NULL DEFAULT '',
-            metadata_json TEXT,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
+def _seed_resume_messages(db, rows=(), history_reader=None) -> None:
     if not callable(history_reader):
         return
     for session_id, _title in rows:
         messages = history_reader(session_id, include_ancestors=True)
         for index, message in enumerate(messages or [], start=1):
-            conn.execute(
-                """
-                INSERT INTO messages (
-                    session_id, role, content, timestamp, metadata_json
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    str((message or {}).get("role") or "user"),
-                    "" if (message or {}).get("content") is None else str((message or {}).get("content") or ""),
-                    float(index),
-                    json.dumps((message or {}).get("metadata"), ensure_ascii=False)
+            db.messages.append(
+                session_id=session_id,
+                role=str((message or {}).get("role") or "user"),
+                content=(
+                    ""
+                    if (message or {}).get("content") is None
+                    else str((message or {}).get("content") or "")
+                ),
+                timestamp=float(index),
+                metadata=(
+                    (message or {}).get("metadata")
                     if isinstance((message or {}).get("metadata"), dict)
-                    else None,
+                    else None
                 ),
             )
 
@@ -757,6 +734,12 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 }
             ]
             self.replaced = None
+            self.messages = types.SimpleNamespace(replace=self.replace_messages)
+            self.runs = types.SimpleNamespace(
+                append_event=self.append_run_event,
+                list_events=self.list_run_events,
+                next_event_seq=self.next_run_event_seq,
+            )
 
         def replace_messages(self, sid, messages):
             self.replaced = (sid, messages)
@@ -870,41 +853,11 @@ def test_session_create_control_plane_only_persists_through_session_repo(
 ):
     import importlib
 
-    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
     importlib.reload(importlib.import_module("tui_gateway.methods.session"))
 
-    class _DB:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def upsert_session_index(self, **kwargs):
-            self._conn.execute(
-                """
-                UPDATE session_index
-                   SET owner_agent_profile_id = ?,
-                       owner_profile_version_id = ?,
-                       runtime_scope_key = ?,
-                       source = ?,
-                       transient = ?,
-                       session_kind = ?,
-                       conversation_kind = ?
-                 WHERE session_id = ?
-                """,
-                (
-                    kwargs.get("owner_agent_profile_id") or "",
-                    kwargs.get("owner_profile_version_id") or "",
-                    kwargs.get("runtime_scope_key") or "",
-                    kwargs.get("source") or "unknown",
-                    1 if kwargs.get("transient") else 0,
-                    kwargs.get("session_kind") or "hermes_session",
-                    kwargs.get("conversation_kind") or "direct",
-                    kwargs.get("session_id") or "",
-                ),
-            )
-
-    conn = connect_session_repository_db(tmp_path / "state.db")
-    db = _DB(conn)
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
 
@@ -926,7 +879,7 @@ def test_session_create_control_plane_only_persists_through_session_repo(
     assert resp["result"]["info"]["lazy"] is True
     assert resp["result"]["info"]["transient"] is True
     session_id = resp["result"]["conversation_session_id"]
-    session_row = conn.execute(
+    session_row = db._conn.execute(
         "SELECT id, source, model, transient FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
@@ -936,7 +889,7 @@ def test_session_create_control_plane_only_persists_through_session_repo(
         "model": "gpt-test",
         "transient": 1,
     }
-    index_row = conn.execute(
+    index_row = db._conn.execute(
         "SELECT session_id, source, transient FROM session_index WHERE session_id = ?",
         (session_id,),
     ).fetchone()
@@ -945,7 +898,7 @@ def test_session_create_control_plane_only_persists_through_session_repo(
         "source": "tui",
         "transient": 1,
     }
-    conn.close()
+    db.close()
 
 
 def test_approval_control_plane_methods_accept_conversation_session_id(server, monkeypatch):
@@ -954,8 +907,11 @@ def test_approval_control_plane_methods_accept_conversation_session_id(server, m
     importlib.reload(importlib.import_module("tui_gateway.methods.prompt"))
 
     class _DB:
-        def get_session(self, session_id):
-            return {"id": session_id} if session_id == "stored-approval" else None
+        sessions = types.SimpleNamespace(
+            get=lambda session_id: (
+                {"id": session_id} if session_id == "stored-approval" else None
+            )
+        )
 
     yolo_sessions = set()
     approval_mod = types.SimpleNamespace(
@@ -1012,8 +968,17 @@ def test_approval_control_plane_methods_accept_conversation_session_id(server, m
     assert after["result"] == {"mode": "full_access", "yolo": True}
 
 
-def test_run_control_replays_events_and_tracks_status(capture):
+def test_run_control_replays_events_and_tracks_status(capture, monkeypatch, tmp_path):
     server, _buf = capture
+    db = _resume_gateway_db(tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.sessions.create("stored-events", source="tui")
+    db.runs.upsert(
+        run_id="run-events",
+        session_id="stored-events",
+        turn_id="turn-events",
+        status="running",
+    )
     server._sessions["runtime-events"] = {
         "agent": MagicMock(model="gpt-test", provider="test-provider"),
         "session_key": "stored-events",
@@ -1220,8 +1185,8 @@ def test_run_control_control_events_do_not_mark_session_busy(capture):
 
 
 def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
-    class _RunDB:
-        def get_session_run_status(self, _session_id):
+    class _Runs:
+        def session_status(self, _session_id):
             return {
                 "running": True,
                 "active_run_id": "run-active",
@@ -1229,7 +1194,7 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
                 "last_event_seq": 3,
             }
 
-        def list_runs(self, _session_id):
+        def list(self, _session_id, **_kwargs):
             return [
                 {
                     "run_id": "run-active",
@@ -1242,7 +1207,8 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
                 }
             ]
 
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = types.SimpleNamespace(runs=_Runs())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {
@@ -1436,36 +1402,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
     from tui_gateway.services import run_control
 
     db = _resume_gateway_db(tmp_path)
-    db._conn.execute(
-        """
-        CREATE TABLE run_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            run_id TEXT,
-            turn_id TEXT,
-            execution_session_id TEXT,
-            runtime_scope_key TEXT,
-            participant_id TEXT,
-            activity_id TEXT,
-            event_type TEXT,
-            seq INTEGER,
-            timestamp REAL,
-            payload_json TEXT,
-            event_json TEXT,
-            status TEXT,
-            frame_blob BLOB,
-            frame_format TEXT,
-            retention_class TEXT,
-            interaction_request_id TEXT,
-            interaction_kind TEXT,
-            interaction_status TEXT,
-            anchor_seq INTEGER,
-            projection_state TEXT,
-            runtime_source_seq INTEGER,
-            projected_tool_event_id TEXT
-        )
-        """
-    )
+    db.sessions.create("stored-run-events", source="tui")
     payload = {"text": "hello"}
     EventLedger(db._conn).append_runtime_frame(
         session_id="stored-run-events",
@@ -1522,8 +1459,8 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch, t
 def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
     captured = {}
 
-    class _RunDB:
-        def list_runs(self, session_id="", *, runtime_scope_key="", statuses=None, limit=200):
+    class _Runs:
+        def list(self, session_id="", *, runtime_scope_key="", statuses=None, limit=200):
             captured.update(
                 {
                     "session_id": session_id,
@@ -1534,7 +1471,8 @@ def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
             )
             return [{"run_id": "run-filtered", "status": "running", "runtime_scope_key": runtime_scope_key}]
 
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = types.SimpleNamespace(runs=_Runs())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {
