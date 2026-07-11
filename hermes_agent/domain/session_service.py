@@ -122,6 +122,11 @@ class SessionService:
     def update_cwd(self, session_id: str, cwd: str) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.update_cwd(session_id, str(cwd or "")))
 
+    def update_source(self, session_id: str, source: str) -> int:
+        return self._unit_of_work.execute(
+            lambda _conn: self._repo.update_source(session_id, source)
+        )
+
     def get_by_title(self, title: str) -> dict[str, Any] | None:
         normalized = sanitize_session_title(title)
         if not normalized:

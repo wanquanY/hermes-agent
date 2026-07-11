@@ -291,9 +291,7 @@ def normalize_team_mission_conversation_session(
         },
     )
 
-    updater = getattr(db, "update_session_source", None)
-    if callable(updater):
-        updater(conversation_session_id, "team_mission")
+    db.sessions.update_source(conversation_session_id, "team_mission")
     return conversation
 
 

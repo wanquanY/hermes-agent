@@ -89,6 +89,23 @@ def test_get_run_returns_none_missing():
     assert repo.get_run("no-such") is None
 
 
+def test_get_run_preserves_error_and_metadata():
+    repo = RunRepoImpl(_make_conn())
+    repo.upsert_materialized_state(
+        run_id="r1",
+        session_id="s1",
+        status="failed",
+        error="worker failed",
+        metadata={"owner": "member:reviewer"},
+    )
+
+    run = repo.get_run("r1")
+
+    assert run is not None
+    assert run.error == "worker failed"
+    assert run.metadata == {"owner": "member:reviewer"}
+
+
 def test_append_event_allocates_monotonic_seq():
     conn = _make_conn()
     repo = RunRepoImpl(conn)

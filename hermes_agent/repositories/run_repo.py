@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from hermes_agent.domain.canonical_event import CanonicalEvent as DomainCanonicalEvent
@@ -58,6 +58,8 @@ class Run:
     terminal_seq: int = 0
     terminal_degraded: bool = False
     terminal_cause: str = ""
+    error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -344,7 +346,8 @@ class RunRepoImpl:
             """
             SELECT run_id, session_id, status, started_at, updated_at,
                    completed_at, turn_id, runtime_scope_key, execution_session_id,
-                   last_seq, terminal_seq, terminal_degraded, terminal_cause
+                   last_seq, terminal_seq, terminal_degraded, terminal_cause,
+                   error, metadata_json
               FROM runs
              WHERE run_id = ?
             """,
@@ -710,6 +713,8 @@ def _row_to_run(row: Any) -> Run:
         terminal_seq=int(_g("terminal_seq", 10) or 0),
         terminal_degraded=bool(int(_g("terminal_degraded", 11) or 0)),
         terminal_cause=str(_g("terminal_cause", 12) or ""),
+        error=str(_g("error", 13) or ""),
+        metadata=_json_loads(_g("metadata_json", 14), {}),
     )
 
 
