@@ -128,6 +128,7 @@ class MessageService:
         *,
         window: int = 5,
         bookend: int = 3,
+        keep_roles: tuple[str, ...] | None = ("user", "assistant"),
         include_inactive: bool = False,
     ) -> dict[str, Any]:
         return self._recall.get_anchored_view(
@@ -135,6 +136,7 @@ class MessageService:
             message_id,
             window=window,
             bookend=bookend,
+            keep_roles=keep_roles,
             include_inactive=include_inactive,
         )
 
