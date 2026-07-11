@@ -224,8 +224,7 @@ def _is_local_clarify_response(params: dict[str, Any]) -> bool:
     try:
         from tools import clarify_gateway
 
-        with clarify_gateway._lock:
-            return request_id in clarify_gateway._entries
+        return clarify_gateway.has_pending_clarify(request_id)
     except Exception:
         _log.debug("failed to inspect local clarify pending registry", exc_info=True)
         return False
