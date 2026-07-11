@@ -26,7 +26,7 @@ from hermes_agent.storage.execution_session_migration import (
 )
 from hermes_agent.storage.fts_schema import ensure_message_fts
 from hermes_agent.storage.migration_operations import reconcile_declared_columns
-from hermes_agent.storage.migrations import MigrationRunner
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION, MigrationRunner
 from hermes_agent.storage.session_store_health import set_last_init_error
 from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
@@ -279,15 +279,42 @@ def ensure_runtime_repository_schema(conn: sqlite3.Connection) -> None:
 
 
 def _validate_existing_runtime_identity_schema(conn: sqlite3.Connection) -> None:
-    """Reject noncanonical runtime tables before reconcile can mask them."""
+    """Reject current/unknown noncanonical schemas before reconcile masks them.
+
+    A database with an explicit older schema version is a supported migration
+    input. Declarative reconciliation may add its canonical identity columns
+    before the remaining versioned migrations run.
+    """
+    noncanonical_tables: list[tuple[str, set[str]]] = []
     for table_name in ("runs", "run_events", "session_runtime_state"):
         columns = _table_columns(conn, table_name)
         if not columns or "execution_session_id" in columns:
             continue
-        raise RuntimeError(
-            f"runtime repository schema is not canonical for {table_name}: "
-            f"columns={sorted(columns)}"
-        )
+        noncanonical_tables.append((table_name, columns))
+    if not noncanonical_tables:
+        return
+
+    schema_version = _existing_schema_version(conn)
+    if schema_version is not None and schema_version < CURRENT_SCHEMA_VERSION:
+        return
+
+    details = "; ".join(
+        f"{table_name}: columns={sorted(columns)}"
+        for table_name, columns in noncanonical_tables
+    )
+    raise RuntimeError(f"runtime repository schema is not canonical for {details}")
+
+
+def _existing_schema_version(conn: sqlite3.Connection) -> int | None:
+    if not _table_columns(conn, "schema_version"):
+        return None
+    row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
