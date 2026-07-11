@@ -69,8 +69,10 @@ class _FakeSessionStore:
         self.last_include_children: Optional[bool] = None
         self.list_calls = 0
         self.messages_calls = 0
+        self.sessions = self
+        self.messages = self
 
-    def list_sessions_rich(
+    def list_rich(
         self,
         source: Optional[str] = None,
         exclude_sources: Optional[List[str]] = None,
@@ -100,7 +102,7 @@ class _FakeSessionStore:
             for i in range(effective)
         ]
 
-    def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
+    def list(self, session_id: str) -> List[Dict[str, Any]]:
         self.messages_calls += 1
         return [
             {"role": "user", "content": f"ask {session_id}"},

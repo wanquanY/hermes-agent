@@ -601,7 +601,7 @@ def scan_sessions(
 
     db = open_cli_session_store()
     try:
-        sessions_meta = db.list_sessions_rich(limit=db_limit, include_children=True, project_compression_tips=False)
+        sessions_meta = db.sessions.list_rich(limit=db_limit, include_children=True, project_compression_tips=False)
         total_sessions = len(sessions_meta)
         sessions: List[Dict[str, Any]] = []
         checkpoint_sessions: Dict[str, Any] = {}
@@ -618,7 +618,7 @@ def scan_sessions(
                 stats = dict(cached_stats)
                 reused += 1
             else:
-                messages = db.get_messages(sid)
+                messages = db.messages.list(sid)
                 stats = analyze_messages(sid, meta.get("title") or meta.get("preview") or "Untitled", messages)
                 rescanned += 1
 
