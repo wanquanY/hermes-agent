@@ -37,6 +37,7 @@ from tui_gateway.services.run_control_events import (
     payload_status as _payload_status,
     remember_terminal_delivery as _remember_direct_terminal_delivery,
     conversation_session_id as _conversation_session_id,
+    stamp_session_identity as _stamp_session_identity,
     stream_text_delta as _stream_text_delta,
     terminal_delivery_identity as _terminal_delivery_identity,
 )
@@ -1658,6 +1659,7 @@ def record_event(
     if worker_process:
         persist = False
     else:
+        _stamp_session_identity(params)
         # PR-1 identity contract: enforced on the caller's dict (not just
         # our private copy) because publish_recorded_event delivers that
         # same dict to transports after this call returns. Worker-side
@@ -1666,6 +1668,7 @@ def record_event(
         # outbound frames without double-synthesis across processes.
         _ensure_outbound_run_identity(params)
     frame = _apply_run_context_to_frame(dict(params), run_context)
+    _stamp_session_identity(frame)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     stable = _conversation_session_id(frame)
     run_id = _event_run_id(frame)
@@ -1673,7 +1676,7 @@ def record_event(
     frame = _normalize_team_mission_deliverable_terminal_event(frame, run_id=run_id, db=db)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     event_type = str(frame.get("type") or "").strip()
-    execution_session_id = str(frame.get("session_id") or "").strip()
+    execution_session_id = str(frame.get("execution_session_id") or "").strip()
     owner_metadata = frame.get("owner_metadata")
     owner_metadata = owner_metadata if isinstance(owner_metadata, dict) else {}
     now = time.time()
@@ -2227,6 +2230,7 @@ def publish_recorded_event(
     alone is diagnostic context; it must not suppress an explicit subscription.
     """
     publish_params = _apply_run_context_to_frame(dict(params), run_context)
+    _stamp_session_identity(publish_params)
     _stamp_participant_id(
         publish_params,
         stable=_conversation_session_id(publish_params),

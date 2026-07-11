@@ -21,7 +21,7 @@ Covers three new behaviors introduced by PR-1 in
    seq replay can never serve.
 
 These are pure unit tests (no DB needed for #1 and #2); #3 drives
-``record_event`` with a non-mock ``SessionDB`` so the
+``record_event`` with a non-mock ``CliSessionStore`` so the
 ``not worker_process and not will_persist`` path is exercised for
 real, and a real DB to exercise the persist-failure branch.
 """
@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control as rc
 
 
@@ -317,6 +317,44 @@ class TestSyncCanonicalFrameSeq:
 # ── 3. transient marking ────────────────────────────────────────────────────
 
 
+class TestCanonicalSessionIdentity:
+    def test_record_event_stamps_conversation_and_execution_identity(self):
+        params = {
+            "type": "message.delta",
+            "conversation_session_id": "stored-1",
+            "session_id": "runtime-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "seq": 1,
+            "payload": {"delta": "x"},
+        }
+
+        rc.record_event(params, db=None, persist=False)
+
+        assert params["conversation_session_id"] == "stored-1"
+        assert params["session_id"] == "stored-1"
+        assert params["execution_session_id"] == "runtime-1"
+        assert params["payload"]["session_id"] == "stored-1"
+        assert params["payload"]["conversation_session_id"] == "stored-1"
+        assert params["payload"]["execution_session_id"] == "runtime-1"
+
+    def test_record_event_uses_session_id_when_conversation_id_is_absent(self):
+        params = {
+            "type": "message.start",
+            "session_id": "conversation-2",
+            "run_id": "run-2",
+            "turn_id": "turn-2",
+            "seq": 1,
+            "payload": {},
+        }
+
+        rc.record_event(params, db=None, persist=False)
+
+        assert params["session_id"] == "conversation-2"
+        assert params["conversation_session_id"] == "conversation-2"
+        assert params["execution_session_id"] == "conversation-2"
+
+
 class TestTransientMarking:
     def test_transient_set_when_no_persist_and_main_process(self, tmp_path):
         # Main process (not worker), persist=False, no db → will_persist is
@@ -336,8 +374,8 @@ class TestTransientMarking:
 
     def test_transient_not_set_when_persists(self, tmp_path):
         # With a real DB + persist=True, will_persist is True → no transient.
-        db = SessionDB(tmp_path / "state.db")
-        db.create_session("sess-T", source="test", transient=False)
+        db = open_cli_session_store(tmp_path / "state.db")
+        db.sessions.create("sess-T", source="test", transient=False)
         params = {
             "type": "message.delta",
             "conversation_session_id": "sess-T",
@@ -350,17 +388,17 @@ class TestTransientMarking:
         assert "transient" not in params
 
     def test_persist_failure_marks_transient(self, tmp_path):
-        # A real DB whose append_run_event raises → except branch stamps
+        # A real DB whose runs.append_event raises -> except branch stamps
         # transient on frame + params.
-        db = SessionDB(tmp_path / "state.db")
-        db.create_session("sess-T", source="test", transient=False)
+        db = open_cli_session_store(tmp_path / "state.db")
+        db.sessions.create("sess-T", source="test", transient=False)
 
-        original = db.append_run_event
+        original = db.runs.append_event
 
         def _boom(*a, **kw):
             raise RuntimeError("simulated persist failure")
 
-        db.append_run_event = _boom  # type: ignore[assignment]
+        db.runs.append_event = _boom  # type: ignore[assignment]
         try:
             params = {
                 "type": "message.delta",
@@ -373,7 +411,7 @@ class TestTransientMarking:
             rc.record_event(params, db=db, persist=True)
             assert params.get("transient") is True
         finally:
-            db.append_run_event = original  # type: ignore[assignment]
+            db.runs.append_event = original  # type: ignore[assignment]
 
     def test_synthetic_run_id_frame_does_not_open_active_run(self, tmp_path):
         # A synthetic-run identity frame must NOT trigger the

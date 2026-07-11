@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services import run_control
 
 
 CONV_SESSION = "team-session-1"
 
 
-def _new_db(tmp_path: Path) -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(CONV_SESSION, source="team_mission", transient=False)
-    db.upsert_conversation_participant(
+def _new_db(tmp_path: Path) -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
+    db.participants.upsert_conversation_participant(
         conversation_session_id=CONV_SESSION,
         participant_id="leader:conv-1",
         role="leader",
@@ -21,7 +21,7 @@ def _new_db(tmp_path: Path) -> SessionDB:
         runtime_scope_key="team:conv-1:leader-conversation",
         display_name="Lead",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=CONV_SESSION,
         participant_id="member:m-alice",
         role="member",
@@ -33,8 +33,8 @@ def _new_db(tmp_path: Path) -> SessionDB:
     return db
 
 
-def _record_message(db: SessionDB, *, run_id: str, payload: dict, frame_participant_id: str = "") -> dict:
-    db.upsert_run(run_id=run_id, session_id=CONV_SESSION, status="running")
+def _record_message(db: CliSessionStore, *, run_id: str, payload: dict, frame_participant_id: str = "") -> dict:
+    db.runs.upsert(run_id=run_id, session_id=CONV_SESSION, status="running")
     frame = {
         "type": "message.complete",
         "session_id": CONV_SESSION,
@@ -47,7 +47,7 @@ def _record_message(db: SessionDB, *, run_id: str, payload: dict, frame_particip
     if frame_participant_id:
         frame["participant_id"] = frame_participant_id
     run_control.record_event(frame, db=db)
-    events = db.list_run_events(CONV_SESSION, run_id=run_id)
+    events = db.runs.list_events(CONV_SESSION, run_id=run_id)
     assert events, "event was not persisted"
     return events[0]
 
@@ -110,7 +110,7 @@ def test_record_event_preserves_existing_frame_participant_id_and_skips_lookup(
     def _fail_lookup(**_kwargs):
         raise AssertionError("resolver must not run for pre-stamped frames")
 
-    monkeypatch.setattr(db, "resolve_participant_id", _fail_lookup)
+    monkeypatch.setattr(db.participants, "resolve_participant_id", _fail_lookup)
 
     event = _record_message(
         db,
