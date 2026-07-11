@@ -21,20 +21,20 @@ import json
 import sqlite3
 
 from hermes_agent.domain.event_ledger import EventLedger
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 from tui_gateway.services import run_control, runtime_scope
 
 
-class _StubDB:
+class _StubDB(CliSessionStore):
     def __init__(self, rows):
-        self._conn = sqlite3.connect(":memory:")
-        self._conn.row_factory = sqlite3.Row
-        ensure_session_repository_schema(self._conn)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        ensure_session_repository_schema(conn)
+        super().__init__(conn)
         for row in rows:
             self._insert_session(row)
-        self._ensure_messages()
 
     def _insert_session(self, row: dict) -> None:
         started_at = float(row.get("started_at") or 0)
@@ -66,34 +66,6 @@ class _StubDB:
 
     def team_mission_run_session_ids(self, _session_ids):
         return set()
-
-    def _ensure_messages(self) -> None:
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                participant_id TEXT NOT NULL DEFAULT '',
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                token_count INTEGER,
-                finish_reason TEXT,
-                reasoning TEXT,
-                reasoning_content TEXT,
-                reasoning_details TEXT,
-                codex_reasoning_items TEXT,
-                codex_message_items TEXT,
-                platform_message_id TEXT,
-                conversation_message_id TEXT NOT NULL DEFAULT '',
-                metadata_json TEXT,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-            """
-        )
 
     def insert_message(
         self,
@@ -197,7 +169,7 @@ def test_session_list_default_limit_stays_legacy_compatible(monkeypatch):
 def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkeypatch):
     """Team conversations belong in the unified Hermes session list."""
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
@@ -211,8 +183,8 @@ def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkey
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-1", source="team_mission", transient=False)
-        seed_db.append_message("team-session-1", role="user", content="hello team")
+        seed_db.sessions.create("team-session-1", source="team_mission", transient=False)
+        seed_db.messages.append("team-session-1", role="user", content="hello team")
     finally:
         seed_db.close()
 
@@ -244,7 +216,7 @@ def test_session_list_surfaces_team_conversation_route_metadata(tmp_path, monkey
 def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch):
     """Team node/member runtime sessions are mission internals, not sidebar conversations."""
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
@@ -255,8 +227,8 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-1", source="team_mission", transient=False)
-        seed_db.append_message("team-session-1", role="user", content="hello team")
+        seed_db.sessions.create("team-session-1", source="team_mission", transient=False)
+        seed_db.messages.append("team-session-1", role="user", content="hello team")
         seed_db.upsert_team_mission(
             mission_id="mission-1",
             conversation_id="conversation-1",
@@ -274,10 +246,10 @@ def test_session_list_hides_team_mission_node_run_sessions(tmp_path, monkeypatch
             status="running",
             runtime_scope_key="team:mission-1:node:node-worker",
         )
-        seed_db.create_session("team:mission-1:node:worker", source="team_mission", transient=False)
-        seed_db.append_message("team:mission-1:node:worker", role="assistant", content="worker output")
-        seed_db.create_session("member-session-leaked-as-tui", source="tui", transient=False)
-        seed_db.append_message("member-session-leaked-as-tui", role="assistant", content="member output")
+        seed_db.sessions.create("team:mission-1:node:worker", source="team_mission", transient=False)
+        seed_db.messages.append("team:mission-1:node:worker", role="assistant", content="worker output")
+        seed_db.sessions.create("member-session-leaked-as-tui", source="tui", transient=False)
+        seed_db.messages.append("member-session-leaked-as-tui", role="assistant", content="member output")
         seed_db.bind_team_mission_run(
             mission_id="mission-1",
             node_id="node-worker",
@@ -430,10 +402,10 @@ def test_session_list_preserves_ordering_after_filter(monkeypatch):
 def test_session_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
     """Control-plane session.list must read the requested profile/version DB."""
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
-        seed_db.create_session("stored-1", "tui")
-        seed_db.append_message("stored-1", "user", "hello from profile db")
+        seed_db.sessions.create("stored-1", "tui")
+        seed_db.messages.append("stored-1", "user", "hello from profile db")
     finally:
         seed_db.close()
 
@@ -459,7 +431,7 @@ def test_session_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
 def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, monkeypatch):
     """Team conversation history must use the same profile-home routing as session.list."""
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
@@ -470,8 +442,8 @@ def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, mon
             workspace_path="/tmp/workspace",
             updated_at=200,
         )
-        seed_db.create_session("team-session-1", source="team_mission", transient=False)
-        seed_db.append_message("team-session-1", role="user", content="hello from profile team conversation")
+        seed_db.sessions.create("team-session-1", source="team_mission", transient=False)
+        seed_db.messages.append("team-session-1", role="user", content="hello from profile team conversation")
     finally:
         seed_db.close()
 
@@ -535,7 +507,7 @@ def test_team_conversation_list_is_control_plane_read_for_profile_scope():
 
 def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, monkeypatch):
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-running",
@@ -546,7 +518,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-running", source="team_mission", transient=False)
+        seed_db.sessions.create("team-session-running", source="team_mission", transient=False)
         seed_db.upsert_team_mission(
             mission_id="mission-running",
             conversation_id="conversation-running",
@@ -607,7 +579,7 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
 
 def test_team_conversation_list_uses_active_member_run_bindings_when_mission_status_is_stale(tmp_path, monkeypatch):
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-member-running",
@@ -618,7 +590,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-member-running", source="team_mission", transient=False)
+        seed_db.sessions.create("team-session-member-running", source="team_mission", transient=False)
         seed_db.upsert_team_mission(
             mission_id="mission-member-running",
             conversation_id="conversation-member-running",
@@ -691,7 +663,7 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
 
 def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_path, monkeypatch):
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-completed",
@@ -702,7 +674,7 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-completed", source="team_mission", transient=False)
+        seed_db.sessions.create("team-session-completed", source="team_mission", transient=False)
         seed_db.upsert_team_mission(
             mission_id="mission-completed",
             conversation_id="conversation-completed",
@@ -721,7 +693,7 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
             status="completed",
             metadata={"task_id": "task-completed"},
         )
-        message_id = seed_db.append_message(
+        message_id = seed_db.messages.append(
             "team-session-completed",
             "assistant",
             "最终汇总",
@@ -772,7 +744,7 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
 
 def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkeypatch):
     profile_home = tmp_path / "profile-home"
-    seed_db = SessionDB(profile_home / "state.db")
+    seed_db = open_cli_session_store(profile_home / "state.db")
     try:
         seed_db.upsert_team_mission_conversation(
             conversation_id="conversation-approval",
@@ -783,7 +755,7 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
             created_at=100,
             updated_at=200,
         )
-        seed_db.create_session("team-session-approval", source="team_mission", transient=False)
+        seed_db.sessions.create("team-session-approval", source="team_mission", transient=False)
         seed_db.upsert_team_mission(
             mission_id="mission-approval",
             conversation_id="conversation-approval",
@@ -826,7 +798,23 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
 
 
 def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch):
+    class _MissionGraphs:
+        @staticmethod
+        def get_team_mission_graph(mission_id):
+            if mission_id != "mission-approval":
+                return {}
+            return {
+                "mission": {
+                    "mission_id": "mission-approval",
+                    "status": "waiting_approval",
+                }
+            }
+
     class _ActivityDB(_StubDB):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.team_mission_graphs = _MissionGraphs()
+
         def get_team_mission_conversation_by_session(self, session_id):
             if session_id != "team-session-approval":
                 return {}
@@ -841,16 +829,6 @@ def test_conversation_activity_list_projects_run_and_approval_state(monkeypatch)
 
         def team_mission_run_session_ids(self, _session_ids):
             return set()
-
-        def get_team_mission_graph(self, mission_id):
-            if mission_id != "mission-approval":
-                return {}
-            return {
-                "mission": {
-                    "mission_id": "mission-approval",
-                    "status": "waiting_approval",
-                }
-            }
 
     db = _ActivityDB([
         {
@@ -936,37 +914,6 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
     db.insert_message("s1", "user", "oldest", timestamp=1.0)
     older_id = db.insert_message("s1", "user", "older", timestamp=10.0)
     newer_id = db.insert_message("s1", "assistant", "newer", timestamp=30.0)
-    db._conn.execute(
-        """
-        CREATE TABLE run_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            run_id TEXT,
-            turn_id TEXT,
-            execution_session_id TEXT,
-            runtime_scope_key TEXT,
-            participant_id TEXT,
-            activity_id TEXT,
-            event_type TEXT,
-            seq INTEGER,
-            timestamp REAL,
-            payload_json TEXT,
-            event_json TEXT,
-            status TEXT,
-            frame_blob BLOB,
-            frame_format TEXT,
-            retention_class TEXT,
-            interaction_request_id TEXT,
-            interaction_kind TEXT,
-            interaction_status TEXT,
-            anchor_seq INTEGER,
-            projection_state TEXT,
-            runtime_source_seq INTEGER,
-            projected_tool_event_id TEXT,
-            projected_message_id TEXT
-        )
-        """
-    )
     payload = {
         "name": "create_agent_profile_draft",
         "result": {"dovie_event": "agent_profile_draft_saved", "draft": {"id": "draft-1"}},
@@ -987,7 +934,8 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
             {
                 "type": "tool.complete",
                 "conversation_session_id": "s1",
-                "session_id": "runtime-run-1",
+                "session_id": "s1",
+                "execution_session_id": "runtime-run-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default:version:v1",
@@ -1029,9 +977,9 @@ def test_session_messages_returns_paged_transcript(monkeypatch):
 
 def test_session_status_reads_stored_profile_session_without_runtime(monkeypatch, tmp_path):
     profile_home = tmp_path / "profile-home"
-    db = SessionDB(db_path=profile_home / "state.db")
+    db = open_cli_session_store(db_path=profile_home / "state.db")
     try:
-        db.create_session("stored-1", source="tui")
+        db.sessions.create("stored-1", source="tui")
         monkeypatch.setattr(server, "_db_by_home", {})
         monkeypatch.setattr(server, "_db_error_by_home", {})
         resp = server.handle_request({
