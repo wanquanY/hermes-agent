@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ from typing import Callable, Optional
 
 
 _SOURCE_ALIAS = "source"
+logger = logging.getLogger(__name__)
 
 # Merge coverage is discovered dynamically.  This priority list only gives
 # parent/control tables a stable order before dependent operational rows.
@@ -470,14 +472,14 @@ def _safe_rollback(conn: sqlite3.Connection) -> None:
         if conn.in_transaction:
             conn.rollback()
     except sqlite3.Error:
-        pass
+        logger.warning("profile DB merge rollback failed", exc_info=True)
 
 
 def _safe_detach(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(f"DETACH DATABASE {_quote_identifier(_SOURCE_ALIAS)}")
     except sqlite3.Error:
-        pass
+        logger.debug("profile DB merge detach skipped", exc_info=True)
 
 
 def _display_path(path: Path, root: Path) -> str:
