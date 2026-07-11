@@ -428,20 +428,20 @@ Legacy CLI 文本流需要在工具调用后插入段落空行，但 TUI Gateway
 重点保留：
 
 - `agent._stream_inject_tool_breaks` 默认 `True`，但 `tui_gateway/methods/prompt.py` 调用 agent 时临时设为 `False`。
-- `_MessageDeltaNormalizer` 暂存 trailing newlines，只有后续文本到来才一起输出；遇到 tool boundary / `feed(None)` 时丢弃 pending trailing newlines。
+- `_MessageDeltaNormalizer` 对 provider append delta 逐字节保真，不缓存、不丢弃 trailing newlines；tool boundary 只由 `tool.start` / `tool.complete` 事件表达。
 - renderer 使用 normalized delta，而不是原始 delta。
 - `dovie_extension/display_transcript.py` 对 assistant text/reasoning 去掉首尾结构性空行，但保留正文内部缩进和换行。
 
 检查方式：
 
 ```sh
-rg "_stream_inject_tool_breaks|_MessageDeltaNormalizer|discard_pending_trailing_newlines|sanitize_assistant_display_text" agent run_agent.py tui_gateway dovie_extension tests
+rg "_stream_inject_tool_breaks|_MessageDeltaNormalizer|sanitize_assistant_display_text" agent run_agent.py tui_gateway dovie_extension tests
 ```
 
 常见坏症状：
 
 - Dovie UI 中工具调用后 assistant 消息以多余空白开头。
-- streamed delta 中出现仅用于 legacy display 的 `\n\n`。
+- provider delta 被基于内容猜测为 snapshot，导致重复文本被错误截断或换行被吞掉。
 - 工具边界后的第一段正文 offset 错误，客户端 reducer 拼接错乱。
 - transcript sanitization 把正文内部格式也剥掉。
 

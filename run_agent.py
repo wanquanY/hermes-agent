@@ -3876,35 +3876,6 @@ class AIAgent:
         return callbacks
 
     @staticmethod
-    def _stream_suffix_prefix_overlap(left: str, right: str) -> int:
-        limit = min(len(left), len(right))
-        for size in range(limit, 0, -1):
-            if left.endswith(right[:size]):
-                return size
-        return 0
-
-    def _normalize_reasoning_delta(self, text: str) -> str:
-        incoming = str(text or "")
-        if not incoming:
-            return ""
-        current = str(getattr(self, "_current_streamed_reasoning_text", "") or "")
-        if not current:
-            self._current_streamed_reasoning_text = incoming
-            return incoming
-        if incoming == current or current.startswith(incoming):
-            return ""
-        if incoming.startswith(current):
-            delta = incoming[len(current):]
-            self._current_streamed_reasoning_text = incoming
-            return delta
-        overlap = self._stream_suffix_prefix_overlap(current, incoming)
-        delta = incoming[overlap:] if overlap > 0 else incoming
-        if not delta:
-            return ""
-        self._current_streamed_reasoning_text = current + delta
-        return delta
-
-    @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
         if not isinstance(text, str):
             return ""
@@ -3997,10 +3968,13 @@ class AIAgent:
             self._record_streamed_assistant_text(text)
 
     def _fire_reasoning_delta(self, text: str) -> None:
-        """Fire reasoning callback if registered."""
-        text = self._normalize_reasoning_delta(text)
+        """Fire one provider reasoning delta without content-based guessing."""
+        text = str(text or "")
         if not text:
             return
+        self._current_streamed_reasoning_text = (
+            str(getattr(self, "_current_streamed_reasoning_text", "") or "") + text
+        )
         cb = self.reasoning_callback
         if cb is not None:
             try:

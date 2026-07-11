@@ -123,7 +123,7 @@ def test_write_json_broken_pipe(server):
     assert server.write_json({"x": 1}) is False
 
 
-def test_message_delta_normalizer_holds_trailing_newlines_until_more_text():
+def test_message_delta_normalizer_preserves_trailing_newlines_immediately():
     from tui_gateway.methods.prompt import _MessageDeltaNormalizer
 
     normalizer = _MessageDeltaNormalizer()
@@ -136,27 +136,27 @@ def test_message_delta_normalizer_holds_trailing_newlines_until_more_text():
     }
     assert normalizer.feed("。\n\n") == {
         "mode": "append",
-        "text": "。",
-        "delta": "。",
+        "text": "。\n\n",
+        "delta": "。\n\n",
         "offset": 6,
     }
     assert normalizer.feed("下一段") == {
         "mode": "append",
-        "text": "\n\n下一段",
-        "delta": "\n\n下一段",
-        "offset": 7,
+        "text": "下一段",
+        "delta": "下一段",
+        "offset": 9,
     }
 
 
-def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
+def test_message_delta_normalizer_keeps_newlines_before_tool_boundary():
     from tui_gateway.methods.prompt import _MessageDeltaNormalizer
 
     normalizer = _MessageDeltaNormalizer()
 
     assert normalizer.feed("让我继续读取。\n\n") == {
         "mode": "append",
-        "text": "让我继续读取。",
-        "delta": "让我继续读取。",
+        "text": "让我继续读取。\n\n",
+        "delta": "让我继续读取。\n\n",
         "offset": 0,
     }
     assert normalizer.feed(None) is None
@@ -164,7 +164,7 @@ def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
         "mode": "append",
         "text": "工具后正文",
         "delta": "工具后正文",
-        "offset": 7,
+        "offset": 9,
     }
 
 

@@ -324,7 +324,6 @@ class _MessageDeltaNormalizer:
 
     def __init__(self) -> None:
         self.text = ""
-        self._pending_trailing_newlines = ""
 
     @staticmethod
     def _structured_value(value) -> dict:
@@ -338,7 +337,6 @@ class _MessageDeltaNormalizer:
 
     def feed(self, value) -> dict | None:
         if value is None:
-            self.discard_pending_trailing_newlines()
             return None
         structured = self._structured_value(value)
         mode = str(structured.get("mode") or "").strip().lower()
@@ -351,14 +349,6 @@ class _MessageDeltaNormalizer:
             return None
         if mode in {"snapshot", "replace", "cumulative"}:
             return self.feed_snapshot(incoming)
-        if self._pending_trailing_newlines:
-            incoming = self._pending_trailing_newlines + incoming
-            self._pending_trailing_newlines = ""
-        visible = incoming.rstrip("\n")
-        self._pending_trailing_newlines = incoming[len(visible):]
-        incoming = visible
-        if not incoming:
-            return None
         current = self.text
         offset = self._protocol_offset(self.text)
         self.text = current + incoming
@@ -382,7 +372,6 @@ class _MessageDeltaNormalizer:
             return None
         offset = self._protocol_offset(self.text)
         self.text = snapshot
-        self._pending_trailing_newlines = ""
         return {
             "mode": "append",
             "text": delta,
@@ -393,12 +382,8 @@ class _MessageDeltaNormalizer:
     def reconcile_final_text(self, value: str) -> dict | None:
         return self.feed_snapshot(str(value or ""))
 
-    def discard_pending_trailing_newlines(self) -> None:
-        self._pending_trailing_newlines = ""
-
     def reset(self) -> None:
         self.text = ""
-        self._pending_trailing_newlines = ""
 
 
 @method("prompt.submit")
@@ -851,7 +836,6 @@ def _run_prompt_submit(
     delta_normalizer = _MessageDeltaNormalizer()
     message_segment_index = 0
     reasoning_text_by_message_seq: dict[str, str] = {}
-    reasoning_last_chunk_by_message_seq: dict[str, str] = {}
 
     def current_client_message_id() -> str:
         base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
@@ -870,19 +854,6 @@ def _run_prompt_submit(
             "messageSeqInRun": message_seq,
         }
 
-    def _reasoning_increment(current: str, incoming: str) -> str:
-        if not incoming or incoming == current:
-            return ""
-        if current and current.endswith(incoming):
-            return ""
-        if current and incoming.startswith(current):
-            return incoming[len(current) :]
-        max_overlap = min(len(current), len(incoming))
-        for overlap in range(max_overlap, 0, -1):
-            if current.endswith(incoming[:overlap]):
-                return incoming[overlap:]
-        return incoming
-
     def _emit_reasoning_delta(reasoning_text: str) -> None:
         if is_turn_interrupted():
             return
@@ -892,20 +863,14 @@ def _run_prompt_submit(
         identity = current_message_identity_payload()
         message_seq = str(identity.get("message_seq_in_run") or "")
         current_reasoning = reasoning_text_by_message_seq.get(message_seq, "")
-        previous_chunk = reasoning_last_chunk_by_message_seq.get(message_seq, "")
-        if incoming == previous_chunk:
-            return
-        delta = _reasoning_increment(current_reasoning, incoming)
-        reasoning_last_chunk_by_message_seq[message_seq] = incoming
-        if not delta:
-            return
-        next_reasoning = current_reasoning + delta
+        next_reasoning = current_reasoning + incoming
         reasoning_text_by_message_seq[message_seq] = next_reasoning
         payload: dict[str, Any] = {
             "source": "provider_reasoning",
-            "text": delta,
-            "delta": delta,
-            "offset": len(current_reasoning),
+            "mode": "append",
+            "text": incoming,
+            "delta": incoming,
+            "offset": _MessageDeltaNormalizer._protocol_offset(current_reasoning),
             "snapshot": next_reasoning,
             **identity,
         }
