@@ -65,8 +65,8 @@ def _append_message_once(
     if not session_id or not content:
         return False
     try:
-        if not db.get_session(session_id):
-            db.create_session(session_id, source="team_mission", transient=False)
+        if not db.sessions.get(session_id):
+            db.sessions.create(session_id, source="team_mission", transient=False)
     except Exception:
         pass
     try:
@@ -75,7 +75,7 @@ def _append_message_once(
         node_id = text(mission.get("node_id"))
         kind = text(mission.get("kind"))
         source_run_id = text(mission.get("source_run_id") or mission.get("run_id"))
-        for message in db.get_messages(session_id):
+        for message in db.messages.list(session_id):
             if (
                 isinstance(message, dict)
                 and text(message.get("role")) == role
@@ -91,7 +91,7 @@ def _append_message_once(
     except Exception:
         pass
     try:
-        db.append_message(
+        db.messages.append(
             session_id,
             role,
             content,
@@ -195,7 +195,7 @@ def _final_deliverable_text_from_history(
         if not text(session_id) or not text(run_id):
             continue
         try:
-            events = db.list_run_events(text(session_id), run_id=text(run_id), limit=5000)
+            events = db.runs.list_events(text(session_id), run_id=text(run_id), limit=5000)
         except Exception:
             events = []
         content = _stream_text_from_events(events)
@@ -302,7 +302,7 @@ def recover_legacy_final_deliverables(db: Any, conversation: dict[str, Any] | No
     if not target_session_id:
         return 0
     try:
-        events = db.list_run_events(target_session_id, limit=5000)
+        events = db.runs.list_events(target_session_id, limit=5000)
     except Exception:
         return 0
     recovered = 0

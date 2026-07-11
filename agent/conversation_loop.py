@@ -209,7 +209,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                     else None
                 )
             else:
-                session_row = agent._session_db.get_session(agent.session_id)
+                session_row = agent._session_db.sessions.get(agent.session_id)
                 raw_prompt = session_row.get("system_prompt") if session_row is not None else None
             _log_dovie_turn_stage(
                 agent,
@@ -337,7 +337,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                     raise AttributeError("session store has no update_scoped_system_prompt")
                 update_scoped(agent.session_id, scoped_prompt_key, agent._cached_system_prompt)
             else:
-                agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+                agent._session_db.sessions.update_system_prompt(agent.session_id, agent._cached_system_prompt)
             _log_dovie_turn_stage(
                 agent,
                 "system-prompt-db-write-end",
@@ -520,8 +520,8 @@ def _drain_activity_events_for_api(agent) -> list[dict[str, str]]:
             if activity_id in marker:
                 continue
             try:
-                if db is not None and callable(getattr(db, "mark_activity_read", None)):
-                    db.mark_activity_read(activity_id)
+                if db is not None:
+                    db.activities.mark_read(activity_id)
                 marker.add(activity_id)
             except Exception as exc:
                 logger.warning("activity mark_read failed activity_id=%s: %s", activity_id, exc)

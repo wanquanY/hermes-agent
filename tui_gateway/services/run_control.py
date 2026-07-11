@@ -1568,12 +1568,11 @@ def _stamp_participant_id(
         or str(team_identity.get("agent_profile_id") or team_identity.get("agentProfileId") or "").strip()
     )
     if stable and not participant_id and (scope_hint or member_hint or profile_hint):
-        resolver = _db_method(db, "resolve_participant_id")
         resolver_failed = False
-        if resolver:
+        if db is not None:
             try:
                 participant_id = str(
-                    resolver(
+                    db.participants.resolve_participant_id(
                         conversation_session_id=stable,
                         runtime_scope_key=scope_hint,
                         member_id=member_hint,
@@ -1601,7 +1600,7 @@ def _stamp_participant_id(
             participant_id = member_hint if member_hint.startswith("member:") else member_participant_id(member_hint)
         if not participant_id and profile_hint:
             participant_id = agent_participant_id(profile_hint)
-        if not participant_id and resolver and not resolver_failed:
+        if not participant_id and db is not None and not resolver_failed:
             _diagnostic_warning(
                 "participant-resolve-miss",
                 db=_db_label(db),

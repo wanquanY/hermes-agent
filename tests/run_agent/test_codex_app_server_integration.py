@@ -25,6 +25,7 @@ from agent.transports.codex_app_server_session import CodexAppServerSession, Tur
 class _UsageDB:
     def __init__(self):
         self.calls = []
+        self.sessions = self
 
     def update_token_counts(self, session_id, **kwargs):
         self.calls.append({"session_id": session_id, **kwargs})
@@ -116,37 +117,37 @@ def _make_codex_agent():
 
 
 def _make_team_codex_agent(tmp_path, *, session_id="team-session-team-conversation-cx-h3"):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id=session_id, source="team_mission", model="test")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id=session_id, source="team_mission", model="test")
+    db.session_index.upsert(
         session_id=session_id,
         source="team_mission",
         session_kind="team_mission",
         conversation_kind="team",
         status="idle",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=session_id,
         participant_id="user",
         role="user",
         display_name="",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=session_id,
         participant_id="leader:team-1",
         role="leader",
         display_name="小多",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=session_id,
         participant_id="member:codex-member",
         role="member",
         member_id="codex-member",
         display_name="Codex 成员",
     )
-    db.upsert_conversation_participant(
+    db.participants.upsert_conversation_participant(
         conversation_session_id=session_id,
         participant_id="member:designer",
         role="member",
@@ -208,7 +209,7 @@ def _append_team_context_message(
         }
     if metadata:
         base_metadata.update(metadata)
-    return db.append_message(
+    return db.messages.append(
         session_id=session_id,
         role=role,
         content=content,

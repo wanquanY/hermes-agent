@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.run_worker import DBRpcRequestFrame
 from tui_gateway import server
 from hermes_agent.orchestration.worker_db_proxy import (
@@ -49,28 +49,37 @@ class _FakeProcess:
         self.pid = 0
 
 
+class _FakeMessages:
+    def __init__(self, owner: "_FakeDB") -> None:
+        self._owner = owner
+
+    def all_as_conversation(self, _session_id: str):
+        return list(self._owner.message_rows)
+
+    def page_as_conversation(self, session_id: str, **_kwargs):
+        return [{"role": "assistant", "content": f"canonical:{session_id}"}]
+
+    def append(self, session_id: str, role: str, content: str | None = None, **_kwargs):
+        self._owner.appended.append((session_id, role, content))
+        self._owner.message_rows.append({"role": role, "content": content})
+        return len(self._owner.message_rows)
+
+
+class _FakeSessionIndex:
+    def get(self, session_id: str):
+        return {"session_id": session_id, "conversation_kind": "team"}
+
+
 class _FakeDB:
     def __init__(self) -> None:
-        self.messages = [{"role": "user", "content": "hello"}]
+        self.message_rows = [{"role": "user", "content": "hello"}]
+        self.messages = _FakeMessages(self)
+        self.session_index = _FakeSessionIndex()
         self.appended: list[tuple[str, str, str | None]] = []
         self.entered: list[str] = []
         self.active = 0
         self.max_active = 0
         self.active_lock = threading.Lock()
-
-    def get_messages_as_conversation(self, session_id: str):
-        return list(self.messages)
-
-    def get_conversation_message_read_model(self, session_id: str):
-        return [{"role": "assistant", "content": f"canonical:{session_id}"}]
-
-    def get_session_index(self, session_id: str):
-        return {"session_id": session_id, "conversation_kind": "team"}
-
-    def append_message(self, session_id: str, role: str, content: str | None = None, **kwargs):
-        self.appended.append((session_id, role, content))
-        self.messages.append({"role": role, "content": content})
-        return len(self.messages)
 
     def explode(self):
         raise RuntimeError("boom")
@@ -104,7 +113,7 @@ def test_get_messages_proxy_returns_correct_data() -> None:
     result_box: dict[str, Any] = {}
     thread = threading.Thread(
         target=lambda: result_box.update(
-            result=proxy.get_messages_as_conversation("session-1")
+            result=proxy.messages.all_as_conversation("session-1")
         )
     )
     thread.start()
@@ -115,7 +124,7 @@ def test_get_messages_proxy_returns_correct_data() -> None:
     )
     thread.join(timeout=1)
     assert result_box["result"] == [{"role": "user", "content": "hello"}]
-    assert request["method"] == "db.get_messages_as_conversation"
+    assert request["method"] == "db.messages.all_as_conversation"
     assert request["params"] == [["session-1"], {}]
 
 
@@ -135,7 +144,7 @@ async def test_append_message_proxy_writes_through_main(monkeypatch: pytest.Monk
     reply = await supervisor._execute_db_rpc(
         DBRpcRequestFrame(
             id="1",
-            method="db.append_message",
+            method="db.messages.append",
             params=[["session-1", "user", "hi"], {}],
             db_scope={"conversation_session_id": "session-1"},
         )
@@ -164,7 +173,7 @@ async def test_projector_read_model_methods_are_exposed_to_worker(
     read_model_reply = await supervisor._execute_db_rpc(
         DBRpcRequestFrame(
             id="1",
-            method="db.get_conversation_message_read_model",
+            method="db.messages.page_as_conversation",
             params=[["team-session-1"], {}],
             db_scope={"conversation_session_id": "team-session-1"},
         )
@@ -172,7 +181,7 @@ async def test_projector_read_model_methods_are_exposed_to_worker(
     session_index_reply = await supervisor._execute_db_rpc(
         DBRpcRequestFrame(
             id="2",
-            method="db.get_session_index",
+            method="db.session_index.get",
             params=[["team-session-1"], {}],
             db_scope={"conversation_session_id": "team-session-1"},
         )
@@ -189,7 +198,7 @@ async def test_create_activity_proxy_writes_through_main(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(
         "tui_gateway.server._db_for_stable_session",
         lambda _stable: db,
@@ -203,7 +212,7 @@ async def test_create_activity_proxy_writes_through_main(
     reply = await supervisor._execute_db_rpc(
         DBRpcRequestFrame(
             id="1",
-            method="db.create_activity",
+            method="db.activities.create",
             params=[
                 [],
                 {
@@ -221,7 +230,7 @@ async def test_create_activity_proxy_writes_through_main(
     assert reply.result["activity_id"] == "act-1"
     assert reply.result["conversation_id"] == "conv-1"
     assert reply.result["status"] == "pending"
-    assert db.get_activity("act-1")["prompt_summary"] == "Review the report"
+    assert db.activities.get("act-1")["prompt_summary"] == "Review the report"
 
 
 def test_proxy_handles_sqlite_row_conversion(tmp_path: Path) -> None:
@@ -436,10 +445,10 @@ async def _noop(*_args, **_kwargs) -> None:
 
 
 def test_benchmark_proxy_append_message_100_calls(tmp_path: Path) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("bench", source="test")
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("bench", source="test")
     started = time.perf_counter()
     for index in range(100):
-        db.append_message("bench", "user", f"msg {index}")
+        db.messages.append("bench", "user", f"msg {index}")
     elapsed = time.perf_counter() - started
     assert elapsed < 0.2

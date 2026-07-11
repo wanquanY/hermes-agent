@@ -30,18 +30,18 @@ IGNORED_DB_METHOD_NAMES = {
 # Existing worker IPC surface kept intentionally even though no current worker
 # code path calls these methods through a statically visible DB handle.
 EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
-    "create_activity",
+    "activities.create",
     "complete_team_mission_plan",
-    "get_activity_for_mission",
+    "activities.get_for_mission",
     "get_message_by_conversation_message_id",
-    "get_session_index",
-    "get_unread_completion_count",
-    "list_active_mission_activities",
-    "list_activities",
+    "session_index.get",
+    "activities.unread_count",
+    "activities.list_active_missions",
+    "activities.list",
     "list_team_mission_events",
     "list_team_mission_run_events",
     "list_unread_completions",
-    "update_session_cwd",
+    "sessions.update_cwd",
     "update_session_meta",
     "update_session_model",
     "upsert_projected_conversation_message",
@@ -87,6 +87,13 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         func = node.func
         if not isinstance(func, ast.Attribute):
             return
+        if isinstance(func.value, ast.Attribute) and _is_db_handle_expr(func.value.value):
+            component = func.value.attr
+            if _is_public_db_method_name(component) and not func.attr.startswith("_"):
+                self.call_sites.append(
+                    DBCallSite(f"{component}.{func.attr}", self.path, node.lineno)
+                )
+            return
         if not _is_db_handle_expr(func.value):
             return
         if _is_public_db_method_name(func.attr):
@@ -106,7 +113,7 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
 
     def _record_run_control_db_method_helper_call(self, node: ast.Call) -> None:
         func = node.func
-        if not isinstance(func, ast.Name) or func.id != "_db_method":
+        if not isinstance(func, ast.Name) or func.id not in {"_db_method", "_run_method"}:
             return
         if len(node.args) < 2 or not _is_db_handle_expr(node.args[0]):
             return
@@ -114,7 +121,8 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         if not isinstance(name_arg, ast.Constant) or not isinstance(name_arg.value, str):
             return
         if _is_public_db_method_name(name_arg.value):
-            self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))
+            method = f"runs.{name_arg.value}" if func.id == "_run_method" else name_arg.value
+            self.call_sites.append(DBCallSite(method, self.path, node.lineno))
 
 
 def _python_files_to_scan() -> list[Path]:

@@ -382,56 +382,37 @@ def _read_canonical_context_rows(
     if db is None:
         return []
 
-    pager = getattr(db, "get_messages_page_as_conversation", None)
-    if callable(pager):
-        if watermark > 0:
-            rows: List[Dict[str, Any]] = []
-            cursor = watermark
-            for _ in range(20):
-                page = pager(
-                    conversation_session_id,
-                    direction="after",
-                    cursor_id=cursor,
-                    limit=200,
-                    include_inactive=False,
-                )
-                selected = list((page or {}).get("messages") or [])
-                rows.extend([row for row in selected if isinstance(row, dict)])
-                page_info = (page or {}).get("pageInfo") or {}
-                next_cursor = page_info.get("next_cursor_id") or page_info.get("nextCursorId")
-                try:
-                    next_cursor_int = int(next_cursor or 0)
-                except (TypeError, ValueError):
-                    next_cursor_int = 0
-                if not next_cursor_int or next_cursor_int <= cursor:
-                    break
-                cursor = next_cursor_int
-            return rows
-        page = pager(
+    pager = db.messages.page_as_conversation
+    if watermark > 0:
+        rows: List[Dict[str, Any]] = []
+        cursor = watermark
+        for _ in range(20):
+            page = pager(
+                conversation_session_id,
+                direction="after",
+                cursor_id=cursor,
+                limit=200,
+                include_inactive=False,
+            )
+            selected = list((page or {}).get("messages") or [])
+            rows.extend([row for row in selected if isinstance(row, dict)])
+            page_info = (page or {}).get("pageInfo") or {}
+            next_cursor = page_info.get("next_cursor_id") or page_info.get("nextCursorId")
+            try:
+                next_cursor_int = int(next_cursor or 0)
+            except (TypeError, ValueError):
+                next_cursor_int = 0
+            if not next_cursor_int or next_cursor_int <= cursor:
+                break
+            cursor = next_cursor_int
+        return rows
+    page = pager(
             conversation_session_id,
             direction="tail",
             limit=_TEAM_CONTEXT_BACKLOG_LIMIT + _TEAM_CONTEXT_BACKLOG_FETCH_BUFFER + 1,
             include_inactive=False,
         )
-        return [row for row in list((page or {}).get("messages") or []) if isinstance(row, dict)]
-
-    reader = getattr(db, "get_conversation_message_read_model", None)
-    if not callable(reader):
-        reader = getattr(db, "get_messages_as_conversation", None)
-    if not callable(reader):
-        return []
-    try:
-        all_rows = reader(
-            conversation_session_id,
-            include_storage_metadata=True,
-            include_inactive=False,
-        )
-    except TypeError:
-        all_rows = reader(conversation_session_id)
-    rows = [row for row in list(all_rows or []) if isinstance(row, dict)]
-    if watermark > 0:
-        return [row for row in rows if _message_seq(row) > watermark]
-    return rows[-(_TEAM_CONTEXT_BACKLOG_LIMIT + _TEAM_CONTEXT_BACKLOG_FETCH_BUFFER + 1):]
+    return [row for row in list((page or {}).get("messages") or []) if isinstance(row, dict)]
 
 
 def _participant_map(agent: Any, conversation_session_id: str) -> Dict[str, Dict[str, Any]]:
@@ -441,10 +422,7 @@ def _participant_map(agent: Any, conversation_session_id: str) -> Dict[str, Dict
         db = getter() if callable(getter) else None
     if db is None:
         return {}
-    lister = getattr(db, "list_conversation_participants", None)
-    if not callable(lister):
-        return {}
-    rows = lister(conversation_session_id) or []
+    rows = db.participants.list_conversation_participants(conversation_session_id) or []
     participants: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict):
@@ -811,7 +789,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
             try:
                 if not agent._session_db_created:
                     agent._ensure_db_session()
-                agent._session_db.update_token_counts(
+                agent._session_db.sessions.update_token_counts(
                     agent.session_id,
                     model=usage_model or None,
                     api_call_count=1,
@@ -888,7 +866,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
         try:
             if not agent._session_db_created:
                 agent._ensure_db_session()
-            agent._session_db.update_token_counts(
+            agent._session_db.sessions.update_token_counts(
                 agent.session_id,
                 input_tokens=canonical_usage.input_tokens,
                 output_tokens=canonical_usage.output_tokens,
