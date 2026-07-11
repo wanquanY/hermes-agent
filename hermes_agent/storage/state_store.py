@@ -20,7 +20,6 @@ from hermes_agent.application.state_facade.storage_engine_facade import (
     format_session_db_unavailable,
     get_last_init_error,
 )
-from hermes_agent.application.state_facade.team_registry_facade import TeamRegistryStateMixin
 from hermes_agent.domain.session_handoff_state import SessionHandoffStateMixin
 from hermes_agent.storage.state_maintenance import StateMaintenanceMixin
 from hermes_team_mission.state.session_mixin import TeamMissionStateMixin
@@ -31,7 +30,6 @@ __path__ = [str(Path(__file__).with_name("hermes_state"))]
 class HermesStateStore(
     StorageEngineMixin,
     AgentProfileStateMixin,
-    TeamRegistryStateMixin,
     TeamMissionStateMixin,
     MemberChatStateMixin,
     ParticipantsMixin,
