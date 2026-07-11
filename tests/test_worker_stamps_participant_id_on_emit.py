@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame, OutgoingFrame
 from tui_gateway.services import run_control
@@ -36,7 +36,7 @@ def _run_context(
     return RunContext(
         conversation_session_id="conv-1",
         participant_id=participant_id,
-        activity_id="member-chat",
+        activity_id="chat:member-chat",
         activity_kind="member_chat",
         execution_scope_key=execution_scope_key,
         control_home="/tmp/hermes-control",
@@ -128,8 +128,20 @@ async def test_worker_publish_wrapper_no_op_when_payload_already_has_participant
         bridge.uninstall()
 
     event = [frame for frame in sink.frames if isinstance(frame, EventFrame)][0].params
-    assert event == params
-    assert original_calls == [params]
+    assert event["type"] == params["type"]
+    assert event["payload"]["delta"] == "hi"
+    assert event["payload"]["participant_id"] == "leader:conv-1"
+    assert event["conversation_session_id"] == "conv-1"
+    assert event["session_id"] == "conv-1"
+    assert event["payload"]["conversation_session_id"] == "conv-1"
+    assert event["payload"]["session_id"] == "conv-1"
+    assert "stored_session_id" not in event
+    assert "stable_session_id" not in event
+    assert "stored_session_id" not in event["payload"]
+    assert "stable_session_id" not in event["payload"]
+    assert original_calls[0]["payload"]["participant_id"] == "leader:conv-1"
+    assert original_calls[0]["activity_id"] == "chat:member-chat"
+    assert original_calls[0]["payload"]["activity_id"] == "chat:member-chat"
 
 
 @pytest.mark.asyncio
@@ -149,7 +161,16 @@ async def test_worker_publish_wrapper_no_op_when_no_active_run_context(
         bridge.uninstall()
 
     event = [frame for frame in sink.frames if isinstance(frame, EventFrame)][0].params
-    assert event == params
+    assert event["type"] == params["type"]
+    assert event["payload"]["delta"] == "hi"
+    assert event["conversation_session_id"] == "conv-1"
+    assert event["session_id"] == "conv-1"
+    assert event["payload"]["conversation_session_id"] == "conv-1"
+    assert event["payload"]["session_id"] == "conv-1"
+    assert "stored_session_id" not in event
+    assert "stable_session_id" not in event
+    assert "stored_session_id" not in event["payload"]
+    assert "stable_session_id" not in event["payload"]
     assert original_calls == [params]
 
 
@@ -192,8 +213,8 @@ def test_main_record_event_uses_payload_participant_id_when_present(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("conv-1", source="team_mission", transient=False)
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conv-1", source="team_mission", transient=False)
 
     def fail_scope_fallback(_scope: str) -> str:
         raise AssertionError("scope fallback should not run when payload has participant_id")
@@ -217,7 +238,7 @@ def test_main_record_event_uses_payload_participant_id_when_present(
             },
             db=db,
         )
-        stored = db.list_run_events("conv-1", run_id="run-1")[0]
+        stored = db.runs.list_events("conv-1", run_id="run-1")[0]
     finally:
         db.close()
 
