@@ -116,24 +116,40 @@ def fake_run_control(monkeypatch):
 
 @pytest.fixture
 def fake_clarify(monkeypatch):
+    import tools as tools_pkg
+
+    missing = object()
     original = sys.modules.get("tools.clarify_gateway")
+    original_attr = getattr(tools_pkg, "clarify_gateway", missing)
     mod, calls = _install_fake_clarify_gateway()
     yield mod, calls
     if original is not None:
         sys.modules["tools.clarify_gateway"] = original
     else:
         sys.modules.pop("tools.clarify_gateway", None)
+    if original_attr is missing:
+        delattr(tools_pkg, "clarify_gateway")
+    else:
+        tools_pkg.clarify_gateway = original_attr
 
 
 @pytest.fixture
 def fake_approval(monkeypatch):
+    import tools as tools_pkg
+
+    missing = object()
     original = sys.modules.get("tools.approval")
+    original_attr = getattr(tools_pkg, "approval", missing)
     mod, calls = _install_fake_approval()
     yield mod, calls
     if original is not None:
         sys.modules["tools.approval"] = original
     else:
         sys.modules.pop("tools.approval", None)
+    if original_attr is missing:
+        delattr(tools_pkg, "approval")
+    else:
+        tools_pkg.approval = original_attr
 
 
 # Tests -------------------------------------------------------------
