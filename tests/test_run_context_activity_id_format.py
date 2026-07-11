@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
@@ -77,9 +77,9 @@ def _submit_message(
     mission_id: str = "",
     target_member_id: str = "",
     request_activity_id: str = "",
-) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
+) -> tuple[CliSessionStore, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     captured: dict[str, Any] = {}
     workspace = _workspace_payload(tmp_path)
 
@@ -253,7 +253,7 @@ def test_runtime_methods_submit_writes_team_dispatch_kind_for_request_activity(
         run_context = json.loads(captured["run_context_json"])
         assert run_context["activity_kind"] == "team_dispatch"
         assert run_context["activity_id"] == "act-team_dispatch-create"
-        messages = db.get_conversation_message_read_model(
+        messages = db.messages.all_as_conversation(
             CONVERSATION_SESSION_ID,
             include_storage_metadata=True,
         )
@@ -287,9 +287,9 @@ def test_member_chat_runtime_emits_act_member_chat_prefix(
 def test_record_event_for_leader_session_persists_mission_prefix_activity_id(
     tmp_path: Path,
 ) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
+        db.sessions.create(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
         run_context = RunContext(**_run_context_payload(
             activity_id="mission:mission-1",
             activity_kind="mission",
@@ -313,9 +313,9 @@ def test_record_event_for_leader_session_persists_mission_prefix_activity_id(
 def test_record_event_for_chat_session_persists_chat_prefix_activity_id(
     tmp_path: Path,
 ) -> None:
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
+        db.sessions.create(CONVERSATION_SESSION_ID, source="team_mission", transient=False)
         run_context = RunContext(**_run_context_payload(
             activity_id=f"chat:{CONVERSATION_SESSION_ID}",
             activity_kind="chat",
