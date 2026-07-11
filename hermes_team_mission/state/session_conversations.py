@@ -1222,146 +1222,6 @@ class TeamMissionConversationMixin:
             )
         return ids
 
-    def _team_mission_conversation_deliverable_projection(
-        self,
-        conversation: Dict[str, Any],
-        missions: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        mission_ids = [
-            _text(mission.get("mission_id"))
-            for mission in missions
-            if _text(mission.get("mission_id"))
-        ]
-        mission_id_set = set(mission_ids)
-        conversation_session_id = _text(
-            conversation.get("conversation_session_id")
-            or conversation.get("conversationSessionId")
-        )
-
-        last_message: Dict[str, Any] = {}
-        final_deliverables: List[Dict[str, Any]] = []
-        if conversation_session_id:
-            with self._lock:
-                last_message_row = self._conn.execute(
-                    """
-                    SELECT *
-                    FROM messages
-                    WHERE session_id = ?
-                      AND active = 1
-                      AND role IN ('user', 'assistant')
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (conversation_session_id,),
-                ).fetchone()
-                final_rows = self._conn.execute(
-                    """
-                    SELECT *
-                    FROM messages
-                    WHERE session_id = ?
-                      AND active = 1
-                      AND role = 'assistant'
-                      AND metadata_json LIKE ?
-                    ORDER BY id ASC
-                    """,
-                    (conversation_session_id, "%final_deliverable%"),
-                ).fetchall()
-            last_message = _message_summary_from_message(self.team_mission_rows.message_from_row(last_message_row))
-            for row in final_rows:
-                message = self.team_mission_rows.message_from_row(row)
-                deliverable = _final_deliverable_from_message(message)
-                if not deliverable:
-                    continue
-                mission_id = _text(deliverable.get("mission_id"))
-                if mission_id not in mission_id_set:
-                    continue
-                final_deliverables.append(deliverable)
-
-        if not mission_ids:
-            return {
-                "last_message": last_message,
-                "last_message_preview": _text(last_message.get("preview")),
-                "last_message_at": last_message.get("timestamp") or 0,
-                "final_deliverables": [],
-                "final_deliverables_by_mission": {},
-                "final_deliverables_by_task": {},
-                "artifact_refs": [],
-                "artifact_refs_by_mission": {},
-                "artifact_refs_by_task": {},
-            }
-
-        placeholders = ",".join("?" for _ in mission_ids)
-        memory_params: List[Any] = [*mission_ids, _MEMORY_COMMITTED_STATUS]
-        memory_clauses = [
-            f"mission_id IN ({placeholders})",
-            "status = ?",
-        ]
-        if conversation_session_id:
-            memory_clauses.append("conversation_session_id = ?")
-            memory_params.append(conversation_session_id)
-        with self._lock:
-            memory_rows = self._conn.execute(
-                f"""
-                SELECT *
-                FROM team_mission_memory_items
-                WHERE {' AND '.join(memory_clauses)}
-                ORDER BY created_at ASC, updated_at ASC, id ASC
-                """,
-                tuple(memory_params),
-            ).fetchall()
-        artifact_refs_by_mission: Dict[str, List[Dict[str, Any]]] = {}
-        artifact_refs_by_task: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
-        all_artifact_refs: List[Dict[str, Any]] = []
-        for row in memory_rows:
-            item = self.team_mission_rows.memory_item_from_row(row)
-            if not item:
-                continue
-            refs = _dedupe_artifact_refs(list(item.get("artifact_refs") or []))
-            if not refs:
-                continue
-            mission_id = _text(item.get("mission_id"))
-            task_id = _text(item.get("task_id"))
-            artifact_refs_by_mission[mission_id] = _dedupe_artifact_refs([
-                *artifact_refs_by_mission.get(mission_id, []),
-                *refs,
-            ])
-            if task_id:
-                artifact_refs_by_task[(mission_id, task_id)] = _dedupe_artifact_refs([
-                    *artifact_refs_by_task.get((mission_id, task_id), []),
-                    *refs,
-                ])
-            all_artifact_refs.extend(refs)
-
-        final_deliverables = [
-            _final_deliverable_with_artifact_refs(
-                deliverable,
-                artifact_refs_by_mission,
-                artifact_refs_by_task,
-            )
-            for deliverable in final_deliverables
-        ]
-        final_deliverables_by_mission: Dict[str, List[Dict[str, Any]]] = {}
-        final_deliverables_by_task: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
-        for deliverable in final_deliverables:
-            mission_id = _text(deliverable.get("mission_id"))
-            task_id = _text(deliverable.get("task_id"))
-            final_deliverables_by_mission.setdefault(mission_id, []).append(deliverable)
-            if task_id:
-                final_deliverables_by_task.setdefault((mission_id, task_id), []).append(deliverable)
-        last_message = _message_with_deliverable_artifact_refs(last_message, final_deliverables)
-
-        return {
-            "last_message": last_message,
-            "last_message_preview": _text(last_message.get("preview")),
-            "last_message_at": last_message.get("timestamp") or 0,
-            "final_deliverables": final_deliverables,
-            "final_deliverables_by_mission": final_deliverables_by_mission,
-            "final_deliverables_by_task": final_deliverables_by_task,
-            "artifact_refs": _dedupe_artifact_refs(all_artifact_refs),
-            "artifact_refs_by_mission": artifact_refs_by_mission,
-            "artifact_refs_by_task": artifact_refs_by_task,
-        }
-
     def get_team_mission_conversation_runtime_summary(self, conversation_id: str) -> Dict[str, Any]:
         """Return the lightweight Team Mission facts needed by conversation lists.
 
@@ -1433,7 +1293,10 @@ class TeamMissionConversationMixin:
             ).fetchall() if mission_ids else []
 
         if not missions:
-            deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, [])
+            deliverable_projection = self.team_mission_conversation_deliverables.project(
+                conversation,
+                [],
+            )
             return {
                 "conversation": conversation,
                 "mission": {},
@@ -1503,7 +1366,10 @@ class TeamMissionConversationMixin:
             active_result,
             _text(active_mission.get("status")),
         )
-        deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
+        deliverable_projection = self.team_mission_conversation_deliverables.project(
+            conversation,
+            missions,
+        )
         deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
         deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
         artifact_refs_by_mission = deliverable_projection.get("artifact_refs_by_mission") or {}

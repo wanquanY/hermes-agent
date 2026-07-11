@@ -48,6 +48,9 @@ from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 from hermes_team_mission.domain.transcript_visibility import (
     TeamMissionTranscriptVisibilityPolicy,
 )
+from hermes_team_mission.read_models.conversation_deliverables import (
+    ConversationDeliverableReadModel,
+)
 from hermes_team_mission.read_models.node_history import (
     TeamMissionNodeHistoryReadModel,
 )
@@ -72,6 +75,10 @@ class CliSessionStore(TeamMissionStateMixin):
         self._unit_of_work = SqliteUnitOfWork(conn, self._lock)
         self._session_repo = SessionRepoImpl(conn)
         self.team_mission_rows = TeamMissionRowMapper()
+        self.team_mission_conversation_deliverables = ConversationDeliverableReadModel(
+            conn,
+            self.team_mission_rows,
+        )
         self.telegram_topics = TelegramTopicStore(
             conn,
             self._execute_write,

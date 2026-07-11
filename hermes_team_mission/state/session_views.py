@@ -136,7 +136,10 @@ class TeamMissionViewMixin:
             ]
         message_page = _conversation_message_page(self, conversation, limit=100)
         if not missions:
-            deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, [])
+            deliverable_projection = self.team_mission_conversation_deliverables.project(
+                conversation,
+                [],
+            )
             return {
                 "mission": {},
                 "conversation": conversation,
@@ -162,7 +165,10 @@ class TeamMissionViewMixin:
             (mission for mission in missions if _text(mission.get("mission_id")) == active_mission_id),
             latest_mission,
         )
-        deliverable_projection = self._team_mission_conversation_deliverable_projection(conversation, missions)
+        deliverable_projection = self.team_mission_conversation_deliverables.project(
+            conversation,
+            missions,
+        )
         deliverables_by_mission = deliverable_projection.get("final_deliverables_by_mission") or {}
         deliverables_by_task = deliverable_projection.get("final_deliverables_by_task") or {}
         artifact_refs_by_mission = deliverable_projection.get("artifact_refs_by_mission") or {}
