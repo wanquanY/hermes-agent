@@ -92,9 +92,9 @@ def _(rid, params: dict) -> dict:
     source_key = str(source_key or "").strip()
     if not source_key:
         return _err(rid, 4006, "source_session_id required")
-    found = db.get_session(source_key)
+    found = db.sessions.get(source_key)
     if not found:
-        by_title = db.get_session_by_title(source_key)
+        by_title = db.sessions.get_by_title(source_key)
         if by_title:
             source_key = by_title["id"]
             found = by_title
@@ -122,7 +122,7 @@ def _(rid, params: dict) -> dict:
     ).strip()
     new_key = str(params.get("new_session_id") or params.get("newSessionId") or "").strip() or _new_session_key()
     try:
-        branch_result = db.branch_session(
+        branch_result = db.branches.branch_session(
             source_session_id=source_key,
             new_session_id=new_key,
             branch_point=branch_point,
@@ -176,7 +176,7 @@ def _(rid, params: dict) -> dict:
     if activate:
         execution_session_id = uuid.uuid4().hex[:8]
         try:
-            history = db.get_messages_as_conversation(
+            history = db.messages.all_as_conversation(
                 conversation_session_id,
                 include_ancestors=False,
                 include_storage_metadata=False,
@@ -208,7 +208,7 @@ def _(rid, params: dict) -> dict:
     page_info = {}
     if hydrate == "tail":
         try:
-            page = db.get_messages_page_as_conversation(
+            page = db.messages.page_as_conversation(
                 conversation_session_id,
                 direction="tail",
                 limit=_bounded_page_limit(
