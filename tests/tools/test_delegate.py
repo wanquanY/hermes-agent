@@ -2212,6 +2212,8 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         self.assertIs(child, mock_child)
         self.assertIsNone(MockAgent.call_args[1]["session_db"])
+        self.assertEqual(MockAgent.call_args[1]["session_kind"], "execution")
+        self.assertEqual(MockAgent.call_args[1]["conversation_kind"], "internal")
         self.assertTrue(child._session_persistence_disabled)
         self.assertIsNone(child._session_db)
 

@@ -57,11 +57,11 @@ class TestFlushDeduplication:
 
     def test_flush_writes_only_new_messages(self):
         """First flush writes all new messages, second flush writes none."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
@@ -76,22 +76,22 @@ class TestFlushDeduplication:
             # First flush — should write 2 new messages
             agent._flush_messages_to_session_db(messages, conversation_history)
 
-            rows = db.get_messages(agent.session_id)
+            rows = db.messages.list(agent.session_id)
             assert len(rows) == 2, f"Expected 2 messages, got {len(rows)}"
 
             # Second flush with SAME messages — should write 0 new messages
             agent._flush_messages_to_session_db(messages, conversation_history)
 
-            rows = db.get_messages(agent.session_id)
+            rows = db.messages.list(agent.session_id)
             assert len(rows) == 2, f"Expected still 2 messages after second flush, got {len(rows)}"
 
     def test_flush_writes_incrementally(self):
         """Messages added between flushes are written exactly once."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
@@ -102,7 +102,7 @@ class TestFlushDeduplication:
 
             # First flush — 1 message
             agent._flush_messages_to_session_db(messages, conversation_history)
-            rows = db.get_messages(agent.session_id)
+            rows = db.messages.list(agent.session_id)
             assert len(rows) == 1
 
             # Add more messages
@@ -111,7 +111,7 @@ class TestFlushDeduplication:
 
             # Second flush — should write only 2 new messages
             agent._flush_messages_to_session_db(messages, conversation_history)
-            rows = db.get_messages(agent.session_id)
+            rows = db.messages.list(agent.session_id)
             assert len(rows) == 3, f"Expected 3 total messages, got {len(rows)}"
 
     def test_turn_start_persist_then_final_flush_keeps_one_ordered_turn(self):
@@ -206,16 +206,16 @@ class TestFlushDeduplication:
 
     def test_team_conversation_flush_uses_active_run_identity(self):
         """Team worker flush must not inherit run ids from projected history."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-member-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -262,7 +262,7 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, history)
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["role"] for row in rows] == ["assistant", "tool"]
             for row in rows:
                 metadata = row["metadata"]
@@ -277,16 +277,16 @@ class TestFlushDeduplication:
 
     def test_team_conversation_flush_does_not_use_history_len_when_history_is_not_prefix(self):
         """Team worker messages may be current-turn-only, not history + new turn."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id=visible_session_id)
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -357,7 +357,7 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, history)
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["role"] for row in rows] == [
                 "assistant",
                 "tool",
@@ -375,16 +375,16 @@ class TestFlushDeduplication:
 
     def test_team_mission_start_flush_persists_main_transcript_tools(self):
         """Leader mission-start messages are main conversation history."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-mission-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -433,7 +433,7 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, [])
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["role"] for row in rows] == ["assistant", "tool", "assistant"]
             assert [row.get("tool_name") for row in rows] == [None, "team_mission_node_create", None]
             assert all(row["metadata"]["transcript_activity_kind"] == "mission_start" for row in rows)
@@ -441,16 +441,16 @@ class TestFlushDeduplication:
 
     def test_team_mission_node_flush_does_not_persist_node_rows_to_visible_transcript(self):
         """Mission node execution belongs to the task graph, not the main conversation."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-mission-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -499,8 +499,8 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, [])
 
-            assert db.get_messages(visible_session_id) == []
-            runtime_rows = db.get_messages("runtime-mission-session")
+            assert db.messages.list(visible_session_id) == []
+            runtime_rows = db.messages.list("runtime-mission-session")
             assert [row["role"] for row in runtime_rows] == ["user", "assistant", "tool", "assistant"]
             assert [row.get("tool_name") for row in runtime_rows] == [None, None, "team_mission_node_create", None]
             assert all(row["metadata"]["transcript_activity_kind"] == "mission_node" for row in runtime_rows)
@@ -510,16 +510,16 @@ class TestFlushDeduplication:
 
     def test_team_dispatch_flush_persists_main_transcript_tools(self):
         """Team dispatch leader/tool messages are main conversation history."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -568,7 +568,7 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, [])
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["role"] for row in rows] == ["assistant", "tool", "assistant"]
             assert [row.get("tool_name") for row in rows] == [None, "team_mission_start_task", None]
             assert all(row["metadata"]["transcript_activity_kind"] == "team_dispatch" for row in rows)
@@ -576,7 +576,7 @@ class TestFlushDeduplication:
 
     def test_team_dispatch_second_run_does_not_reuse_stale_memory_flush_cursor(self):
         """A rebuilt leader history must not let the previous run's cursor skip rows."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from tui_gateway.services.run_control import record_event
 
         def install_dispatch_context(agent, *, run_id: str, turn_id: str) -> None:
@@ -621,12 +621,12 @@ class TestFlushDeduplication:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -690,13 +690,13 @@ class TestFlushDeduplication:
             ]
             agent._flush_messages_to_session_db(second_messages, rebuilt_history)
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["content"] for row in rows] == [
                 "第一轮准备启动",
-                "{}",
+                {},
                 "第一轮任务已经进入规划",
                 "第二轮准备启动",
-                "{}",
+                {},
                 "第二轮任务已经进入规划",
             ]
             second_rows = [
@@ -710,9 +710,10 @@ class TestFlushDeduplication:
                 None,
             ]
             assert [row["metadata"]["turn_message_index"] for row in second_rows] == [1, 2, 3]
+            assert [row["metadata"].get("assistant_segment_index") for row in second_rows] == [0, None, 1]
             assert all(row["metadata"].get("persist_message_key") for row in second_rows)
             assert {
-                tuple(event["type"] for event in db.list_run_events(visible_session_id, run_id=run_id))
+                tuple(event["type"] for event in db.runs.list_events(visible_session_id, run_id=run_id))
                 for run_id in ("team-leader-run-first", "team-leader-run-second")
             } == {
                 (
@@ -753,21 +754,21 @@ class TestFlushDeduplication:
             ]
             agent._flush_messages_to_session_db(second_messages_rebuilt_again, rebuilt_history)
 
-            assert len(db.get_messages(visible_session_id)) == len(rows)
+            assert len(db.messages.list(visible_session_id)) == len(rows)
 
     def test_turn_message_buffer_boundary_keeps_history_out_when_history_arg_is_lost(self):
         """Loaded history is never reclassified as current output by DB flush."""
         from agent.turn_message_buffer import TurnMessageBuffer
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             agent = self._make_uninitialized_agent(db, session_id="runtime-dispatch-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
@@ -850,10 +851,10 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, None)
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert [row["content"] for row in rows] == [
                 "准备启动团队任务",
-                "{}",
+                {},
                 "任务已经进入规划",
             ]
             assert [row.get("tool_name") for row in rows] == [None, "team_mission_start_task", None]
@@ -864,24 +865,24 @@ class TestFlushDeduplication:
 
     def test_team_projected_summary_is_not_reflushed_by_generic_writer(self):
         """Stable team projection rows are owned by their upsert writer."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             visible_session_id = "team-session-team-conversation-test"
             stable_id = "team-mission-summary:mission-1:completed"
             agent = self._make_uninitialized_agent(db, session_id="runtime-summary-session")
-            db.create_session(visible_session_id, source="team_mission", transient=False)
-            db.upsert_session_index(
+            db.sessions.create(visible_session_id, source="team_mission", transient=False)
+            db.session_index.upsert(
                 session_id=visible_session_id,
                 source="team_mission",
                 conversation_kind="team",
                 started_at=1.0,
                 updated_at=1.0,
             )
-            db.append_message(
+            db.messages.append(
                 visible_session_id,
                 role="assistant",
                 content="最终汇总",
@@ -925,18 +926,18 @@ class TestFlushDeduplication:
 
             agent._flush_messages_to_session_db(messages, [])
 
-            rows = db.get_messages(visible_session_id)
+            rows = db.messages.list(visible_session_id)
             assert len(rows) == 1
             assert rows[0]["conversation_message_id"] == stable_id
             assert agent._last_flushed_db_idx == len(messages)
 
     def test_persist_session_multiple_calls_no_duplication(self):
         """Multiple _persist_session calls don't duplicate DB entries."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
@@ -952,16 +953,16 @@ class TestFlushDeduplication:
             for _ in range(5):
                 agent._persist_session(messages, conversation_history)
 
-            rows = db.get_messages(agent.session_id)
+            rows = db.messages.list(agent.session_id)
             assert len(rows) == 4, f"Expected 4 messages, got {len(rows)} (duplication bug!)"
 
     def test_flush_reset_after_compression(self):
         """After compression creates a new session, flush index resets."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
@@ -977,7 +978,7 @@ class TestFlushDeduplication:
 
             # Simulate what _compress_context does: new session, reset idx
             agent.session_id = "compressed-session-new"
-            db.create_session(session_id=agent.session_id, source="test")
+            db.sessions.create(session_id=agent.session_id, source="test")
             agent._last_flushed_db_idx = 0
 
             # Now flush compressed messages to new session
@@ -986,11 +987,11 @@ class TestFlushDeduplication:
             ]
             agent._flush_messages_to_session_db(compressed_messages, [])
 
-            new_rows = db.get_messages(agent.session_id)
+            new_rows = db.messages.list(agent.session_id)
             assert len(new_rows) == 1
 
             # Old session should still have its 2 messages
-            old_rows = db.get_messages(old_session)
+            old_rows = db.messages.list(old_session)
             assert len(old_rows) == 2
 
 
