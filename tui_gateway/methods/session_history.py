@@ -178,7 +178,7 @@ def _(rid, params: dict) -> dict:
     raw_messages = _history_to_messages(page.get("messages") or [])
     sanitized_messages = sanitize_transcript_messages(raw_messages)
     page_info = _message_page_info(page.get("pageInfo"))
-    branch_info = db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None
+    branch_info = db.branches.get_session_branch_info(target)
     result = {
         "session_id": target,
         "messages": sanitized_messages,
