@@ -124,20 +124,23 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     event_type = source_event_type(source_event)
     mission_id = _first_text(identity.get("mission_id"), identity.get("missionId"), payload.get("mission_id"), payload.get("missionId"))
     conversation_id = _first_text(identity.get("conversation_id"), identity.get("conversationId"), payload.get("conversation_id"), payload.get("conversationId"))
-    conversation_conversation_session_id = _first_text(identity.get("conversation_session_id"), identity.get("conversationSessionId"), payload.get("conversation_session_id"), payload.get("conversationSessionId"))
+    conversation_session_id = _first_text(
+        identity.get("conversation_session_id"),
+        identity.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
+    )
     runtime_conversation_session_id = _first_text(
         source_event.get("conversation_session_id"),
         source_event.get("conversationSessionId"),
         payload.get("conversation_session_id"),
         payload.get("conversationSessionId"),
-        payload.get("session_key"),
-        payload.get("sessionKey"),
         identity.get("runtime_conversation_session_id"),
         identity.get("runtimeConversationSessionId"),
     )
     execution_session_id = _first_text(
-        source_event.get("session_id"),
-        source_event.get("sessionId"),
+        source_event.get("execution_session_id"),
+        source_event.get("executionSessionId"),
         payload.get("execution_session_id"),
         payload.get("executionSessionId"),
         identity.get("execution_session_id"),
@@ -165,11 +168,8 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     subject: Dict[str, Any] = {
         "mission_id": mission_id,
         "conversation_id": conversation_id,
-        "conversation_session_id": conversation_conversation_session_id,
-        "conversation_conversation_session_id": conversation_conversation_session_id,
-        "conversation_session_id": conversation_conversation_session_id,
+        "conversation_session_id": conversation_session_id,
         "runtime_conversation_session_id": runtime_conversation_session_id,
-        "source_session_id": runtime_conversation_session_id,
         "execution_session_id": execution_session_id,
         "runtime_scope_key": runtime_scope_key,
         "run_id": run_id,
@@ -558,10 +558,20 @@ def projection_event(
         if text(value):
             event[key] = value
     _apply_subject_node_identity(event, subject)
-    for key in ("run_id", "turn_id", "session_id", "execution_session_id", "runtime_scope_key"):
+    for key in ("run_id", "turn_id", "execution_session_id", "runtime_scope_key"):
         value = source_event.get(key)
         if text(value):
             event[key] = value
+    projected_conversation_session_id = _first_text(
+        subject.get("conversation_session_id"),
+    )
+    if projected_conversation_session_id:
+        event["session_id"] = projected_conversation_session_id
+        event["conversation_session_id"] = projected_conversation_session_id
+        payload["session_id"] = projected_conversation_session_id
+        payload["conversation_session_id"] = projected_conversation_session_id
+    if text(event.get("execution_session_id")):
+        payload["execution_session_id"] = event["execution_session_id"]
     return event
 
 
