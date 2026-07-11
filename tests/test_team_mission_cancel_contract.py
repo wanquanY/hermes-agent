@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway.runtime_methods import _resolve_cancel_mission_id
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
@@ -32,9 +31,9 @@ def _assert_error(response: dict[str, Any], code: int, message: str) -> None:
 
 
 @pytest.fixture()
-def gateway_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SessionDB:
+def gateway_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CliSessionStore:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_db", db, raising=False)
     monkeypatch.setattr(server, "_db_error", None, raising=False)
@@ -47,7 +46,7 @@ def gateway_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SessionDB:
 
 
 def _seed_mission(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str = "mission-1",
     conversation_id: str = "conversation-1",
@@ -82,7 +81,7 @@ def _seed_mission(
 
 
 def test_team_mission_cancel_with_unknown_mission_id_returns_4040_not_silent(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     response = _call("team_mission.cancel", {"mission_id": "missing-mission"})
 
@@ -90,7 +89,7 @@ def test_team_mission_cancel_with_unknown_mission_id_returns_4040_not_silent(
 
 
 def test_team_mission_cancel_with_conversation_id_resolves_to_mission_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     _seed_mission(gateway_db, mission_id="mission-conv", conversation_id="conversation-conv")
 
@@ -100,11 +99,11 @@ def test_team_mission_cancel_with_conversation_id_resolves_to_mission_id(
 
     assert result["mission_id"] == "mission-conv"
     assert result["mission_status"] == "cancelled"
-    assert gateway_db.get_team_mission_graph("mission-conv")["mission"]["status"] == "cancelled"
+    assert gateway_db.team_mission_graphs.get_team_mission_graph("mission-conv")["mission"]["status"] == "cancelled"
 
 
 def test_team_mission_cancel_with_conversation_id_no_associated_mission_returns_4040(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     response = _call("team_mission.cancel", {"conversation_id": "conversation-empty"})
 
@@ -112,7 +111,7 @@ def test_team_mission_cancel_with_conversation_id_no_associated_mission_returns_
 
 
 def test_team_mission_cancel_with_conversation_session_id_resolves_to_mission_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     _seed_mission(
         gateway_db,
@@ -133,7 +132,7 @@ def test_team_mission_cancel_with_conversation_session_id_resolves_to_mission_id
 
 
 def test_team_mission_cancel_with_only_mission_id_argument_works(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     _seed_mission(gateway_db, mission_id="mission-direct")
 
@@ -144,7 +143,7 @@ def test_team_mission_cancel_with_only_mission_id_argument_works(
 
 
 def test_team_mission_cancel_returns_4006_when_no_identifier_provided(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     response = _call("team_mission.cancel", {})
 
@@ -154,10 +153,12 @@ def test_team_mission_cancel_returns_4006_when_no_identifier_provided(
 def test_team_mission_cancel_logs_graph_empty_for_resolved_mission_id_when_race(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     _seed_mission(gateway_db, mission_id="mission-race")
-    original_get_team_mission_graph = gateway_db.get_team_mission_graph
+    original_get_team_mission_graph = (
+        gateway_db.team_mission_graphs.get_team_mission_graph
+    )
     calls = {"count": 0}
 
     def flaky_get_team_mission_graph(mission_id: str) -> dict[str, Any]:
@@ -166,7 +167,11 @@ def test_team_mission_cancel_logs_graph_empty_for_resolved_mission_id_when_race(
             return original_get_team_mission_graph(mission_id)
         return {}
 
-    monkeypatch.setattr(gateway_db, "get_team_mission_graph", flaky_get_team_mission_graph)
+    monkeypatch.setattr(
+        gateway_db.team_mission_graphs,
+        "get_team_mission_graph",
+        flaky_get_team_mission_graph,
+    )
     caplog.set_level(logging.WARNING, logger="hermes_team_mission.state.session_graph")
 
     response = _call("team_mission.cancel", {"mission_id": "mission-race"})
@@ -177,14 +182,14 @@ def test_team_mission_cancel_logs_graph_empty_for_resolved_mission_id_when_race(
 
 
 def test_cancel_team_mission_state_layer_returns_empty_dict_when_graph_empty(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     assert gateway_db.cancel_team_mission(mission_id="missing-mission") == {}
 
 
 def test_cancel_team_mission_state_layer_logs_clear_diagnostic_when_aborting(
     caplog: pytest.LogCaptureFixture,
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     caplog.set_level(logging.WARNING, logger="hermes_team_mission.state.session_graph")
 
@@ -194,6 +199,14 @@ def test_cancel_team_mission_state_layer_logs_clear_diagnostic_when_aborting(
     assert "get_team_mission_graph found no mission row" in caplog.text
 
 
+class _MissionGraphs:
+    def __init__(self, graphs: dict[str, dict[str, Any]]) -> None:
+        self._graphs = graphs
+
+    def get_team_mission_graph(self, mission_id: str) -> dict[str, Any]:
+        return self._graphs.get(mission_id, {})
+
+
 class _ResolverDB:
     def __init__(
         self,
@@ -201,11 +214,8 @@ class _ResolverDB:
         graphs: dict[str, dict[str, Any]] | None = None,
         projections: dict[str, Any] | None = None,
     ) -> None:
-        self.graphs = graphs or {}
         self.projections = projections or {}
-
-    def get_team_mission_graph(self, mission_id: str) -> dict[str, Any]:
-        return self.graphs.get(mission_id, {})
+        self.team_mission_graphs = _MissionGraphs(graphs or {})
 
     def resolve_team_mission_conversation(self, identifier: str) -> Any:
         return self.projections.get(identifier, {})
@@ -252,10 +262,12 @@ def test_resolve_cancel_mission_id_handles_resolver_returning_non_dict() -> None
     assert _resolve_cancel_mission_id(db, {"conversation_id": "conversation-1"}) == ""
 
 
-def test_resolve_cancel_mission_id_handles_db_missing_get_team_mission_graph() -> None:
-    db = SimpleNamespace(
-        resolve_team_mission_conversation=lambda _identifier: {
-            "conversation": {"active_mission_id": "mission-1"}
+def test_resolve_cancel_mission_id_returns_empty_when_graph_has_no_mission() -> None:
+    db = _ResolverDB(
+        projections={
+            "conversation-1": {
+                "conversation": {"active_mission_id": "mission-1"}
+            }
         }
     )
 
@@ -263,6 +275,9 @@ def test_resolve_cancel_mission_id_handles_db_missing_get_team_mission_graph() -
 
 
 def test_resolve_cancel_mission_id_handles_db_missing_resolve_team_mission_conversation() -> None:
-    db = SimpleNamespace(get_team_mission_graph=lambda _mission_id: {})
+    class _GraphOnlyDB:
+        team_mission_graphs = _MissionGraphs({})
+
+    db = _GraphOnlyDB()
 
     assert _resolve_cancel_mission_id(db, {"conversation_id": "conversation-1"}) == ""
