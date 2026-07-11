@@ -38,7 +38,35 @@ class WorkerDBProxyMethodError(WorkerDBProxyRemoteError):
 
 
 _BYTES_MARKER = "__worker_db_proxy_bytes__"
-_DB_COMPONENT_NAMES = frozenset({"team_mission_graphs"})
+WORKER_DB_COMPONENT_NAMES = frozenset(
+    {
+        "activities",
+        "analytics",
+        "branches",
+        "compression_leases",
+        "member_chat_views",
+        "messages",
+        "maintenance",
+        "metadata",
+        "participants",
+        "profiles",
+        "runs",
+        "run_event_maintenance",
+        "session_index",
+        "sessions",
+        "team_mission_audit",
+        "team_mission_conversation_deliverables",
+        "team_capabilities",
+        "team_mission_graphs",
+        "team_mission_maintenance",
+        "team_mission_node_history",
+        "team_mission_rows",
+        "team_missions",
+        "teams",
+        "telegram_topics",
+        "tool_event_projection",
+    }
+)
 
 
 def serialize_db_value(value: Any) -> Any:
@@ -111,7 +139,7 @@ class WorkerDBProxy:
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
-        if name in _DB_COMPONENT_NAMES:
+        if name in WORKER_DB_COMPONENT_NAMES:
             return _WorkerDBComponentProxy(self, name, conversation_session_id="")
 
         def proxy(*args: Any, **kwargs: Any) -> Any:
@@ -254,7 +282,7 @@ class _ScopedWorkerDBProxy:
     def __getattr__(self, name: str):
         if name.startswith("_"):
             raise AttributeError(name)
-        if name in _DB_COMPONENT_NAMES:
+        if name in WORKER_DB_COMPONENT_NAMES:
             return _WorkerDBComponentProxy(
                 self._root,
                 name,
