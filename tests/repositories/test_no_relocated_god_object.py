@@ -220,20 +220,10 @@ def _composed_method_surface(
 # and the manifest's Rebuild List explicitly accepts adapter size as
 # separate deferred debt (and the user asked not to touch channel code).
 # The composed arm therefore excludes ``channels/`` and targets exactly
-# the two god-objects this refactor is chartered to eliminate:
-# ``HermesStateStore`` (ex-SessionDB, data plane) and ``GatewayRunner``
-# (gateway runtime).
+# the live composed runtime objects this refactor is chartered to eliminate.
 _COMPOSED_EXCLUDE_TREES = ("channels/",)
 
-# ``HermesStateStore`` is a mixin-composed facade too (~236 surface), BUT
-# it is a NON-production-wired compat shim: ``p2:no_hermes_state_store_
-# production_instantiation`` proves production never instantiates it (the
-# real data-plane owners are the 5 aggregate repos, §4.6). Its recomposed
-# surface is inert source slated for deletion, not a live god-object, so
-# the composed arm defers it to the P2 gate and excludes it here — leaving
-# this arm to isolate the LIVE fake-out (a composed god-object that IS
-# instantiated in production, e.g. GatewayRunner in hermes_gateway/runner.py).
-_COMPOSED_ALLOWLIST_CLASSES = frozenset({"HermesStateStore"})
+_COMPOSED_ALLOWLIST_CLASSES = frozenset()
 
 
 def _composed_god_objects() -> list[tuple[str, str, int]]:
@@ -294,11 +284,9 @@ def test_threshold_does_not_flag_legit_classes():
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Anti-relocation reality signal. Currently trips on "
-        "HermesStateStore (199 methods in hermes_agent/storage/state_store.py) "
-        "— the known P2 god-object still being decomposed. Flips to xpassed "
-        "when P2 decomposes it and no P4/P5 relocation reintroduces a "
-        "monolith (e.g. GatewayRunner moved into hermes_gateway/). "
+        "Anti-relocation reality signal. Flips to xpassed when no remaining "
+        "runtime object exceeds the method threshold and no later relocation "
+        "reintroduces a monolith. "
         "Fix by decomposing, never by raising the "
         "threshold."
     ),

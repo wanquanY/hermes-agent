@@ -19,10 +19,8 @@ def test_team_registry_facade_module_is_deleted() -> None:
     ).exists()
 
 
-def test_legacy_state_store_does_not_compose_team_registry_facade() -> None:
-    source = (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").read_text()
-    assert "TeamRegistryStateMixin" not in source
-    assert "team_registry_facade" not in source
+def test_legacy_state_store_is_deleted() -> None:
+    assert not (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").exists()
 
 
 def test_cli_store_owns_team_registry_through_repository(tmp_path: Path) -> None:

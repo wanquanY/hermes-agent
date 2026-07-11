@@ -23,10 +23,8 @@ def test_run_facade_module_is_deleted() -> None:
     ).exists()
 
 
-def test_legacy_state_store_does_not_compose_run_facade() -> None:
-    source = (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").read_text()
-    assert "RunStateMixin" not in source
-    assert "run_facade" not in source
+def test_legacy_state_store_is_deleted() -> None:
+    assert not (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").exists()
 
 
 def test_cli_store_composes_explicit_run_owners(tmp_path: Path) -> None:

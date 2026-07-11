@@ -19,10 +19,8 @@ def test_member_chat_facade_module_is_deleted() -> None:
     ).exists()
 
 
-def test_legacy_state_store_does_not_compose_member_chat_facade() -> None:
-    source = (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").read_text()
-    assert "MemberChatStateMixin" not in source
-    assert "member_chat_facade" not in source
+def test_legacy_state_store_is_deleted() -> None:
+    assert not (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").exists()
 
 
 def test_cli_store_owns_member_chat_projection_through_domain_service(

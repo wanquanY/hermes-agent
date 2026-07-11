@@ -20,10 +20,8 @@ def test_participant_facade_and_top_level_shim_are_deleted() -> None:
     assert not (REPO_ROOT / "hermes_state_participants.py").exists()
 
 
-def test_legacy_state_store_does_not_compose_participant_facade() -> None:
-    source = (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").read_text()
-    assert "ParticipantsMixin" not in source
-    assert "participant_facade" not in source
+def test_legacy_state_store_is_deleted() -> None:
+    assert not (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").exists()
 
 
 def test_cli_store_owns_participants_through_domain_service(tmp_path: Path) -> None:

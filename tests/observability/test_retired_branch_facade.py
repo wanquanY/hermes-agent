@@ -19,10 +19,8 @@ def test_branch_facade_module_is_deleted() -> None:
     ).exists()
 
 
-def test_legacy_state_store_does_not_compose_branch_facade() -> None:
-    source = (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").read_text()
-    assert "BranchStateMixin" not in source
-    assert "branch_facade" not in source
+def test_legacy_state_store_is_deleted() -> None:
+    assert not (REPO_ROOT / "hermes_agent" / "storage" / "state_store.py").exists()
 
 
 def test_cli_store_owns_branching_through_domain_service(tmp_path: Path) -> None:

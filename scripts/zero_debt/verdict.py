@@ -177,19 +177,15 @@ _P2_SESSIONDB_ALLOWLIST = {
     "scripts/zero_debt/verdict.py",
 }
 
-_P2_STATE_STORE_PATHS = [
+_P2_RETIRED_STATE_PATHS = [
+    "hermes_state.py",
     "hermes_agent/storage/state_store.py",
-    "hermes_agent/storage/state_mixins/activities.py",
-    "hermes_agent/storage/state_mixins/agent_profiles.py",
-    "hermes_agent/storage/state_mixins/branch.py",
-    "hermes_agent/storage/state_mixins/member_chat.py",
-    "hermes_agent/storage/state_mixins/participants.py",
-    "hermes_agent/storage/state_mixins/runs.py",
-    "hermes_agent/storage/state_mixins/team_capabilities.py",
-    "hermes_agent/storage/state_mixins/team_registry.py",
+    "hermes_agent/storage/state_maintenance.py",
+    "hermes_agent/application/state_facade/message_facade.py",
+    "hermes_agent/application/state_facade/session_facade.py",
+    "hermes_agent/application/state_facade/storage_engine_facade.py",
 ]
 
-_P2_STATE_STORE_MAX_TOTAL_LINES = 100
 _P2_HERMES_STATE_STORE_MAX_METHODS = 0
 
 _GOD_OBJECT_MAX_CLASS_METHODS = 80
@@ -764,9 +760,9 @@ def _p2_data_plane_checks() -> list[Check]:
         tokens=("UPDATE runs",),
         allowlist=_P2_RUNS_UPDATE_ALLOWLIST,
     )
-    state_store_lines, state_store_line_details = _python_line_count(
-        _P2_STATE_STORE_PATHS
-    )
+    retired_state_paths = [
+        path for path in _P2_RETIRED_STATE_PATHS if (REPO_ROOT / path).exists()
+    ]
     state_store_method_count = _class_method_count(
         "hermes_agent/storage/state_store.py",
         "HermesStateStore",
@@ -822,14 +818,11 @@ def _p2_data_plane_checks() -> list[Check]:
         ),
         Check(
             id="p2:state_store_decomposed",
-            ok=state_store_lines <= _P2_STATE_STORE_MAX_TOTAL_LINES,
+            ok=not retired_state_paths,
             message=(
-                f"state_store/state_mixins total lines {state_store_lines} <= "
-                f"{_P2_STATE_STORE_MAX_TOTAL_LINES}"
-                if state_store_lines <= _P2_STATE_STORE_MAX_TOTAL_LINES
-                else "state_store/state_mixins still own data-plane bulk: "
-                + f"{state_store_lines} lines; "
-                + "; ".join(state_store_line_details)
+                "legacy state store and facade modules are removed"
+                if not retired_state_paths
+                else "legacy state modules remain: " + ", ".join(retired_state_paths)
             ),
         ),
         Check(

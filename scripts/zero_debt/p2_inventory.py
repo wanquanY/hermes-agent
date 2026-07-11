@@ -21,11 +21,10 @@ from verdict import (
     _P2_IDENTITY_ALIAS_TOKENS,
     _P2_SESSIONDB_ALLOWLIST,
     _P2_SESSIONDB_TOKENS,
-    _P2_STATE_STORE_PATHS,
+    _P2_RETIRED_STATE_PATHS,
     _class_method_count,
     _p2_hermes_state_store_instantiations,
     _p2_silent_swallow_offenders,
-    _python_line_count,
     _production_python_files,
 )
 
@@ -67,9 +66,9 @@ def build_inventory() -> dict[str, Any]:
         tokens=_P2_IDENTITY_ALIAS_TOKENS,
         allowlist=_P2_IDENTITY_ALIAS_ALLOWLIST,
     )
-    state_store_lines, state_store_line_details = _python_line_count(
-        _P2_STATE_STORE_PATHS
-    )
+    retired_state_paths = [
+        path for path in _P2_RETIRED_STATE_PATHS if (REPO_ROOT / path).exists()
+    ]
     state_store_methods = _class_method_count(
         "hermes_agent/storage/state_store.py",
         "HermesStateStore",
@@ -84,15 +83,15 @@ def build_inventory() -> dict[str, Any]:
                 _p2_hermes_state_store_instantiations()
             ),
             "p2:state_store_decomposed": {
-                "total_offenders": state_store_lines,
-                "file_count": len(state_store_line_details),
+                "total_offenders": len(retired_state_paths),
+                "file_count": len(retired_state_paths),
                 "files": [
                     {
-                        "path": detail.split(": ", 1)[0],
-                        "offenders": int(detail.split(": ", 1)[1]),
-                        "first_lines": [{"line": "", "text": detail}],
+                        "path": path,
+                        "offenders": 1,
+                        "first_lines": [{"line": "", "text": "legacy module remains"}],
                     }
-                    for detail in state_store_line_details
+                    for path in retired_state_paths
                 ],
             },
             "p2:hermes_state_store_no_methods": {
