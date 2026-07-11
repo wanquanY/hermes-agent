@@ -23,9 +23,9 @@ import pytest
 
 def _make_session_db(tmp_path):
     """Create a real SessionDB for integration-style tests."""
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     db_path = tmp_path / "test_state.db"
-    return SessionDB(db_path=db_path)
+    return open_cli_session_store(db_path=db_path)
 
 
 def _tui_session(agent=None, session_key="session-key-old", **extra):
@@ -66,10 +66,10 @@ class TestFinalizeSessionUsesAgentSessionId:
         db = _make_session_db(tmp_path)
 
         # Create two sessions: parent (already ended by compression) and continuation
-        db.create_session(session_id="parent-session", source="tui", model="test")
-        db.end_session("parent-session", "compression")
+        db.sessions.create(session_id="parent-session", source="tui", model="test")
+        db.sessions.end("parent-session", "compression")
 
-        db.create_session(
+        db.sessions.create(
             session_id="continuation-session",
             source="tui",
             model="test",
@@ -96,7 +96,7 @@ class TestFinalizeSessionUsesAgentSessionId:
                 server._finalize_session(session, end_reason="tui_close")
 
         # The continuation session should be ended
-        continuation = db.get_session("continuation-session")
+        continuation = db.sessions.get("continuation-session")
         assert continuation["ended_at"] is not None, (
             "_finalize_session should end the agent's current session (continuation), "
             "not the already-ended parent"
@@ -109,7 +109,7 @@ class TestFinalizeSessionUsesAgentSessionId:
         from tui_gateway import server
 
         db = _make_session_db(tmp_path)
-        db.create_session(session_id="orphan-key", source="tui", model="test")
+        db.sessions.create(session_id="orphan-key", source="tui", model="test")
 
         session = _tui_session(agent=None, session_key="orphan-key")
 
@@ -117,7 +117,7 @@ class TestFinalizeSessionUsesAgentSessionId:
             with patch.object(server, "_notify_session_boundary", lambda *a: None):
                 server._finalize_session(session, end_reason="tui_close")
 
-        row = db.get_session("orphan-key")
+        row = db.sessions.get("orphan-key")
         assert row["ended_at"] is not None
         assert row["end_reason"] == "tui_close"
 

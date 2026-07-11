@@ -18,8 +18,6 @@ the prompt path drags in the full LLM stack."""
 
 from __future__ import annotations
 
-import json
-import sqlite3
 import threading
 
 import pytest
@@ -115,73 +113,44 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
 ) -> None:
     from tui_gateway import server as _server
 
-    class FakeDB:
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self._conn = conn
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        def list_conversation_participants(self, session_id: str):
-            assert session_id == "team-session-team-conversation-1"
-            return [
-                {"participant_id": "leader:team-conversation-1", "display_name": "小多"},
-                {"participant_id": "member:frontend", "display_name": "前端工程师"},
-            ]
-
-    conn = sqlite3.connect(tmp_path / "state.db")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            participant_id TEXT NOT NULL DEFAULT '',
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL,
-            finish_reason TEXT,
-            reasoning TEXT,
-            reasoning_content TEXT,
-            reasoning_details TEXT,
-            codex_reasoning_items TEXT,
-            codex_message_items TEXT,
-            platform_message_id TEXT,
-            conversation_message_id TEXT NOT NULL DEFAULT '',
-            metadata_json TEXT,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-        """
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id="team-session-team-conversation-1",
+        source="team",
+        conversation_kind="team",
     )
     for index, message in enumerate(
         [
-            ("user", "你是谁？", {"participant_id": "user"}),
-            ("assistant", "我是小多，负责团队协调。", {"participant_id": "leader:team-conversation-1"}),
-            ("assistant", "我是前端工程师，负责 UI。", {"participant_id": "member:frontend"}),
+            ("user", "你是谁？", "user"),
+            ("assistant", "我是小多，负责团队协调。", "leader:team-conversation-1"),
+            ("assistant", "我是前端工程师，负责 UI。", "member:frontend"),
         ],
         start=1,
     ):
-        conn.execute(
-            """
-            INSERT INTO messages (
-                session_id, role, content, timestamp, metadata_json
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "team-session-team-conversation-1",
-                message[0],
-                message[1],
-                float(index),
-                json.dumps(message[2], ensure_ascii=False),
-            ),
+        db.messages.append(
+            "team-session-team-conversation-1",
+            role=message[0],
+            content=message[1],
+            participant_id=message[2],
+            timestamp=float(index),
         )
+    monkeypatch.setattr(
+        db.participants,
+        "list_conversation_participants",
+        lambda session_id: [
+            {"participant_id": "leader:team-conversation-1", "display_name": "小多"},
+            {"participant_id": "member:frontend", "display_name": "前端工程师"},
+        ],
+    )
 
     control_home = str(tmp_path / "control")
     execution_home = str(tmp_path / "execution")
     monkeypatch.setattr(_server, "_sessions", {})
     monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
     monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
-    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: FakeDB(conn))
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
 
     _, session = _ensure_worker_session(
         RunStartFrame(

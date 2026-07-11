@@ -308,7 +308,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             full_history = load_conversation_history(db, frame.conversation_session_id)
             if _should_project_member_perspective(run_context):
                 try:
-                    participants = db.list_conversation_participants(  # type: ignore[attr-defined]
+                    participants = db.participants.list_conversation_participants(
                         frame.conversation_session_id
                     )
                 except Exception:

@@ -6418,7 +6418,10 @@ def test_make_agent_uses_persisted_session_model(monkeypatch):
     _setup_make_agent_mocks(monkeypatch, {})
 
     class FakeDB:
-        def get_session(self, key):
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, key):
             return {
                 "id": key,
                 "model": "deepseek-v4-pro",

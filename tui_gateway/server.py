@@ -513,7 +513,7 @@ def _finalize_session(
             try:
                 db = _db_for_stable_session(str(session_id or session_key or ""))
                 if db is not None:
-                    db.end_session(session_id, end_reason)
+                    db.sessions.end(session_id, end_reason)
             except Exception:
                 pass
     finally:

@@ -74,7 +74,7 @@ def _persisted_session_codex_metadata(session_key: str) -> dict:
         return {}
     try:
         db = _db_for_stable_session(key)
-        row = db.get_session(key) if db is not None else None
+        row = db.sessions.get(key) if db is not None else None
     except Exception:
         return {}
     if not isinstance(row, dict):
