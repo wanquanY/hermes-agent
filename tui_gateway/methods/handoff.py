@@ -71,9 +71,9 @@ def _(rid, params: dict) -> dict:
             return _db_unavailable_error(rid, code=5007)
         key = session["session_key"]
         try:
-            if not db.get_session(key):
-                db.set_session_title(key, f"handoff-{key[:8]}")
-            ok = db.request_handoff(key, platform_name)
+            if not db.sessions.get(key):
+                db.sessions.set_title(key, f"handoff-{key[:8]}")
+            ok = db.sessions.request_handoff(key, platform_name)
         except Exception as e:
             return _err(rid, 5007, str(e))
 
@@ -108,7 +108,7 @@ def _(rid, params: dict) -> dict:
     with _session_db(session) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
-        record = db.get_handoff_state(session["session_key"])
+        record = db.sessions.handoff_state(session["session_key"])
 
     record = record or {}
     return _ok(
@@ -136,10 +136,10 @@ def _(rid, params: dict) -> dict:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
         key = session["session_key"]
-        record = db.get_handoff_state(key) or {}
+        record = db.sessions.handoff_state(key) or {}
         state = record.get("state") or ""
         if state in {"pending", "running"}:
-            db.fail_handoff(key, reason)
+            db.sessions.fail_handoff(key, reason)
             return _ok(rid, {"failed": True, "state": "failed"})
 
     return _ok(rid, {"failed": False, "state": state})
