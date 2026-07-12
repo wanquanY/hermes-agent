@@ -2599,7 +2599,7 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
 
     items = db.list_team_mission_memory_items(
         conversation_session_id="team-session-1",
-        statuses=["committed"],
+        statuses=["proposed"],
     )
     assert len(items) == 1
     assert items[0]["kind"] == "summary"
@@ -2623,7 +2623,7 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
     assert memory_event["payload"]["source_event"]["payload"]["memory_item_ids"] == [items[0]["id"]]
 
 
-def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_path: Path):
+def test_team_mission_memory_pack_reuses_only_promoted_previous_task_memory(tmp_path: Path):
     db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
@@ -2657,6 +2657,17 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
     )
     compiled = db.compile_team_mission_memory(mission_id="mission-1", emit_event=False)
     assert compiled["memory_item_ids"]
+    compiled_item = compiled["items"][0]
+    promoted = db.conversation_memory.create_item(
+        conversation_session_id="team-session-1",
+        owner_kind="conversation",
+        owner_id="team-session-1",
+        kind="summary",
+        content=compiled_item["content"],
+        visibility={"kind": "conversation"},
+        provenance={"source_memory_ids": compiled["memory_item_ids"]},
+        status="committed",
+    )
 
     db.upsert_team_mission(
         mission_id="mission-2",
@@ -2673,7 +2684,7 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
     )
 
     item_ids = pack["memory_pack"]["item_ids"]
-    assert item_ids == compiled["memory_item_ids"]
+    assert item_ids == [promoted["memory_id"]]
     assert "team-session-1" == pack["conversation_session_id"]
     edges = db.list_team_mission_memory_edges(
         from_memory_id=item_ids[0],
@@ -2776,6 +2787,45 @@ def test_team_mission_memory_pack_dedupes_similar_items(tmp_path: Path):
 
     assert first["id"] != second["id"]
     assert len([item_id for item_id in pack["memory_pack"]["item_ids"] if item_id in {first["id"], second["id"]}]) == 1
+
+
+def test_team_mission_memory_pack_surfaces_explicit_conflicts(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Choose launch region",
+        mode="autonomous_mission",
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    items = []
+    for content in ("Launch region is Germany.", "Launch region is France."):
+        items.append(
+            db.upsert_team_mission_memory_item(
+                team_id="team-1",
+                mission_id="mission-1",
+                conversation_session_id="team-session-1",
+                task_id="task-1",
+                scope="conversation",
+                kind="decision",
+                content=content,
+                structured_payload={"conflict_key": "launch_region"},
+                source_run_ids=[f"run-{len(items) + 1}"],
+                visibility="team",
+                status="committed",
+            )
+        )
+
+    pack = db.build_team_mission_memory_pack(
+        mission_id="mission-1", objective="Choose launch region", limit=5
+    )["memory_pack"]
+
+    assert set(pack["item_ids"]) == {item["id"] for item in items}
+    assert pack["conflicts"][0]["conflict_key"] == "decision:launch_region"
+    assert set(pack["conflicts"][0]["memory_item_ids"]) == {
+        item["id"] for item in items
+    }
 
 
 def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path: Path):
@@ -3743,9 +3793,10 @@ def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_p
         """,
         (json.dumps({"duplicated": "payload"}), json.dumps({"duplicated": "source"}), "mission-1"),
     )
-    # Anchor to the pre-compaction schema (23). Using CURRENT_SCHEMA_VERSION - 1
-    # silently skips the migration whenever CURRENT_SCHEMA_VERSION advances past 24.
-    db._conn.execute("UPDATE schema_version SET version = ?", (23,))  # noqa: SLF001
+    # Re-open from immediately before modular migration 0039 and remove its
+    # ledger entry. schema_version alone is no longer the migration authority.
+    db._conn.execute("DELETE FROM applied_migrations WHERE version = 39")  # noqa: SLF001
+    db._conn.execute("UPDATE schema_version SET version = ?", (38,))  # noqa: SLF001
     db._conn.commit()  # noqa: SLF001
     db.close()
 

@@ -66,17 +66,6 @@ def main_transcript_message_decision(message: dict[str, Any]) -> dict[str, Any]:
             "activity_kind": activity_kind,
         }
 
-    team = _mapping(metadata.get("team_mission") or metadata.get("teamMission"))
-    if team.get("team_mission_conversation_mirror") or metadata.get(
-        "team_mission_conversation_mirror"
-    ):
-        return {
-            "include": False,
-            "reason": "legacy_conversation_mirror",
-            "transcript_activity_kind": "",
-            "activity_kind": activity_kind,
-        }
-
     return {
         "include": True,
         "reason": "legacy_no_activity_kind",

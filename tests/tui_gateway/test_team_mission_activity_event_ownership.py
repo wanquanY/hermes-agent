@@ -35,12 +35,33 @@ def test_activity_replay_queries_use_store_components(tmp_path: Path) -> None:
         )
 
         db.runs.append_event(
-            "team-session-1",
+            "team:mission:mission-1:events",
             {
                 "type": "mission.node.created",
                 "run_id": "run-1",
                 "activity_id": "mission:mission-1",
                 "payload": {"mission_id": "mission-1"},
+            },
+            activity_id="mission:mission-1",
+        )
+        db.runs.append_event(
+            "team:mission:mission-1:events",
+            {
+                "type": "mission.node.updated",
+                "activity_id": "mission:mission-1",
+                "payload": {"mission_id": "mission-1"},
+            },
+            activity_id="mission:mission-1",
+        )
+        # A legacy projection may carry the same mission activity id inside a
+        # node-local sequence domain. It must never participate in the mission
+        # cursor after the dedicated activity ledger is authoritative.
+        db.runs.append_event(
+            "team:mission-1:node:legacy",
+            {
+                "type": "mission.node.created",
+                "activity_id": "mission:mission-1",
+                "payload": {"mission_id": "mission-1", "legacy": True},
             },
             activity_id="mission:mission-1",
         )
@@ -56,7 +77,7 @@ def test_activity_replay_queries_use_store_components(tmp_path: Path) -> None:
         assert mission_id_for_activity("act-team_dispatch-1", db=db) == "mission-1"
         assert uses_event_log("mission:mission-1", db=db) is True
         assert mission_status_for_activity("mission:mission-1", db=db) == "running"
-        assert activity_last_seq("mission:mission-1", db=db) == 1
+        assert activity_last_seq("mission:mission-1", db=db) == 2
         assert activity_last_seq("chat:chat-session-1", db=db) == 1
     finally:
         db.close()

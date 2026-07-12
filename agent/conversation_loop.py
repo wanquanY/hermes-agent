@@ -36,7 +36,6 @@ from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
-from agent.tool_handoff import format_tool_handoff_response, pop_tool_handoff
 from agent.turn_message_buffer import TurnMessageBuffer
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
@@ -1434,6 +1433,19 @@ def run_conversation(
 
                 if env_var_enabled("HERMES_DUMP_REQUESTS"):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
+
+                # Dovie team reconciliation boundary: api_kwargs is now the
+                # final provider body (including actor-scoped system context,
+                # projected shared transcript, tools and model parameters).
+                # Capture it before the SDK call so failed requests are also
+                # auditable. The helper is a no-op outside Leader/member runs.
+                from agent.team_request_audit import dump_team_inference_request_audit
+                dump_team_inference_request_audit(
+                    agent,
+                    api_kwargs,
+                    api_call_count=api_call_count,
+                    retry_count=retry_count,
+                )
 
                 # Always prefer the streaming path — even without stream
                 # consumers.  Streaming gives us fine-grained health
@@ -4048,18 +4060,6 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
-
-                tool_handoff = pop_tool_handoff(agent)
-                if tool_handoff is not None and tool_handoff.get("end_current_turn") is True:
-                    _turn_exit_reason = f"tool_handoff({tool_handoff.get('kind') or 'unknown'})"
-                    final_response = format_tool_handoff_response(tool_handoff)
-                    messages.append({
-                        "role": "assistant",
-                        "content": final_response,
-                        "metadata": {"tool_handoff": tool_handoff},
-                    })
-                    agent._fire_stream_delta(final_response)
-                    break
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision

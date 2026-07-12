@@ -55,6 +55,29 @@ class CompressionLeaseService:
             lambda _conn: self._repository.release(lease_session_id, lease_holder)
         )
 
+    def refresh(
+        self,
+        session_id: str,
+        holder: str,
+        ttl_seconds: float = 300.0,
+    ) -> bool:
+        lease_session_id = str(session_id or "").strip()
+        lease_holder = str(holder or "").strip()
+        if not lease_session_id or not lease_holder:
+            return False
+        ttl = float(ttl_seconds)
+        if ttl <= 0:
+            raise ValueError("compression lease ttl_seconds must be positive")
+        now = float(self._clock())
+        return self._unit_of_work.execute(
+            lambda _conn: self._repository.refresh(
+                lease_session_id,
+                lease_holder,
+                now=now,
+                expires_at=now + ttl,
+            )
+        )
+
     def holder(self, session_id: str) -> str | None:
         lease_session_id = str(session_id or "").strip()
         if not lease_session_id:

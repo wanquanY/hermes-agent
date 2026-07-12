@@ -111,6 +111,7 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "message_seq_in_run": "1",
+                "client_message_id": "turn-1:assistant-segment:1",
             },
             status="completed",
         )
@@ -129,6 +130,8 @@ def test_reference_run_event_payloads_slim_message_complete_and_rehydrates_from_
     assert decoded["payload"]["summary"] == large_text[:500]
     assert "text" not in decoded["payload"]
     assert events[0]["payload"]["text"] == large_text
+    assert events[0]["payload"]["message_id"] == conversation_message_id
+    assert events[0]["payload"]["client_message_id"] == "turn-1:assistant-segment:1"
 
 
 def test_reference_run_event_payloads_slim_tool_complete_and_rehydrates_from_tool_events(tmp_path):

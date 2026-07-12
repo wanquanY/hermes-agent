@@ -78,5 +78,8 @@ class ParticipantService:
     def resolve_participant_id_for_run(self, *args: Any, **kwargs: Any) -> str:
         return self._repository.resolve_participant_id_for_run(*args, **kwargs)
 
+    def advance_actor_state(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._repository.advance_actor_state(*args, **kwargs)
+
 
 __all__ = ["ParticipantService"]

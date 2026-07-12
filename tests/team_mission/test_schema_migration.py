@@ -15,8 +15,6 @@ TEAM_MISSION_TABLES = {
     "team_mission_events",
     "team_mission_artifacts",
     "team_mission_deliverables",
-    "team_mission_memory_items",
-    "team_mission_memory_edges",
 }
 
 
@@ -34,11 +32,6 @@ TEAM_MISSION_INDEXES = {
     "idx_team_mission_artifacts_mission",
     "idx_team_mission_deliverables_mission",
     "idx_team_mission_deliverables_run",
-    "idx_team_mission_memory_items_mission",
-    "idx_team_mission_memory_items_conversation",
-    "idx_team_mission_memory_items_team",
-    "idx_team_mission_memory_edges_from",
-    "idx_team_mission_memory_edges_to",
 }
 
 

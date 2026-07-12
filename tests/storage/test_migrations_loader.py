@@ -105,3 +105,55 @@ def test_runner_stops_on_apply_error_without_bumping_version(tmp_path):
 
     assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
 
+
+def test_runner_tracks_gaps_so_later_migration_does_not_consume_frozen_version(tmp_path):
+    _write_migration(
+        tmp_path,
+        "0001_baseline.py",
+        """
+        version = 1
+        description = "baseline"
+
+        def apply(cursor):
+            cursor.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        """,
+    )
+    _write_migration(
+        tmp_path,
+        "0002_parked.py",
+        """
+        version = 2
+        description = "parked"
+
+        class FrozenMigrationError(RuntimeError):
+            pass
+
+        def apply(cursor):
+            raise FrozenMigrationError("not ready")
+        """,
+    )
+    _write_migration(
+        tmp_path,
+        "0003_later.py",
+        """
+        version = 3
+        description = "later"
+
+        def apply(cursor):
+            cursor.execute("CREATE TABLE later_landed (id INTEGER PRIMARY KEY)")
+        """,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+
+    MigrationRunner(conn.cursor(), migrations_dir=tmp_path).run_all()
+
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+    assert {
+        row[0] for row in conn.execute("SELECT version FROM applied_migrations")
+    } == {1, 3}
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'later_landed'"
+    ).fetchone() is not None

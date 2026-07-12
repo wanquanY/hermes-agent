@@ -372,7 +372,7 @@ def test_append_run_event_terminal_prunes_message_delta_rows(tmp_path: Path):
     assert archive["last_seq"] == 2
 
 
-def test_append_run_event_preserves_team_mission_final_deliverable_mirror_delta(tmp_path: Path):
+def test_append_run_event_does_not_special_case_retired_mirror_delta(tmp_path: Path):
     db = open_cli_session_store(tmp_path / "state.db")
     payload = {
         "mode": "append",
@@ -409,9 +409,9 @@ def test_append_run_event_preserves_team_mission_final_deliverable_mirror_delta(
         "SELECT reason, event_count, first_seq, last_seq FROM run_event_archives"
     ).fetchone()
 
-    assert [event["type"] for event in events] == ["message.delta", "message.complete"]
-    assert events[0]["payload"]["text"] == "final report"
-    assert archive is None
+    assert [event["type"] for event in events] == ["message.complete"]
+    assert archive["reason"] == "terminal_run_stream_events"
+    assert archive["event_count"] == 1
 
 
 def test_reconcile_heals_stuck_running_regular_session_with_terminal_run(tmp_path: Path):

@@ -22,7 +22,13 @@ def _mission_id_from_activity_id(activity_id: str) -> str:
 
 def _latest_team_mission_event_seq(db: Any, mission_id: str) -> int:
     try:
-        return db.team_mission_audit.latest_seq(mission_id)
+        events = db.runs.list_events_by_mission_activity(
+            mission_id,
+            after_seq=0,
+            limit=1,
+            reverse=True,
+        )
+        return max((int(event.get("seq") or 0) for event in events), default=0)
     except Exception:
         return 0
 

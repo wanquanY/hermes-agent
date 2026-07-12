@@ -533,6 +533,30 @@ def _on_run_event_appended(db: Any, event: dict[str, Any]) -> None:
         mission_id = _team_activity_events.mission_id_for_run_event(event, db=db)
     if not mission_id:
         return
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    activity_id = str(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+        or ""
+    ).strip()
+    session_id = str(
+        event.get("conversation_session_id")
+        or event.get("session_id")
+        or ""
+    ).strip()
+    is_transient = event.get("transient") is True
+    is_canonical_activity_row = bool(
+        activity_id == f"mission:{mission_id}"
+        and session_id == f"team:mission:{mission_id}:events"
+    )
+    # Persisted source rows are projected immediately into the mission's
+    # canonical activity ledger. Delivering both rows produces duplicates and
+    # exposes node-local seq values to a mission-scoped cursor. Transient deltas
+    # have no ledger row yet, so they remain eligible for direct live delivery.
+    if not is_transient and not is_canonical_activity_row:
+        return
     _team_activity_terminal_log(
         "run-event-appended",
         mission_id=mission_id,
@@ -2125,59 +2149,6 @@ def record_event(
                     if not scheduler_mission_id:
                         scheduler_mission_id = str(binding.get("mission_id") or "").strip()
                 if scheduler_mission_id:
-                    try:
-                        from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
-
-                        mirrored = mirror_event_to_conversation(
-                            db,
-                            mission_id=scheduler_mission_id,
-                            binding=binding or None,
-                            event=event_for_stream,
-                            source="runtime_event",
-                        )
-                        if mirrored:
-                            mirror_stable = _conversation_session_id(mirrored)
-                            mirror_subscribers = set()
-                            with _lock:
-                                if mirror_stable:
-                                    mirror_session_key = _memory_session_key(mirror_stable, db)
-                                    _events_by_session[mirror_session_key].append(mirrored)
-                                    _last_seq_by_session[mirror_session_key] = max(
-                                        int(_last_seq_by_session.get(mirror_session_key) or 0),
-                                        int(mirrored.get("seq") or 0),
-                                    )
-                                    for subscription_id in list(_subscription_ids_by_session.get(mirror_stable, set())):
-                                        subscription = _subscriptions_by_id.get(subscription_id)
-                                        transport = subscription.get("transport") if isinstance(subscription, dict) else None
-                                        if (
-                                            transport is not None
-                                            and isinstance(subscription, dict)
-                                            and _session_subscription_matches_event(subscription, mirrored)
-                                        ):
-                                            _remember_subscription_run(subscription, mirrored)
-                                            mirror_subscribers.add(transport)
-                                    mirror_subscribers.update(_subscribers_by_session.get(mirror_stable, set()))
-                            for transport in mirror_subscribers:
-                                if _write_event(transport, mirrored):
-                                    remember_transport_delivery(transport, mirrored)
-                    except Exception as _mirror_exc:
-                        # S9: was logger.debug — silent degradation. The
-                        # mirror-to-conversation failure means the Team
-                        # Mission conversation lane lost an event; emit ERROR
-                        # with context (event_type, session_id, run_id,
-                        # mission_id) so it is visible and counted.
-                        logger.error(
-                            "[dovie-run-control] team-mission-mirror-failed "
-                            "%s",
-                            _json_for_log({
-                                "event_type": event_type,
-                                "session_id": stable,
-                                "run_id": run_id,
-                                "mission_id": scheduler_mission_id,
-                                "error": str(_mirror_exc),
-                            }),
-                            exc_info=True,
-                        )
                     if (
                         mission_event
                         and _team_mission_runtime_event_allows_conversation_status(

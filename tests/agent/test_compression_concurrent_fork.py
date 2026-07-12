@@ -173,6 +173,32 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     agent.context_compressor.compress.assert_not_called()
 
 
+def test_slow_compression_refreshes_lease_until_rotation_finishes(tmp_path: Path) -> None:
+    """A summarizer slower than the original TTL must retain exclusivity."""
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
+    parent_sid = "SLOW_SUMMARY_SESSION"
+    db.sessions.create(parent_sid, source="discord")
+    winner = _build_agent_with_db(db, parent_sid)
+    loser = _build_agent_with_db(db, parent_sid)
+    for agent in (winner, loser):
+        agent._compression_lock_ttl_seconds = 0.12
+        agent._compression_lock_refresh_interval = 0.03
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    thread = threading.Thread(
+        target=lambda: winner._compress_context(messages, "sys", approx_tokens=120_000)
+    )
+    thread.start()
+    time.sleep(0.16)  # past the initial lease TTL, while winner still summarizes
+    loser._compress_context(messages, "sys", approx_tokens=120_000)
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert _count_children(db, parent_sid) == 1
+    assert winner.session_id != parent_sid
+    assert loser.session_id == parent_sid
+
+
 class _NoLeaseSubsystemDB:
     """Wrap a real store while omitting the required lease component."""
 

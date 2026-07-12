@@ -52,6 +52,41 @@ def _task_id_from_node_and_binding(node: Dict[str, Any] | None, binding: Dict[st
     return _task_id_from_metadata(node_metadata) or _task_id_from_metadata(binding_metadata)
 
 
+def _conversation_item_as_team_memory(item: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(item, dict) or not item:
+        return {}
+    payload = item.get("structured_payload") if isinstance(item.get("structured_payload"), dict) else {}
+    legacy = payload.get("team_mission") if isinstance(payload.get("team_mission"), dict) else {}
+    provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+    visibility = item.get("visibility") if isinstance(item.get("visibility"), dict) else {}
+    return {
+        "id": text(item.get("memory_id")),
+        "memory_id": text(item.get("memory_id")),
+        "team_id": text(legacy.get("team_id")),
+        "mission_id": text(legacy.get("mission_id") or item.get("activity_id")).removeprefix("mission:"),
+        "conversation_session_id": text(item.get("conversation_session_id")),
+        "task_id": text(legacy.get("task_id")),
+        "scope": text(legacy.get("scope")) or text(item.get("owner_kind")),
+        "kind": text(item.get("kind")),
+        "content": text(item.get("content")),
+        "structured_payload": payload.get("payload") if isinstance(payload.get("payload"), dict) else payload,
+        "source_node_ids": list(provenance.get("source_node_ids") or []),
+        "source_run_ids": list(provenance.get("source_run_ids") or []),
+        "artifact_refs": list(payload.get("artifact_refs") or []),
+        "workspace_refs": list(payload.get("workspace_refs") or []),
+        "confidence": float(item.get("confidence") or 0),
+        "visibility": text(
+            legacy.get("visibility")
+            or ("team" if visibility.get("kind") in {"conversation", "activity"} else visibility.get("kind"))
+        ),
+        "status": text(item.get("status")),
+        "created_at": float(item.get("created_at") or 0),
+        "updated_at": float(item.get("updated_at") or 0),
+        "invalidated_at": item.get("invalidated_at"),
+        "revision": int(item.get("revision") or 0),
+    }
+
+
 def team_mission_memory_context(db: Any, mission: Dict[str, Any]) -> Dict[str, Any]:
     metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     conversation_session_id = text(
@@ -62,8 +97,6 @@ def team_mission_memory_context(db: Any, mission: Dict[str, Any]) -> Dict[str, A
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or mission.get("leader_session_id")
-        or mission.get("team_id")
-        or mission.get("mission_id")
     )
     active_task = metadata.get("active_task") if isinstance(metadata.get("active_task"), dict) else {}
     task_id = text(
@@ -84,7 +117,7 @@ def team_mission_memory_context(db: Any, mission: Dict[str, Any]) -> Dict[str, A
             "workspace_path": workspace_path,
         })
     return {
-        "team_id": text(mission.get("team_id") or conversation_session_id or mission.get("mission_id")),
+        "team_id": text(mission.get("team_id")),
         "mission_id": text(mission.get("mission_id")),
         "conversation_session_id": conversation_session_id,
         "task_id": task_id,
@@ -139,72 +172,75 @@ def upsert_team_mission_memory_item(
         ",".join(source_nodes),
         ",".join(source_runs),
     )
-    now = time.time()
-    created = float(created_at or now)
-    updated = float(updated_at or now)
-
-    def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-        existing = conn.execute(
-            "SELECT created_at FROM team_mission_memory_items WHERE id = ?",
-            (normalized_id,),
-        ).fetchone()
-        conn.execute(
-            """
-            INSERT INTO team_mission_memory_items (
-                id, team_id, mission_id, conversation_session_id, task_id,
-                scope, kind, content, structured_payload_json,
-                source_node_ids_json, source_run_ids_json, artifact_refs_json,
-                workspace_refs_json, confidence, visibility, status,
-                created_at, updated_at, invalidated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                team_id = excluded.team_id,
-                mission_id = excluded.mission_id,
-                conversation_session_id = excluded.conversation_session_id,
-                task_id = excluded.task_id,
-                scope = excluded.scope,
-                kind = excluded.kind,
-                content = excluded.content,
-                structured_payload_json = excluded.structured_payload_json,
-                source_node_ids_json = excluded.source_node_ids_json,
-                source_run_ids_json = excluded.source_run_ids_json,
-                artifact_refs_json = excluded.artifact_refs_json,
-                workspace_refs_json = excluded.workspace_refs_json,
-                confidence = excluded.confidence,
-                visibility = excluded.visibility,
-                status = excluded.status,
-                updated_at = excluded.updated_at,
-                invalidated_at = excluded.invalidated_at
-            """,
-            (
-                normalized_id,
-                text(team_id),
-                mission_id,
-                conversation_session_id,
-                text(task_id),
-                text(scope) or "mission_task",
-                text(kind) or "summary",
-                content,
-                _json_dumps(structured_payload or {}),
-                _json_dumps(source_nodes),
-                _json_dumps(source_runs),
-                _json_dumps(artifacts),
-                _json_dumps(workspace_refs or []),
-                max(0.0, min(float(confidence or 0), 1.0)),
-                text(visibility) or "team",
-                text(status) or MEMORY_COMMITTED_STATUS,
-                float(_row_value(existing, "created_at", created) or created),
-                updated,
-                invalidated_at,
-            ),
+    memory = db.conversation_memory
+    normalized_scope = text(scope) or "mission_task"
+    if normalized_scope in {"conversation", "team"}:
+        owner_kind, owner_id, activity_id, node_id = (
+            "conversation", conversation_session_id, "", ""
         )
-        return db.team_mission_rows.memory_item_from_row(conn.execute(
-            "SELECT * FROM team_mission_memory_items WHERE id = ?",
-            (normalized_id,),
-        ).fetchone()) or {}
-
-    return db._execute_write(_do)
+        visibility_policy = {"kind": "conversation"}
+    elif normalized_scope == "node" and source_nodes:
+        owner_kind, owner_id, activity_id, node_id = (
+            "node", source_nodes[0], f"mission:{mission_id}", source_nodes[0]
+        )
+        visibility_policy = {
+            "kind": "node", "activity_id": activity_id, "node_id": node_id
+        }
+    else:
+        owner_kind, owner_id, activity_id, node_id = (
+            "activity", f"mission:{mission_id}", f"mission:{mission_id}", ""
+        )
+        visibility_policy = {"kind": "activity", "activity_id": activity_id}
+    normalized_status = text(status) or MEMORY_COMMITTED_STATUS
+    if normalized_status == "deleted":
+        normalized_status = "invalidated"
+    payload = {
+        "payload": structured_payload or {},
+        "artifact_refs": artifacts,
+        "workspace_refs": list(workspace_refs or []),
+        "team_mission": {
+            "team_id": text(team_id),
+            "mission_id": mission_id,
+            "task_id": text(task_id),
+            "scope": normalized_scope,
+            "visibility": text(visibility) or "team",
+        },
+    }
+    existing = memory.get_item(normalized_id)
+    if existing:
+        result = memory.update_item(
+            normalized_id,
+            expected_revision=int(existing.get("revision") or 0),
+            content=content,
+            structured_payload=payload,
+            visibility=visibility_policy,
+            confidence=max(0.0, min(float(confidence or 0), 1.0)),
+            status=normalized_status,
+        )
+    else:
+        result = memory.create_item(
+            memory_id=normalized_id,
+            conversation_session_id=conversation_session_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            activity_id=activity_id,
+            node_id=node_id,
+            kind=text(kind) if text(kind) in {
+                "fact", "preference", "decision", "commitment", "constraint",
+                "risk", "open_question", "artifact", "summary",
+            } else "fact",
+            content=content,
+            structured_payload=payload,
+            visibility=visibility_policy,
+            provenance={
+                "source_node_ids": source_nodes,
+                "source_run_ids": source_runs,
+            },
+            confidence=max(0.0, min(float(confidence or 0), 1.0)),
+            status=normalized_status,
+            valid_from=created_at,
+        )
+    return _conversation_item_as_team_memory(result)
 
 
 def list_team_mission_memory_items(
@@ -220,54 +256,31 @@ def list_team_mission_memory_items(
     include_deleted: bool = False,
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
-    if text(mission_id):
-        clauses.append("mission_id = ?")
-        params.append(text(mission_id))
-    if text(conversation_session_id):
-        clauses.append("conversation_session_id = ?")
-        params.append(text(conversation_session_id))
-    if text(team_id):
-        clauses.append("team_id = ?")
-        params.append(text(team_id))
-    if text(task_id):
-        clauses.append("task_id = ?")
-        params.append(text(task_id))
-    normalized_kinds = dedupe_text(kinds or [])
-    if normalized_kinds:
-        clauses.append(f"kind IN ({','.join('?' for _ in normalized_kinds)})")
-        params.extend(normalized_kinds)
     normalized_statuses = dedupe_text(statuses or [])
-    if normalized_statuses:
-        clauses.append(f"status IN ({','.join('?' for _ in normalized_statuses)})")
-        params.extend(normalized_statuses)
-    elif not include_deleted:
-        clauses.append("status != ?")
-        params.append("deleted")
-    normalized_visibility = dedupe_text(visibility or [])
-    if normalized_visibility:
-        clauses.append(f"visibility IN ({','.join('?' for _ in normalized_visibility)})")
-        params.extend(normalized_visibility)
-    where = " AND ".join(clauses) if clauses else "1 = 1"
-    bounded_limit = max(1, min(int(limit or 200), 1000))
-    params.append(bounded_limit)
-    with db._lock:
-        rows = db._conn.execute(
-            f"""
-            SELECT *
-            FROM team_mission_memory_items
-            WHERE {where}
-            ORDER BY updated_at DESC, created_at DESC, id ASC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
+    if not normalized_statuses and not include_deleted:
+        normalized_statuses = ["proposed", "committed", "superseded"]
+    resolved_conversation = text(conversation_session_id)
+    if text(mission_id) and not resolved_conversation:
+        graph = db.team_mission_graphs.get_team_mission_graph(text(mission_id))
+        mission = graph.get("mission") if isinstance(graph, dict) else {}
+        if isinstance(mission, dict):
+            resolved_conversation = team_mission_memory_context(db, mission)[
+                "conversation_session_id"
+            ]
+    rows = db.conversation_memory.list_items(
+        conversation_session_id=resolved_conversation,
+        kinds=dedupe_text(kinds or []),
+        statuses=normalized_statuses,
+        limit=limit,
+    )
+    items = [_conversation_item_as_team_memory(row) for row in rows]
     return [
-        item for item in (
-            db.team_mission_rows.memory_item_from_row(row)
-            for row in rows
-        ) if item is not None
+        item for item in items
+        if item
+        and (not text(mission_id) or item.get("mission_id") == text(mission_id))
+        and (not text(team_id) or item.get("team_id") == text(team_id))
+        and (not text(task_id) or item.get("task_id") == text(task_id))
+        and (not visibility or item.get("visibility") in dedupe_text(visibility))
     ]
 
 
@@ -284,39 +297,30 @@ def update_team_mission_memory_item(
     memory_id = text(memory_id)
     if not memory_id:
         return {}
-    with db._lock:
-        row = db._conn.execute(
-            "SELECT * FROM team_mission_memory_items WHERE id = ?",
-            (memory_id,),
-        ).fetchone()
-    existing = db.team_mission_rows.memory_item_from_row(row)
+    existing_raw = db.conversation_memory.get_item(memory_id)
+    existing = _conversation_item_as_team_memory(existing_raw)
     if not existing:
         return {}
     next_status = text(status) or existing["status"]
     invalidated_at = existing.get("invalidated_at")
     if next_status in {"invalidated", "deleted"} and not invalidated_at:
         invalidated_at = time.time()
-    return upsert_team_mission_memory_item(
-        db,
-        memory_id=memory_id,
-        team_id=existing["team_id"],
-        mission_id=existing["mission_id"],
-        conversation_session_id=existing["conversation_session_id"],
-        task_id=existing.get("task_id") or "",
-        scope=existing["scope"],
-        kind=existing["kind"],
-        content=content if content is not None else existing["content"],
-        structured_payload=structured_payload if structured_payload is not None else dict(existing.get("structured_payload") or {}),
-        source_node_ids=list(existing.get("source_node_ids") or []),
-        source_run_ids=list(existing.get("source_run_ids") or []),
-        artifact_refs=list(existing.get("artifact_refs") or []),
-        workspace_refs=list(existing.get("workspace_refs") or []),
-        confidence=confidence if confidence is not None else float(existing.get("confidence") or 0),
-        visibility=visibility if visibility is not None else existing["visibility"],
-        status=next_status,
-        created_at=float(existing.get("created_at") or time.time()),
-        invalidated_at=invalidated_at,
+    next_visibility = existing_raw.get("visibility") or {}
+    if visibility is not None:
+        next_visibility = {"kind": "conversation"} if visibility == "team" else next_visibility
+    updated = db.conversation_memory.update_item(
+        memory_id,
+        expected_revision=int(existing_raw.get("revision") or 0),
+        content=content,
+        structured_payload=(
+            structured_payload if structured_payload is not None
+            else existing_raw.get("structured_payload") or {}
+        ),
+        visibility=next_visibility,
+        status="invalidated" if next_status == "deleted" else next_status,
+        confidence=confidence,
     )
+    return _conversation_item_as_team_memory(updated)
 
 
 def delete_team_mission_memory_item(db: Any, memory_id: str) -> Dict[str, Any]:
@@ -346,34 +350,21 @@ def upsert_team_mission_memory_edge(
     )
     created = float(created_at or time.time())
 
-    def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
-        conn.execute(
-            """
-            INSERT INTO team_mission_memory_edges (
-                id, from_memory_id, to_memory_id, relation, metadata_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                from_memory_id = excluded.from_memory_id,
-                to_memory_id = excluded.to_memory_id,
-                relation = excluded.relation,
-                metadata_json = excluded.metadata_json
-            """,
-            (
-                normalized_edge_id,
-                from_memory_id,
-                text(to_memory_id),
-                relation,
-                _json_dumps(metadata or {}),
-                created,
-            ),
-        )
-        return db.team_mission_rows.memory_edge_from_row(conn.execute(
-            "SELECT * FROM team_mission_memory_edges WHERE id = ?",
-            (normalized_edge_id,),
-        ).fetchone()) or {}
-
-    return db._execute_write(_do)
+    edge = db.conversation_memory.upsert_edge(
+        edge_id=normalized_edge_id,
+        from_memory_id=from_memory_id,
+        to_memory_id=text(to_memory_id),
+        relation=relation,
+        metadata=metadata or {},
+    )
+    return {
+        "id": edge.get("edge_id"),
+        "from_memory_id": edge.get("from_memory_id"),
+        "to_memory_id": edge.get("to_memory_id") or "",
+        "relation": edge.get("relation"),
+        "metadata": edge.get("metadata") or {},
+        "created_at": edge.get("created_at") or created,
+    }
 
 
 def list_team_mission_memory_edges(
@@ -384,35 +375,21 @@ def list_team_mission_memory_edges(
     relation: str = "",
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
-    if text(from_memory_id):
-        clauses.append("from_memory_id = ?")
-        params.append(text(from_memory_id))
-    if text(to_memory_id):
-        clauses.append("to_memory_id = ?")
-        params.append(text(to_memory_id))
-    if text(relation):
-        clauses.append("relation = ?")
-        params.append(text(relation))
-    where = " AND ".join(clauses) if clauses else "1 = 1"
-    params.append(max(1, min(int(limit or 200), 1000)))
-    with db._lock:
-        rows = db._conn.execute(
-            f"""
-            SELECT *
-            FROM team_mission_memory_edges
-            WHERE {where}
-            ORDER BY created_at DESC, id ASC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
     return [
-        edge for edge in (
-            db.team_mission_rows.memory_edge_from_row(row)
-            for row in rows
-        ) if edge is not None
+        {
+            "id": edge.get("edge_id"),
+            "from_memory_id": edge.get("from_memory_id"),
+            "to_memory_id": edge.get("to_memory_id") or "",
+            "relation": edge.get("relation"),
+            "metadata": edge.get("metadata") or {},
+            "created_at": edge.get("created_at") or 0,
+        }
+        for edge in db.conversation_memory.list_edges(
+            from_memory_id=from_memory_id,
+            to_memory_id=to_memory_id,
+            relation=relation,
+            limit=limit,
+        )
     ]
 
 
@@ -551,7 +528,7 @@ def compile_memory_for_binding(
         workspace_refs=list(context.get("workspace_refs") or []),
         confidence=0.82 if summary else 0.65,
         visibility="team",
-        status=MEMORY_COMMITTED_STATUS,
+        status="proposed",
     )
     if summary_item:
         items.append(summary_item)
@@ -574,7 +551,7 @@ def compile_memory_for_binding(
             workspace_refs=list(context.get("workspace_refs") or []),
             confidence=0.9,
             visibility="team",
-            status=MEMORY_COMMITTED_STATUS,
+            status="proposed",
         )
         if risk_item:
             items.append(risk_item)
@@ -595,7 +572,7 @@ def compile_memory_for_binding(
             workspace_refs=list(context.get("workspace_refs") or []),
             confidence=0.78,
             visibility="team",
-            status=MEMORY_COMMITTED_STATUS,
+            status="proposed",
         )
         if open_item:
             items.append(open_item)
@@ -619,41 +596,67 @@ def compile_memory_for_binding(
             workspace_refs=list(context.get("workspace_refs") or []),
             confidence=0.95,
             visibility="team",
-            status=MEMORY_COMMITTED_STATUS,
+            status="proposed",
         )
         if artifact_item:
             items.append(artifact_item)
     return items
 
 
-def _dedupe_memory_items_by_similarity(items: List[Dict[str, Any]], *, threshold: float = 0.8) -> List[Dict[str, Any]]:
+def _memory_conflict_key(item: Dict[str, Any]) -> str:
+    payload = item.get("structured_payload") if isinstance(item.get("structured_payload"), dict) else {}
+    subject = text(
+        payload.get("conflict_key")
+        or payload.get("conflictKey")
+        or payload.get("subject")
+        or payload.get("key")
+    )
+    return f"{text(item.get('kind'))}:{subject}" if subject else ""
+
+
+def _resolve_memory_candidates(
+    items: List[Dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Remove exact duplicates and surface contradictory facts explicitly.
+
+    Similar wording is not evidence that two memories are equivalent. Only an
+    exact normalized identity is deduplicated; candidates sharing an explicit
+    semantic conflict key with different content remain selected and form a
+    conflict set for the model and UI.
+    """
     kept: list[dict[str, Any]] = []
-    kept_tokens: list[set[str]] = []
+    exact_identities: set[str] = set()
+    by_conflict_key: dict[str, list[dict[str, Any]]] = {}
     for item in items:
-        tokens = tokenize(
-            " ".join([
-                text(item.get("kind")),
-                text(item.get("content")),
-                _json_dumps(item.get("structured_payload") or {}),
-            ])
+        identity = _json_dumps(
+            {
+                "kind": text(item.get("kind")),
+                "content": " ".join(text(item.get("content")).split()).casefold(),
+                "structured_payload": item.get("structured_payload") or {},
+            }
         )
-        if not tokens:
-            kept.append(item)
-            kept_tokens.append(set())
+        if identity in exact_identities:
             continue
-        duplicate = False
-        for existing in kept_tokens:
-            if not existing:
-                continue
-            similarity = len(tokens & existing) / max(1, len(tokens | existing))
-            if similarity >= threshold:
-                duplicate = True
-                break
-        if duplicate:
-            continue
+        exact_identities.add(identity)
         kept.append(item)
-        kept_tokens.append(tokens)
-    return kept
+        conflict_key = _memory_conflict_key(item)
+        if conflict_key:
+            by_conflict_key.setdefault(conflict_key, []).append(item)
+    conflicts: list[dict[str, Any]] = []
+    for conflict_key, group in sorted(by_conflict_key.items()):
+        distinct_contents = {" ".join(text(item.get("content")).split()).casefold() for item in group}
+        if len(distinct_contents) <= 1:
+            continue
+        conflicts.append(
+            {
+                "conflict_key": conflict_key,
+                "memory_item_ids": [text(item.get("id")) for item in group if text(item.get("id"))],
+                "candidates": group,
+            }
+        )
+    return kept[: max(1, min(int(limit or 8), 50))], conflicts
 
 
 def compile_team_mission_memory(
@@ -787,6 +790,28 @@ def select_team_mission_memory_items(
     include_team_scope: bool = False,
     preferred_node_ids: set[str] | None = None,
 ) -> List[Dict[str, Any]]:
+    selected, _ = resolve_team_mission_memory_items(
+        db,
+        mission=mission,
+        objective=objective,
+        limit=limit,
+        visibility=visibility,
+        include_team_scope=include_team_scope,
+        preferred_node_ids=preferred_node_ids,
+    )
+    return selected
+
+
+def resolve_team_mission_memory_items(
+    db: Any,
+    *,
+    mission: Dict[str, Any],
+    objective: str,
+    limit: int,
+    visibility: List[str],
+    include_team_scope: bool = False,
+    preferred_node_ids: set[str] | None = None,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     context = team_mission_memory_context(db, mission)
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -815,8 +840,7 @@ def select_team_mission_memory_items(
         ),
         reverse=True,
     )
-    deduped = _dedupe_memory_items_by_similarity(ranked)
-    return deduped[: max(1, min(int(limit or 8), 50))]
+    return _resolve_memory_candidates(ranked, limit=limit)
 
 
 def record_team_mission_memory_references(
@@ -855,7 +879,7 @@ def build_team_mission_memory_pack(
         return {}
     context = team_mission_memory_context(db, mission)
     objective_text = text(objective) or text(mission.get("objective") or mission.get("title"))
-    items = select_team_mission_memory_items(
+    items, conflicts = resolve_team_mission_memory_items(
         db,
         mission=mission,
         objective=objective_text,
@@ -894,7 +918,7 @@ def build_team_mission_memory_pack(
         "memory_pack": {
             "items": items,
             "item_ids": [item["id"] for item in items if item.get("id")],
-            "conflicts": [],
+            "conflicts": conflicts,
             "artifact_refs": artifact_refs,
         },
     }
@@ -927,7 +951,7 @@ def build_team_mission_memory_slice(
     role = text(node_metadata.get("role") or node.get("kind"))
     visibility = ["team", "leader_only"] if role in {"leader", "root"} else list(MEMORY_VISIBLE_TO_WORKER)
     objective_text = text(objective) or text(node.get("objective") or node.get("title") or mission.get("objective"))
-    items = select_team_mission_memory_items(
+    items, conflicts = resolve_team_mission_memory_items(
         db,
         mission=mission,
         objective=objective_text,
@@ -949,6 +973,7 @@ def build_team_mission_memory_slice(
             "node_id": text(node_id),
             "objective": objective_text,
             "dependency_node_ids": sorted(dep for dep in dependency_node_ids if dep),
+            "conflicts": conflicts,
             "reference_kind": "worker_memory_slice",
         },
     )

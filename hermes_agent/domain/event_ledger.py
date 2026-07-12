@@ -815,12 +815,13 @@ class EventLedger:
             return []
         bounded_limit = max(1, min(int(limit or 2000), 5000))
         clauses = [
-            "(activity_id = ? OR activity_id LIKE ?)",
+            "session_id = ?",
+            "activity_id = ?",
             "seq > ?",
         ]
         params: list[Any] = [
+            f"team:mission:{stable_mission}:events",
             f"mission:{stable_mission}",
-            f"act-node:{stable_mission}:%",
             int(after_seq or 0),
         ]
         if not include_internal:

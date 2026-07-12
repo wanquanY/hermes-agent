@@ -178,36 +178,6 @@ CREATE TABLE IF NOT EXISTS team_mission_results (
     updated_at REAL NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS team_mission_memory_items (
-    id TEXT PRIMARY KEY,
-    team_id TEXT NOT NULL,
-    mission_id TEXT NOT NULL REFERENCES team_missions(mission_id) ON DELETE CASCADE,
-    conversation_session_id TEXT NOT NULL,
-    task_id TEXT,
-    scope TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    content TEXT NOT NULL,
-    structured_payload_json TEXT,
-    source_node_ids_json TEXT,
-    source_run_ids_json TEXT,
-    artifact_refs_json TEXT,
-    workspace_refs_json TEXT,
-    confidence REAL NOT NULL,
-    visibility TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    invalidated_at REAL
-);
-
-CREATE TABLE IF NOT EXISTS team_mission_memory_edges (
-    id TEXT PRIMARY KEY,
-    from_memory_id TEXT NOT NULL,
-    to_memory_id TEXT,
-    relation TEXT NOT NULL,
-    metadata_json TEXT,
-    created_at REAL NOT NULL
-);
 """
 
 
@@ -246,16 +216,6 @@ CREATE INDEX IF NOT EXISTS idx_team_mission_deliverables_run
     ON team_mission_deliverables(run_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_mission_results_mission
     ON team_mission_results(mission_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_mission
-    ON team_mission_memory_items(mission_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_conversation
-    ON team_mission_memory_items(conversation_session_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_items_team
-    ON team_mission_memory_items(team_id, scope, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_from
-    ON team_mission_memory_edges(from_memory_id, relation, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_team_mission_memory_edges_to
-    ON team_mission_memory_edges(to_memory_id, relation, created_at DESC);
 """
 
 

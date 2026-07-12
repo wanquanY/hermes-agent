@@ -35,6 +35,26 @@ def test_projection_uses_durable_conversation_identity_for_session_fields() -> N
     assert projected["payload"]["execution_session_id"] == "runtime-session-1"
 
 
+def test_projection_carries_client_message_identity_in_text_stream_contract() -> None:
+    projected = _project(
+        {
+            "type": "message.delta",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "payload": {
+                "delta": "hello",
+                "mode": "append",
+                "offset": 0,
+                "client_message_id": "turn-1:assistant-segment:0",
+            },
+        }
+    )
+
+    assert projected["payload"]["text_stream"]["client_message_id"] == (
+        "turn-1:assistant-segment:0"
+    )
+
+
 def test_projection_does_not_infer_execution_identity_from_session_id() -> None:
     projected = _project(
         {

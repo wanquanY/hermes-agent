@@ -70,10 +70,10 @@ class TeamMissionEventMixin:
             elif status == "interrupted":
                 next_status = "interrupted"
             elif status in {"failed", "error"}:
-                if (
-                    self.team_mission_run_has_deliverable(run_id)
-                    or self._team_mission_run_has_deliverable_text(run_id, max_seq=_event_seq(event))
-                ):
+                # A failed run's streamed prose is not an authoritative
+                # deliverable. Only the explicit handoff contract can turn an
+                # error terminal into a completed node.
+                if self.team_mission_run_has_deliverable(run_id):
                     next_status = "completed"
                 else:
                     next_status = "failed"
@@ -337,9 +337,7 @@ class TeamMissionEventMixin:
 
         Single implementation shared by both the explicit
         ``append_team_mission_run_event`` path and the write-time hook in
-        ``append_run_event`` (directly-delivered node events). Callers MUST set
-        ``self._team_mission_projecting`` for the duration so the conversation
-        mirror's nested ``append_run_event`` does not re-enter the hook.
+        ``append_run_event`` (directly-delivered node events).
         """
         mission_event = _event_log.append_team_mission_runtime_event(
             self,
@@ -349,16 +347,6 @@ class TeamMissionEventMixin:
             identity=identity,
         )
         self.reduce_team_mission_run_event(run_id=run_id, event=source_event)
-        try:
-            _mirror_team_mission_event(
-                self,
-                mission_id=mission_id,
-                binding=binding,
-                event=source_event,
-                source="team_mission_run_event",
-            )
-        except Exception:
-            pass
         if (
             isinstance(mission_event, dict)
             and not mission_event.get("_persistence_disposition")

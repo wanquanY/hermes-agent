@@ -212,3 +212,42 @@ def test_delete_participant_removes_row(tmp_path: Path) -> None:
     assert db.participants.delete_participant("conv-1", "member:m1")
     assert db.participants.get_participant("conv-1", "member:m1") is None
     assert not db.participants.delete_participant("conv-1", "member:m1")
+
+
+def test_participant_actor_state_has_isolated_namespace_and_cas_cursor(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first = db.participants.ensure_participant(
+        "conv-1",
+        participant_id="member:m1",
+        role="member",
+    )
+    second = db.participants.ensure_participant(
+        "conv-1",
+        participant_id="member:m2",
+        role="member",
+    )
+
+    assert first["memory_namespace"] == "conversation:conv-1/participant:member:m1"
+    assert second["memory_namespace"] == "conversation:conv-1/participant:member:m2"
+    assert first["memory_namespace"] != second["memory_namespace"]
+
+    advanced = db.participants.advance_actor_state(
+        "conv-1",
+        "member:m1",
+        expected_memory_revision=0,
+        transcript_cursor=42,
+    )
+    assert advanced["transcript_cursor"] == 42
+    assert advanced["memory_revision"] == 1
+
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        db.participants.advance_actor_state(
+            "conv-1",
+            "member:m1",
+            expected_memory_revision=0,
+            transcript_cursor=50,
+        )
+
+    untouched = db.participants.get_participant("conv-1", "member:m2")
+    assert untouched["transcript_cursor"] == 0
+    assert untouched["memory_revision"] == 0

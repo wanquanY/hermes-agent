@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +80,69 @@ def _compression_lock_holder(agent: Any) -> str:
         f":agent={id(agent):x}"
         f":nonce={uuid.uuid4().hex[:8]}"
     )
+
+
+class _CompressionLeaseRefresher:
+    """Keep a cross-process compression lease alive during slow LLM calls."""
+
+    def __init__(
+        self,
+        lease_service: Any,
+        session_id: str,
+        holder: str,
+        ttl_seconds: float,
+        refresh_interval_seconds: float | None = None,
+    ) -> None:
+        self._lease_service = lease_service
+        self._session_id = session_id
+        self._holder = holder
+        self._ttl_seconds = ttl_seconds
+        interval = (
+            refresh_interval_seconds
+            if refresh_interval_seconds is not None
+            else max(1.0, min(60.0, ttl_seconds / 2.0))
+        )
+        self._interval = max(0.1, float(interval))
+        self._max_failures = max(1, int(ttl_seconds / self._interval))
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="compression-lease-refresh",
+            daemon=True,
+        )
+
+    def start(self) -> "_CompressionLeaseRefresher":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        failures = 0
+        while not self._stop.wait(self._interval):
+            try:
+                refreshed = self._lease_service.refresh(
+                    self._session_id,
+                    self._holder,
+                    ttl_seconds=self._ttl_seconds,
+                )
+            except Exception as exc:
+                logger.debug("compression lease refresh raised: %s", exc)
+                refreshed = False
+            if refreshed:
+                failures = 0
+                continue
+            failures += 1
+            if failures >= self._max_failures:
+                logger.warning(
+                    "compression lease refresh stopped after %d failures: session=%s",
+                    failures,
+                    self._session_id,
+                )
+                break
 
 
 def check_compression_model_feasibility(agent: Any) -> None:
@@ -379,12 +443,21 @@ def compress_context(
     _lease_session_id = agent.session_id or ""
     _lease_holder: Optional[str] = None
     _lease_service = None
+    _lease_refresher: Optional[_CompressionLeaseRefresher] = None
+    try:
+        _lease_ttl = float(
+            getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0
+        )
+    except (TypeError, ValueError):
+        _lease_ttl = 300.0
     if _lease_store is not None and _lease_session_id:
         # Missing durable lease ownership is a deployment error. Proceeding
         # unlocked can create two canonical continuation sessions.
         _lease_service = _lease_store.compression_leases
         _lease_holder = _compression_lock_holder(agent)
-        if not _lease_service.try_acquire(_lease_session_id, _lease_holder):
+        if not _lease_service.try_acquire(
+            _lease_session_id, _lease_holder, ttl_seconds=_lease_ttl
+        ):
             existing = _lease_service.holder(_lease_session_id)
             logger.warning(
                 "compression skipped: another path is compressing session=%s "
@@ -411,9 +484,18 @@ def compress_context(
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
             return messages, _existing_sp
+        _lease_refresher = _CompressionLeaseRefresher(
+            _lease_service,
+            _lease_session_id,
+            _lease_holder,
+            _lease_ttl,
+            getattr(agent, "_compression_lock_refresh_interval", None),
+        ).start()
 
     def _release_lease() -> None:
         """Release the lease keyed on the pre-rotation session id."""
+        if _lease_refresher is not None:
+            _lease_refresher.stop()
         if _lease_service is not None and _lease_session_id and _lease_holder:
             try:
                 _lease_service.release(_lease_session_id, _lease_holder)
@@ -426,9 +508,12 @@ def compress_context(
                 )
 
     # Notify external memory provider before compression discards context
+    memory_preservation_context = ""
     if agent._memory_manager:
         try:
-            agent._memory_manager.on_pre_compress(messages)
+            memory_preservation_context = (
+                agent._memory_manager.on_pre_compress(messages) or ""
+            )
         except Exception:
             pass
 
@@ -439,6 +524,7 @@ def compress_context(
                 current_tokens=approx_tokens,
                 focus_topic=focus_topic,
                 force=force,
+                preservation_context=memory_preservation_context,
             )
         except TypeError:
             # Plugin context engine with strict signature that doesn't accept
@@ -613,9 +699,12 @@ def compress_context(
     try:
         _old_sid = locals().get("old_session_id")
         if _old_sid and agent._memory_manager:
+            _memory_sid = str(
+                getattr(agent, "memory_session_id", "") or agent.session_id or ""
+            )
             agent._memory_manager.on_session_switch(
-                agent.session_id or "",
-                parent_session_id=_old_sid,
+                _memory_sid,
+                parent_session_id=_memory_sid,
                 reset=False,
                 reason="compression",
             )

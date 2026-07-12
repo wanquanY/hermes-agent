@@ -30,13 +30,6 @@ _START_TASK_RESULT_MESSAGE = (
     "Team mission task accepted. A new asynchronous team task was created "
     "and execution is now owned by the Team Mission runtime."
 )
-_START_TASK_FOLLOWUP_INSTRUCTION = (
-    "Reply naturally and briefly in the user's language. Tell the user the "
-    "team task has started and is being processed asynchronously, progress is "
-    "available on the canvas, and they can continue chatting or submit another "
-    "task. Do not continue task execution, do not create deliverables, and do "
-    "not call additional tools in this turn."
-)
 _DOVIE_ATTRIBUTION_CONTEXT_KEYS = (
     "cloud_query",
     "cloudQuery",
@@ -308,15 +301,11 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             run={},
             graph_summary=_graph_summary(existing_graph),
             message=_START_TASK_RESULT_MESSAGE,
-            assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
             idempotent=True,
             hermes_control={
                 "kind": "team_mission_started",
-                "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
                 "await_final_deliverable": True,
                 "mission_status": mission_status,
-                "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
             },
         )
     members = list(team_context.get("members") or []) if isinstance(team_context.get("members"), list) else []
@@ -382,14 +371,10 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         run=started.get("run") if isinstance(started, Mapping) else {},
         graph_summary=_graph_summary(graph),
         message=_START_TASK_RESULT_MESSAGE,
-        assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
         hermes_control={
             "kind": "team_mission_started",
-            "skip_remaining_tool_calls": True,
-            "require_followup_response": True,
             "await_final_deliverable": True,
             "mission_status": mission_status,
-            "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
         },
     )
 

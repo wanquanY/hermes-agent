@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_agent.domain.conversation_memory import MemoryAccessContext
 from tests.team_mission_gateway_test_support import team_mission_gateway, team_mission_history_gateway
 
 
@@ -574,9 +575,10 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(monkeypatch
     assert graph["mission"]["metadata"]["requires_whole_graph_approval"] is True
     assert [node["kind"] for node in graph["nodes"]] == ["root"]
     assert graph["run_bindings"][0]["role"] == "leader"
-    assert submitted["text"] != "规划审批后执行"
-    assert "team_mission_node_create" in submitted["text"]
-    assert "team_mission_plan_complete" in submitted["text"]
+    assert submitted["text"] == "规划审批后执行"
+    assert "team_mission_node_create" in submitted["turn_system_context"]
+    assert "team_mission_plan_complete" in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
     assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
@@ -921,7 +923,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(mo
     assert submit_response["result"]["conversation_id"] == "mission-1"
     assert submitted[0]["conversation_session_id"] == "team-session-1"
     assert submitted[0]["agent_profile_id"] == "profile-leader"
-    assert submitted[0]["persist_user_message"] == ""
+    assert "persist_user_message" not in submitted[0]
     assert db.team_mission_graphs.get_team_mission_graph("mission-1") == {}
 
     resolve_response = server._methods["team_mission.conversation.resolve"](
@@ -989,9 +991,10 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     conversation = db.get_team_mission_conversation("conversation-1")
     assert conversation["title"] == "你是谁？ 我是谁？"
     assert conversation["display_title_source"] == "first_user_message"
-    assert submitted["persist_user_message"] == ""
+    assert "persist_user_message" not in submitted
+    assert submitted["user_message_persistence"] == "external"
     run_context = json.loads(submitted["run_context_json"])
-    assert run_context == {
+    assert {
         "conversation_session_id": "team-session-1",
         "participant_id": "leader:conversation-1",
         "activity_id": "chat:team-session-1",
@@ -999,7 +1002,9 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
         "execution_scope_key": "team:conversation-1:leader-conversation",
         "control_home": run_context["control_home"],
         "execution_home": run_context["execution_home"],
-    }
+    }.items() <= run_context.items()
+    assert run_context["memory_namespace"] == "conversation:team-session-1/participant:leader:conversation-1"
+    assert run_context["context_snapshot_id"].startswith("context-snapshot:")
     assert Path(run_context["execution_home"]).parts[-2:] == ("profiles", "default")
     assert run_context["execution_home"] != run_context["control_home"]
 
@@ -1051,6 +1056,7 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
         "profile_id": "profile-builder",
         "profile_version_id": "version-builder",
         "role": "builder",
+        "display_name": "Builder",
         "runtime_scope_key": "profile:profile-builder:version:version-builder",
         "dovie_profile": {
             "id": "profile-builder",
@@ -1071,6 +1077,26 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
         metadata={"conversation_session_id": "team-session-1"},
         members=[member],
     )
+    db.conversation_memory.create_item(
+        conversation_session_id="team-session-1",
+        owner_kind="participant",
+        owner_id="member:member-builder",
+        participant_id="member:member-builder",
+        kind="commitment",
+        content="Builder owns the current inspection follow-up.",
+        visibility={"kind": "private", "participant_id": "member:member-builder"},
+        status="committed",
+    )
+    db.conversation_memory.create_item(
+        conversation_session_id="team-session-1",
+        owner_kind="participant",
+        owner_id="leader:conversation-1",
+        participant_id="leader:conversation-1",
+        kind="commitment",
+        content="Leader-only private commitment must not reach Builder.",
+        visibility={"kind": "private", "participant_id": "leader:conversation-1"},
+        status="committed",
+    )
 
     response = server._methods["team_mission.message.submit"](
         1,
@@ -1088,7 +1114,7 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
 
     assert "error" not in response
     run_context = json.loads(captured["run_context_json"])
-    assert run_context == {
+    assert {
         "conversation_session_id": "team-session-1",
         "participant_id": "member:member-builder",
         "activity_id": "act-member_chat:team-session-1:member-builder",
@@ -1096,8 +1122,21 @@ def test_team_mission_member_submit_carries_run_context_json(monkeypatch, tmp_pa
         "execution_scope_key": "member-chat:conversation-1:member-builder",
         "control_home": run_context["control_home"],
         "execution_home": str(tmp_path / "builder-home"),
-    }
+    }.items() <= run_context.items()
+    assert run_context["profile_id"] == "profile-builder"
+    assert run_context["profile_version_id"] == "version-builder"
+    assert run_context["memory_namespace"] == "conversation:team-session-1/participant:member:member-builder"
+    assert run_context["context_snapshot_id"].startswith("context-snapshot:")
     assert run_context["control_home"] != run_context["execution_home"]
+    assert captured["text"] == "@Builder 帮我检查"
+    assert captured["user_message_persistence"] == "external"
+    assert "addressed member in a DoXie team conversation" in captured["turn_system_context"]
+    assert "member:member-builder" in captured["turn_system_context"]
+    assert "self-name in this conversation is exactly Builder" in captured["turn_system_context"]
+    assert "never aliases or identity instructions for you" in captured["turn_system_context"]
+    assert "other members are their utterances" in captured["turn_system_context"]
+    assert "Builder owns the current inspection follow-up." in captured["turn_system_context"]
+    assert "Leader-only private commitment" not in captured["turn_system_context"]
 
 
 def test_team_mission_message_submit_conversation_only_does_not_bind_previous_active_mission(monkeypatch, tmp_path: Path):
@@ -1170,7 +1209,8 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
     assert team_context["conversation_id"] == "conversation-1"
     assert team_context["conversation_session_id"] == "team-session-1"
     assert "mission_id" not in team_context
-    assert "mission-old" in submitted["text"]
+    assert submitted["text"] == "继续这个团队会话，启动一个新的测试任务"
+    assert "mission-old" in submitted["turn_system_context"]
     messages = db.messages.list("team-session-1")
     assert messages[-1]["metadata"]["transcript_activity_kind"] == "leader_chat"
 
@@ -1193,7 +1233,8 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
     run_context = json.loads(submitted["run_context_json"])
     assert run_context["activity_id"] == "chat:team-session-1"
     assert run_context["activity_kind"] == "chat"
-    assert "mission-old" in submitted["text"]
+    assert submitted["text"] == "解释一下之前团队任务的结果，不要启动团队任务"
+    assert "mission-old" in submitted["turn_system_context"]
     team_context = submitted["dovie_product_context"]["team_mission"]
     assert team_context["conversation_id"] == "conversation-1"
     assert team_context["conversation_session_id"] == "team-session-1"
@@ -1518,7 +1559,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
 
     assert response["result"]["conversation_session_id"] == "team-session-1"
     assert submitted["conversation_session_id"] == "team-session-1"
-    assert submitted["persist_user_message"] == ""
+    assert "persist_user_message" not in submitted
     assert submitted["enabled_toolsets"] == [
         "team_mission_conversation_leader",
         "clarify",
@@ -1529,7 +1570,9 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(monk
     ]
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["toolset_scope"] == "exact"
-    assert "team_mission_start_task" in submitted["text"]
+    assert submitted["text"] == "你好，上一轮进度怎么样？"
+    assert "team_mission_start_task" in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
     assert submitted["dovie_product_context"]["team_mission"]["kind"] == "leader_conversation"
     assert submitted["dovie_product_context"]["team_mission"]["tool_policy"]["disabled_toolsets"] == ["delegation"]
     assert submitted["dovie_product_context"]["team_mission"]["tool_policy"]["toolset_scope"] == "exact"
@@ -1597,9 +1640,11 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(m
     assert submitted["enabled_toolsets"] == []
     assert submitted["toolset_scope"] == "exact"
     assert submitted["reasoning_config"] == {"enabled": False}
-    assert "team_mission_start_task" not in submitted["text"]
-    assert "Answer directly" in submitted["text"]
-    assert submitted["persist_user_message"] == ""
+    assert submitted["text"] == "我测试功能，你写一篇不少于800字的科幻作文，不要启动团队任务，你自己完成"
+    assert "team_mission_start_task" not in submitted["turn_system_context"]
+    assert "Answer directly" in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
+    assert "persist_user_message" not in submitted
     assert db.team_mission_graphs.get_team_mission_graph("mission-1") == {}
 
 
@@ -1655,11 +1700,13 @@ def test_team_mission_message_submit_explicit_start_task_overrides_negated_direc
         "todo",
     ]
     assert submitted["toolset_scope"] == "exact"
-    assert "team_mission_start_task" in submitted["text"]
-    assert "The user explicitly asked you not to start or launch a team task" not in submitted["text"]
-    assert "Do not call tools, do not create tasks" not in submitted["text"]
+    assert submitted["text"].startswith("请必须启动团队任务")
+    assert "team_mission_start_task" in submitted["turn_system_context"]
+    assert "The user explicitly asked you not to start or launch a team task" not in submitted["turn_system_context"]
+    assert "Do not call tools, do not create tasks" not in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
     assert "reasoning_config" not in submitted
-    assert submitted["persist_user_message"] == ""
+    assert "persist_user_message" not in submitted
     assert submitted["dovie_product_context"]["team_mission"]["team_id"] == "team-1"
 
 
@@ -1799,7 +1846,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
     assert submitted["dovie_profile"]["agentProfileVersionId"] == "version-leader"
     assert submitted["dovie_profile"]["runtimeScopeKey"] == "profile:profile-leader:version:version-leader"
     run_context = json.loads(submitted["run_context_json"])
-    assert run_context == {
+    assert {
         "conversation_session_id": "team-session-1",
         "participant_id": "leader:mission-1",
         "activity_id": "mission:mission-1",
@@ -1807,7 +1854,10 @@ def test_team_mission_message_submit_forwards_leader_profile_context(monkeypatch
         "execution_scope_key": "team:mission-1:leader-conversation",
         "control_home": run_context["control_home"],
         "execution_home": str(tmp_path / "leader-home"),
-    }
+    }.items() <= run_context.items()
+    assert run_context["profile_id"] == "profile-leader"
+    assert run_context["profile_version_id"] == "version-leader"
+    assert run_context["context_snapshot_id"].startswith("context-snapshot:")
     assert run_context["control_home"] != run_context["execution_home"]
 
 
@@ -2136,18 +2186,19 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
     assert submitted["toolset_scope"] == "exact"
     assert "delegation" in submitted["disabled_toolsets"]
     assert submitted["agent_context_mode"] == "team_leader"
-    assert "Hermes" not in submitted["text"]
-    assert "Dovie team conversation" in submitted["text"]
-    assert "underlying Dovie profile supplies tone and memory only" in submitted["text"]
-    assert "team member utterances, not roles you performed" in submitted["text"]
-    assert "Never expose internal runtime" in submitted["text"]
+    assert submitted["text"] == "先看看当前目录再决定任务怎么规划"
+    assert "Hermes" not in submitted["turn_system_context"]
+    assert "Dovie team conversation" in submitted["turn_system_context"]
+    assert "underlying Dovie profile supplies tone and memory only" in submitted["turn_system_context"]
+    assert "team member utterances, not roles you performed" in submitted["turn_system_context"]
+    assert "Never expose internal runtime" in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
 
 
-def test_team_leader_direct_reply_prompt_keeps_team_speaker_ownership():
-    from hermes_team_mission.gateway.common import _leader_direct_reply_prompt
+def test_team_leader_direct_reply_context_keeps_team_speaker_ownership():
+    from hermes_team_mission.gateway.common import _leader_direct_reply_context
 
-    prompt = _leader_direct_reply_prompt(
-        user_text="总结一下我们的对话记录",
+    prompt = _leader_direct_reply_context(
         graph={
             "conversation": {
                 "conversation_id": "team-conversation-1",
@@ -2167,11 +2218,10 @@ def test_team_leader_direct_reply_prompt_keeps_team_speaker_ownership():
     assert "team-session-team-conversation-1" in prompt
 
 
-def test_team_leader_router_prompt_returns_start_task_result_to_leader():
-    from hermes_team_mission.gateway.common import _leader_router_prompt
+def test_team_leader_router_context_returns_start_task_result_to_leader():
+    from hermes_team_mission.gateway.common import _leader_router_context
 
-    prompt = _leader_router_prompt(
-        user_text="启动一个团队任务，生成报告",
+    prompt = _leader_router_context(
         graph={
             "conversation": {
                 "conversation_id": "team-conversation-1",
@@ -2332,11 +2382,11 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(m
 
     assert response["result"]["conversation_session_id"] == "team-session-new"
     assert submitted["conversation_session_id"] == "team-session-new"
-    assert "Team Conversation Memory Pack" not in submitted["text"]
-    assert "filescan.py" not in submitted["text"]
+    assert submitted["text"] == "你好"
+    assert "Team Conversation Memory Pack" not in submitted["turn_system_context"]
+    assert "filescan.py" not in submitted["turn_system_context"]
     memory_context = submitted["dovie_product_context"]["team_mission"]["memory"]
-    assert memory_context["kind"] == "leader_conversation_memory_pack"
-    assert memory_context["item_ids"] == []
+    assert memory_context == {}
 
 
 def test_team_mission_conversation_ensure_creates_missing_stable_session(monkeypatch, tmp_path: Path):
@@ -2729,10 +2779,11 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
     assert result["final_result_available"] is False
     assert result["await_final_deliverable"] is True
     assert result["hermes_control"]["kind"] == "team_mission_started"
-    assert result["hermes_control"]["skip_remaining_tool_calls"] is True
-    assert result["hermes_control"]["require_followup_response"] is True
     assert result["hermes_control"]["await_final_deliverable"] is True
-    assert "assistant_followup_instruction" in result["hermes_control"]
+    assert "end_current_turn" not in result["hermes_control"]
+    assert "skip_remaining_tool_calls" not in result["hermes_control"]
+    assert "require_followup_response" not in result["hermes_control"]
+    assert "assistant_followup_instruction" not in result["hermes_control"]
     assert result["mission_id"] != "mission-1"
     assert result["conversation_id"] == "mission-1"
     assert result["node"]["node_id"] == f"team-mission:{result['mission_id']}:root"
@@ -2746,8 +2797,9 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(monkeypatch, t
         "member-leader",
         "member-builder",
     ]
-    assert "Mission objective: 规划并执行第二个任务" in submitted["text"]
-    assert "Mission objective: 初始任务" not in submitted["text"]
+    assert submitted["text"] == "规划并执行第二个任务"
+    assert "Mission objective: 规划并执行第二个任务" in submitted["turn_system_context"]
+    assert "Mission objective: 初始任务" not in submitted["turn_system_context"]
     updated_graph = db.team_mission_graphs.get_team_mission_graph(result["mission_id"])
     assert updated_graph["mission"]["title"] == "第二个任务"
     assert updated_graph["mission"]["objective"] == "规划并执行第二个任务"
@@ -3135,9 +3187,10 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(monke
 
     assert started["result"]["mission_id"] == "mission-filescan"
     assert started["result"]["leader_start"]["node"]["metadata"]["task_id"] == "task-filescan"
-    assert "Mission title: 创建文件扫描工具" in submitted["text"]
-    assert "Mission objective: 在当前工作目录下创建 filescan.py 并完成验证" in submitted["text"]
-    assert "Mission objective: 你好" not in submitted["text"]
+    assert submitted["text"] == "在当前工作目录下创建 filescan.py 并完成验证"
+    assert "Mission title: 创建文件扫描工具" in submitted["turn_system_context"]
+    assert "Mission objective: 在当前工作目录下创建 filescan.py 并完成验证" in submitted["turn_system_context"]
+    assert "Mission objective: 你好" not in submitted["turn_system_context"]
     graph = db.team_mission_graphs.get_team_mission_graph("mission-filescan")
     assert graph["mission"]["title"] == "创建文件扫描工具"
     assert graph["mission"]["objective"] == "在当前工作目录下创建 filescan.py 并完成验证"
@@ -3391,12 +3444,14 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
     assert captured["rid"].startswith("leader-report:")
     submitted = captured["params"]
     assert submitted["conversation_session_id"] == "team-session-1"
-    assert submitted["persist_user_message"] == ""
+    assert "persist_user_message" not in submitted
+    assert submitted["user_message_persistence"] == "external"
     assert submitted["draft_text"] == ""
     assert submitted["enabled_toolsets"] == []
     assert submitted["agent_context_mode"] == "team_leader"
-    assert "asynchronously woken" in submitted["text"]
-    assert "当前进度如下" in submitted["text"]
+    assert submitted["text"] == "Publish the completed team activity report now."
+    assert "asynchronously woken" in submitted["turn_system_context"]
+    assert "当前进度如下" in submitted["turn_system_context"]
     run_context = json.loads(submitted["run_context_json"])
     assert run_context["conversation_session_id"] == "team-session-1"
     assert run_context["activity_id"] == "chat:team-session-1"
@@ -3406,6 +3461,16 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
     saved_result = db.get_team_mission_result("mission-report")
     assert saved_result["leader_report_run_id"] == response["run_id"]
     assert db.messages.list("team-session-1") == []
+    promoted = db.conversation_memory.list_visible(
+        MemoryAccessContext(
+            conversation_session_id="team-session-1",
+            actor_participant_id="leader:conversation-1",
+            actor_role="leader",
+        )
+    )
+    assert {item["kind"] for item in promoted} == {"summary", "artifact"}
+    assert any(item["content"] == "最终结论：PASS" for item in promoted)
+    assert len(submitted["dovie_product_context"]["team_mission"]["promoted_memory_ids"]) == 2
 
 
 def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscriber(tmp_path: Path):
@@ -3678,129 +3743,6 @@ def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_delive
     assert db.get_team_mission_node("mission-1", "team-mission:mission-1:synthesis")["status"] == "completed"
     resolved = db.resolve_team_mission_conversation("mission-1")
     assert resolved["messages"] == []
-
-
-def test_final_deliverable_recovery_does_not_rewrite_legacy_snapshot_mirror_events(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
-    from hermes_team_mission.runtime.conversation_mirror import recover_legacy_final_deliverables
-
-    db = open_cli_session_store(tmp_path / "state.db")
-    db.sessions.create("team-session-1", source="team_mission", transient=False)
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        metadata={"conversationTeamSessionId": "team-session-1"},
-    )
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        kind="synthesizer",
-        title="汇总交付",
-        status="completed",
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        run_id="run-synthesis",
-        session_id="synthesis-session-1",
-        execution_session_id="runtime-synthesis",
-        runtime_scope_key="team:mission-1:synthesis",
-        role="member",
-    )
-    db.runs.append_event(
-        "synthesis-session-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-synthesis",
-            "conversation_session_id": "synthesis-session-1",
-            "run_id": "run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team:mission-1:synthesis",
-            "seq": 1,
-            "payload": {"mode": "append", "delta": "最终汇总交付内容", "text": "最终汇总交付内容"},
-        },
-    )
-    mirror_payload = {
-        "run_id": "team-mission:mission-1:conversation:run-synthesis",
-        "source_run_id": "run-synthesis",
-        "source_session_id": "synthesis-session-1",
-        "mission_id": "mission-1",
-        "node_id": "team-mission:mission-1:synthesis",
-        "team_mission_final_deliverable": True,
-        "team_mission_conversation_mirror": True,
-    }
-    db.runs.append_event(
-        "team-session-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-synthesis",
-            "conversation_session_id": "team-session-1",
-            "run_id": "team-mission:mission-1:conversation:run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team_mission:mission-1",
-            "seq": 1,
-            "payload": {
-                **mirror_payload,
-                "mode": "snapshot",
-                "snapshot": "旧 snapshot 内容",
-                "text": "旧 snapshot 内容",
-            },
-        },
-    )
-    db.runs.append_event(
-        "team-session-1",
-        {
-            "type": "message.delta",
-            "session_id": "runtime-synthesis",
-            "conversation_session_id": "team-session-1",
-            "run_id": "team-mission:mission-1:conversation:run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team_mission:mission-1",
-            "seq": 2,
-            "payload": {
-                **mirror_payload,
-                "mode": "snapshot",
-                "snapshot": "重复旧 snapshot 内容",
-                "text": "重复旧 snapshot 内容",
-            },
-        },
-    )
-    db.runs.append_event(
-        "team-session-1",
-        {
-            "type": "message.complete",
-            "session_id": "runtime-synthesis",
-            "conversation_session_id": "team-session-1",
-            "run_id": "team-mission:mission-1:conversation:run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team_mission:mission-1",
-            "seq": 3,
-            "payload": {
-                **mirror_payload,
-                "text": "旧完成内容",
-                "status": "complete",
-            },
-        },
-    )
-
-    assert recover_legacy_final_deliverables(db, {"conversation_session_id": "team-session-1"}) == 1
-
-    # Terminal-run retention prunes replay-redundant stream deltas from the
-    # durable run_events log. Recovery must therefore use the source run or
-    # complete payload, not rewrite/keep old legacy snapshot mirror deltas.
-    deliverable = db.latest_team_mission_deliverable_for_run("run-synthesis")
-    assert deliverable["source"] == "legacy_imported"
-    assert deliverable["summary"] == "最终汇总交付内容"
-    assert db.team_mission_run_has_deliverable("run-synthesis") is True
-    delta_events = [
-        event
-        for event in db.runs.list_events("team-session-1")
-        if event["type"] == "message.delta"
-    ]
-    assert delta_events == []
-    assert db.messages.list("team-session-1") == []
 
 
 def test_team_mission_cancel_marks_graph_and_cancels_active_runs(monkeypatch, tmp_path: Path):
@@ -4746,14 +4688,17 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
         },
         db=db,
     )
-    persisted_activity_events = db.runs.list_events_by_activity("mission:mission-1")
+    persisted_activity_events = db.runs.list_events_by_mission_activity("mission-1")
     assert [event["type"] for event in persisted_activity_events] == [
+        "team_mission.runtime.event",
+        "team_mission.runtime.event",
+    ]
+    assert [event["payload"]["source_event_type"] for event in persisted_activity_events] == [
         "message.delta",
         "tool.start",
     ]
-    assert persisted_activity_events[0]["payload"]["mode"] == "append"
-    assert persisted_activity_events[0]["payload"]["offset"] == 0
-    assert persisted_activity_events[0]["payload"]["text"] == "先前事件实时事件"
+    assert persisted_activity_events[0]["payload"]["text_stream"]["mode"] == "append"
+    assert persisted_activity_events[0]["payload"]["text_stream"]["delta"] == "先前事件实时事件"
 
     removed = server._methods["runtime.activity.unsubscribe"](2, {"subscription_id": subscription_id})
     assert removed["result"] == {"removed": 1}
@@ -5591,10 +5536,12 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(monkeypa
     assert started["result"]["conversation_session_id"] == "team:mission-1:node:node-worker"
     assert submitted["conversation_session_id"] == "team:mission-1:node:node-worker"
     assert submitted["runtime_scope_key"] == "profile:worker-a"
-    assert "You are executing one assigned node in a DoXie team task." in submitted["text"]
-    assert "完成交付" in submitted["text"]
-    assert "Acceptance criteria:" in submitted["text"]
-    assert "clarify tool" in submitted["text"]
+    assert submitted["text"] == "完成交付"
+    assert "You are executing one assigned node in a DoXie team task." in submitted["turn_system_context"]
+    assert "完成交付" in submitted["turn_system_context"]
+    assert "Acceptance criteria:" in submitted["turn_system_context"]
+    assert "clarify tool" in submitted["turn_system_context"]
+    assert submitted["user_message_persistence"] == "external"
     assert "clarify" in submitted["enabled_toolsets"]
     assert submitted["dovie_product_context"]["team_mission"]["node_id"] == "node-worker"
 
@@ -6295,13 +6242,13 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(monkeypatc
     assert _wait_for_team_mission_node_status(db, "mission-1", "node-b", "running")
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == "node-b"
     assert "Run B after A" in submitted[0]["text"]
-    assert "Acceptance criteria:" in submitted[0]["text"]
-    assert "clarify tool" in submitted[0]["text"]
-    assert "Team Conversation Memory Slice" in submitted[0]["text"]
-    assert submitted[0]["dovie_product_context"]["team_mission"]["memory"]["kind"] == "worker_memory_slice"
+    assert "Acceptance criteria:" in submitted[0]["turn_system_context"]
+    assert "clarify tool" in submitted[0]["turn_system_context"]
+    assert "Team Conversation Memory Slice" not in submitted[0]["turn_system_context"]
+    assert submitted[0]["dovie_product_context"]["team_mission"]["memory"]["kind"] == "activity_memory_slice"
 
 
-def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_path: Path):
+def test_team_mission_node_start_injects_only_frozen_conversation_memory(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_agent.storage.cli_session_store import open_cli_session_store
@@ -6319,17 +6266,16 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
         mode="autonomous_mission",
         metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-old"},
     )
-    memory_item = db.upsert_team_mission_memory_item(
-        team_id="team-1",
-        mission_id="mission-old",
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    memory_item = db.conversation_memory.create_item(
         conversation_session_id="team-session-1",
-        task_id="task-old",
-        scope="conversation",
+        owner_kind="conversation",
+        owner_id="team-session-1",
         kind="summary",
         content="Previous decision: launch in Japan with partner channel.",
-        source_node_ids=["node-old"],
-        source_run_ids=["run-old"],
-        visibility="team",
+        visibility={"kind": "conversation"},
+        provenance={"source_node_ids": ["node-old"], "source_run_ids": ["run-old"]},
+        status="committed",
     )
     db.initialize_team_mission_from_strategy(
         mission_id="mission-new",
@@ -6373,14 +6319,14 @@ def test_team_mission_node_start_injects_leader_memory_pack(monkeypatch, tmp_pat
     )
 
     assert started["result"]["binding"]["role"] == "leader"
-    assert "Team Conversation Memory Pack" in submitted["text"]
-    assert "launch in Japan" in submitted["text"]
+    assert "Frozen Activity memory slice" in submitted["turn_system_context"]
+    assert "launch in Japan" in submitted["turn_system_context"]
     memory_context = submitted["dovie_product_context"]["team_mission"]["memory"]
-    assert memory_context["kind"] == "leader_memory_pack"
-    assert memory_context["item_ids"] == [memory_item["id"]]
+    assert memory_context["kind"] == "activity_memory_slice"
+    assert memory_context["item_ids"] == [memory_item["memory_id"]]
 
 
-def test_team_mission_memory_gateway_methods(monkeypatch, tmp_path: Path):
+def test_conversation_memory_gateway_enforces_propose_commit_lifecycle(monkeypatch, tmp_path: Path):
     import importlib
 
     from hermes_agent.storage.cli_session_store import open_cli_session_store
@@ -6389,41 +6335,77 @@ def test_team_mission_memory_gateway_methods(monkeypatch, tmp_path: Path):
     team_mission = team_mission_gateway()
     db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        team_id="team-1",
-        title="Mission",
-        objective="Create launch plan",
-        mode="autonomous_mission",
-        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    db.participants.ensure_participant(
+        "team-session-1",
+        participant_id="leader:conversation-1",
+        role="leader",
     )
-    item = db.upsert_team_mission_memory_item(
-        team_id="team-1",
-        mission_id="mission-1",
-        conversation_session_id="team-session-1",
-        task_id="task-1",
-        scope="conversation",
-        kind="summary",
-        content="Reusable launch summary.",
-        source_node_ids=["node-a"],
-        source_run_ids=["run-a"],
-        visibility="team",
+    actor = {
+        "conversation_session_id": "team-session-1",
+        "participant_id": "leader:conversation-1",
+    }
+    proposed = server._methods["conversation.memory.propose"](
+        1,
+        {
+            **actor,
+            "owner_kind": "conversation",
+            "owner_id": "team-session-1",
+            "kind": "summary",
+            "content": "Reusable launch summary.",
+        },
+    )["result"]["item"]
+    assert proposed["status"] == "proposed"
+
+    listed = server._methods["conversation.memory.list"](
+        2, {**actor, "statuses": ["proposed"]}
     )
+    assert listed["result"]["items"][0]["memory_id"] == proposed["memory_id"]
 
-    listed = server._methods["team_mission.memory.list"](1, {"mission_id": "mission-1"})
-    assert listed["result"]["items"][0]["id"] == item["id"]
+    committed = server._methods["conversation.memory.commit"](
+        3, {**actor, "memory_id": proposed["memory_id"], "expected_revision": 1}
+    )["result"]["item"]
+    assert committed["status"] == "committed"
 
-    packed = server._methods["team_mission.memory.pack"](2, {"mission_id": "mission-1", "objective": "launch"})
-    assert packed["result"]["memory_pack"]["item_ids"] == [item["id"]]
+    invalidated = server._methods["conversation.memory.invalidate"](
+        4,
+        {
+            **actor,
+            "memory_id": proposed["memory_id"],
+            "expected_revision": committed["revision"],
+        },
+    )["result"]["item"]
+    assert invalidated["status"] == "invalidated"
 
-    updated = server._methods["team_mission.memory.update"](
-        3,
-        {"memory_id": item["id"], "status": "invalidated"},
+    private = server._methods["conversation.memory.propose"](
+        5,
+        {
+            **actor,
+            "owner_kind": "participant",
+            "kind": "commitment",
+            "content": "Leader private follow-up.",
+        },
+    )["result"]["item"]
+    private_commit = server._methods["conversation.memory.commit"](
+        6,
+        {**actor, "memory_id": private["memory_id"], "expected_revision": 1},
     )
-    assert updated["result"]["item"]["status"] == "invalidated"
+    assert private_commit["error"]["code"] == 4030
 
-    deleted = server._methods["team_mission.memory.delete"](4, {"memory_id": item["id"]})
-    assert deleted["result"]["item"]["status"] == "deleted"
+    db.sessions.create("team-session-2", source="team_mission", transient=False)
+    db.participants.ensure_participant(
+        "team-session-2", participant_id="leader:conversation-2", role="leader"
+    )
+    cross_conversation = server._methods["conversation.memory.invalidate"](
+        7,
+        {
+            "conversation_session_id": "team-session-2",
+            "participant_id": "leader:conversation-2",
+            "memory_id": private["memory_id"],
+            "expected_revision": private["revision"],
+        },
+    )
+    assert cross_conversation["error"]["code"] == 4040
 
 
 def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(monkeypatch, tmp_path: Path):
@@ -6501,7 +6483,7 @@ def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(monke
     verifier_id = "team-mission:mission-1:verifier"
     assert _wait_for_team_mission_node_status(db, "mission-1", verifier_id, "running")
     assert submitted[0]["dovie_product_context"]["team_mission"]["node_id"] == verifier_id
-    assert "team_mission_submit_deliverable" in submitted[0]["text"]
+    assert "team_mission_submit_deliverable" in submitted[0]["turn_system_context"]
 
 
 # ── team conversation recall_turn ────────────────────────────────────
@@ -6571,9 +6553,9 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
     return db, calls, server
 
 
-def test_recall_turn_member_chat_cancels_conversation_run_and_syncs_legacy_view(monkeypatch, tmp_path: Path):
+def test_recall_turn_member_chat_cancels_canonical_conversation_run(monkeypatch, tmp_path: Path):
     """PR-C path: @-member turns run on the conversation session. Recall must
-    cancel run_id on that session while still retracting any legacy view rows."""
+    cancel run_id on that session without maintaining deprecated mirror rows."""
     db, calls, server = _recall_setup_team_conversation(monkeypatch, tmp_path)
 
     # Seed conv messages: a user @-request + a mirrored member reply.
@@ -6620,17 +6602,15 @@ def test_recall_turn_member_chat_cancels_conversation_run_and_syncs_legacy_view(
     assert len(calls["session_recall"]) == 1
     assert calls["session_recall"][0]["session_id"] == "team-session-1"
     assert calls["session_recall"][0]["turn_id"] == "team-member-turn-A"
-    # The view rows pointing at the recalled conv messages got deactivated.
-    assert result["recalled"]["view_retracted_total"] == 2
-    assert result["recalled"]["view_retracted_by_session"] == {
-        "memberchat:conv-1:member-bob": 2,
-    }
-    # The view session messages are now inactive (worker won't re-hydrate them).
+    assert "view_retracted_total" not in result["recalled"]
+    assert "view_retracted_by_session" not in result["recalled"]
+    # Legacy mirror rows are no longer a runtime read source and are not
+    # maintained by canonical recall.
     rows = db._conn.execute(  # noqa: SLF001
         "SELECT active FROM messages WHERE session_id = ?",
         ("memberchat:conv-1:member-bob",),
     ).fetchall()
-    assert all(int(r["active"]) == 0 for r in rows)
+    assert all(int(r["active"]) == 1 for r in rows)
 
 
 def test_recall_turn_path_B_leader_mission_cancels_mission(monkeypatch, tmp_path: Path):

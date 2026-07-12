@@ -31,6 +31,7 @@ IGNORED_DB_METHOD_NAMES = {
 # code path calls these methods through a statically visible DB handle.
 EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
     "activities.create",
+    "activities.insert_command",
     "complete_team_mission_plan",
     "activities.get_for_mission",
     "get_message_by_conversation_message_id",
@@ -107,6 +108,11 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
             return
         name_arg = node.args[1]
         if not isinstance(name_arg, ast.Constant) or not isinstance(name_arg.value, str):
+            return
+        # Component discovery is not a root DB method call. Calls on the
+        # returned component are scanned separately as
+        # `participants.<method>`.
+        if name_arg.value == "participants":
             return
         if _is_public_db_method_name(name_arg.value):
             self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))

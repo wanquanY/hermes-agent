@@ -272,8 +272,9 @@ def test_team_mission_start_task_emits_structured_complete_when_tool_progress_di
                 "await_final_deliverable": True,
                 "hermes_control": {
                     "kind": "team_mission_started",
+                    "end_current_turn": True,
                     "skip_remaining_tool_calls": True,
-                    "require_followup_response": True,
+                    "require_followup_response": False,
                     "await_final_deliverable": True,
                 },
             }

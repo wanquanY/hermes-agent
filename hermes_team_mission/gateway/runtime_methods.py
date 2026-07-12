@@ -470,7 +470,6 @@ def _submit_message_to_member(
     # STEP ORDER FIX (2026-06-27): The original code did
     #   1. append_message(conv_session, role=user, ...)   ← FK FAIL: conv session row doesn't exist yet
     #   2. create memberchat worker session
-    #   3. sync_member_chat_conversation_view
     #   4. ensure_team_mission_conversation  ← THIS creates the conv session row in sessions table
     #
     # The user's @-mention message silently vanished because step 1 hit a
@@ -561,6 +560,25 @@ def _submit_message_to_member(
 
     member_run_home = _home_from_dovie_profile(dovie_profile)
     control_home = _control_plane_home()
+    member_memory_ids, member_memory_text = _actor_conversation_memory_text(
+        db,
+        conversation_session_id=conversation_session_id,
+        actor_participant_id=member_participant_id(target_member_id),
+        actor_role="member",
+        profile_id=agent_profile_id,
+        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
+    )
+    member_actor_fields = _actor_context_snapshot_fields(
+        db,
+        conversation_session_id=conversation_session_id,
+        participant_id=member_participant_id(target_member_id),
+        execution_scope_key=member_scope,
+        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
+        activity_kind="member_chat",
+        profile_id=agent_profile_id,
+        profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
+        selected_memory_ids=member_memory_ids,
+    )
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=member_participant_id(target_member_id),
@@ -569,6 +587,7 @@ def _submit_message_to_member(
         execution_scope_key=member_scope,
         control_home=control_home,
         execution_home=member_run_home,
+        **member_actor_fields,
     )
 
     runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
@@ -601,7 +620,13 @@ def _submit_message_to_member(
         # transcript row above keeps the user's clean draft text plus attachment
         # metadata for history hydration.
         "text": text,
-        "persist_user_message": "",
+        "turn_system_context": _member_conversation_context(
+            conversation_session_id=conversation_session_id,
+            participant_id=member_participant_id(target_member_id),
+            display_name=display_name,
+            memory_text=member_memory_text,
+        ),
+        "user_message_persistence": "external",
         "draft_text": draft_text,
         "attachments": submitted_attachments,
         "tool_progress_mode": "all",
@@ -856,11 +881,7 @@ def _(rid, params: dict) -> dict:
             "edges": [],
             "run_bindings": [],
         }
-    memory_context, memory_text = (
-        _team_memory_for_leader_message(db, params, mission, objective=text)
-        if isinstance(mission, dict) and mission
-        else ({}, "")
-    )
+    memory_context, memory_text = {}, ""
     run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
     client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
@@ -907,8 +928,35 @@ def _(rid, params: dict) -> dict:
     else:
         leader_activity_id = f"chat:{conversation_session_id}"
         leader_activity_kind = "chat"
+    actor_memory_ids, actor_memory_text = _actor_conversation_memory_text(
+        db,
+        conversation_session_id=conversation_session_id,
+        actor_participant_id=leader_participant_id(conversation_id),
+        actor_role="leader",
+        profile_id=str(profile_params.get("agent_profile_id") or ""),
+        activity_id=leader_activity_id,
+    )
+    effective_memory_text = "\n\n".join(
+        part for part in (memory_text, actor_memory_text) if part
+    )
+    if actor_memory_ids:
+        team_context["conversation_memory_item_ids"] = actor_memory_ids
     leader_run_home = _home_from_profile_params(profile_params)
     control_home = _control_plane_home()
+    leader_actor_fields = _actor_context_snapshot_fields(
+        db,
+        conversation_session_id=conversation_session_id,
+        participant_id=leader_participant_id(conversation_id),
+        execution_scope_key=runtime_scope_key,
+        activity_id=leader_activity_id,
+        activity_kind=leader_activity_kind,
+        profile_id=str(profile_params.get("agent_profile_id") or ""),
+        profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
+        selected_memory_ids=[
+            *list((memory_context or {}).get("item_ids") or []),
+            *actor_memory_ids,
+        ],
+    )
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=leader_participant_id(conversation_id),
@@ -917,6 +965,7 @@ def _(rid, params: dict) -> dict:
         execution_scope_key=runtime_scope_key,
         control_home=control_home,
         execution_home=leader_run_home,
+        **leader_actor_fields,
     )
     try:
         _upsert_team_user_submission_message(
@@ -951,16 +1000,25 @@ def _(rid, params: dict) -> dict:
         "agent_context_mode": "team_leader",
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        "text": (
-            _leader_direct_reply_prompt(
-                user_text=text,
+        # The provider user message is exactly the user's input. Team identity,
+        # routing policy, graph state, and memory are trusted per-turn system
+        # context and must never be flattened into user-role content.
+        "text": text,
+        "turn_system_context": (
+            _leader_direct_reply_context(
                 graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph,
-                memory_text=memory_text,
+                memory_text=effective_memory_text,
             )
             if direct_reply
-            else _leader_router_prompt(user_text=text, graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph, memory_text=memory_text)
+            else _leader_router_context(
+                graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph,
+                memory_text=effective_memory_text,
+            )
         ),
-        "persist_user_message": "",
+        # UserSubmissionWriter above owns the canonical visible user row.
+        # The runtime keeps the pure user input for inference but must not
+        # append a second transcript row for the same run/turn.
+        "user_message_persistence": "external",
         "draft_text": draft_text,
         "attachments": submitted_attachments,
         "enabled_toolsets": [] if direct_reply else _leader_message_toolsets(params),
@@ -1882,36 +1940,20 @@ def _(rid, params: dict) -> dict:
     recall_result = recall_resp.get("result") if isinstance(recall_resp, dict) else {}
     recall_result = recall_result if isinstance(recall_result, dict) else {}
 
-    # Step 4 — sync member-chat view sessions: any worker that already
-    # materialized rows pointing at the recalled conv messages must drop
-    # those rows from its hydration view so its NEXT turn doesn't keep
-    # seeing retracted speech. P5 removed the deprecated member_chat_runs
-    # registry; the authoritative source for member identities is now the
-    # conversation participant roster.
-    view_retracted_total = 0
-    view_retracted_by_session: dict[str, int] = {}
+    invalidated_context_ids: list[str] = []
     if affected_source_ids:
-        participants = db.participants.list_conversation_participants(conversation_session_id) or []
-        seen_view_sessions: set[str] = set()
-        for participant in participants:
-            if not isinstance(participant, dict):
-                continue
-            if str(participant.get("role") or "").strip() != "member":
-                continue
-            mc_member_id = str(participant.get("member_id") or "").strip()
-            if not mc_member_id or not conversation_id:
-                continue
-            view_session_id = f"memberchat:{conversation_id}:{mc_member_id}"
-            if view_session_id in seen_view_sessions:
-                continue
-            seen_view_sessions.add(view_session_id)
-            count = db.member_chat_views.recall_member_chat_view_messages(
-                member_chat_session_id=view_session_id,
-                source_message_ids=affected_source_ids,
+        try:
+            invalidated_context_ids = db.conversation_memory.invalidate_summaries_for_events(
+                [str(source_id) for source_id in affected_source_ids],
+                reason=f"conversation turn {turn_id} retracted",
             )
-            if count:
-                view_retracted_by_session[view_session_id] = int(count)
-                view_retracted_total += int(count)
+        except Exception:
+            _log.warning(
+                "team conversation summary invalidation failed session=%s turn=%s",
+                conversation_session_id,
+                turn_id,
+                exc_info=True,
+            )
 
     return _ok(rid, {
         "status": "recalled",
@@ -1921,8 +1963,7 @@ def _(rid, params: dict) -> dict:
         "recalled": {
             "removed_messages": int(recall_result.get("removed_messages") or 0),
             "source_message_ids": affected_source_ids,
-            "view_retracted_total": view_retracted_total,
-            "view_retracted_by_session": view_retracted_by_session,
+            "invalidated_context_ids": invalidated_context_ids,
             "interrupted": bool(recall_result.get("interrupted")),
             "draft": recall_result.get("draft") or {},
         },
@@ -2143,6 +2184,7 @@ def _(rid, params: dict) -> dict:
     mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
     conversation_id = _conversation_id_from_params(params, mission_metadata) or str((mission or {}).get("conversation_id") or mission_id)
     conversation_session_id = _conversation_session_id_from_params(params, mission_metadata) or _team_conversation_session_id(mission if isinstance(mission, dict) else {})
+    visible_conversation_session_id = conversation_session_id
     if isinstance(mission, dict) and mission:
         db.ensure_team_mission_conversation(
             conversation_id=conversation_id,
@@ -2230,6 +2272,14 @@ def _(rid, params: dict) -> dict:
             memory_text=memory_text,
         )
         text = str(worker_context.get("text") or base_text).strip()
+    turn_system_context = text
+    execution_input = str(
+        node.get("objective")
+        or node.get("title")
+        or (mission or {}).get("objective")
+        or (mission or {}).get("title")
+        or "Execute the assigned team activity."
+    ).strip()
     enabled_toolsets = _start_toolsets(
         params,
         mission if isinstance(mission, dict) else {},
@@ -2293,14 +2343,53 @@ def _(rid, params: dict) -> dict:
             ).strip()
         )
     )
+    activity_context_snapshot = _ensure_mission_activity_context_snapshot(
+        db,
+        mission=mission if isinstance(mission, dict) else {},
+        conversation_session_id=visible_conversation_session_id,
+        leader_participant=leader_participant_id(conversation_id),
+    )
+    activity_context_memory_ids = list(
+        activity_context_snapshot.get("selected_memory_ids") or []
+    )
+    resume_summary_text = _activity_context_summary_text(
+        db,
+        activity_id=node_activity_id,
+        node_id=node_id,
+        attempt_id=run_id,
+    )
+    if resume_summary_text:
+        turn_system_context = f"{turn_system_context}\n\n{resume_summary_text}".strip()
     run_context = RunContext(
-        conversation_session_id=conversation_session_id,
+        conversation_session_id=visible_conversation_session_id,
         participant_id=node_participant_id,
         activity_id=node_activity_id,
         activity_kind="mission",
         execution_scope_key=runtime_scope_key,
         control_home=_control_plane_home(),
         execution_home=_home_from_profile_params(profile_params),
+        execution_session_id=conversation_session_id,
+        node_id=node_id,
+        attempt_id=run_id,
+        activity_context_snapshot_id=str(
+            activity_context_snapshot.get("snapshot_id") or ""
+        ),
+        **_actor_context_snapshot_fields(
+            db,
+            conversation_session_id=visible_conversation_session_id,
+            participant_id=node_participant_id,
+            execution_scope_key=runtime_scope_key,
+            activity_id=node_activity_id,
+            activity_kind="mission",
+            profile_id=agent_profile_id,
+            profile_version_id=agent_profile_version_id,
+            node_id=node_id,
+            attempt_id=run_id,
+            selected_memory_ids=[
+                *activity_context_memory_ids,
+                *list((memory_context or {}).get("item_ids") or []),
+            ],
+        ),
     )
     binding_metadata = {
         "turn_id": turn_id,
@@ -2334,7 +2423,12 @@ def _(rid, params: dict) -> dict:
         "agent_profile_version_id": agent_profile_version_id,
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        "text": text,
+        # Node identity, graph state, handoffs, memory, and execution policy
+        # are trusted activity context. The user-role input carries only the
+        # delegated objective that initiated this execution.
+        "text": execution_input,
+        "turn_system_context": turn_system_context,
+        "user_message_persistence": "external",
         "enabled_toolsets": enabled_toolsets,
         **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
         **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node or enabled_toolsets else {}),
@@ -2358,6 +2452,12 @@ def _(rid, params: dict) -> dict:
                 "task_brief": worker_context.get("task_brief") if worker_context else _node_task_brief(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
+                "activity_context_snapshot": {
+                    "snapshot_id": activity_context_snapshot.get("snapshot_id") or "",
+                    "activity_context_revision": activity_context_snapshot.get("activity_context_revision") or 0,
+                    "conversation_revision": activity_context_snapshot.get("conversation_revision") or 0,
+                    "selected_memory_ids": activity_context_memory_ids,
+                },
                 **({"members": leader_members} if leader_members else {}),
                 "worker_context": {
                     key: value

@@ -174,15 +174,18 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
         )
     )
 
-    assert session["history"][0]["role"] == "system"
-    assert session["history"][0]["metadata"]["team_member_identity_contract"] is True
-    assert "你是 小多(角色:未指定),团队会话中的一名成员。" in session["history"][0]["content"]
-    assert [(msg["role"], msg["content"]) for msg in session["history"][1:]] == [
-        ("user", "你是谁？"),
-        ("assistant", "我是小多，负责团队协调。"),
-        ("user", "[前端工程师] 我是前端工程师，负责 UI。"),
+    assert [msg["role"] for msg in session["history"]] == [
+        "user", "assistant", "user"
     ]
-    assert session["history"][3]["metadata"]["transformed_speaker_pid"] == "member:frontend"
+    assert session["history"][0]["content"].endswith("你是谁？")
+    assert session["history"][1]["content"].startswith(
+        "[assistant | You | leader:team-conversation-1]"
+    )
+    assert session["history"][2]["content"].startswith(
+        "[assistant | 前端工程师 | member:frontend]"
+    )
+    assert session["history"][2]["metadata"]["speaker_participant_id"] == "member:frontend"
+    assert session["history"][2]["metadata"]["speaker_projected_role"] == "user"
 
 
 def test_worker_session_restores_workspace_context(

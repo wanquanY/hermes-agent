@@ -539,26 +539,7 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
     def _do(conn: sqlite3.Connection) -> list[str]:
         if mission_ids:
             placeholders = ",".join("?" for _ in mission_ids)
-            memory_ids = [
-                _text(row["id"])
-                for row in conn.execute(
-                    f"SELECT id FROM team_mission_memory_items WHERE mission_id IN ({placeholders})",
-                    tuple(mission_ids),
-                ).fetchall()
-                if _text(row["id"])
-            ]
-            if memory_ids:
-                memory_placeholders = ",".join("?" for _ in memory_ids)
-                conn.execute(
-                    f"""
-                    DELETE FROM team_mission_memory_edges
-                    WHERE from_memory_id IN ({memory_placeholders})
-                       OR to_memory_id IN ({memory_placeholders})
-                    """,
-                    tuple(memory_ids + memory_ids),
-                )
             for table in (
-                "team_mission_memory_items",
                 "team_mission_artifacts",
                 "team_mission_run_bindings",
                 "team_mission_edges",

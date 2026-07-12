@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -13,7 +14,6 @@ from hermes_team_mission.context.conversation_projection import (
     message_summary_from_message,
     message_with_deliverable_artifact_refs,
 )
-from hermes_team_mission.domain.utils import MEMORY_COMMITTED_STATUS
 from hermes_team_mission.read_models.row_mapper import TeamMissionRowMapper
 
 
@@ -90,9 +90,10 @@ class ConversationDeliverableReadModel:
                 all_artifact_refs=[],
             )
 
-        placeholders = ",".join("?" for _ in mission_ids)
-        memory_params: list[Any] = [*mission_ids, MEMORY_COMMITTED_STATUS]
-        memory_clauses = [f"mission_id IN ({placeholders})", "status = ?"]
+        activity_ids = [f"mission:{mission_id}" for mission_id in mission_ids]
+        placeholders = ",".join("?" for _ in activity_ids)
+        memory_params: list[Any] = [*activity_ids]
+        memory_clauses = [f"activity_id IN ({placeholders})", "status IN ('proposed', 'committed')"]
         if conversation_session_id:
             memory_clauses.append("conversation_session_id = ?")
             memory_params.append(conversation_session_id)
@@ -100,9 +101,9 @@ class ConversationDeliverableReadModel:
             memory_rows = self._conn.execute(
                 f"""
                 SELECT *
-                FROM team_mission_memory_items
+                FROM conversation_memory_items
                 WHERE {' AND '.join(memory_clauses)}
-                ORDER BY created_at ASC, updated_at ASC, id ASC
+                ORDER BY created_at ASC, updated_at ASC, memory_id ASC
                 """,
                 tuple(memory_params),
             ).fetchall()
@@ -111,14 +112,17 @@ class ConversationDeliverableReadModel:
         artifact_refs_by_task: dict[tuple[str, str], list[dict[str, Any]]] = {}
         all_artifact_refs: list[dict[str, Any]] = []
         for row in memory_rows:
-            item = self._rows.memory_item_from_row(row)
-            if not item:
-                continue
-            refs = dedupe_artifact_refs(list(item.get("artifact_refs") or []))
+            try:
+                payload = json.loads(row["structured_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            legacy = payload.get("team_mission") if isinstance(payload.get("team_mission"), dict) else {}
+            refs = dedupe_artifact_refs(list(payload.get("artifact_refs") or []))
             if not refs:
                 continue
-            mission_id = _text(item.get("mission_id"))
-            task_id = _text(item.get("task_id"))
+            mission_id = _text(legacy.get("mission_id") or row["activity_id"]).removeprefix("mission:")
+            task_id = _text(legacy.get("task_id"))
             artifact_refs_by_mission[mission_id] = dedupe_artifact_refs([
                 *artifact_refs_by_mission.get(mission_id, []),
                 *refs,

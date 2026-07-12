@@ -123,13 +123,6 @@ def _truthy_payload_flag(payload: dict[str, Any], *keys: str) -> bool:
     return False
 
 
-def _payload_has_stream_text(payload: dict[str, Any]) -> bool:
-    for key in ("delta", "text", "snapshot"):
-        if str(payload.get(key) or "").strip():
-            return True
-    return False
-
-
 def _row_value(row: Any, key: str) -> Any:
     try:
         return row[key]
@@ -159,57 +152,13 @@ def _event_is_stream_checkpoint(value: Any) -> bool:
     return _truthy_payload_flag(payload, "stream_checkpoint", "streamCheckpoint")
 
 
-def _run_event_stream_text_exists(
-    conn: Any,
-    *,
-    session_id: str,
-    run_id: str,
-) -> bool:
-    session_id = str(session_id or "").strip()
-    run_id = str(run_id or "").strip()
-    if not session_id or not run_id:
-        return False
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM run_events
-        WHERE session_id = ?
-          AND run_id = ?
-          AND event_type = 'message.delta'
-        ORDER BY seq ASC, id ASC
-        LIMIT 128
-        """,
-        (session_id, run_id),
-    ).fetchall()
-    for row in rows:
-        if _payload_has_stream_text(_payload_from_row(row)):
-            return True
-    return False
-
-
 def should_preserve_terminal_stream_row(conn: Any, row: Any) -> bool:
     """Return true when pruning this terminal stream row would lose Team Mission truth."""
 
-    event_type = str(_row_value(row, "event_type") or "").strip()
     payload = _payload_from_row(row)
     # Runtime stream checkpoints are the durable semantic record between
     # structural boundaries. Deleting them at terminal would retain tools but
     # erase the text segments that causally surround those tools.
     if _truthy_payload_flag(payload, "stream_checkpoint", "streamCheckpoint"):
         return True
-    if event_type != "message.delta":
-        return False
-    if not (
-        _truthy_payload_flag(payload, "team_mission_final_deliverable", "teamMissionFinalDeliverable")
-        and _truthy_payload_flag(payload, "team_mission_conversation_mirror", "teamMissionConversationMirror")
-    ):
-        return False
-    if str(payload.get("mode") or "").strip().lower() != "snapshot":
-        return True
-    source_session_id = str(payload.get("source_session_id") or payload.get("sourceSessionId") or "").strip()
-    source_run_id = str(payload.get("source_run_id") or payload.get("sourceRunId") or "").strip()
-    return not _run_event_stream_text_exists(
-        conn,
-        session_id=source_session_id,
-        run_id=source_run_id,
-    )
+    return False

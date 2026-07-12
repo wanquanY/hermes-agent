@@ -211,6 +211,9 @@ def _normalize_conversation(conversation: Any, mission: dict[str, Any]) -> dict[
     return {
         "conversation_id": conversation_id,
         "team_id": team_id,
+        "conversation_session_id": conversation_session_id,
+        # Compatibility alias for pre-canonical desktop consumers. New code
+        # must use conversation_session_id as the cross-surface identity.
         "conversation_team_session_id": conversation_session_id,
         "title": title,
         "objective": _first_text(raw.get("objective"), mission.get("objective")),
@@ -253,6 +256,7 @@ def _normalize_mission(
         "activity_id": activity_id,
         "conversation_id": conversation_id or explicit_mission_id,
         "team_id": team_id,
+        "conversation_session_id": normalized_conversation["conversation_session_id"],
         "conversation_team_session_id": normalized_conversation["conversation_team_session_id"],
         "title": title,
         "objective": objective,

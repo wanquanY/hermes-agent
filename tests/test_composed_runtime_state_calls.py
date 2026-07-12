@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_team_mission.runtime.conversation_mirror import _append_message_once
+from hermes_team_mission.runtime.conversation_transcript import _append_message_once
 from hermes_team_mission.runtime.leader_runs import ensure_team_leader_message_run_state
 
 
@@ -55,7 +55,7 @@ class _RunStore:
         self.runs = _Runs()
 
 
-def test_conversation_mirror_uses_composed_session_and_message_services() -> None:
+def test_conversation_transcript_uses_composed_session_and_message_services() -> None:
     db = _ConversationStore()
     metadata = {
         "team_mission": {

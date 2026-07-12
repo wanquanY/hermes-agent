@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from hermes_agent.storage.conversation_memory_schema import CONVERSATION_MEMORY_SCHEMA_SQL
 from hermes_team_mission.state.schema import team_mission_deferred_index_sql
 from hermes_team_mission.state.schema import team_mission_schema_sql
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS applied_migrations (
+    version INTEGER PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    applied_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -104,6 +111,10 @@ CREATE TABLE IF NOT EXISTS conversation_participants (
     agent_profile_id TEXT NOT NULL DEFAULT '',
     agent_profile_version_id TEXT NOT NULL DEFAULT '',
     runtime_scope_key TEXT NOT NULL DEFAULT '',
+    memory_namespace TEXT NOT NULL DEFAULT '',
+    transcript_cursor INTEGER NOT NULL DEFAULT 0,
+    memory_revision INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'removed')),
     display_name TEXT NOT NULL DEFAULT '',
     avatar TEXT NOT NULL DEFAULT '',
     metadata_json TEXT NOT NULL DEFAULT '',
@@ -457,7 +468,7 @@ CREATE TABLE IF NOT EXISTS agent_profile_drafts (
     updated_at REAL NOT NULL,
     published_at REAL
 );
-""" + team_mission_schema_sql() + """
+""" + team_mission_schema_sql() + CONVERSATION_MEMORY_SCHEMA_SQL + """
 CREATE TABLE IF NOT EXISTS team_capability_snapshots (
     snapshot_id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL,

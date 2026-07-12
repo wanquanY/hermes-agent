@@ -13,7 +13,7 @@ import pytest_asyncio
 from agent.activity_event_bus import ActivityEventBus
 from agent.conversation_loop import _drain_activity_events_for_api
 from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
-from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
+from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame
 from tui_gateway.services.runtime_scope import RuntimeScope
@@ -371,17 +371,20 @@ async def test_e2e_team_mission_member_chat(
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "@Alice please review the release plan."
     participants = harness.db.participants.list_conversation_participants("conv-B")
-    projection = transform_to_member_perspective(
+    projection = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-alice",
         participants=participants,
     )
-    assert projection[0]["metadata"]["team_member_identity_contract"] is True
-    assert [(message["role"], message["content"]) for message in projection[1:]] == [
-        ("user", "@Alice please review the release plan."),
-        ("assistant", "I will review the release plan as Alice."),
-        ("user", "[Bob] Bob sees one risk in the test plan."),
+    assert [message["role"] for message in projection] == [
+        "user", "assistant", "user"
     ]
+    assert projection[0]["content"].endswith("@Alice please review the release plan.")
+    assert projection[1]["content"].endswith("I will review the release plan as Alice.")
+    assert projection[2]["content"].startswith(
+        "[assistant | Bob | member:member-bob]"
+    )
+    assert projection[2]["metadata"]["speaker_projected_role"] == "user"
 
 
 @pytest.mark.asyncio

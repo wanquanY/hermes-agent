@@ -98,12 +98,6 @@ class MessageRepo(Protocol):
         patch: dict[str, Any],
     ) -> Message: ...
 
-    def deactivate_member_chat_view_sources(
-        self,
-        session_id: str,
-        source_message_ids: list[int],
-    ) -> int: ...
-
     def copy_branch_prefix(
         self,
         source_session_ids: list[str],
@@ -274,34 +268,6 @@ class MessageRepoImpl:
         got = self._fetch_by_id(int(message_id))
         assert got is not None
         return got
-
-    def deactivate_member_chat_view_sources(
-        self,
-        session_id: str,
-        source_message_ids: list[int],
-    ) -> int:
-        stable_sid = str(session_id or "").strip()
-        if not stable_sid or not source_message_ids:
-            return 0
-        normalized_ids = [str(int(mid)) for mid in source_message_ids if str(mid).strip()]
-        if not normalized_ids:
-            return 0
-        affected = 0
-        for source_id in normalized_ids:
-            fragment = f'"source_message_id": "{source_id}"'
-            compact_fragment = f'"source_message_id":"{source_id}"'
-            cursor = self._conn.execute(
-                """
-                UPDATE messages
-                   SET active = 0
-                 WHERE session_id = ?
-                   AND active = 1
-                   AND (instr(metadata_json, ?) > 0 OR instr(metadata_json, ?) > 0)
-                """,
-                (stable_sid, fragment, compact_fragment),
-            )
-            affected += int(cursor.rowcount or 0)
-        return affected
 
     def copy_branch_prefix(
         self,

@@ -278,6 +278,14 @@ def _text_stream_contract(source_event: Dict[str, Any], subject: Dict[str, Any])
         "run_id": subject.get("run_id", ""),
         "turn_id": subject.get("turn_id", ""),
     }
+    client_message_id = _first_text(
+        payload.get("client_message_id"),
+        payload.get("clientMessageId"),
+        source_event.get("client_message_id"),
+        source_event.get("clientMessageId"),
+    )
+    if client_message_id:
+        contract["client_message_id"] = client_message_id
     if event_type == "message.delta":
         contract["delta"] = fragment
         contract["text"] = fragment
@@ -746,6 +754,13 @@ def append_team_mission_runtime_event(
         dedupe_key=runtime_dedupe_key(mission_id, run_id, source_event),
         source_event=source_event,
     )
+    if stored and not stored.get("_persistence_disposition"):
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+            identity=identity,
+        )
     payload = event_payload(stored)
     subject = mapping(payload.get("subject"))
     text_stream = mapping(payload.get("text_stream"))
@@ -774,35 +789,13 @@ def _mission_activity_session_id(
     event: Dict[str, Any],
     identity: Dict[str, str] | None = None,
 ) -> str:
-    payload = event_payload(event)
-    identity = identity or {}
-    candidates = [
-        identity.get("runtime_conversation_session_id"),
-        identity.get("runtimeConversationSessionId"),
-        identity.get("source_session_id"),
-        identity.get("sourceSessionId"),
-        identity.get("session_id"),
-        identity.get("sessionId"),
-        payload.get("runtime_conversation_session_id"),
-        payload.get("runtimeConversationSessionId"),
-        payload.get("source_session_id"),
-        payload.get("sourceSessionId"),
-        event.get("session_id"),
-        event.get("sessionId"),
-        payload.get("session_id"),
-        payload.get("sessionId"),
-    ]
-    # Do not fall back to the visible team transcript session here. These
-    # canonical activity events are replay-index rows, not chat transcript
-    # messages. Writing them into the visible session would pollute
-    # `list_run_events(<team-session>)` and reintroduce the mirror bug that the
-    # team-mission transcript split was designed to prevent.
-    candidates.append(f"team:mission:{mission_id}:events")
-    for candidate in candidates:
-        normalized = text(candidate)
-        if normalized:
-            return normalized
-    return ""
+    # A mission subscription needs exactly one monotonic cursor domain. Runtime
+    # node sessions each allocate seq from 1, so indexing mission activity rows
+    # into those sessions makes `after_seq` invalid as soon as two nodes run.
+    # Keep source session/run identity in the payload and write every replayable
+    # mission fact to this dedicated activity ledger session instead.
+    stable_mission = text(mission_id)
+    return f"team:mission:{stable_mission}:events" if stable_mission else ""
 
 
 def _ensure_activity_session(db: Any, session_id: str) -> None:
@@ -833,6 +826,33 @@ def _append_mission_activity_run_event(
     activity_id = f"mission:{stable_mission}"
     frame = dict(event or {})
     payload = dict(event_payload(frame))
+    audit_seq = int(frame.get("seq") or payload.get("team_mission_event_seq") or 0)
+    event_type = text(frame.get("type"))
+    if audit_seq > 0 and db.runs.has_event_source(
+        session_id,
+        event_type=event_type,
+        runtime_source_seq=audit_seq,
+    ):
+        return
+    source_run_id = text(frame.get("run_id") or payload.get("run_id"))
+    source_turn_id = text(frame.get("turn_id") or payload.get("turn_id"))
+    source_session_id = text(
+        frame.get("conversation_session_id")
+        or frame.get("session_id")
+        or payload.get("conversation_session_id")
+        or payload.get("session_id")
+    )
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
+        payload["sourceRunId"] = source_run_id
+    if source_turn_id:
+        payload["source_turn_id"] = source_turn_id
+        payload["sourceTurnId"] = source_turn_id
+    if source_session_id:
+        payload["source_session_id"] = source_session_id
+        payload["sourceSessionId"] = source_session_id
+    for key in ("run_id", "runId", "turn_id", "turnId"):
+        payload.pop(key, None)
     frame["activity_id"] = activity_id
     frame["activityId"] = activity_id
     frame["session_id"] = session_id
@@ -841,6 +861,14 @@ def _append_mission_activity_run_event(
     payload["conversation_session_id"] = session_id
     payload["activity_id"] = activity_id
     payload["activityId"] = activity_id
+    # Canonical activity rows are an index, not executions. Do not let their
+    # append mutate the source run's owning session or terminal state.
+    frame["run_id"] = ""
+    frame["turn_id"] = ""
+    frame["execution_session_id"] = ""
+    frame["runtime_scope_key"] = f"mission:{stable_mission}:activity-ledger"
+    frame.pop("seq", None)
+    frame["runtime_source_seq"] = audit_seq
     frame["payload"] = payload
     _ensure_activity_session(db, session_id)
     previous = getattr(db, "_team_mission_projecting", False)
@@ -900,7 +928,7 @@ def append_team_mission_structural_event(
         dedupe_key=text(dedupe_key) or structural_dedupe_key(mission_id, source_event),
         source_event=source_event,
     )
-    if stored:
+    if stored and not stored.get("_persistence_disposition"):
         _append_mission_activity_run_event(
             db,
             mission_id=mission_id,
@@ -942,7 +970,7 @@ def append_team_mission_conversation_status_event(
         dedupe_key=status_dedupe_key(mission_id, source_mission_seq, source_event),
         source_event=source_event,
     )
-    if stored:
+    if stored and not stored.get("_persistence_disposition"):
         _append_mission_activity_run_event(
             db,
             mission_id=mission_id,

@@ -12,6 +12,7 @@ from hermes_agent.domain.participants import leader_participant_id
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway.common import _ensure_team_conversation_session
 from hermes_team_mission.gateway.common import _ensure_team_mission_runtime_session_shell
+from hermes_team_mission.gateway.common import _actor_context_snapshot_fields
 from hermes_team_mission.gateway.common import _leader_conversation_runtime_scope_contract_error
 from hermes_team_mission.gateway.common import _leader_conversation_runtime_scope_key
 from hermes_team_mission.gateway.common import _leader_disabled_toolsets
@@ -27,6 +28,80 @@ from hermes_team_mission.runtime.leader_runs import ensure_team_leader_message_r
 
 
 RunSubmitter = Callable[[str, dict], dict]
+
+
+def _promote_result_to_conversation_memory(
+    db,
+    *,
+    mission: dict,
+    result: dict,
+    conversation_session_id: str,
+    summary_text: str,
+    artifact_refs: list[dict],
+) -> list[str]:
+    """Publish verified final result facts into shared conversation memory."""
+    memory_service = getattr(db, "conversation_memory", None)
+    if memory_service is None:
+        return []
+    mission_id = str(mission.get("mission_id") or "").strip()
+    result_id = str(result.get("result_id") or result.get("resultId") or mission_id).strip()
+    if not mission_id or not conversation_session_id or not result_id:
+        return []
+    promoted: list[str] = []
+    summary = str(
+        result.get("summary_text")
+        or result.get("summaryText")
+        or summary_text
+        or ""
+    ).strip()
+    if summary:
+        item = memory_service.create_item(
+            memory_id=f"conversation-result:{result_id}:summary",
+            conversation_session_id=conversation_session_id,
+            owner_kind="conversation",
+            owner_id=conversation_session_id,
+            activity_id=f"mission:{mission_id}",
+            kind="summary",
+            content=summary,
+            structured_payload={"mission_id": mission_id, "result_id": result_id},
+            visibility={"kind": "conversation"},
+            provenance={
+                "source_result_ids": [result_id],
+                "source_node_ids": [
+                    str(item.get("node_id") or "")
+                    for item in (result.get("node_results") or [])
+                    if isinstance(item, dict) and item.get("node_id")
+                ],
+            },
+            confidence=0.95,
+            status="committed",
+        )
+        promoted.append(str(item.get("memory_id") or ""))
+    for index, artifact in enumerate(artifact_refs):
+        uri = str(
+            artifact.get("uri")
+            or artifact.get("path")
+            or artifact.get("id")
+            or ""
+        ).strip()
+        if not uri:
+            continue
+        item = memory_service.create_item(
+            memory_id=f"conversation-result:{result_id}:artifact:{index}",
+            conversation_session_id=conversation_session_id,
+            owner_kind="conversation",
+            owner_id=conversation_session_id,
+            activity_id=f"mission:{mission_id}",
+            kind="artifact",
+            content=f"Team activity produced artifact: {artifact.get('title') or uri}",
+            structured_payload={"artifact": artifact, "mission_id": mission_id, "result_id": result_id},
+            visibility={"kind": "conversation"},
+            provenance={"source_result_ids": [result_id]},
+            confidence=0.98,
+            status="committed",
+        )
+        promoted.append(str(item.get("memory_id") or ""))
+    return [item for item in promoted if item]
 
 
 def _home_from_dovie_profile(dovie_profile: dict) -> str:
@@ -262,6 +337,14 @@ def submit_mission_leader_report_run(
         for item in (artifact_refs or result.get("artifact_refs") or result.get("artifactRefs") or [])
         if isinstance(item, dict)
     ]
+    promoted_memory_ids = _promote_result_to_conversation_memory(
+        db,
+        mission=mission,
+        result=result,
+        conversation_session_id=conversation_session_id,
+        summary_text=summary_text,
+        artifact_refs=artifact_refs,
+    )
     run_id = uuid.uuid4().hex
     turn_id = uuid.uuid4().hex
     run_context = RunContext(
@@ -272,6 +355,17 @@ def submit_mission_leader_report_run(
         execution_scope_key=runtime_scope_key,
         control_home=_control_plane_home(),
         execution_home=_home_from_profile_params(profile_params),
+        **_actor_context_snapshot_fields(
+            db,
+            conversation_session_id=conversation_session_id,
+            participant_id=leader_participant_id(conversation_id),
+            execution_scope_key=runtime_scope_key,
+            activity_id=f"chat:{conversation_session_id}",
+            activity_kind="chat",
+            profile_id=str(profile_params.get("agent_profile_id") or ""),
+            profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
+            selected_memory_ids=promoted_memory_ids,
+        ),
     )
     run_context_json = _run_context_json(run_context)
     result_id = str(result.get("result_id") or result.get("resultId") or "").strip()
@@ -316,8 +410,9 @@ def submit_mission_leader_report_run(
         "agent_context_mode": "team_leader",
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        "text": prompt,
-        "persist_user_message": "",
+        "text": "Publish the completed team activity report now.",
+        "turn_system_context": prompt,
+        "user_message_persistence": "external",
         "draft_text": "",
         "enabled_toolsets": [],
         "disabled_toolsets": _leader_disabled_toolsets(params),
@@ -340,6 +435,7 @@ def submit_mission_leader_report_run(
                 "summaryText": str(result.get("summary_text") or result.get("summaryText") or summary_text or ""),
                 "artifact_refs": artifact_refs,
                 "artifactRefs": artifact_refs,
+                "promoted_memory_ids": promoted_memory_ids,
             },
             executing_agent_profile_id=str(
                 profile_params.get("agent_profile_id")

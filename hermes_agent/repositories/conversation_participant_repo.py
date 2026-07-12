@@ -59,6 +59,14 @@ def _conversation_session_exists(conn: sqlite3.Connection, session_id: str) -> b
     return row is not None
 
 
+def participant_memory_namespace(conversation_session_id: str, participant_id: str) -> str:
+    conversation = _text(conversation_session_id)
+    participant = _text(participant_id)
+    if not conversation or not participant:
+        return ""
+    return f"conversation:{conversation}/participant:{participant}"
+
+
 class ConversationParticipantRepo:
     def __init__(self, conn: sqlite3.Connection, execute_write: Callable[[Any], Any], lock: Any) -> None:
         self._conn = conn
@@ -75,6 +83,8 @@ class ConversationParticipantRepo:
         agent_profile_id: str = "",
         agent_profile_version_id: str = "",
         runtime_scope_key: str = "",
+        memory_namespace: str = "",
+        status: str = "active",
         display_name: str = "",
         avatar: str = "",
         metadata_json: str = "",
@@ -114,10 +124,11 @@ class ConversationParticipantRepo:
                 INSERT OR REPLACE INTO conversation_participants (
                     conversation_session_id, participant_id, role, member_id,
                     agent_profile_id, agent_profile_version_id,
-                    runtime_scope_key, display_name, avatar, metadata_json,
+                    runtime_scope_key, memory_namespace, status,
+                    display_name, avatar, metadata_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_conversation_session_id,
@@ -127,6 +138,11 @@ class ConversationParticipantRepo:
                     _text(agent_profile_id),
                     _text(agent_profile_version_id),
                     _text(runtime_scope_key),
+                    _text(memory_namespace) or participant_memory_namespace(
+                        normalized_conversation_session_id,
+                        normalized_participant_id,
+                    ),
+                    _text(status) or "active",
                     _text(display_name),
                     _text(avatar),
                     _text(metadata_json),
@@ -344,6 +360,8 @@ class ConversationParticipantRepo:
         agent_profile_id: str = "",
         agent_profile_version_id: str = "",
         runtime_scope_key: str = "",
+        memory_namespace: str = "",
+        status: str = "active",
         display_name: str = "",
         avatar: str = "",
         metadata: Optional[Dict[str, Any]] = None,
@@ -370,10 +388,11 @@ class ConversationParticipantRepo:
                 INSERT INTO conversation_participants (
                     conversation_session_id, participant_id, role, member_id,
                     agent_profile_id, agent_profile_version_id,
-                    runtime_scope_key, display_name, avatar, metadata_json,
+                    runtime_scope_key, memory_namespace, status,
+                    display_name, avatar, metadata_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(conversation_session_id, participant_id) DO UPDATE SET
                     role = CASE WHEN excluded.role != ''
                         THEN excluded.role ELSE conversation_participants.role END,
@@ -387,6 +406,10 @@ class ConversationParticipantRepo:
                     runtime_scope_key = CASE WHEN excluded.runtime_scope_key != ''
                         THEN excluded.runtime_scope_key
                         ELSE conversation_participants.runtime_scope_key END,
+                    memory_namespace = CASE WHEN excluded.memory_namespace != ''
+                        THEN excluded.memory_namespace
+                        ELSE conversation_participants.memory_namespace END,
+                    status = excluded.status,
                     display_name = CASE
                         WHEN conversation_participants.display_name = ''
                          AND excluded.display_name != ''
@@ -412,6 +435,11 @@ class ConversationParticipantRepo:
                     _text(agent_profile_id),
                     _text(agent_profile_version_id),
                     _text(runtime_scope_key),
+                    _text(memory_namespace) or participant_memory_namespace(
+                        normalized_conversation_session_id,
+                        normalized_participant_id,
+                    ),
+                    _text(status) or "active",
                     _text(display_name),
                     _text(avatar),
                     metadata_json,
@@ -435,6 +463,49 @@ class ConversationParticipantRepo:
         self, conversation_session_id: str, participant_id: str
     ) -> Dict[str, Any]:
         return self.get_participant(conversation_session_id, participant_id) or {}
+
+    def advance_actor_state(
+        self,
+        conversation_session_id: str,
+        participant_id: str,
+        *,
+        expected_memory_revision: int,
+        transcript_cursor: int,
+    ) -> Dict[str, Any]:
+        """CAS-update a participant's durable actor-memory cursor."""
+        conversation = _text(conversation_session_id)
+        participant = _text(participant_id)
+        if not conversation or not participant:
+            raise ValueError("conversation_session_id and participant_id required")
+        expected_revision = max(0, int(expected_memory_revision))
+        next_cursor = max(0, int(transcript_cursor))
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            cursor = conn.execute(
+                """
+                UPDATE conversation_participants
+                   SET transcript_cursor = MAX(transcript_cursor, ?),
+                       memory_revision = memory_revision + 1,
+                       updated_at = ?
+                 WHERE conversation_session_id = ?
+                   AND participant_id = ?
+                   AND memory_revision = ?
+                   AND status = 'active'
+                """,
+                (next_cursor, time.time(), conversation, participant, expected_revision),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("participant actor state revision conflict")
+            row = conn.execute(
+                """
+                SELECT * FROM conversation_participants
+                 WHERE conversation_session_id = ? AND participant_id = ?
+                """,
+                (conversation, participant),
+            ).fetchone()
+            return self._participant_row_to_dict(row)
+
+        return self._execute_write(_do)
 
     def resolve_participant_id(
         self,
@@ -536,5 +607,6 @@ __all__ = [
     "agent_participant_id",
     "leader_participant_id",
     "member_participant_id",
+    "participant_memory_namespace",
     "user_participant_id",
 ]

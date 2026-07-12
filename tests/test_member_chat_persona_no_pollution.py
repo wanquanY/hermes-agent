@@ -110,17 +110,17 @@ def _hydrate_worker_history(
     return list(session["history"])
 
 
-def test_member_worker_hydrates_with_other_speakers_as_user_role(monkeypatch, tmp_path: Path) -> None:
+def test_member_worker_preserves_other_assistant_speaker_ownership(monkeypatch, tmp_path: Path) -> None:
     db = _db_with_team_history(tmp_path)
 
     history = _hydrate_worker_history(monkeypatch, tmp_path, db)
 
-    assert history[0]["role"] == "system"
-    assert history[0]["metadata"]["team_member_identity_contract"] is True
-    assert history[1]["role"] == "user"
-    assert history[1]["content"] == "[Leader Name] I am Hermes Agent and will lead this task."
-    assert history[1]["metadata"]["transformed_from_role"] == "assistant"
-    assert history[1]["metadata"]["transformed_speaker_pid"] == LEADER_PARTICIPANT_ID
+    assert history[0]["role"] == "user"
+    assert history[0]["content"].startswith(
+        f"[assistant | Leader Name | {LEADER_PARTICIPANT_ID}]"
+    )
+    assert history[0]["metadata"]["speaker_participant_id"] == LEADER_PARTICIPANT_ID
+    assert history[0]["metadata"]["speaker_projected_role"] == "user"
 
 
 def test_member_own_replies_kept_as_assistant(monkeypatch, tmp_path: Path) -> None:
@@ -128,9 +128,11 @@ def test_member_own_replies_kept_as_assistant(monkeypatch, tmp_path: Path) -> No
 
     history = _hydrate_worker_history(monkeypatch, tmp_path, db)
 
-    assert history[2]["role"] == "assistant"
-    assert history[2]["content"] == "Alice previous reply in her own persona."
-    assert history[2]["metadata"]["participant_id"] == ALICE_PARTICIPANT_ID
+    assert history[1]["role"] == "assistant"
+    assert history[1]["content"].startswith(
+        f"[assistant | You | {ALICE_PARTICIPANT_ID}]"
+    )
+    assert history[1]["metadata"]["speaker_participant_id"] == ALICE_PARTICIPANT_ID
 
 
 def test_leader_mission_hydration_uses_same_participant_perspective(
@@ -150,9 +152,11 @@ def test_leader_mission_hydration_uses_same_participant_perspective(
         ),
     )
 
-    assert [message["role"] for message in history] == ["system", "assistant", "user"]
-    assert history[0]["metadata"]["participant_id"] == LEADER_PARTICIPANT_ID
-    assert history[1]["content"] == "I am Hermes Agent and will lead this task."
-    assert "transformed_from_role" not in history[1]["metadata"]
-    assert history[2]["content"] == "[Alice] Alice previous reply in her own persona."
-    assert history[2]["metadata"]["transformed_speaker_pid"] == ALICE_PARTICIPANT_ID
+    assert [message["role"] for message in history] == ["assistant", "user"]
+    assert history[0]["content"].startswith(
+        f"[assistant | You | {LEADER_PARTICIPANT_ID}]"
+    )
+    assert history[1]["content"].startswith(
+        f"[assistant | Alice | {ALICE_PARTICIPANT_ID}]"
+    )
+    assert history[1]["metadata"]["speaker_participant_id"] == ALICE_PARTICIPANT_ID

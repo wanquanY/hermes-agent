@@ -44,7 +44,6 @@ WORKER_DB_COMPONENT_NAMES = frozenset(
         "analytics",
         "branches",
         "compression_leases",
-        "member_chat_views",
         "messages",
         "maintenance",
         "metadata",

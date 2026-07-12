@@ -633,16 +633,6 @@ def _is_control_plane_conversation_session_id(conversation_session_id: str) -> b
             "team:mission-",
             "team-session-team-conversation-",
             "team-conversation-",
-            # Group-chat member-chat worker session: the worker runs in its own
-            # profile process, but its run-registry / event-stream MUST live in
-            # the same control-plane db as the team conversation it mirrors
-            # into. Without this, run reservations / terminal events / status
-            # lookups split across two databases (control-plane vs profile),
-            # and prompt.py's terminalize_if_still_active sees a stale
-            # status="running" in one db while the worker already terminalized
-            # in the other ("prompt worker terminal event did not close active
-            # run"). Routing to the control-plane db keeps both halves in sync.
-            "memberchat:",
         )
     )
 

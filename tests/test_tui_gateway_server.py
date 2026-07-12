@@ -4818,6 +4818,61 @@ def test_prompt_submit_emits_append_only_message_delta(monkeypatch):
     assert complete_events[-1]["message_seq_in_run"] == 1
 
 
+def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(monkeypatch):
+    class _Agent:
+        session_id = "session-key"
+        ephemeral_system_prompt = "profile persona"
+
+        def __init__(self):
+            self.seen_prompt = None
+            self.seen_system_context = None
+            self.seen_persist_user_message = None
+
+        def run_conversation(self, prompt, **kwargs):
+            self.seen_prompt = prompt
+            self.seen_system_context = self.ephemeral_system_prompt
+            self.seen_persist_user_message = kwargs.get("persist_user_message")
+            return {
+                "final_response": "done",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "pure user input",
+                    "run_id": "run-system-context",
+                    "turn_id": "turn-system-context",
+                    "turn_system_context": "trusted team policy",
+                    "user_message_persistence": "external",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert agent.seen_prompt == "pure user input"
+    assert agent.seen_system_context == "profile persona\n\ntrusted team policy"
+    assert agent.seen_persist_user_message == ""
+    assert agent.ephemeral_system_prompt == "profile persona"
+
+
 def test_prompt_submit_reconciles_diverged_stream_with_message_complete_text(monkeypatch):
     """A bad live stream is corrected only by the terminal canonical answer."""
 
@@ -5193,6 +5248,8 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
                 "attachments": [],
                 "draft_text": "use a tool first",
                 "persist_user_message": "",
+                "user_message_persistence": "runtime",
+                "turn_system_context": "",
                 "model": "",
                 "model_descriptor": {},
                 "reasoning_config": None,

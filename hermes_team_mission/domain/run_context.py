@@ -29,6 +29,18 @@ class RunContext:
     execution_scope_key: str
     control_home: str
     execution_home: str
+    profile_id: str = ""
+    profile_version_id: str = ""
+    memory_namespace: str = ""
+    conversation_revision: int = 0
+    transcript_cursor: int = 0
+    participant_memory_revision: int = 0
+    visibility_policy_id: str = ""
+    context_snapshot_id: str = ""
+    execution_session_id: str = ""
+    activity_context_snapshot_id: str = ""
+    node_id: str = ""
+    attempt_id: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -63,8 +75,17 @@ class RunContext:
             if not Path(value).expanduser().is_absolute():
                 raise ValueError(f"{field_name} must be an absolute path")
 
-    def to_payload(self) -> dict[str, str]:
-        return {
+        for field_name in (
+            "conversation_revision",
+            "transcript_cursor",
+            "participant_memory_revision",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "conversation_session_id": self.conversation_session_id,
             "participant_id": self.participant_id,
             "activity_id": self.activity_id,
@@ -73,6 +94,27 @@ class RunContext:
             "control_home": self.control_home,
             "execution_home": self.execution_home,
         }
+        for field_name in (
+            "profile_id",
+            "profile_version_id",
+            "memory_namespace",
+            "visibility_policy_id",
+            "context_snapshot_id",
+            "execution_session_id",
+            "activity_context_snapshot_id",
+            "node_id",
+            "attempt_id",
+        ):
+            value = getattr(self, field_name)
+            if value:
+                payload[field_name] = value
+        if self.conversation_revision:
+            payload["conversation_revision"] = self.conversation_revision
+        if self.transcript_cursor:
+            payload["transcript_cursor"] = self.transcript_cursor
+        if self.participant_memory_revision:
+            payload["participant_memory_revision"] = self.participant_memory_revision
+        return payload
 
     @classmethod
     def from_payload(cls, data: dict[str, Any] | str) -> RunContext:
@@ -100,4 +142,20 @@ class RunContext:
         if missing:
             raise ValueError(f"run context payload missing required fields: {', '.join(missing)}")
 
-        return cls(**{field_name: parsed[field_name] for field_name in required})
+        optional = (
+            "profile_id",
+            "profile_version_id",
+            "memory_namespace",
+            "conversation_revision",
+            "transcript_cursor",
+            "participant_memory_revision",
+            "visibility_policy_id",
+            "context_snapshot_id",
+            "execution_session_id",
+            "activity_context_snapshot_id",
+            "node_id",
+            "attempt_id",
+        )
+        values = {field_name: parsed[field_name] for field_name in required}
+        values.update({field_name: parsed[field_name] for field_name in optional if field_name in parsed})
+        return cls(**values)

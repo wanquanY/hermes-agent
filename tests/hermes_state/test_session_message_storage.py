@@ -100,6 +100,16 @@ class TestSessionLifecycle:
             == "frontend scoped prompt v2"
         )
 
+        db.update_scoped_system_prompt(
+            "s1",
+            "member-chat:s1:product",
+            "product scoped prompt",
+        )
+        assert (
+            db.get_scoped_system_prompt("s1", "member-chat:s1:product")
+            == "product scoped prompt"
+        )
+
     def test_update_token_counts(self, db):
         db.sessions.create(session_id="s1", source="cli")
         db.sessions.update_token_counts("s1", input_tokens=200, output_tokens=100)

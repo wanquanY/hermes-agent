@@ -14,8 +14,8 @@ from pathlib import Path
 from channels.platforms.telegram_topic_store import TelegramTopicStore
 from hermes_agent.domain.activity_service import ActivityService
 from hermes_agent.domain.compression_lease_service import CompressionLeaseService
+from hermes_agent.domain.conversation_memory_service import ConversationMemoryService
 from hermes_agent.domain.message_service import MessageService
-from hermes_agent.domain.member_chat_projection_service import MemberChatProjectionService
 from hermes_agent.domain.participant_service import ParticipantService
 from hermes_agent.domain.run_event_maintenance_service import RunEventMaintenanceService
 from hermes_agent.domain.run_service import RunService
@@ -37,6 +37,7 @@ from hermes_agent.read_models.team_missions import TeamMissionReadModel
 from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
+from hermes_agent.repositories.conversation_memory_repo import ConversationMemoryRepo
 from hermes_agent.repositories.conversation_participant_repo import ConversationParticipantRepo
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
@@ -105,6 +106,9 @@ class CliSessionStore(TeamMissionStateMixin):
             self._unit_of_work,
         )
         self.participants.reconcile()
+        self.conversation_memory = ConversationMemoryService(
+            ConversationMemoryRepo(conn, self._execute_write)
+        )
         activity_repository = TeamMissionRepoImpl(conn)
         self.activities = ActivityService(activity_repository, self._unit_of_work)
         self.team_mission_maintenance = TeamMissionMaintenanceService(
@@ -170,12 +174,6 @@ class CliSessionStore(TeamMissionStateMixin):
             self._lock,
             self.sessions.sanitize_title,
         )
-        self.member_chat_views = MemberChatProjectionService(
-            conn,
-            self._execute_write,
-            self.messages.list,
-            self.messages.append,
-        )
         self.runs = RunService(
             conn,
             self._unit_of_work,
@@ -221,6 +219,19 @@ class CliSessionStore(TeamMissionStateMixin):
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def get_scoped_system_prompt(self, session_id: str, scope_key: str) -> str | None:
+        """Worker-RPC facade for participant-scoped system prompt snapshots."""
+        return self.sessions.get_scoped_system_prompt(session_id, scope_key)
+
+    def update_scoped_system_prompt(
+        self,
+        session_id: str,
+        scope_key: str,
+        prompt: str,
+    ) -> None:
+        """Worker-RPC facade for participant-scoped system prompt snapshots."""
+        self.sessions.update_scoped_system_prompt(session_id, scope_key, prompt)
 
     def _execute_write(self, fn):
         return self._unit_of_work.execute(fn)

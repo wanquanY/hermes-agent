@@ -370,7 +370,9 @@ def _decode_run_event_row(row: Any) -> dict[str, Any]:
     event.setdefault("run_id", _row_value(row, "run_id", ""))
     event.setdefault("turn_id", _row_value(row, "turn_id", ""))
     event.setdefault("participant_id", _row_value(row, "participant_id", ""))
-    event.setdefault("seq", int(_row_value(row, "seq", 0) or 0))
+    # Like session identity above, the relational ledger sequence is the only
+    # replay cursor. Frame blobs may retain a worker-local/source sequence.
+    event["seq"] = int(_row_value(row, "seq", 0) or 0)
     runtime_source_seq = int(_row_value(row, "runtime_source_seq", 0) or 0)
     if runtime_source_seq > 0:
         event.setdefault("runtime_source_seq", runtime_source_seq)
@@ -439,8 +441,25 @@ def _rehydrate_referenced_event(
                 metadata = _json_or(_row_value(message_row, "metadata_json"), {})
                 payload.setdefault("text", content)
                 payload.setdefault("content", content)
-                if isinstance(metadata, dict) and metadata.get("projection_status"):
-                    payload.setdefault("status", metadata.get("projection_status"))
+                payload.setdefault("message_id", conversation_message_id)
+                payload.setdefault("messageId", conversation_message_id)
+                if isinstance(metadata, dict):
+                    if metadata.get("projection_status"):
+                        payload.setdefault("status", metadata.get("projection_status"))
+                    for key, aliases in {
+                        "client_message_id": ("client_message_id", "clientMessageId"),
+                        "channel": ("channel",),
+                        "visibility": ("visibility",),
+                        "team_mission": ("team_mission", "teamMission"),
+                        "participant_id": ("participant_id", "participantId"),
+                    }.items():
+                        if payload.get(key) not in (None, ""):
+                            continue
+                        for alias in aliases:
+                            value = metadata.get(alias)
+                            if value not in (None, ""):
+                                payload[key] = value
+                                break
     elif kind == "tool":
         tool_event_id = _text(reference.get("tool_event_id") or _row_value(row, "projected_tool_event_id"))
         if tool_event_id:

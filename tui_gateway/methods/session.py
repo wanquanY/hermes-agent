@@ -1606,32 +1606,24 @@ def _participant_view_for_resume(
     agent_context_mode: str,
     params: dict | None = None,
 ) -> str:
-    """Return the participant_id the resuming runtime should hydrate its
-    conversation history under.
-
-    - team-leader runtime over a team conversation session → ``"leader"``
-      (so leader sees its own assistant turns vs. other members' as
-      observed user-side speech)
-    - member-chat worker session → its ``member_id`` (member-chat sessions
-      also materialize this view at write-time via
-      sync_member_chat_conversation_view, so this lookup is mostly a
-      belt-and-braces for any re-hydration paths)
-    - all other sessions (plain chat, single-participant) → ``""`` and no
-      projection is applied
-
-    Caller passes the resolved agent_context_mode so we don't re-derive.
-    """
-    target = str(conversation_session_id or "").strip()
+    """Return an explicit participant id supplied by the runtime contract."""
     mode = str(agent_context_mode or "").strip().lower()
-    if mode == "team_leader":
-        return "leader"
-    if target.startswith("memberchat:"):
-        # memberchat:<conv>:<member_id>
-        rest = target[len("memberchat:"):]
-        # split off conv prefix (which itself may contain ':' segments)
-        # — the member id is the last colon-delimited segment.
-        if ":" in rest:
-            return rest.rsplit(":", 1)[-1].strip()
+    params = params if isinstance(params, dict) else {}
+    explicit = str(
+        params.get("participant_id") or params.get("participantId") or ""
+    ).strip()
+    if explicit:
+        return explicit
+    if mode != "team_leader":
+        return ""
+    db = _db_for_stable_session(str(conversation_session_id or "").strip())
+    if db is not None:
+        participants = db.participants.list_conversation_participants(
+            str(conversation_session_id or "").strip()
+        )
+        for participant in participants:
+            if isinstance(participant, dict) and str(participant.get("role") or "") == "leader":
+                return str(participant.get("participant_id") or "").strip()
     return ""
 
 
@@ -1717,13 +1709,9 @@ def _(rid, params: dict) -> dict:
     try:
         db.sessions.reopen(target)
         history = load_conversation_history(db, target)
-        # P1 participant-view projection: when this runtime is hydrating a
-        # MULTI-PARTICIPANT conversation (the team leader reading a team
-        # conversation that also contains member-chat mirrored replies, or
-        # any other participant view), project the shared message log into
-        # first-person view so the LLM doesn't conflate other participants'
-        # assistant turns with its own. Single-participant chats pass
-        # `viewer=""` and the projection is a no-op.
+        # Participant-aware projection keeps only the viewing actor's own
+        # replies as assistant. Other participants become attributed user-role
+        # conversation context and legacy system rows are excluded.
         agent_context_mode = _agent_context_mode_from_params(params)
         viewer_participant_id = _participant_view_for_resume(
             conversation_session_id=target,
@@ -1731,8 +1719,15 @@ def _(rid, params: dict) -> dict:
             params=params,
         )
         if viewer_participant_id:
-            from hermes_team_mission.domain.member_chat_projection import project_messages_for_viewer
-            history = project_messages_for_viewer(history, viewer_participant_id)
+            from hermes_agent.domain.participant_transcript_projector import (
+                project_participant_transcript,
+            )
+            participants = db.participants.list_conversation_participants(target)
+            history = project_participant_transcript(
+                history,
+                viewing_participant_id=viewer_participant_id,
+                participants=participants,
+            )
         display_history = _display_history_conversation(db, target)
         display_history_prefix = display_history[
             : max(0, len(display_history) - len(history))

@@ -683,20 +683,26 @@ def _project_run_event_for_subscription(
     event_type = text(event.get("type"))
     if event_type.startswith("team_mission."):
         return event_for_subscription(event, activity_id)
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     try:
         source_seq = int(
-            event.get("runtime_source_seq")
-            or event.get("runtimeSourceSeq")
-            or event.get("seq")
+            payload.get("source_seq")
+            or payload.get("sourceSeq")
+            or event.get("source_seq")
+            or event.get("sourceSeq")
             or 0
         )
     except (TypeError, ValueError):
         source_seq = 0
+    try:
+        activity_seq = int(event.get("seq") or 0)
+    except (TypeError, ValueError):
+        activity_seq = 0
     projected = projection_event(
         event,
         _identity_for_activity_event(event, activity_id, mission_id_value),
         source_seq=source_seq,
-        mission_seq=source_seq,
+        mission_seq=activity_seq,
     )
     return event_for_subscription(projected, activity_id)
 

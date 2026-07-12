@@ -8,11 +8,13 @@ import uuid
 from pathlib import Path
 
 from hermes_constants import get_hermes_home as _base_get_hermes_home
+from hermes_agent.domain.conversation_memory import MemoryAccessContext
+from hermes_agent.domain.participants import leader_participant_id, member_participant_id
 from hermes_team_leader_runtime_context import resolve_team_leader_runtime_params, resolve_team_runtime_members
 from hermes_team_mission.context.artifact_refs import artifact_refs_from_payload
 from hermes_team_mission.state.conversation import is_placeholder_team_mission_conversation_title as _is_placeholder_team_mission_conversation_title
-from hermes_team_mission.runtime.conversation_mirror import append_user_task_message as _append_team_user_task_message
-from hermes_team_mission.runtime.conversation_mirror import conversation_session_id as _team_conversation_session_id
+from hermes_team_mission.runtime.conversation_transcript import append_user_task_message as _append_team_user_task_message
+from hermes_team_mission.runtime.conversation_transcript import conversation_session_id as _team_conversation_session_id
 from hermes_team_mission.context.worker_context import build_team_mission_worker_context
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 from hermes_team_mission.gateway.leader_policy import TEAM_LEADER_BLOCKED_TOOLS as _TEAM_LEADER_BLOCKED_TOOLS
@@ -145,9 +147,7 @@ def _conversation_title_from_submit(db, params: dict, text: str) -> str:
         pass
 
     message_title = str(
-        params.get("persist_user_message")
-        or params.get("persistUserMessage")
-        or params.get("draft_text")
+        params.get("draft_text")
         or params.get("draftText")
         or text
         or ""
@@ -1160,6 +1160,242 @@ def _memory_context_text(*, label: str, payload: dict) -> str:
     return "\n".join(lines).strip()
 
 
+def _actor_context_snapshot_fields(
+    db,
+    *,
+    conversation_session_id: str,
+    participant_id: str,
+    execution_scope_key: str,
+    activity_id: str,
+    activity_kind: str,
+    profile_id: str = "",
+    profile_version_id: str = "",
+    node_id: str = "",
+    attempt_id: str = "",
+    selected_memory_ids: list[str] | None = None,
+) -> dict:
+    """Create an immutable per-run actor context snapshot when supported."""
+    participant = db.participants.get_participant(
+        conversation_session_id,
+        participant_id,
+    ) or {}
+    memory_namespace = str(participant.get("memory_namespace") or "").strip()
+    memory_revision = int(participant.get("memory_revision") or 0)
+    transcript_cursor = int(participant.get("transcript_cursor") or 0)
+    conversation_revision = 0
+    snapshot_id = ""
+    memory_service = getattr(db, "conversation_memory", None)
+    if memory_service is not None:
+        conversation_revision = memory_service.current_conversation_revision(
+            conversation_session_id
+        )
+        snapshot = memory_service.create_snapshot(
+            conversation_session_id=conversation_session_id,
+            actor_participant_id=participant_id,
+            execution_scope_key=execution_scope_key,
+            activity_id=activity_id,
+            activity_kind=activity_kind,
+            node_id=node_id,
+            attempt_id=attempt_id,
+            conversation_revision=conversation_revision,
+            participant_memory_revision=memory_revision,
+            transcript_cursor=transcript_cursor,
+            selected_memory_ids=list(selected_memory_ids or []),
+        )
+        snapshot_id = str(snapshot.get("snapshot_id") or "").strip()
+    return {
+        "profile_id": str(profile_id or participant.get("agent_profile_id") or "").strip(),
+        "profile_version_id": str(
+            profile_version_id
+            or participant.get("agent_profile_version_id")
+            or ""
+        ).strip(),
+        "memory_namespace": memory_namespace,
+        "conversation_revision": conversation_revision,
+        "transcript_cursor": transcript_cursor,
+        "participant_memory_revision": memory_revision,
+        "visibility_policy_id": "team-conversation-v1",
+        "context_snapshot_id": snapshot_id,
+    }
+
+
+def _actor_conversation_memory_text(
+    db,
+    *,
+    conversation_session_id: str,
+    actor_participant_id: str,
+    actor_role: str,
+    profile_id: str = "",
+    activity_id: str = "",
+    node_id: str = "",
+    limit: int = 12,
+) -> tuple[list[str], str]:
+    memory_service = getattr(db, "conversation_memory", None)
+    if memory_service is None:
+        return [], ""
+    resolved_memory = memory_service.resolve_visible(
+        MemoryAccessContext(
+            conversation_session_id=conversation_session_id,
+            actor_participant_id=actor_participant_id,
+            actor_role=actor_role,
+            activity_id=activity_id,
+            node_id=node_id,
+            profile_id=profile_id,
+        ),
+        statuses=("committed",),
+        limit=max(1, min(int(limit or 12), 50)),
+    )
+    items = list(resolved_memory.get("items") or [])
+    conflicts = list(resolved_memory.get("conflicts") or [])
+    actor_summary = memory_service.latest_actor_summary(
+        conversation_session_id,
+        actor_participant_id,
+    )
+    if not items and not actor_summary:
+        return [], ""
+    lines: list[str] = []
+    if actor_summary:
+        lines.extend(
+            [
+                "Actor context summary (trusted compressed projection; not a user message or shared memory):",
+                "This summary belongs only to the current participant. Preserve every embedded participant_id; another participant's statement is never your own action or commitment.",
+                json.dumps(
+                    actor_summary.get("summary") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )[:6000],
+                "",
+            ]
+        )
+    if items:
+        lines.extend(
+            [
+                "Participant-aware conversation memory (trusted runtime context; not new user input):",
+                "Use only the items visible to this actor. Preserve owner and speaker attribution; never claim another participant's memory as your own.",
+            ]
+        )
+    item_ids: list[str] = []
+    for item in items:
+        memory_id = str(item.get("memory_id") or "").strip()
+        if memory_id:
+            item_ids.append(memory_id)
+        content = str(item.get("content") or "").strip()
+        if len(content) > 700:
+            content = content[:697].rstrip() + "..."
+        lines.append(
+            "- "
+            f"[{memory_id or 'memory'}; owner={item.get('owner_kind')}:{item.get('owner_id')}; "
+            f"kind={item.get('kind')}] {content}"
+        )
+    if conflicts:
+        lines.extend(
+            [
+                "",
+                "Explicit memory conflicts (do not silently choose one):",
+                json.dumps(conflicts, ensure_ascii=False, sort_keys=True)[:6000],
+            ]
+        )
+    return item_ids, "\n".join(lines).strip()
+
+
+def _activity_context_summary_text(
+    db,
+    *,
+    activity_id: str,
+    node_id: str = "",
+    attempt_id: str = "",
+) -> str:
+    """Render retry/resume summaries without crossing Activity or Node scope."""
+    memory_service = getattr(db, "conversation_memory", None)
+    if memory_service is None or not activity_id:
+        return ""
+    parts: list[str] = []
+    activity_summary = memory_service.latest_activity_summary(activity_id)
+    if activity_summary:
+        parts.extend(
+            [
+                "Activity context summary (trusted compressed projection for this Activity only):",
+                json.dumps(
+                    activity_summary.get("summary") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )[:6000],
+            ]
+        )
+    if node_id and attempt_id:
+        node_summary = memory_service.latest_node_attempt_summary(
+            activity_id,
+            node_id,
+            attempt_id,
+        )
+        if node_summary:
+            parts.extend(
+                [
+                    "Node attempt summary (trusted projection for this node attempt only; do not expose it to other nodes):",
+                    json.dumps(
+                        node_summary.get("summary") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )[:6000],
+                ]
+            )
+    return "\n\n".join(parts).strip()
+
+
+def _ensure_mission_activity_context_snapshot(
+    db,
+    *,
+    mission: dict,
+    conversation_session_id: str,
+    leader_participant: str,
+) -> dict:
+    """Freeze the conversation inputs a Mission may consume implicitly."""
+    memory_service = getattr(db, "conversation_memory", None)
+    mission_id = str((mission or {}).get("mission_id") or "").strip()
+    if memory_service is None or not mission_id or not conversation_session_id:
+        return {}
+    activity_id = f"mission:{mission_id}"
+    existing = memory_service.latest_activity_snapshot(activity_id)
+    if existing:
+        return existing
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    visible = memory_service.list_visible(
+        MemoryAccessContext(
+            conversation_session_id=conversation_session_id,
+            actor_participant_id=leader_participant,
+            actor_role="leader",
+            activity_id=activity_id,
+        ),
+        statuses=("committed",),
+        limit=100,
+    )
+    shared_memory_ids = [
+        str(item.get("memory_id") or "")
+        for item in visible
+        if item.get("owner_kind") == "conversation" and item.get("memory_id")
+    ]
+    try:
+        return memory_service.create_activity_snapshot(
+            conversation_session_id=conversation_session_id,
+            activity_id=activity_id,
+            objective=str(mission.get("objective") or mission.get("title") or "Team activity"),
+            conversation_revision=memory_service.current_conversation_revision(
+                conversation_session_id
+            ),
+            selected_memory_ids=shared_memory_ids,
+            team_snapshot=metadata.get("team_capability_snapshot") or {},
+            workspace_snapshot={
+                "workspace_id": str(mission.get("workspace_id") or ""),
+                "workspace_path": str(mission.get("workspace_path") or ""),
+            },
+            expected_revision=0,
+        )
+    except RuntimeError:
+        # Concurrent node starts race only on snapshot creation; the winner's
+        # immutable revision is authoritative for every node in the activity.
+        return memory_service.latest_activity_snapshot(activity_id)
+
+
 def _team_memory_for_node(db, params: dict, mission: dict, node: dict, *, objective: str) -> tuple[dict, str]:
     if _team_memory_disabled(params, mission):
         return {"disabled": True, "reason": "disabled_by_request_or_policy"}, ""
@@ -1167,44 +1403,94 @@ def _team_memory_for_node(db, params: dict, mission: dict, node: dict, *, object
     node_id = str(node.get("node_id") or "").strip()
     if not mission_id or not node_id:
         return {}, ""
+    memory_service = getattr(db, "conversation_memory", None)
+    if memory_service is None:
+        return {"disabled": True, "reason": "conversation_memory_unavailable"}, ""
+    metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
+    conversation_session_id = str(
+        mission.get("conversation_session_id")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationTeamSessionId")
+        or mission.get("leader_session_id")
+        or ""
+    ).strip()
+    conversation_id = str(mission.get("conversation_id") or mission_id).strip()
+    activity_id = f"mission:{mission_id}"
     role = _node_role(node)
-    kind = str(node.get("kind") or "").strip()
-    phase = _node_phase(node)
-    try:
-        if role == "leader" and kind == "root" and phase in {"planning", "change_request", "discussion"}:
-            payload = db.build_team_mission_memory_pack(
-                mission_id=mission_id,
-                objective=objective or str(mission.get("objective") or ""),
-                workspace_id=str(mission.get("workspace_id") or ""),
-                limit=int(params.get("memory_limit") or params.get("memoryLimit") or 8),
-                include_team_scope=_team_memory_include_team_scope(params, mission),
-            )
-            text = _memory_context_text(label="Team Conversation Memory Pack", payload=payload)
-            memory = payload.get("memory_pack") if isinstance(payload, dict) else {}
-            return {
-                "kind": "leader_memory_pack",
-                "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
-                "item_ids": list((memory or {}).get("item_ids") or []),
-                "artifact_refs": list((memory or {}).get("artifact_refs") or []),
-            }, text
-        payload = db.build_team_mission_memory_slice(
-            mission_id=mission_id,
-            node_id=node_id,
-            objective=objective or str(node.get("objective") or ""),
-            limit=int(params.get("memory_limit") or params.get("memoryLimit") or 5),
-            include_team_scope=_team_memory_include_team_scope(params, mission),
+    node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    participant_id = (
+        leader_participant_id(conversation_id)
+        if role == "leader"
+        else member_participant_id(
+            str(
+                node.get("member_id")
+                or node_metadata.get("member_id")
+                or node_id
+            ).strip()
         )
-        text = _memory_context_text(label="Team Conversation Memory Slice", payload=payload)
-        memory = payload.get("memory_slice") if isinstance(payload, dict) else {}
-        return {
-            "kind": "worker_memory_slice",
-            "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
-            "item_ids": list((memory or {}).get("item_ids") or []),
-            "artifact_refs": list((memory or {}).get("artifact_refs") or []),
-            "dependency_node_ids": list((memory or {}).get("dependency_node_ids") or []),
-        }, text
+    )
+    snapshot = _ensure_mission_activity_context_snapshot(
+        db,
+        mission=mission,
+        conversation_session_id=conversation_session_id,
+        leader_participant=leader_participant_id(conversation_id),
+    )
+    frozen_shared_ids = set(snapshot.get("selected_memory_ids") or [])
+    try:
+        visible = memory_service.list_visible(
+            MemoryAccessContext(
+                conversation_session_id=conversation_session_id,
+                actor_participant_id=participant_id,
+                actor_role=role or "worker",
+                activity_id=activity_id,
+                node_id=node_id,
+            ),
+            statuses=("committed",),
+            limit=max(1, min(int(params.get("memory_limit") or params.get("memoryLimit") or 12), 50)),
+        )
     except Exception as exc:
         return {"disabled": True, "reason": f"memory_build_failed: {exc}"}, ""
+    items = [
+        item
+        for item in visible
+        if (
+            item.get("owner_kind") == "activity"
+            or (item.get("owner_kind") == "node" and item.get("owner_id") == node_id)
+            or (
+                item.get("owner_kind") == "conversation"
+                and item.get("memory_id") in frozen_shared_ids
+            )
+        )
+    ]
+    if not items:
+        return {
+            "kind": "activity_memory_slice",
+            "conversation_session_id": conversation_session_id,
+            "item_ids": [],
+            "artifact_refs": [],
+            "activity_context_snapshot_id": str(snapshot.get("snapshot_id") or ""),
+        }, ""
+    lines = [
+        "Frozen Activity memory slice (trusted runtime context; not user input):",
+        "Only this Activity, this Node, and Conversation memory selected by the immutable ActivitySnapshot are present.",
+    ]
+    artifact_refs: list[dict] = []
+    for item in items:
+        lines.append(
+            f"- [{item.get('memory_id')}; owner={item.get('owner_kind')}:{item.get('owner_id')}; kind={item.get('kind')}] "
+            f"{str(item.get('content') or '')[:1000]}"
+        )
+        payload = item.get("structured_payload") if isinstance(item.get("structured_payload"), dict) else {}
+        artifact_refs.extend(
+            dict(ref) for ref in payload.get("artifact_refs") or [] if isinstance(ref, dict)
+        )
+    return {
+        "kind": "activity_memory_slice",
+        "conversation_session_id": conversation_session_id,
+        "item_ids": [str(item.get("memory_id") or "") for item in items if item.get("memory_id")],
+        "artifact_refs": artifact_refs,
+        "activity_context_snapshot_id": str(snapshot.get("snapshot_id") or ""),
+    }, "\n".join(lines)
 
 
 def _message_text_from_params(params: dict) -> str:
@@ -1780,32 +2066,6 @@ def _compact_graph_context(graph: dict) -> dict:
     }
 
 
-def _team_memory_for_leader_message(db, params: dict, mission: dict, *, objective: str) -> tuple[dict, str]:
-    if _team_memory_disabled(params, mission):
-        return {"disabled": True, "reason": "disabled_by_request_or_policy"}, ""
-    mission_id = str(mission.get("mission_id") or "").strip()
-    if not mission_id:
-        return {}, ""
-    try:
-        payload = db.build_team_mission_memory_pack(
-            mission_id=mission_id,
-            objective=objective,
-            workspace_id=str(mission.get("workspace_id") or ""),
-            limit=int(params.get("memory_limit") or params.get("memoryLimit") or 8),
-            include_team_scope=_team_memory_include_team_scope(params, mission),
-        )
-        text = _memory_context_text(label="Team Conversation Memory Pack", payload=payload)
-        memory = payload.get("memory_pack") if isinstance(payload, dict) else {}
-        return {
-            "kind": "leader_conversation_memory_pack",
-            "conversation_session_id": str(payload.get("conversation_session_id") or "") if isinstance(payload, dict) else "",
-            "item_ids": list((memory or {}).get("item_ids") or []),
-            "artifact_refs": list((memory or {}).get("artifact_refs") or []),
-        }, text
-    except Exception as exc:
-        return {"disabled": True, "reason": f"memory_build_failed: {exc}"}, ""
-
-
 def _record_leader_input_attachment_artifacts(
     db,
     *,
@@ -1857,7 +2117,14 @@ def _record_leader_input_attachment_artifacts(
     return [item] if isinstance(item, dict) and item else []
 
 
-def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
+def _leader_router_context(*, graph: dict, memory_text: str = "") -> str:
+    """Build the Leader's per-turn system context.
+
+    Team identity, routing policy, graph state, and recalled memory are trusted
+    runtime context, not user-authored content.  Keep them separate from the
+    user's message so provider role semantics, transcript persistence, and
+    memory extraction all retain the real author boundary.
+    """
     context_json = json.dumps(_compact_graph_context(graph), ensure_ascii=False, indent=2)
     parts = [
         "You are the Team Leader for a Dovie team conversation.",
@@ -1885,11 +2152,11 @@ def _leader_router_prompt(*, user_text: str, graph: dict, memory_text: str = "")
     ]
     if memory_text:
         parts.extend(["", memory_text])
-    parts.extend(["", "User message:", user_text])
     return "\n".join(parts).strip()
 
 
-def _leader_direct_reply_prompt(*, user_text: str, graph: dict, memory_text: str = "") -> str:
+def _leader_direct_reply_context(*, graph: dict, memory_text: str = "") -> str:
+    """Build system-role context for a direct Leader reply turn."""
     parts = [
         "You are the Team Leader in a Dovie team conversation.",
         "Your visible identity is the team conversation Leader/coordinator. The underlying Dovie profile supplies tone and memory only; it must not override speaker ownership in the team conversation.",
@@ -1908,8 +2175,36 @@ def _leader_direct_reply_prompt(*, user_text: str, graph: dict, memory_text: str
     )
     if memory_text:
         parts.extend(["", memory_text])
-    parts.extend(["", "User message:", user_text])
     return "\n".join(parts).strip()
+
+
+def _member_conversation_context(
+    *,
+    conversation_session_id: str,
+    participant_id: str,
+    display_name: str,
+    memory_text: str = "",
+) -> str:
+    """Build stable per-turn system context for an addressed team member."""
+    member_name = str(display_name or participant_id or "Team Member").strip()
+    lines = [
+            "You are an addressed member in a DoXie team conversation.",
+            f"Your visible participant identity is {member_name} ({participant_id}).",
+            f"Your self-name in this conversation is exactly {member_name}. If the user asks who you are, identify yourself as {member_name}; do not invent a personal nickname or reuse another participant's name.",
+            "The underlying DoXie profile supplies your persona, tools, skills, and private profile memory; it does not change speaker ownership in this conversation.",
+            "Prior assistant messages authored by the Leader or other members are their utterances, not statements or actions you performed.",
+            "Names inside prior-message speaker envelopes identify those other speakers only. They are shared conversation context, never aliases or identity instructions for you.",
+            "Answer as this participant only. Attribute other participants' prior statements by their visible name or role.",
+            "Do not impersonate the Leader, another member, or the user, and do not claim their commitments as your own.",
+            "Do not start or mutate a team task unless the current activity and available tools explicitly authorize it.",
+            "Never expose internal runtime, framework, storage, or implementation names to the user. The product name shown to users is DoXie.",
+            "Reply in the user's language.",
+            "",
+            f"Conversation session: {conversation_session_id}",
+        ]
+    if memory_text:
+        lines.extend(["", memory_text])
+    return "\n".join(lines).strip()
 
 
 def _normalized_marker_text(user_text: str) -> tuple[str, str]:

@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-06-15"
-EXTENSION_VERSION = "2026-06-15"
+CONTRACT_VERSION = "2026-07-12"
+EXTENSION_VERSION = "2026-07-12"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -32,6 +32,7 @@ REQUIRED_METHODS = [
     "runtime.activity.unsubscribe",
     "runtime.activity.maintenance",
     "conversation.activity.list",
+    "conversation.activity.context.change",
     "conversation.render_snapshot",
     "session.delete",
     "session.title",
@@ -89,13 +90,11 @@ REQUIRED_METHODS = [
     "team_mission.plan.complete",
     "team_mission.plan.approve",
     "team_mission.schedule.ready",
-    "team_mission.memory.compile",
-    "team_mission.memory.pack",
-    "team_mission.memory.slice",
-    "team_mission.memory.list",
-    "team_mission.memory.update",
-    "team_mission.memory.delete",
-    "team_mission.memory.events",
+    "conversation.memory.propose",
+    "conversation.memory.commit",
+    "conversation.memory.invalidate",
+    "conversation.memory.list",
+    "conversation.context.summary.list",
     "model.set",
     "model.options",
     "approval.pending.list",
@@ -164,7 +163,7 @@ REQUIRED_STATE_FEATURES = [
     "state:team_mission_result",
     "state:team_registry",
     "state:team_mission_conversation",
-    "state:team_mission_memory",
+    "state:conversation_memory",
     "state:team_capability_snapshot",
     "state:message_reasoning",
     "state:session_search",
@@ -215,6 +214,7 @@ REQUIRED_GATEWAY_METHODS = {
     "runtime.activity.maintenance",
     "runtime.cloud_proxy.update",
     "conversation.activity.list",
+    "conversation.activity.context.change",
     "conversation.render_snapshot",
     "session.delete",
     "session.title",
@@ -273,13 +273,11 @@ REQUIRED_GATEWAY_METHODS = {
     "team_mission.plan.complete",
     "team_mission.plan.approve",
     "team_mission.schedule.ready",
-    "team_mission.memory.compile",
-    "team_mission.memory.pack",
-    "team_mission.memory.slice",
-    "team_mission.memory.list",
-    "team_mission.memory.update",
-    "team_mission.memory.delete",
-    "team_mission.memory.events",
+    "conversation.memory.propose",
+    "conversation.memory.commit",
+    "conversation.memory.invalidate",
+    "conversation.memory.list",
+    "conversation.context.summary.list",
     "model.set",
     "model.options",
     "approval.pending.list",

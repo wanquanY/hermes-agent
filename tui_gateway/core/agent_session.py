@@ -653,6 +653,18 @@ def _make_agent(
     if agent_context_mode:
         session_context["agent_context_mode"] = agent_context_mode
     context_options = _agent_context_options_for_session(session_context)
+    run_context = session_context.get("run_context")
+    memory_session_id = str(
+        getattr(run_context, "memory_namespace", "")
+        or (
+            f"conversation:{getattr(run_context, 'conversation_session_id', '')}"
+            f"/participant:{getattr(run_context, 'participant_id', '')}"
+            if run_context is not None
+            else ""
+        )
+        or session_id
+        or key
+    ).strip()
     agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -671,6 +683,7 @@ def _make_agent(
         disabled_toolsets=disabled_toolsets,
         platform="tui",
         session_id=session_id or key,
+        memory_session_id=memory_session_id,
         session_db=_db_for_stable_session(session_id or key),
         ephemeral_system_prompt=system_prompt or None,
         cwd=cwd,

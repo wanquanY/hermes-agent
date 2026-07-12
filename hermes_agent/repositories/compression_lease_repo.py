@@ -52,6 +52,22 @@ class CompressionLeaseRepository:
         )
         return int(cursor.rowcount or 0) > 0
 
+    def refresh(
+        self,
+        session_id: str,
+        holder: str,
+        *,
+        now: float,
+        expires_at: float,
+    ) -> bool:
+        """Extend an unexpired lease only while ``holder`` still owns it."""
+        cursor = self._conn.execute(
+            "UPDATE session_compression_leases SET expires_at = ?, updated_at = ? "
+            "WHERE session_id = ? AND holder = ? AND expires_at >= ?",
+            (expires_at, now, session_id, holder, now),
+        )
+        return int(cursor.rowcount or 0) > 0
+
     def holder(self, session_id: str, *, now: float) -> str | None:
         self._conn.execute(
             "DELETE FROM session_compression_leases WHERE session_id = ? AND expires_at <= ?",

@@ -12,16 +12,16 @@ S8 — orphan-recovery main-only:
     * ``_recover_orphaned_active_runs`` short-circuits in a worker process
       (``is_worker_process() == True``) and never calls the DB scan method.
 
-S9 — silent-degradation logging:
-    * The ``record_event`` team-mission mirror / reduce try/except blocks
-      that previously swallowed exceptions (``pass`` or ``logger.debug``)
-      now emit ``logger.error`` with contextual fields.
+S9 — canonical projection observability:
+    * The retired live-mirror branch is absent, while remaining projection
+      failures emit ``logger.error`` with contextual fields.
 
 Tests use monkeypatch / mock only — no source-code mutation.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -255,54 +255,12 @@ class TestS8OrphanRecoveryMainOnly:
 # ---------------------------------------------------------------------------
 
 class TestS9SilentDegradationLogging:
-    """The team-mission mirror / reduce except blocks must emit logger.error."""
+    """Canonical team-mission projection failures must emit logger.error."""
 
-    def test_mirror_failure_emits_error(self, caplog):
-        """When ``mirror_event_to_conversation`` raises, record_event must
-        emit an ERROR log (was logger.debug before)."""
-        # We need to reach the mirror block: persist must succeed, the
-        # reducer must return a scheduler_mission_id, and the mirror call
-        # must raise.
-        frame = _make_terminal_frame()
-
-        def _fake_append_run_event(stable, frame, **kw):
-            return {"seq": 1}
-
-        def _fake_reduce_team_mission_run_event(*, run_id, event):
-            return {"mission_id": "mission-1"}
-
-        def _fake_append_team_mission_event_for_run(*, run_id, event):
-            return {"seq": 1, "type": "mission.node.created"}
-
-        def _fake_get_team_mission_run_binding(run_id):
-            return {"mission_id": "mission-1"}
-
-        db = _StubDB(
-            append_run_event=_fake_append_run_event,
-            reduce_team_mission_run_event=_fake_reduce_team_mission_run_event,
-            append_team_mission_event_for_run=_fake_append_team_mission_event_for_run,
-            get_team_mission_run_binding=_fake_get_team_mission_run_binding,
-        )
-
-        with patch("tui_gateway.process_role.is_worker_process", return_value=False):
-            with patch(
-                "hermes_team_mission.runtime.conversation_mirror.mirror_event_to_conversation",
-                side_effect=RuntimeError("mirror boom"),
-            ):
-                with caplog.at_level(logging.DEBUG, logger="tui_gateway.services.run_control"):
-                    run_control.record_event(frame, db=db)
-
-        error_msgs = [
-            r.message for r in caplog.records
-            if r.levelno == logging.ERROR
-            and "team-mission-mirror-failed" in r.message
-        ]
-        assert len(error_msgs) == 1, (
-            f"expected 1 ERROR mirror-failed log, got {error_msgs}"
-        )
-        assert "mirror boom" in error_msgs[0]
-        # context fields
-        assert "mission-1" in error_msgs[0]
+    def test_live_conversation_mirror_branch_is_retired(self):
+        source = inspect.getsource(run_control.record_event)
+        assert "mirror_event_to_conversation" not in source
+        assert "team-mission-mirror-failed" not in source
 
     def test_status_append_failure_emits_error(self, caplog):
         """When ``append_team_mission_conversation_status_event`` raises,
@@ -333,13 +291,8 @@ class TestS9SilentDegradationLogging:
         )
 
         with patch("tui_gateway.process_role.is_worker_process", return_value=False):
-            # mirror must succeed (return a dict) so we reach the status block
-            with patch(
-                "hermes_team_mission.runtime.conversation_mirror.mirror_event_to_conversation",
-                return_value=None,  # no mirror event → skip mirror delivery
-            ):
-                with caplog.at_level(logging.DEBUG, logger="tui_gateway.services.run_control"):
-                    run_control.record_event(frame, db=db)
+            with caplog.at_level(logging.DEBUG, logger="tui_gateway.services.run_control"):
+                run_control.record_event(frame, db=db)
 
         error_msgs = [
             r.message for r in caplog.records

@@ -6,6 +6,7 @@ import importlib.util
 import logging
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -199,44 +200,78 @@ class MigrationRunner:
         )
 
     def run_all(self) -> None:
-        """Apply pending migrations in ascending order and bump schema_version.
+        """Apply every unapplied migration and update the compatibility version.
 
         Migrations that raise an exception whose class name is
         ``FrozenMigrationError`` are treated as intentionally parked (spec
-        §12 Phase M pattern) — skipped, logged, and excluded from the
-        target ``schema_version`` bump. Real errors continue to abort.
+        §12 Phase M pattern). The per-version ledger deliberately leaves that
+        version absent, so later migrations may ship without making the parked
+        migration impossible to run after it is unblocked. ``schema_version``
+        remains the highest successfully applied version for legacy readers.
         """
 
         migrations = load_migrations(self._migrations_dir)
         current_version = self._read_schema_version()
+        self._ensure_applied_migrations_ledger()
+        applied = self._read_applied_migration_versions()
+        if not applied and current_version is not None:
+            # Databases created before the ledger tracked only a monotonic high
+            # water mark. Backfill the contiguous historical prefix once. A
+            # parked migration above that mark remains absent and retryable.
+            for record in migrations:
+                if record.version <= current_version:
+                    self._record_applied_migration(record)
+                    applied.add(record.version)
         applied_versions: list[int] = []
 
         for record in migrations:
-            if record.version == 1:
-                if current_version is None:
-                    try:
-                        record.migration.apply(self._cursor)
-                        applied_versions.append(record.version)
-                    except Exception as exc:
-                        if type(exc).__name__ == "FrozenMigrationError":
-                            _log_frozen_skip(record.version, exc)
-                            continue
-                        raise
+            if record.version in applied:
                 continue
-            if current_version is None or record.version > current_version:
-                try:
-                    record.migration.apply(self._cursor)
-                    applied_versions.append(record.version)
-                except Exception as exc:
-                    if type(exc).__name__ == "FrozenMigrationError":
-                        _log_frozen_skip(record.version, exc)
-                        continue
-                    raise
+            try:
+                record.migration.apply(self._cursor)
+                self._record_applied_migration(record)
+                applied.add(record.version)
+                applied_versions.append(record.version)
+            except Exception as exc:
+                if type(exc).__name__ == "FrozenMigrationError":
+                    _log_frozen_skip(record.version, exc)
+                    continue
+                raise
 
         if applied_versions:
-            bump_to = max(applied_versions)
+            bump_to = max([*(applied or {0}), *applied_versions])
             if current_version is None or bump_to > current_version:
                 self._write_schema_version(bump_to)
+
+    def _ensure_applied_migrations_ledger(self) -> None:
+        self._cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS applied_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                applied_at REAL NOT NULL
+            )
+            """
+        )
+
+    def _read_applied_migration_versions(self) -> set[int]:
+        rows = self._cursor.execute(
+            "SELECT version FROM applied_migrations"
+        ).fetchall()
+        return {
+            int(row["version"] if isinstance(row, sqlite3.Row) else row[0])
+            for row in rows
+        }
+
+    def _record_applied_migration(self, record: MigrationRecord) -> None:
+        self._cursor.execute(
+            """
+            INSERT OR IGNORE INTO applied_migrations (
+                version, description, applied_at
+            ) VALUES (?, ?, ?)
+            """,
+            (record.version, record.description, time.time()),
+        )
 
     def _read_schema_version(self) -> int | None:
         try:

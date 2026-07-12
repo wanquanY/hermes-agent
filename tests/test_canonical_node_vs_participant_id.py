@@ -6,7 +6,7 @@ from typing import Any
 
 from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.identities import canonical_node_id
-from hermes_team_mission.domain.member_perspective import transform_to_member_perspective
+from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
 from hermes_team_mission.domain.runtime_identity import node_participant_id
 
 
@@ -109,24 +109,25 @@ def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
         {"participant_id": "member:member-beta", "display_name": "Beta"},
     ]
 
-    alpha_view = transform_to_member_perspective(
+    alpha_view = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-alpha",
         participants=participants,
     )
-    beta_view = transform_to_member_perspective(
+    beta_view = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-beta",
         participants=participants,
     )
 
-    assert alpha_view[0]["metadata"]["team_member_identity_contract"] is True
-    assert beta_view[0]["metadata"]["team_member_identity_contract"] is True
-    assert alpha_view[1]["role"] == "assistant"
-    assert alpha_view[1]["content"] == "Alpha has the build."
-    assert beta_view[1]["role"] == "user"
-    assert beta_view[1]["content"] == "[Alpha] Alpha has the build."
-    assert beta_view[1]["metadata"]["transformed_speaker_pid"] == "member:member-alpha"
+    assert alpha_view[0]["role"] == "assistant"
+    assert alpha_view[0]["content"].endswith("Alpha has the build.")
+    assert beta_view[0]["role"] == "user"
+    assert beta_view[0]["content"].startswith(
+        "[assistant | Alpha | member:member-alpha]"
+    )
+    assert beta_view[0]["metadata"]["speaker_participant_id"] == "member:member-alpha"
+    assert beta_view[0]["metadata"]["speaker_projected_role"] == "user"
 
 
 def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Path, monkeypatch) -> None:

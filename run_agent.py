@@ -376,6 +376,7 @@ class AIAgent:
         provider_data_collection: str = None,
         openrouter_min_coding_score: Optional[float] = None,
         session_id: str = None,
+        memory_session_id: str = None,
         tool_progress_callback: callable = None,
         tool_start_callback: callable = None,
         tool_complete_callback: callable = None,
@@ -394,6 +395,7 @@ class AIAgent:
         prefill_messages: List[Dict[str, Any]] = None,
         platform: str = None,
         user_id: str = None,
+        user_id_alt: str = None,
         user_name: str = None,
         chat_id: str = None,
         chat_name: str = None,
@@ -449,6 +451,7 @@ class AIAgent:
             provider_data_collection=provider_data_collection,
             openrouter_min_coding_score=openrouter_min_coding_score,
             session_id=session_id,
+            memory_session_id=memory_session_id,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
@@ -467,6 +470,7 @@ class AIAgent:
             prefill_messages=prefill_messages,
             platform=platform,
             user_id=user_id,
+            user_id_alt=user_id_alt,
             user_name=user_name,
             chat_id=chat_id,
             chat_name=chat_name,
@@ -1263,19 +1267,33 @@ class AIAgent:
             if isinstance(msg, dict) and msg.get("role") == "user":
                 msg["content"] = override
 
+    def _messages_for_persistence(self, messages: List[Dict]) -> List[Dict]:
+        """Return a persistence-safe copy without mutating provider context.
+
+        ``persist_user_message`` is a storage contract, not a prompt rewrite.
+        Team Mission terminal reports deliberately submit an API-only user
+        instruction while persisting an empty external-message placeholder.
+        Applying the override to the live list before the provider call made
+        the current user message empty and caused the model to answer an older
+        request from history.
+        """
+        persisted = [dict(message) if isinstance(message, dict) else message for message in messages]
+        self._apply_persist_user_message_override(persisted)
+        return persisted
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
         """
         if getattr(self, "_session_persistence_disabled", False):
-            self._session_messages = messages
+            self._session_messages = self._messages_for_persistence(messages)
             return
         self._drop_trailing_empty_response_scaffolding(messages)
-        self._apply_persist_user_message_override(messages)
-        self._session_messages = messages
-        self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        persisted_messages = self._messages_for_persistence(messages)
+        self._session_messages = persisted_messages
+        self._save_session_log(persisted_messages)
+        self._flush_messages_to_session_db(persisted_messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1719,7 +1737,6 @@ class AIAgent:
         """
         if not self._session_db:
             return
-        self._apply_persist_user_message_override(messages)
         visible_session_id = ""
         try:
             visible_session_id = self._visible_transcript_session_id()
@@ -2842,11 +2859,11 @@ class AIAgent:
         try:
             self._memory_manager.sync_all(
                 original_user_message, final_response,
-                session_id=self.session_id or "",
+                session_id=self.memory_session_id or self.session_id or "",
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
-                session_id=self.session_id or "",
+                session_id=self.memory_session_id or self.session_id or "",
             )
         except Exception:
             pass
@@ -4839,7 +4856,7 @@ class AIAgent:
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(
+        result = run_conversation(
             self,
             user_message,
             system_message,
@@ -4849,6 +4866,11 @@ class AIAgent:
             persist_user_message,
             turn_metadata,
         )
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            persisted_messages = self._messages_for_persistence(result["messages"])
+            result = {**result, "messages": persisted_messages}
+            self._session_messages = persisted_messages
+        return result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

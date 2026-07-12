@@ -12,6 +12,7 @@ def _persist(
     *,
     text: str = "",
     persist_user_message: str = "",
+    user_message_persistence: str = "runtime",
     attachments: list[dict] | None = None,
 ):
     db = open_cli_session_store(tmp_path / "state.db")
@@ -27,6 +28,7 @@ def _persist(
         "client_message_id": "client-1",
         "text": text,
         "persist_user_message": persist_user_message,
+        "user_message_persistence": user_message_persistence,
         "attachments": attachments or [],
         "draft_text": text,
         "model": "model-1",
@@ -35,6 +37,20 @@ def _persist(
     }
     prompt._persist_prompt_user_turn(**options)
     return db, options
+
+
+def test_prompt_user_persistence_skips_externally_owned_turn(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db, _options = _persist(
+        monkeypatch,
+        tmp_path,
+        text="pure user input",
+        user_message_persistence="external",
+    )
+
+    assert db.messages.list("conversation-1") == []
 
 
 def test_prompt_user_persistence_preserves_original_whitespace(

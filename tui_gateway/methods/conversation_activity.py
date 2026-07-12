@@ -204,3 +204,84 @@ def _(rid, params: dict) -> dict:
             "pageInfo": result.get("pageInfo") if isinstance(result.get("pageInfo"), dict) else {"hasMore": False},
         },
     )
+
+
+@method("conversation.activity.context.change")
+def _(rid, params: dict) -> dict:
+    """Create a new immutable Activity context revision after Leader approval."""
+    db = _get_db()
+    if db is None:
+        return _err(rid, 5008, "state database unavailable")
+    conversation_session_id = _text(
+        params.get("conversation_session_id") or params.get("conversationSessionId")
+    )
+    participant_id = _text(params.get("participant_id") or params.get("participantId"))
+    activity_id = _text(params.get("activity_id") or params.get("activityId"))
+    objective = _text(params.get("objective"))
+    if not conversation_session_id or not participant_id or not activity_id or not objective:
+        return _err(
+            rid,
+            4006,
+            "conversation_session_id, participant_id, activity_id, and objective required",
+        )
+    participant = db.participants.get_participant(
+        conversation_session_id, participant_id
+    ) or {}
+    if _text(participant.get("role")) != "leader":
+        return _err(rid, 4030, "only an active Leader may change Activity context")
+    current = db.conversation_memory.latest_activity_snapshot(activity_id)
+    if not current or current.get("conversation_session_id") != conversation_session_id:
+        return _err(rid, 4040, "active Activity context snapshot not found")
+    selected_event_ids = params.get("selected_event_ids") or params.get("selectedEventIds")
+    selected_memory_ids = params.get("selected_memory_ids") or params.get("selectedMemoryIds")
+    if not isinstance(selected_event_ids, list):
+        selected_event_ids = list(current.get("selected_event_ids") or [])
+    if not isinstance(selected_memory_ids, list):
+        selected_memory_ids = list(current.get("selected_memory_ids") or [])
+    expected_revision = int(
+        params.get("expected_revision")
+        or params.get("expectedRevision")
+        or current.get("activity_context_revision")
+        or 0
+    )
+    try:
+        snapshot = db.conversation_memory.create_activity_snapshot(
+            conversation_session_id=conversation_session_id,
+            activity_id=activity_id,
+            objective=objective,
+            conversation_revision=db.conversation_memory.current_conversation_revision(
+                conversation_session_id
+            ),
+            selected_event_ids=selected_event_ids,
+            selected_memory_ids=selected_memory_ids,
+            team_snapshot=current.get("team_snapshot") or {},
+            workspace_snapshot=current.get("workspace_snapshot") or {},
+            expected_revision=expected_revision,
+        )
+    except RuntimeError as exc:
+        return _err(rid, 4090, str(exc))
+    mission_id = activity_id.removeprefix("mission:")
+    if mission_id:
+        try:
+            from hermes_team_mission.state.event_log import append_team_mission_event
+
+            append_team_mission_event(
+                db,
+                mission_id=mission_id,
+                dedupe_key=f"activity-context-change:{activity_id}:{snapshot['activity_context_revision']}",
+                event={
+                    "type": "mission.change_requested",
+                    "conversation_session_id": conversation_session_id,
+                    "participant_id": participant_id,
+                    "payload": {
+                        "activity_id": activity_id,
+                        "snapshot_id": snapshot["snapshot_id"],
+                        "activity_context_revision": snapshot["activity_context_revision"],
+                        "objective": objective,
+                    },
+                },
+            )
+        except Exception:
+            # Snapshot revision is authoritative; audit projection is retriable.
+            pass
+    return _ok(rid, {"snapshot": snapshot})

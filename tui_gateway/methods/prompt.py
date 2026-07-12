@@ -215,6 +215,7 @@ def _persist_prompt_user_turn(
     client_message_id: str,
     text: Any,
     persist_user_message: str,
+    user_message_persistence: str,
     attachments: list[dict],
     draft_text: str,
     model: str,
@@ -222,6 +223,11 @@ def _persist_prompt_user_turn(
     dovie_product_context: str,
 ) -> None:
     if session.get("transient"):
+        return
+    if str(user_message_persistence or "").strip().lower() == "external":
+        # A control-plane writer already committed the canonical visible user
+        # event for this run/turn. The execution runtime consumes the input but
+        # is not a second transcript owner.
         return
     canonical_session_id = str(conversation_session_id or "").strip()
     if not canonical_session_id or not run_id or not turn_id:
@@ -427,6 +433,18 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         or params.get("transcriptText")
         or ""
     )
+    user_message_persistence = str(
+        params.get("user_message_persistence")
+        or params.get("userMessagePersistence")
+        or "runtime"
+    ).strip().lower()
+    if user_message_persistence not in {"runtime", "external"}:
+        return _err(rid, 4002, "user_message_persistence must be 'runtime' or 'external'")
+    turn_system_context = str(
+        params.get("turn_system_context")
+        or params.get("turnSystemContext")
+        or ""
+    ).strip()
     raw_dovie_context = params.get("dovie_product_context") or params.get("dovieProductContext") or ""
     dovie_product_context = (
         json.dumps(raw_dovie_context, ensure_ascii=False)
@@ -510,6 +528,8 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "attachments": submitted_attachments,
             "draft_text": str(params.get("draft_text") or text or ""),
             "persist_user_message": persist_user_message,
+            "user_message_persistence": user_message_persistence,
+            "turn_system_context": turn_system_context,
             "model": requested_model,
             "model_descriptor": model_descriptor,
             "dovie_product_context": dovie_product_context,
@@ -562,6 +582,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 client_message_id=client_message_id,
                 text=text,
                 persist_user_message=persist_user_message,
+                user_message_persistence=user_message_persistence,
                 attachments=submitted_attachments,
                 draft_text=str(params.get("draft_text") or text or ""),
                 model=requested_model,
@@ -694,6 +715,8 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "attachments": submitted_attachments,
                 "draft_text": str(params.get("draft_text") or text or ""),
                 "persist_user_message": persist_user_message,
+                "user_message_persistence": user_message_persistence,
+                "turn_system_context": turn_system_context,
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
                 "reasoning_config": _turn_reasoning_config(params),
@@ -793,6 +816,54 @@ def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict |
     return latest_message_id
 
 
+def _commit_scope_summary_after_compression(
+    *,
+    session: dict,
+    history: list[dict],
+) -> None:
+    run_context = session.get("run_context")
+    if run_context is None:
+        return
+    conversation_session_id = str(
+        getattr(run_context, "conversation_session_id", "") or ""
+    ).strip()
+    snapshot_id = str(
+        getattr(run_context, "activity_context_snapshot_id", "")
+        or getattr(run_context, "context_snapshot_id", "")
+        or ""
+    ).strip()
+    if not conversation_session_id or not snapshot_id:
+        return
+    try:
+        db = _db_for_stable_session(conversation_session_id)
+        memory_service = getattr(db, "conversation_memory", None) if db is not None else None
+        if memory_service is None:
+            return
+        from hermes_agent.domain.context_compaction import (
+            ContextCompactionService,
+            ContextScope,
+        )
+
+        ContextCompactionService(memory_service).checkpoint(
+            ContextScope.from_run_context(run_context),
+            history,
+        )
+    except RuntimeError as exc:
+        logger.info(
+            "context summary CAS lost conversation=%s participant=%s: %s",
+            conversation_session_id,
+            str(getattr(run_context, "participant_id", "") or ""),
+            exc,
+        )
+    except Exception:
+        logger.warning(
+            "context summary commit failed conversation=%s participant=%s",
+            conversation_session_id,
+            str(getattr(run_context, "participant_id", "") or ""),
+            exc_info=True,
+        )
+
+
 def _run_prompt_submit(
     rid,
     sid: str,
@@ -818,6 +889,16 @@ def _run_prompt_submit(
             turn_id=turn_id,
         )
         return
+    user_message_persistence = str(
+        (turn_metadata or {}).get("user_message_persistence") or "runtime"
+    ).strip().lower()
+    turn_system_context = str(
+        (turn_metadata or {}).get("turn_system_context") or ""
+    ).strip()
+    compression_count_before = int(
+        getattr(getattr(agent, "context_compressor", None), "compression_count", 0)
+        or 0
+    )
     delta_normalizer = _MessageDeltaNormalizer()
     message_segment_index = 0
     reasoning_text_by_message_seq: dict[str, str] = {}
@@ -1184,7 +1265,11 @@ def _run_prompt_submit(
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
-            clean_prompt = str((turn_metadata or {}).get("persist_user_message") or prompt or "")
+            clean_prompt = (
+                ""
+                if user_message_persistence == "external"
+                else str((turn_metadata or {}).get("persist_user_message") or prompt or "")
+            )
 
             if isinstance(prompt, str) and "@" in prompt:
                 _log_prompt_stage(session, sid, "context-reference-preprocess-start", run_id=turn_run_id, turn_id=turn_id)
@@ -1217,7 +1302,10 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
-                if not str((turn_metadata or {}).get("persist_user_message") or "").strip():
+                if (
+                    user_message_persistence != "external"
+                    and not str((turn_metadata or {}).get("persist_user_message") or "").strip()
+                ):
                     clean_prompt = prompt
                 _log_prompt_stage(
                     session,
@@ -1336,6 +1424,11 @@ def _run_prompt_submit(
             previous_private_run_context = getattr(agent, "_run_context", active_context_missing)
             previous_reasoning_config = getattr(agent, "reasoning_config", active_context_missing)
             previous_reasoning_callback = getattr(agent, "reasoning_callback", active_context_missing)
+            previous_ephemeral_system_prompt = getattr(
+                agent,
+                "ephemeral_system_prompt",
+                active_context_missing,
+            )
             turn_reasoning_config = (
                 (turn_metadata or {}).get("reasoning_config")
                 if isinstance((turn_metadata or {}).get("reasoning_config"), dict)
@@ -1359,6 +1452,15 @@ def _run_prompt_submit(
                     agent._run_context = session.get("run_context")
                 if turn_reasoning_config is not None:
                     agent.reasoning_config = dict(turn_reasoning_config)
+                if turn_system_context:
+                    base_system_context = (
+                        ""
+                        if previous_ephemeral_system_prompt is active_context_missing
+                        else str(previous_ephemeral_system_prompt or "").strip()
+                    )
+                    agent.ephemeral_system_prompt = "\n\n".join(
+                        part for part in (base_system_context, turn_system_context) if part
+                    )
                 agent.reasoning_callback = _emit_reasoning_delta
                 _log_prompt_stage(
                     session,
@@ -1492,6 +1594,13 @@ def _run_prompt_submit(
                         pass
                 else:
                     agent.reasoning_callback = previous_reasoning_callback
+                if previous_ephemeral_system_prompt is active_context_missing:
+                    try:
+                        delattr(agent, "ephemeral_system_prompt")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.ephemeral_system_prompt = previous_ephemeral_system_prompt
 
             if is_turn_interrupted():
                 result_messages = (
@@ -1539,6 +1648,19 @@ def _run_prompt_submit(
             last_reasoning = None
             status_note = None
             if isinstance(result, dict):
+                compression_count_after = int(
+                    getattr(
+                        getattr(agent, "context_compressor", None),
+                        "compression_count",
+                        0,
+                    )
+                    or 0
+                )
+                if compression_count_after > compression_count_before:
+                    _commit_scope_summary_after_compression(
+                        session=session,
+                        history=[item for item in history if isinstance(item, dict)],
+                    )
                 if isinstance(result.get("messages"), list):
                     with session["history_lock"]:
                         current_version = int(session.get("history_version", 0))

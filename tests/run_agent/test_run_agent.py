@@ -1869,7 +1869,7 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
-    def test_team_mission_handoff_skips_remaining_same_turn_tools(self, agent):
+    def test_team_mission_start_result_does_not_change_normal_tool_batch_semantics(self, agent):
         tc1 = _mock_tool_call(name="team_mission_start_task", arguments="{}", call_id="c1")
         tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
@@ -1883,26 +1883,23 @@ class TestExecuteToolCalls:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
+                "end_current_turn": True,
                 "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
+                "require_followup_response": False,
                 "await_final_deliverable": True,
             },
         })
 
-        with patch("run_agent.handle_function_call", return_value=handoff_result) as mock_hfc:
+        with patch("run_agent.handle_function_call", side_effect=[handoff_result, "search result"]) as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
 
-        assert mock_hfc.call_count == 1
+        assert mock_hfc.call_count == 2
         assert len(messages) == 2
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
         assert messages[1]["role"] == "tool"
         assert messages[1]["tool_call_id"] == "c2"
-        assert "Team Mission task was accepted" in messages[1]["content"]
-        assert "brief startup confirmation" in messages[1]["content"]
-        assert agent._tool_handoff_exit["kind"] == "team_mission_started"
-        assert agent._tool_handoff_exit["end_current_turn"] is False
-        assert agent._tool_handoff_exit["require_followup_response"] is True
+        assert messages[1]["content"] == "search result"
 
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
@@ -2806,7 +2803,7 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
-    def test_team_mission_start_task_returns_to_leader_for_natural_confirmation(self, agent):
+    def test_team_mission_start_task_returns_to_model_for_normal_final_response(self, agent):
         self._setup_agent(agent)
         agent.valid_tool_names.add("team_mission_start_task")
         tc = _mock_tool_call(
@@ -2814,12 +2811,16 @@ class TestRunConversation:
             arguments='{"objective":"plan the work"}',
             call_id="c1",
         )
-        start_response = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
-        confirmation_response = _mock_response(
-            content="团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。",
+        start_response = _mock_response(
+            content="好的，我来启动这个团队任务。",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        final_response = _mock_response(
+            content="团队任务已经启动，我会在画布中持续更新进度。",
             finish_reason="stop",
         )
-        agent.client.chat.completions.create.side_effect = [start_response, confirmation_response]
+        agent.client.chat.completions.create.side_effect = [start_response, final_response]
         handoff_result = json.dumps({
             "success": True,
             "mission_id": "mission-1",
@@ -2829,12 +2830,10 @@ class TestRunConversation:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
+                "end_current_turn": True,
                 "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
+                "require_followup_response": False,
                 "await_final_deliverable": True,
-                "assistant_followup_instruction": (
-                    "Reply naturally and briefly in the user's language."
-                ),
             },
         })
 
@@ -2846,11 +2845,58 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("start a team task")
 
-        assert result["final_response"] == "团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。"
+        assert result["final_response"] == "团队任务已经启动，我会在画布中持续更新进度。"
         assert str(result["turn_exit_reason"]).startswith("text_response")
         assert result["api_calls"] == 2
         assert agent.client.chat.completions.create.call_count == 2
         assert mock_handle_function_call.call_count == 1
+        visible_assistant_messages = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("content")
+        ]
+        assert visible_assistant_messages[-1]["content"] == result["final_response"]
+        second_request_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assert any(
+            message.get("role") == "tool" and "mission-1" in str(message.get("content"))
+            for message in second_request_messages
+        )
+
+    def test_team_mission_start_task_without_preamble_still_uses_model_response(self, agent):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("team_mission_start_task")
+        tc = _mock_tool_call(name="team_mission_start_task", arguments="{}", call_id="c1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+            _mock_response(content="任务已启动，正在后台异步执行。", finish_reason="stop"),
+        ]
+        handoff_result = json.dumps({
+            "success": True,
+            "mission_id": "mission-1",
+            "hermes_control": {
+                "kind": "team_mission_started",
+                "end_current_turn": True,
+                "skip_remaining_tool_calls": True,
+                "require_followup_response": False,
+            },
+        })
+
+        with (
+            patch("run_agent.handle_function_call", return_value=handoff_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("启动一个团队任务")
+
+        assert result["final_response"] == "任务已启动，正在后台异步执行。"
+        assert result["api_calls"] == 2
+        visible_assistant_messages = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("content")
+        ]
+        assert visible_assistant_messages[-1]["content"] == result["final_response"]
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
@@ -5354,9 +5400,37 @@ class TestPersistUserMessageOverride:
 
         agent._persist_session(messages, [])
 
-        assert messages[0]["content"] == "Hello there"
+        assert messages[0]["content"].startswith("[Voice input")
+        assert agent._session_messages[0]["content"] == "Hello there"
         first_db_write = agent._session_db.messages.append.call_args_list[0].kwargs
         assert first_db_write["content"] == "Hello there"
+
+    def test_api_only_user_instruction_reaches_provider_but_not_returned_history(self, agent):
+        TestRunConversation()._setup_agent(agent)
+        agent._session_persistence_disabled = True
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="The terminal report is ready.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Publish the completed team activity report now.",
+                persist_user_message="",
+            )
+
+        provider_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(
+            message.get("role") == "user"
+            and message.get("content") == "Publish the completed team activity report now."
+            for message in provider_messages
+        )
+        returned_users = [message for message in result["messages"] if message.get("role") == "user"]
+        assert returned_users[-1]["content"] == ""
+        assert result["final_response"] == "The terminal report is ready."
 
 
 class TestReasoningReplayForStrictProviders:

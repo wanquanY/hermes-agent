@@ -21,7 +21,7 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-06-15"
+    assert manifest["protocolVersion"] == "2026-07-12"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -32,7 +32,7 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     assert "state:run_event_log" in manifest["stateFeatures"]
     assert "state:team_mission_graph" in manifest["stateFeatures"]
     assert "state:team_mission_conversation" in manifest["stateFeatures"]
-    assert "state:team_mission_memory" in manifest["stateFeatures"]
+    assert "state:conversation_memory" in manifest["stateFeatures"]
     assert "state:team_capability_snapshot" in manifest["stateFeatures"]
     assert "state:runtime_scope_key" in manifest["stateFeatures"]
     assert "state:transient_session" in manifest["stateFeatures"]
@@ -82,7 +82,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-06-15"
+    assert response["result"]["protocolVersion"] == "2026-07-12"
     assert response["result"]["timelineContract"]["contractVersion"] == "3.1"
     assert response["result"]["timelineContract"]["capabilities"]["cursor"]["afterSeq"] is True
     assert response["result"]["timelineContract"]["capabilities"]["history"]["canonical"] is False
@@ -122,13 +122,12 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.plan.complete" in response["result"]["methods"]
     assert "team_mission.plan.approve" in response["result"]["methods"]
     assert "team_mission.schedule.ready" in response["result"]["methods"]
-    assert "team_mission.memory.compile" in response["result"]["methods"]
-    assert "team_mission.memory.pack" in response["result"]["methods"]
-    assert "team_mission.memory.slice" in response["result"]["methods"]
-    assert "team_mission.memory.list" in response["result"]["methods"]
-    assert "team_mission.memory.update" in response["result"]["methods"]
-    assert "team_mission.memory.delete" in response["result"]["methods"]
-    assert "team_mission.memory.events" in response["result"]["methods"]
+    assert "conversation.memory.propose" in response["result"]["methods"]
+    assert "conversation.memory.commit" in response["result"]["methods"]
+    assert "conversation.memory.invalidate" in response["result"]["methods"]
+    assert "conversation.memory.list" in response["result"]["methods"]
+    assert "conversation.activity.context.change" in response["result"]["methods"]
+    assert "conversation.context.summary.list" in response["result"]["methods"]
     assert "session.usage" in response["result"]["methods"]
     assert "session.status" in response["result"]["methods"]
     assert "session.message_metadata.merge" in response["result"]["methods"]
@@ -178,13 +177,12 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.plan.complete" in server._methods
     assert "team_mission.plan.approve" in server._methods
     assert "team_mission.schedule.ready" in server._methods
-    assert "team_mission.memory.compile" in server._methods
-    assert "team_mission.memory.pack" in server._methods
-    assert "team_mission.memory.slice" in server._methods
-    assert "team_mission.memory.list" in server._methods
-    assert "team_mission.memory.update" in server._methods
-    assert "team_mission.memory.delete" in server._methods
-    assert "team_mission.memory.events" in server._methods
+    assert "conversation.memory.propose" in server._methods
+    assert "conversation.memory.commit" in server._methods
+    assert "conversation.memory.invalidate" in server._methods
+    assert "conversation.memory.list" in server._methods
+    assert "conversation.activity.context.change" in server._methods
+    assert "conversation.context.summary.list" in server._methods
     assert "session.usage" in server._methods
     assert "session.status" in server._methods
     assert "session.branch" in server._methods
@@ -245,13 +243,12 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.plan.approve": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.schedule.ready": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.node.history": "hermes_team_mission.gateway.history_methods",
-        "team_mission.memory.compile": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.pack": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.slice": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.list": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.update": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.delete": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.events": "hermes_team_mission.gateway.memory_methods",
+        "conversation.memory.propose": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.commit": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.invalidate": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.list": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.activity.context.change": "tui_gateway.methods.conversation_activity",
+        "conversation.context.summary.list": "hermes_team_mission.gateway.conversation_memory_methods",
     }
     for method_name, owner_module in expected_team_mission_owners.items():
         assert server._methods[method_name].__module__ == owner_module

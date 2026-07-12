@@ -12,7 +12,7 @@ class DovieHermesExtension:
     """Registers Dovie-owned Gateway ABI surface with Hermes Core."""
 
     id = "dovie"
-    version = "2026-06-15"
+    version = "2026-07-12"
 
     def register_gateway_methods(self, registry: dict[str, Any] | None = None) -> None:
         register_gateway_methods(registry)

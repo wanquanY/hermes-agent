@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sys
 import types
@@ -11,7 +12,6 @@ import pytest
 
 from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
-from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
 from tui_gateway.run_worker import EventFrame, OutgoingFrame, RunTerminalFrame
 from tui_gateway.services import run_control
 from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
@@ -191,27 +191,10 @@ async def test_team_mission_node_message_complete_stamps_mission_prefix(tmp_path
 
 
 def test_team_mission_live_conversation_mirror_is_disabled(tmp_path: Path) -> None:
-    db = _db(tmp_path)
-    try:
-        _setup_mission(db)
-        saved = mirror_event_to_conversation(
-            db,
-            mission_id="mission-1",
-            event={
-                "type": "message.complete",
-                "session_id": "runtime-worker",
-                "conversation_session_id": "synthesis-session-1",
-                "run_id": "synthesis-run-1",
-                "turn_id": "turn-worker",
-                "runtime_scope_key": "team:mission-1:worker",
-                "activity_id": "mission:mission-1",
-                "payload": {"status": "complete", "text": "final deliverable"},
-            },
-        )
-        assert saved == {}
-        assert db.runs.list_events("team-session-1") == []
-    finally:
-        db.close()
+    from hermes_team_mission.runtime import conversation_transcript
+
+    assert hasattr(conversation_transcript, "append_user_task_message")
+    assert "mirror_event_to_conversation" not in inspect.getsource(run_control.record_event)
 
 
 @pytest.mark.asyncio
