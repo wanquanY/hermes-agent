@@ -33,7 +33,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse
 
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
-from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
+from hermes_constants import (
+    FINISH_REASON_LENGTH,
+    FINISH_REASON_STREAM_ERROR,
+    PARTIAL_STREAM_STUB_ID,
+)
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
@@ -1934,38 +1938,34 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 "(possible upstream error or malformed SSE response)."
             )
 
-        # A stream that delivered a tool call but only partial/unparseable
-        # JSON args splits into two very different cases:
+        # A stream that reaches EOF without a provider completion frame is
+        # incomplete, regardless of whether the transport reports a clean
+        # socket close. A provider-reported ``finish_reason="length"`` is a
+        # genuine output-cap truncation; a missing finish reason is a transport
+        # failure and must never be promoted to ``stop``.
         #
-        #   1. Provider sent finish_reason="length" → a genuine output-cap
-        #      truncation.  Boosting max_tokens on retry is the right move.
-        #
-        #   2. Provider sent NO finish_reason (the SSE simply stopped after
-        #      the opening "{" with no terminator and no [DONE]) → the
-        #      upstream dropped/stalled the connection mid tool-call.  This
-        #      is NOT an output cap — the model never reported hitting one.
-        #      Some dedicated endpoints (e.g. NVIDIA Nemotron Ultra on the
-        #      Nous dedicated endpoint) stall for minutes during large
-        #      tool-arg generation, then close the stream cleanly without a
-        #      finish_reason.  Stamping "length" here sends it down the
-        #      max_tokens-boost truncation path, which retries 3× to no
-        #      effect and finally reports the misleading "Response truncated
-        #      due to output length limit" — the red herring this guards
-        #      against.  Route it through the partial-stream-stub path
-        #      instead so the loop reports an honest mid-tool-call stream
-        #      drop and fails fast rather than escalating output budget.
-        _tool_args_dropped_no_finish = has_truncated_tool_args and finish_reason is None
-        if _tool_args_dropped_no_finish:
+        # Tool calls are deliberately discarded on this path, even if their
+        # accumulated JSON happens to parse: without the completion frame the
+        # provider never authorized executing that side effect.
+        if finish_reason is None:
             _dropped_names = [
                 (tool_calls_acc[idx]["function"]["name"] or "?")
                 for idx in sorted(tool_calls_acc)
             ]
-            logger.warning(
-                "Stream ended with no finish_reason while a tool call's "
-                "arguments were still incomplete (tools=%s); treating as a "
-                "mid-tool-call stream drop, not an output-length truncation.",
-                _dropped_names,
-            )
+            if has_truncated_tool_args:
+                logger.warning(
+                    "Stream ended with no finish_reason while a tool call's "
+                    "arguments were still incomplete (tools=%s); treating as a "
+                    "mid-tool-call stream drop, not an output-length truncation.",
+                    _dropped_names,
+                )
+            else:
+                logger.warning(
+                    "Stream ended after partial output without a finish_reason "
+                    "(tools=%s); preserving received content as an incomplete "
+                    "response.",
+                    _dropped_names,
+                )
             full_reasoning = "".join(reasoning_parts) or None
             mock_message = SimpleNamespace(
                 role=role,
@@ -1976,7 +1976,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             mock_choice = SimpleNamespace(
                 index=0,
                 message=mock_message,
-                finish_reason=FINISH_REASON_LENGTH,
+                finish_reason=FINISH_REASON_STREAM_ERROR,
             )
             return SimpleNamespace(
                 id=PARTIAL_STREAM_STUB_ID,
@@ -2498,10 +2498,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if result["error"] is not None:
         if deltas_were_sent["yes"]:
             # Streaming failed AFTER some tokens were already delivered to
-            # the platform.  Re-raising would let the outer retry loop make
-            # Return a partial response stub with finish_reason="length"
-            # so the conversation loop's continuation machinery fires.
-            # tool_calls=None prevents auto-execution of incomplete calls.
+            # the platform. Return a terminal partial-response stub so the
+            # caller preserves visible text without launching a hidden retry.
+            # ``tool_calls=None`` prevents auto-execution of incomplete calls.
             _partial_text = (
                 getattr(agent, "_current_streamed_assistant_text", "") or ""
             ).strip() or None
@@ -2529,17 +2528,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     "of text; surfaced warning to user: %s",
                     _partial_names, len(_partial_text or ""), result["error"],
                 )
-                _stub_finish_reason = FINISH_REASON_LENGTH
+                _stub_finish_reason = FINISH_REASON_STREAM_ERROR
             else:
                 logger.warning(
                     "Partial stream delivered before error; returning "
-                    "length-truncated stub with %s chars of recovered "
-                    "content so the loop can continue from where the "
-                    "stream died: %s",
+                    "incomplete stub with %s chars of recovered content: %s",
                     len(_partial_text or ""),
                     result["error"],
                 )
-                _stub_finish_reason = FINISH_REASON_LENGTH
+                _stub_finish_reason = FINISH_REASON_STREAM_ERROR
             _stub_msg = SimpleNamespace(
                 role="assistant", content=_partial_text, tool_calls=None,
                 reasoning_content=None,

@@ -270,15 +270,17 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = None
                 if db is not None:
                     kwargs["db"] = db
-                # terminate_run internally calls
-                # publish_recorded_event without exposing a persist
-                # flag; that call DOES persist on the main side, but
-                # this method is only invoked from on_run_terminal
-                # which Phase 4c already gates to abnormal exits
-                # (cancelled/failed) only — those have not been
-                # persisted by the worker (worker may have died before
-                # its own publish), so the main-side persist is the
-                # canonical source there.
+                    try:
+                        existing = db.runs.get(str(kwargs.get("run_id") or "")) or {}
+                        existing_status = str(existing.get("status") or "").strip().lower()
+                    except Exception:
+                        existing_status = ""
+                    if existing_status in {"completed", "failed", "interrupted", "cancelled"}:
+                        return {}
+                # RunTerminalFrame is the main-process reconciliation barrier.
+                # If the preceding message.complete already committed, the
+                # terminal check above makes this a no-op; if the worker died
+                # before emitting it, terminate_run supplies the missing fact.
                 return run_control.terminate_run(**kwargs)
 
             _router_singleton = WorkerFrameRouter(

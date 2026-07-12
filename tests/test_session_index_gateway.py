@@ -164,8 +164,6 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     the conversation's objective — replacing the supplementary
     loadTeamConversationSidebarSessions stream and the merge heuristic."""
     db = _setup(monkeypatch, tmp_path)
-    session_methods = importlib.import_module("tui_gateway.methods.session")
-    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", True)
 
     # Reference data the JOIN needs.
     db.teams.upsert_agent_team(
@@ -229,8 +227,7 @@ def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch
     assert "objective" not in plain_item
 
 
-def test_session_index_list_reconciles_preexisting_sessions_once(monkeypatch, tmp_path: Path):
-    from tui_gateway.methods import session as session_methods
+def test_session_index_startup_reconciles_preexisting_sessions_before_reads(monkeypatch, tmp_path: Path):
     db = _setup(monkeypatch, tmp_path)
     # session created before the index existed (no index row yet). Give it a
     # message so reconcile backfills a non-empty row that survives the
@@ -239,8 +236,11 @@ def test_session_index_list_reconciles_preexisting_sessions_once(monkeypatch, tm
     db.messages.append(session_id="legacy-1", role="user", content="hello")
     db.session_index.delete("legacy-1")
     assert db.session_index.list()["sessions"] == []
-    # first sidebar read backfills via reconcile
-    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
+    db.close()
+
+    db = open_cli_session_store(tmp_path / "state.db")
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    monkeypatch.setattr(session_methods, "_get_db", lambda: db)
     resp = server._methods["session.index.list"](1, {})
     ids = [s["id"] for s in resp["result"]["sessions"]]
     assert "legacy-1" in ids

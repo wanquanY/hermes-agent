@@ -421,8 +421,12 @@ def _stream_text(event: dict[str, Any]) -> str:
 
 
 def _is_coalescible_stream(event: dict[str, Any]) -> bool:
-    return str(event.get("type") or "") in COALESCIBLE_STREAM_EVENT_TYPES and bool(
-        _stream_text(event)
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return bool(
+        str(event.get("type") or "") in COALESCIBLE_STREAM_EVENT_TYPES
+        and not payload.get("stream_checkpoint")
+        and not payload.get("streamCheckpoint")
+        and _stream_text(event)
     )
 
 

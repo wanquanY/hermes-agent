@@ -400,14 +400,16 @@ def test_emit_realtime_frame_includes_stable_run_metadata(capture):
     server._emit("message.delta", "runtime-meta", {"text": "hi"})
     params = json.loads(buf.getvalue())["params"]
 
-    assert params["session_id"] == "runtime-meta"
+    assert params["session_id"] == "stored-meta"
     assert params["execution_session_id"] == "runtime-meta"
     assert params["conversation_session_id"] == "stored-meta"
     assert params["run_id"] == "run-meta"
     assert params["turn_id"] == "turn-meta"
     assert params["runtime_scope_key"] == "scope-meta"
-    assert isinstance(params["seq"], int)
-    assert params["seq"] > 0
+    assert params["transient"] is True
+    assert "seq" not in params
+    assert isinstance(params["runtime_source_seq"], int)
+    assert params["runtime_source_seq"] > 0
     assert params["payload"]["text"] == "hi"
 
 

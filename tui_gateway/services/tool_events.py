@@ -414,7 +414,13 @@ class GatewayToolEventBridge:
         **kwargs,
     ) -> None:
         session = self._sessions.get(sid)
-        if session_interrupted(session) or not self._tool_progress_enabled(sid):
+        if not self._tool_progress_enabled(sid):
+            return
+        # Cancellation closes the content stream, but the terminal lifecycle
+        # fact must still cross the worker boundary so history and status can
+        # converge. Dropping subagent.complete here leaves the child running
+        # forever in every downstream read model.
+        if session_interrupted(session) and event_type != "subagent.complete":
             return
         if event_type == "tool.started" and name:
             self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})

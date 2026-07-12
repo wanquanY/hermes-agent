@@ -102,12 +102,6 @@ class SessionIndexService:
         include_transient: bool = False,
         conversation_kind: str | None = None,
     ) -> dict[str, Any]:
-        def repair(conn: sqlite3.Connection) -> None:
-            SessionIndexReconciler(conn).repair_terminal_active_runs()
-            if self._repair_team_runtime_scope is not None:
-                self._repair_team_runtime_scope(conn)
-
-        self._unit_of_work.execute(repair)
         return self._read_model.list(
             SessionIndexQuery(
                 limit=limit,
@@ -118,11 +112,15 @@ class SessionIndexService:
         )
 
     def reconcile(self, *, exclude_sources: list[str] | None = None) -> dict[str, Any]:
-        return self._unit_of_work.execute(
-            lambda conn: SessionIndexReconciler(conn).reconcile(
+        def reconcile_projection(conn: sqlite3.Connection) -> dict[str, Any]:
+            result = SessionIndexReconciler(conn).reconcile(
                 exclude_sources=exclude_sources
             )
-        )
+            if self._repair_team_runtime_scope is not None:
+                result["runtime_scopes_repaired"] = self._repair_team_runtime_scope(conn)
+            return result
+
+        return self._unit_of_work.execute(reconcile_projection)
 
 
 __all__ = ["SessionIndexService"]

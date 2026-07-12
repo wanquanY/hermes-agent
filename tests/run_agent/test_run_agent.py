@@ -5015,11 +5015,9 @@ class TestStreamingApiCall:
         # Stream delivers a tool call with incomplete JSON args and then ENDS
         # with no finish_reason (the SSE just stops — no terminator, no
         # [DONE]).  This is an upstream mid-tool-call drop, NOT an output cap.
-        # The builder must route it through the partial-stream-stub path
-        # (id=PARTIAL_STREAM_STUB_ID, tool_calls=None so it can't execute,
-        # finish_reason=length so the loop's continuation machinery fires with
-        # chunking guidance) rather than stamping a normal 'length' truncation.
-        from hermes_constants import PARTIAL_STREAM_STUB_ID
+        # The builder must route it through the partial-stream-stub path with
+        # tool_calls=None so the unconfirmed side effect cannot execute.
+        from hermes_constants import FINISH_REASON_STREAM_ERROR, PARTIAL_STREAM_STUB_ID
         chunks = [
             _make_chunk(tool_calls=[_make_tc_delta(0, "call_1", "write_file", '{"path":"x.txt","content":"hel')]),
         ]
@@ -5028,7 +5026,7 @@ class TestStreamingApiCall:
         resp = agent._interruptible_streaming_api_call({"messages": []})
 
         assert resp.id == PARTIAL_STREAM_STUB_ID
-        assert resp.choices[0].finish_reason == "length"
+        assert resp.choices[0].finish_reason == FINISH_REASON_STREAM_ERROR
         assert resp.choices[0].message.tool_calls is None
         assert getattr(resp, "_dropped_tool_names", None) == ["write_file"]
 

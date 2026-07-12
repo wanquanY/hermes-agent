@@ -350,6 +350,20 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
                 },
             },
         )
+        db.runs.append_event(
+            "stored-ordinary-1",
+            {
+                "type": "message.delta",
+                "session_id": "runtime-1",
+                "conversation_session_id": "stored-ordinary-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {
+                    "mode": "replace",
+                    "text": "正在输出但尚未收到终结帧",
+                },
+            },
+        )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
 
@@ -362,9 +376,26 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         assert response["result"]["renderReady"] is True
         assert response["result"]["conversation_session_id"] == "stored-ordinary-1"
         assert response["result"]["messages"][0]["text"] == "我会读取文件。"
-        assert response["result"]["runEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-read-1"
+        run_events = response["result"]["runEvents"]
+        assert [event["type"] for event in run_events] == ["tool.complete", "message.delta"]
+        assert run_events[0]["payload"]["tool_id"] == "tool-read-1"
+        assert run_events[1]["payload"]["text"] == "正在输出但尚未收到终结帧"
         assert response["result"]["projection"]["source"] == "conversation.render_snapshot"
+
+        db.runs.terminate(
+            run_id="run-1",
+            session_id="stored-ordinary-1",
+            target_status="completed",
+            cause="worker_emitted",
+        )
+        completed_response = server._methods["conversation.render_snapshot"](
+            2,
+            {"session_id": "stored-ordinary-1", "limit": 50},
+        )
+        assert all(
+            event["type"] != "message.delta"
+            for event in completed_response["result"]["runEvents"]
+        )
     finally:
         db.close()
 

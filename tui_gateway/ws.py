@@ -27,6 +27,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import threading
 import time
 import uuid
 from collections import deque
@@ -43,8 +44,20 @@ _log = logging.getLogger(__name__)
 # to flush a WS frame before we mark the transport dead. Protects handler
 # threads from a wedged socket.
 _WS_WRITE_TIMEOUT_S = 10.0
-_WS_SEND_TIMEOUT_S = 2.0
 _WS_LARGE_FRAME_BYTES = 512 * 1024
+_STREAMING_EVENT_TYPES = frozenset(
+    {
+        "message.delta",
+        "reasoning.delta",
+        "thinking.delta",
+        "subagent.output_delta",
+        "subagent.reasoning_delta",
+        "agent_profile_test.output_delta",
+        "agent_profile_test.thinking",
+    }
+)
+_TOKEN_COALESCE_S = 0.033
+_STREAM_TEXT_FIELDS = ("delta", "text", "output", "content")
 _WS_DIAGNOSTIC_METHODS = frozenset(
     {
         "approval.respond",
@@ -101,6 +114,180 @@ _WS_CONTROL_METHODS = frozenset(
         "workspace.list",
     }
 )
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _utf16_length(value: str) -> int:
+    return len(str(value or "").encode("utf-16-le")) // 2
+
+
+def _stream_payload(frame: dict[str, Any]) -> dict[str, Any]:
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    return params.get("payload") if isinstance(params.get("payload"), dict) else {}
+
+
+def _stream_text(payload: dict[str, Any]) -> str:
+    text_stream = payload.get("text_stream") if isinstance(payload.get("text_stream"), dict) else {}
+    for field in _STREAM_TEXT_FIELDS:
+        value = text_stream.get(field)
+        if value is not None and str(value) != "":
+            return str(value)
+    for field in _STREAM_TEXT_FIELDS:
+        value = payload.get(field)
+        if value is not None and str(value) != "":
+            return str(value)
+    return ""
+
+
+def _stream_offset(payload: dict[str, Any]) -> int | None:
+    text_stream = payload.get("text_stream") if isinstance(payload.get("text_stream"), dict) else {}
+    for value in (text_stream.get("offset"), payload.get("offset")):
+        if value is None or value == "":
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _stream_mode(payload: dict[str, Any]) -> str:
+    text_stream = payload.get("text_stream") if isinstance(payload.get("text_stream"), dict) else {}
+    return str(text_stream.get("mode") or payload.get("mode") or "append").strip().lower()
+
+
+def _stream_identity(frame: dict[str, Any]) -> tuple[str, ...]:
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    return tuple(
+        str(value or "").strip()
+        for value in (
+            params.get("type"),
+            params.get("conversation_session_id") or params.get("session_id"),
+            params.get("execution_session_id"),
+            params.get("run_id"),
+            params.get("turn_id"),
+            params.get("runtime_scope_key"),
+            params.get("activity_id") or params.get("activityId"),
+            params.get("participant_id") or params.get("participantId"),
+            payload.get("subagent_id") or payload.get("subagentId"),
+            payload.get("delegate_call_id") or payload.get("delegateCallId"),
+            payload.get("client_message_id") or payload.get("clientMessageId"),
+            payload.get("message_id") or payload.get("messageId"),
+            payload.get("segment_id") or payload.get("segmentId"),
+            payload.get("stream_id") or payload.get("streamId"),
+            payload.get("test_run_id") or payload.get("testRunId"),
+            payload.get("source"),
+        )
+    )
+
+
+def _merge_stream_frames(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _stream_identity(first) != _stream_identity(second):
+        return None
+    first_payload = _stream_payload(first)
+    second_payload = _stream_payload(second)
+    if _stream_mode(first_payload) != "append" or _stream_mode(second_payload) != "append":
+        return None
+    first_text = _stream_text(first_payload)
+    second_text = _stream_text(second_payload)
+    if not first_text or not second_text:
+        return None
+    first_offset = _stream_offset(first_payload)
+    second_offset = _stream_offset(second_payload)
+    if (first_offset is None) != (second_offset is None):
+        return None
+    if first_offset is not None and second_offset != first_offset + _utf16_length(first_text):
+        return None
+
+    merged_text = first_text + second_text
+    merged = dict(first)
+    first_params = first.get("params") if isinstance(first.get("params"), dict) else {}
+    second_params = second.get("params") if isinstance(second.get("params"), dict) else {}
+    merged_params = {**first_params, **second_params}
+    merged_payload = {**first_payload, **second_payload}
+    for field in _STREAM_TEXT_FIELDS:
+        if field in first_payload or field in second_payload:
+            merged_payload[field] = merged_text
+    if first_offset is not None:
+        merged_payload["offset"] = first_offset
+
+    first_text_stream = (
+        first_payload.get("text_stream")
+        if isinstance(first_payload.get("text_stream"), dict)
+        else {}
+    )
+    second_text_stream = (
+        second_payload.get("text_stream")
+        if isinstance(second_payload.get("text_stream"), dict)
+        else {}
+    )
+    if first_text_stream or second_text_stream:
+        merged_text_stream = {**first_text_stream, **second_text_stream}
+        for field in _STREAM_TEXT_FIELDS:
+            if field in first_text_stream or field in second_text_stream:
+                merged_text_stream[field] = merged_text
+        if first_offset is not None:
+            merged_text_stream["offset"] = first_offset
+        merged_payload["text_stream"] = merged_text_stream
+    first_event_text_stream = (
+        first_params.get("text_stream")
+        if isinstance(first_params.get("text_stream"), dict)
+        else {}
+    )
+    second_event_text_stream = (
+        second_params.get("text_stream")
+        if isinstance(second_params.get("text_stream"), dict)
+        else {}
+    )
+    if first_event_text_stream or second_event_text_stream:
+        merged_event_text_stream = {
+            **first_event_text_stream,
+            **second_event_text_stream,
+        }
+        for field in _STREAM_TEXT_FIELDS:
+            if field in first_event_text_stream or field in second_event_text_stream:
+                merged_event_text_stream[field] = merged_text
+        if first_offset is not None:
+            merged_event_text_stream["offset"] = first_offset
+        merged_params["text_stream"] = merged_event_text_stream
+    merged_params["payload"] = merged_payload
+    merged["params"] = merged_params
+    return merged
+
+
+def _coalesce_stream_lines(lines: list[str]) -> list[str]:
+    coalesced: list[dict[str, Any] | str] = []
+    for line in lines:
+        try:
+            frame = json.loads(line)
+        except (TypeError, ValueError):
+            coalesced.append(line)
+            continue
+        if not isinstance(frame, dict):
+            coalesced.append(line)
+            continue
+        previous = coalesced[-1] if coalesced else None
+        if isinstance(previous, dict):
+            merged = _merge_stream_frames(previous, frame)
+            if merged is not None:
+                coalesced[-1] = merged
+                continue
+        coalesced.append(frame)
+    return [
+        item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+        for item in coalesced
+    ]
 _ws_control_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="tui-ws-control",
@@ -221,6 +408,10 @@ class WSTransport:
         self._pending_requests: dict[str, dict[str, Any]] = {}
         self._send_queue: deque[tuple[bool, str, asyncio.Future | None]] = deque()
         self._send_worker: asyncio.Task | None = None
+        self._stream_lock = threading.Lock()
+        self._pending_stream_lines: list[str] = []
+        self._stream_flush_handle: asyncio.TimerHandle | None = None
+        self._stream_flush_armed = False
 
     def _diagnostics(self) -> dict[str, Any]:
         return {
@@ -230,6 +421,7 @@ class WSTransport:
             "sent_count": self._sent_count,
             "bytes_sent": self._bytes_sent,
             "queue_size": len(self._send_queue),
+            "pending_stream_count": len(self._pending_stream_lines),
             "pending_request_count": len(self._pending_requests),
             "last_send": self._last_send_meta,
         }
@@ -269,6 +461,19 @@ class WSTransport:
         )
         return enriched
 
+    @staticmethod
+    def _is_streaming_frame(obj: dict[str, Any]) -> bool:
+        params = obj.get("params") if isinstance(obj, dict) else None
+        if not isinstance(params, dict) or params.get("type") not in _STREAMING_EVENT_TYPES:
+            return False
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        return bool(
+            params.get("transient") is True
+            and _positive_int(params.get("seq")) == 0
+            and not payload.get("stream_checkpoint")
+            and not payload.get("streamCheckpoint")
+        )
+
     def write(self, obj: dict) -> bool:
         if self._closed:
             return False
@@ -276,15 +481,21 @@ class WSTransport:
         line = json.dumps(obj, ensure_ascii=False)
         frame_meta = _frame_meta(line)
 
+        if self._is_streaming_frame(obj):
+            with self._stream_lock:
+                self._pending_stream_lines.append(line)
+                if not self._stream_flush_armed:
+                    self._stream_flush_armed = True
+                    self._loop.call_soon_threadsafe(self._arm_stream_flush)
+            return not self._closed
+
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
             on_loop = False
 
         if on_loop:
-            # Fire-and-forget, but keep ordinary event frames behind any
-            # response frame that arrives while an earlier send is blocked.
-            self._loop.create_task(self._enqueue_send(line, priority=False))
+            self._enqueue_on_loop(line, priority=False, flush_streams=True)
             return True
 
         try:
@@ -298,6 +509,17 @@ class WSTransport:
                 )
                 return False
             fut.result(timeout=_WS_WRITE_TIMEOUT_S)
+            return not self._closed
+        except concurrent.futures.TimeoutError:
+            # A busy agent turn can stall the event loop without closing the
+            # socket. The coroutine remains scheduled and will send when the
+            # loop resumes; only _safe_send may latch a real transport failure.
+            _log.warning(
+                "gateway ws write slow: loop stalled >%ss %s frame=%s",
+                _WS_WRITE_TIMEOUT_S,
+                self._diagnostics(),
+                frame_meta,
+            )
             return not self._closed
         except Exception as exc:
             self._closed = True
@@ -314,24 +536,91 @@ class WSTransport:
         """Send from the owning event loop. Awaits until the frame is on the wire."""
         if self._closed:
             return False
-        await self._enqueue_send(json.dumps(obj, ensure_ascii=False), priority=True)
+        await self._enqueue_send(
+            json.dumps(obj, ensure_ascii=False),
+            priority=True,
+            flush_streams=True,
+        )
         return not self._closed
 
     async def _send_from_worker(self, line: str) -> bool:
-        await self._enqueue_send(line, priority=False)
+        await self._enqueue_send(line, priority=False, flush_streams=True)
         return not self._closed
 
-    async def _enqueue_send(self, line: str, *, priority: bool) -> bool:
+    def _take_pending_stream_lines(self) -> list[str]:
+        with self._stream_lock:
+            lines = self._pending_stream_lines
+            self._pending_stream_lines = []
+            self._stream_flush_armed = False
+            handle = self._stream_flush_handle
+            self._stream_flush_handle = None
+        if handle is not None:
+            handle.cancel()
+        return _coalesce_stream_lines(lines)
+
+    def _arm_stream_flush(self) -> None:
         if self._closed:
-            return False
-        fut = self._loop.create_future()
-        item = (priority, line, fut)
-        if priority:
+            return
+        with self._stream_lock:
+            if not self._stream_flush_armed or self._stream_flush_handle is not None:
+                return
+            self._stream_flush_handle = self._loop.call_later(
+                _TOKEN_COALESCE_S,
+                self._flush_stream_lines,
+            )
+
+    def _flush_stream_lines(self) -> None:
+        lines = self._take_pending_stream_lines()
+        if lines and not self._closed:
+            self._queue_stream_lines(lines)
+
+    def _queue_stream_lines(self, lines: list[str]) -> None:
+        if self._closed:
+            return
+        for stream_line in lines:
+            self._send_queue.append((False, stream_line, None))
+        self._ensure_send_worker()
+
+    def _enqueue_on_loop(
+        self,
+        line: str,
+        *,
+        priority: bool,
+        flush_streams: bool,
+    ) -> None:
+        pending_streams = self._take_pending_stream_lines() if flush_streams else []
+        for stream_line in pending_streams:
+            self._send_queue.append((False, stream_line, None))
+        item = (priority, line, None)
+        if priority and not pending_streams:
             self._send_queue.appendleft(item)
         else:
             self._send_queue.append(item)
+        self._ensure_send_worker()
+
+    def _ensure_send_worker(self) -> None:
         if self._send_worker is None or self._send_worker.done():
             self._send_worker = self._loop.create_task(self._drain_send_queue())
+
+    async def _enqueue_send(
+        self,
+        line: str,
+        *,
+        priority: bool,
+        flush_streams: bool = False,
+    ) -> bool:
+        if self._closed:
+            return False
+        pending_streams = self._take_pending_stream_lines() if flush_streams else []
+        for stream_line in pending_streams:
+            self._send_queue.append((False, stream_line, None))
+        fut = self._loop.create_future()
+        item = (priority, line, fut)
+        if priority and not pending_streams:
+            self._send_queue.appendleft(item)
+        else:
+            self._send_queue.append(item)
+        self._ensure_send_worker()
         await fut
         return not self._closed
 
@@ -361,10 +650,7 @@ class WSTransport:
                 meta,
             )
         try:
-            await asyncio.wait_for(
-                self._ws.send_text(line),
-                timeout=_WS_SEND_TIMEOUT_S,
-            )
+            await self._ws.send_text(line)
             self._sent_count += 1
             self._bytes_sent += int(meta.get("bytes") or 0)
         except Exception as exc:
@@ -381,6 +667,13 @@ class WSTransport:
         if not self._closed:
             _log.info("gateway ws transport closing %s", self._diagnostics())
         self._closed = True
+        with self._stream_lock:
+            self._pending_stream_lines = []
+            self._stream_flush_armed = False
+            handle = self._stream_flush_handle
+            self._stream_flush_handle = None
+        if handle is not None:
+            handle.cancel()
 
     async def aclose(self) -> None:
         # Phase 6: legacy ``_runtime_bridges`` map deleted; the new

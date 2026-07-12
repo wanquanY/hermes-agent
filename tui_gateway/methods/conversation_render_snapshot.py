@@ -75,6 +75,30 @@ def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
     return [dict(event) for event in events if _is_structural_run_event(event)]
 
 
+def _ordinary_render_run_events(session_id: str, events: list[Any]) -> list[dict[str, Any]]:
+    db = _get_db()
+    if db is None or not session_id:
+        return _structural_run_events(events)
+    try:
+        status = db.runs.session_status(session_id)
+    except Exception:
+        return _structural_run_events(events)
+    active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
+    return [
+        dict(event)
+        for event in events
+        if isinstance(event, dict)
+        and (
+            _is_structural_run_event(event)
+            or (
+                bool(active_run_id)
+                and _text(event.get("type")) in _RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES
+                and _text(event.get("run_id")) == active_run_id
+            )
+        )
+    ]
+
+
 def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
     run_ids = sorted(item for item in _covered_render_run_ids(messages) if item)
     return run_ids
@@ -1099,7 +1123,10 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "participants": _participants_for_session(session_id),
             "messages": list(page.get("messages") or []),
             "toolEvents": list(page.get("toolEvents") or []),
-            "runEvents": _structural_run_events(list(page.get("runEvents") or [])),
+            "runEvents": _ordinary_render_run_events(
+                session_id,
+                list(page.get("runEvents") or []),
+            ),
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},
             "branchInfo": page.get("branchInfo") if isinstance(page.get("branchInfo"), dict) else None,
             "projection": {

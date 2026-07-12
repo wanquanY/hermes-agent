@@ -77,6 +77,34 @@ async def test_completes_emits_completed_terminal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminal_frame_never_overtakes_thread_scheduled_event_frames() -> None:
+    from tui_gateway.services import run_control
+
+    class _SlowSink(_Sink):
+        async def emit(self, frame) -> None:
+            if isinstance(frame, EventFrame):
+                await asyncio.sleep(0.02)
+            self.frames.append(frame)
+
+    def runner(_frame: RunStartFrame, _cancel: threading.Event) -> None:
+        run_control.publish_recorded_event(
+            {
+                "type": "subagent.complete",
+                "conversation_session_id": "s1",
+                "run_id": "r-order",
+                "payload": {"subagent_id": "sa-1", "status": "completed"},
+            }
+        )
+
+    backend = AgentRunBackend(runner=runner)
+    sink = _SlowSink()
+    await backend.start(_start_frame("r-order"), sink.emit)
+
+    assert [type(frame) for frame in sink.frames] == [EventFrame, RunTerminalFrame]
+    assert sink.frames[0].params["type"] == "subagent.complete"
+
+
+@pytest.mark.asyncio
 async def test_runner_exception_emits_failed_terminal_and_log() -> None:
     def runner(frame, cancel) -> None:
         raise RuntimeError("kaboom")

@@ -434,19 +434,26 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         ]
         assert immediate_raw_deltas == []
 
-        mission_deltas = [
-            event
-            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
+        live_projected_deltas = [
+            frame.get("params") or {}
+            for frame in mission_transport.frames
             if (
-                event["type"] == "team_mission.runtime.event"
-                and event["payload"]["source_event_type"] == "message.delta"
+                frame.get("method") == "event"
+                and (frame.get("params") or {}).get("type") == "team_mission.runtime.event"
+                and ((frame.get("params") or {}).get("payload") or {}).get("source_event_type") == "message.delta"
             )
         ]
-        assert mission_deltas
-        assert all(event.get("mission_id") == "mission-1" for event in mission_deltas)
-        assert all(event["payload"]["source_event"]["type"] == "message.delta" for event in mission_deltas)
-        assert [event["payload"]["text_stream"]["delta"] for event in mission_deltas] == ["最终", "交付", "完成"]
-        assert all(event["payload"]["subject"]["type"] == "node" for event in mission_deltas)
+        assert [event["payload"]["text_stream"]["delta"] for event in live_projected_deltas] == [
+            "最终",
+            "交付",
+            "完成",
+        ]
+        assert all(event.get("transient") is True for event in live_projected_deltas)
+        assert not any(
+            event.get("type") == "team_mission.runtime.event"
+            and (event.get("payload") or {}).get("source_event_type") == "message.delta"
+            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
+        )
 
         _, replay_events = run_control.subscribe_activity(
             activity_id="mission:mission-1",
@@ -458,7 +465,10 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             if event["type"] == "team_mission.runtime.event"
             and event["payload"]["source_event_type"] == "message.delta"
         ]
-        assert [event["payload"]["text_stream"]["delta"] for event in replay_deltas] == ["最终", "交付", "完成"]
+        assert len(replay_deltas) == 1
+        assert replay_deltas[0]["transient"] is True
+        assert replay_deltas[0]["payload"]["text_stream"]["mode"] == "snapshot"
+        assert replay_deltas[0]["payload"]["text_stream"]["delta"] == "最终交付完成"
 
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)

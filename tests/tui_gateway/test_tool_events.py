@@ -185,6 +185,46 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[9]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
+def test_interrupted_session_still_emits_subagent_terminal_fact():
+    events = []
+    sessions = {
+        "sid": {
+            "session_key": "stored",
+            "active_run_id": "run-1",
+            "active_turn_id": "turn-1",
+            "interrupted_run_id": "run-1",
+            "interrupted_turn_id": "turn-1",
+        }
+    }
+    bridge = GatewayToolEventBridge(
+        sessions=sessions,
+        emit=lambda event_type, sid, payload=None: events.append(
+            {"type": event_type, "session_id": sid, "payload": payload or {}}
+        ),
+        tool_progress_enabled=lambda _sid: True,
+        session_cwd=lambda _session: "/tmp",
+    )
+
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.reasoning_delta",
+        preview="late token",
+        subagent_id="sa-1",
+    )
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.complete",
+        preview="stopped",
+        subagent_id="sa-1",
+        status="interrupted",
+        summary="stopped",
+    )
+
+    assert [event["type"] for event in events] == ["subagent.complete"]
+    assert events[0]["payload"]["status"] == "interrupted"
+    assert events[0]["payload"]["subagent_id"] == "sa-1"
+
+
 def test_agent_profile_design_context_emits_structured_complete_when_tool_progress_disabled():
     events = []
     bridge = _bridge(events, tool_progress_enabled=False)

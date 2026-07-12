@@ -29,6 +29,8 @@ from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
+from tui_gateway.services import runtime_streams as _runtime_streams
+from tui_gateway.services import runtime_event_protocol as _runtime_event_protocol
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
     event_run_id as _event_run_id,
@@ -95,6 +97,29 @@ _STREAM_TRACE_EVENT_TYPES = {
     "message.complete",
     "reasoning.delta",
     "thinking.delta",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.progress",
+    "subagent.tool",
+}
+_STREAM_CHECKPOINT_BOUNDARY_TYPES = {
+    "message.complete",
+    "error",
+    "session.interrupted",
+    "session.recalled",
+    "tool.start",
+    "tool.complete",
+    "approval.request",
+    "clarify.request",
+    "secret.request",
+    "sudo.request",
+    "input_approval.request",
+    "subagent.tool",
+    "subagent.progress",
+    "subagent.complete",
+    "agent_profile_test.tool",
+    "agent_profile_test.progress",
+    "agent_profile_test.complete",
 }
 
 def _transport_debug_id(transport: Any) -> str:
@@ -112,6 +137,12 @@ def _stream_trace_summary(event: dict[str, Any]) -> dict[str, Any]:
         "payload_len": len(text),
         "payload_sha1": digest,
         "payload_preview": text[:80].replace("\n", "\\n"),
+        "payload_offset": payload.get("offset"),
+        "subagent_id": str(payload.get("subagent_id") or payload.get("subagentId") or ""),
+        "delegate_call_id": str(
+            payload.get("delegate_call_id") or payload.get("delegateCallId") or ""
+        ),
+        "source": str(payload.get("source") or ""),
     }
 
 
@@ -139,6 +170,8 @@ _subscription_ids_by_transport: dict[Transport, set[str]] = defaultdict(set)
 _run_state_by_id: dict[str, dict[str, Any]] = {}
 _run_ids_by_session: dict[str, list[str]] = defaultdict(list)
 _last_seq_by_session: dict[str, int] = defaultdict(int)
+_participant_id_by_resolution_key: dict[tuple[str, str, str, str, str], str] = {}
+_team_mission_binding_by_run: dict[str, dict[str, Any]] = {}
 _subscription_poller_thread: threading.Thread | None = None
 _team_mission_ready_scheduler: Any = None
 
@@ -154,6 +187,10 @@ def _reset_for_tests() -> None:
         _run_state_by_id.clear()
         _run_ids_by_session.clear()
         _last_seq_by_session.clear()
+        _participant_id_by_resolution_key.clear()
+        _team_mission_binding_by_run.clear()
+    _runtime_streams.reset_for_tests()
+    _runtime_event_protocol.reset_for_tests()
 
 
 def _db_method(db: Any, name: str):
@@ -416,6 +453,8 @@ def _subscription_event_cursor(
     subscription: dict[str, Any],
     event: dict[str, Any],
 ) -> tuple[str, int]:
+    if bool(event.get("transient")):
+        return "", 0
     if str(subscription.get("kind") or "session") == "activity":
         activity_seq = _event_activity_seq(event)
         if activity_seq > 0:
@@ -437,18 +476,31 @@ def _subscription_after_seq(subscription: dict[str, Any]) -> int:
     return int(subscription.get("last_seq") or 0)
 
 
-def _event_has_team_mission_run_binding(event: dict[str, Any], db: Any = None) -> bool:
+def _team_mission_run_binding(event: dict[str, Any], db: Any = None) -> dict[str, Any]:
     run_id = _event_run_id(event)
     if not run_id:
-        return False
+        return {}
+    cache_key = _memory_run_key(run_id, db)
+    with _lock:
+        cached = _team_mission_binding_by_run.get(cache_key)
+    if cached:
+        return dict(cached)
     binding_getter = _db_method(db, "get_team_mission_run_binding")
     if binding_getter is None:
-        return False
+        return {}
     try:
         binding = binding_getter(run_id)
     except Exception:
-        return False
-    return isinstance(binding, dict) and bool(binding)
+        return {}
+    if not isinstance(binding, dict) or not binding:
+        return {}
+    with _lock:
+        _team_mission_binding_by_run[cache_key] = dict(binding)
+    return dict(binding)
+
+
+def _event_has_team_mission_run_binding(event: dict[str, Any], db: Any = None) -> bool:
+    return bool(_team_mission_run_binding(event, db=db))
 
 
 def _team_mission_runtime_event_allows_conversation_status(
@@ -475,7 +527,10 @@ def _team_mission_runtime_event_allows_conversation_status(
 
 
 def _on_run_event_appended(db: Any, event: dict[str, Any]) -> None:
-    mission_id = _team_activity_events.mission_id_for_run_event(event, db=db)
+    binding = _team_mission_run_binding(event, db=db)
+    mission_id = str(binding.get("mission_id") or "").strip()
+    if not mission_id:
+        mission_id = _team_activity_events.mission_id_for_run_event(event, db=db)
     if not mission_id:
         return
     _team_activity_terminal_log(
@@ -1568,7 +1623,18 @@ def _stamp_participant_id(
         or str(frame.get("agent_profile_id") or frame.get("agentProfileId") or "").strip()
         or str(team_identity.get("agent_profile_id") or team_identity.get("agentProfileId") or "").strip()
     )
-    if stable and not participant_id and (scope_hint or member_hint or profile_hint):
+    participant_cache_key = (
+        _memory_run_key(run_id, db),
+        scope_hint,
+        member_hint,
+        profile_hint,
+        str(frame.get("role") or payload.get("role") or "").strip().lower(),
+    )
+    with _lock:
+        participant_cached = bool(run_id and participant_cache_key in _participant_id_by_resolution_key)
+        if not participant_id and participant_cached:
+            participant_id = _participant_id_by_resolution_key[participant_cache_key]
+    if stable and not participant_id and not participant_cached and (scope_hint or member_hint or profile_hint):
         resolver_failed = False
         if db is not None:
             try:
@@ -1615,6 +1681,9 @@ def _stamp_participant_id(
             )
     if not participant_id:
         participant_id = _participant_id_from_user(payload, frame)
+    if run_id:
+        with _lock:
+            _participant_id_by_resolution_key[participant_cache_key] = participant_id
     if not participant_id:
         return ""
     frame["participant_id"] = participant_id
@@ -1625,6 +1694,42 @@ def _stamp_participant_id(
     return participant_id
 
 
+def _persist_stream_checkpoints(
+    *,
+    conversation_session_id: str,
+    run_id: str,
+    boundary_event_type: str,
+    db: Any,
+) -> None:
+    if boundary_event_type not in _STREAM_CHECKPOINT_BOUNDARY_TYPES:
+        return
+    excluded = {"message.delta"} if boundary_event_type == "message.complete" else set()
+    pending = _runtime_streams.pending_checkpoints(
+        conversation_session_id,
+        run_id=run_id,
+        exclude_event_types=excluded,
+        db=db,
+    )
+    _persist_checkpoint_entries(pending, db=db)
+
+
+def _persist_checkpoint_entries(
+    pending: list[_runtime_streams.PendingCheckpoint],
+    *,
+    db: Any,
+) -> None:
+    completed: list[_runtime_streams.PendingCheckpoint] = []
+    for checkpoint in pending:
+        record_event(
+            checkpoint.frame,
+            db=db,
+            persist=True,
+            _flush_streams=False,
+        )
+        completed.append(checkpoint)
+    _runtime_streams.mark_checkpointed(completed)
+
+
 def record_event(
     params: dict[str, Any],
     owner_transport: Transport | None = None,
@@ -1632,6 +1737,7 @@ def record_event(
     db: Any = None,
     persist: bool = True,
     run_context: "RunContext | None" = None,
+    _flush_streams: bool = True,
 ) -> list[Transport]:
     """Persist an event frame and return live subscriber transports to notify.
 
@@ -1695,6 +1801,25 @@ def record_event(
     )
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     terminal_event = _terminal_status(event_type, payload)
+    _runtime_event_protocol.stamp_runtime_source_seq(
+        frame,
+        params,
+        assign_if_missing=not worker_process,
+    )
+    transient_stream = bool(
+        not worker_process and _runtime_streams.is_transient_stream_event(frame)
+    )
+    if transient_stream:
+        persist = False
+        _runtime_event_protocol.mark_transient(frame, params)
+        _runtime_streams.observe(frame, db=db)
+    elif _flush_streams and not worker_process and stable and run_id:
+        _persist_stream_checkpoints(
+            conversation_session_id=stable,
+            run_id=run_id,
+            boundary_event_type=event_type,
+            db=db,
+        )
     synthetic_run_identity = bool(frame.get("synthetic_run_id"))
     # PR-1 transient contract: a frame that will never gain a canonical
     # run_events.seq must say so explicitly — the FE ledger only admits
@@ -1704,13 +1829,15 @@ def record_event(
     will_persist = bool(
         persist and stable and _run_method(db, "append_event") is not None
     )
-    if not worker_process and not will_persist:
-        frame["transient"] = True
-        if isinstance(params, dict):
-            params["transient"] = True
+    if not worker_process and not will_persist and frame.get("transient") is not False:
+        _runtime_event_protocol.mark_transient(frame, params)
     scheduler_mission_id = ""
     persisted_run_checked = False
     persisted_terminal_reopen = False
+    with _lock:
+        cached_run_state = _run_state_by_id.get(_memory_run_key(run_id, db)) if run_id else None
+        if cached_run_state is None and run_id:
+            cached_run_state = _run_state_by_id.get(run_id)
     if (
         stable
         and run_id
@@ -1718,7 +1845,7 @@ def record_event(
         and terminal_event is None
         and _event_opens_active_run(event_type)
     ):
-        if getter := _run_method(db, "get"):
+        if cached_run_state is None and (getter := _run_method(db, "get")):
             persisted_run_checked = True
             try:
                 persisted_run = getter(run_id)
@@ -1736,9 +1863,11 @@ def record_event(
                 )
 
     with _lock:
-        if stable:
+        if stable and not transient_stream:
             memory_session_key = _memory_session_key(stable, db)
             _events_by_session[memory_session_key].append(frame)
+        if stable:
+            memory_session_key = _memory_session_key(stable, db)
             _last_seq_by_session[memory_session_key] = max(
                 int(_last_seq_by_session.get(memory_session_key) or 0),
                 int(frame.get("seq") or 0),
@@ -1841,6 +1970,13 @@ def record_event(
                 subscriber_delivery_count=len(result),
                 **_stream_trace_summary(frame),
             )
+    with _lock:
+        has_activity_subscribers = any(_subscription_ids_by_activity.values())
+    if transient_stream and db is not None and has_activity_subscribers:
+        # Team mission activity subscribers consume a projected transport ABI.
+        # The run-event listener normally produces it after a durable append;
+        # transient streams deliberately have no append, so project them here.
+        _on_run_event_appended(db, frame)
     if persist and stable and (method := _run_method(db, "append_event")):
         prev_projecting = getattr(db, "_team_mission_projecting", False)
         try:
@@ -2182,6 +2318,21 @@ def record_event(
                     "seq": int(frame.get("seq") or 0),
                 }),
             )
+        elif not persist and db is not None:
+            logger.debug(
+                "[dovie-run-control] terminal-event-broadcast-without-repersist %s",
+                _json_for_log({
+                    "db": _db_label(db),
+                    "event_type": event_type,
+                    "terminal_status": terminal_event,
+                    "session_id": stable,
+                    "run_id": run_id,
+                    "turn_id": turn_id,
+                    "runtime_scope_key": str(frame.get("runtime_scope_key") or ""),
+                    "execution_session_id": execution_session_id,
+                    "seq": int(frame.get("seq") or 0),
+                }),
+            )
         else:
             logger.error(
                 "[dovie-run-control] terminal-event-dropped-no-db "
@@ -2205,6 +2356,8 @@ def record_event(
             trigger_event=event_type,
             run_id=run_id,
         )
+    if terminal_event and stable and run_id:
+        _runtime_streams.clear_run(stable, run_id, db=db)
     return result
 
 
@@ -2248,6 +2401,11 @@ def publish_recorded_event(
         persist=persist,
         run_context=run_context,
     )
+    # The caller may also own a direct-delivery path. Propagate canonical seq,
+    # transient classification, and normalized identity back to that frame so
+    # direct and subscription transports observe the same envelope.
+    params.clear()
+    params.update(publish_params)
     if before_deliver is not None:
         before_deliver()
     delivered: list[Transport] = []
@@ -2354,6 +2512,7 @@ def terminate_run(
     }
     if atomic_result is not None and atomic_result.terminal_seq:
         frame["seq"] = atomic_result.terminal_seq
+        frame["transient"] = False
     _diagnostic_warning(
         "publish-terminal-event",
         db=_db_label(db),
@@ -2614,6 +2773,22 @@ def subscribe_activity(
         if _event_activity_id(event) == normalized_activity_id
         and int(event.get("seq") or 0) > replay_after_seq
     ]
+    mission_id_value = _team_activity_events.mission_id_for_activity(
+        normalized_activity_id,
+        db=db,
+    )
+    transient_snapshots = [
+        _team_activity_events.project_run_event_for_subscription(
+            event,
+            normalized_activity_id,
+            mission_id_value=mission_id_value,
+        )
+        for event in _runtime_streams.replay_activity_snapshots(
+            normalized_activity_id,
+            db=db,
+        )
+    ] if mission_id_value else []
+    events.extend(transient_snapshots)
     _trace_team_runtime_chain(
         "subscribe-activity-replay",
         activity_id=normalized_activity_id,
@@ -2758,13 +2933,23 @@ def subscribe_session_with_id(
         if seq > 0:
             by_seq.setdefault(seq, event)
     events = [by_seq[seq] for seq in sorted(by_seq)]
+    replay_snapshots = _runtime_streams.replay_snapshots(
+        stable,
+        run_id=normalized_run_id,
+        runtime_scope_key=scope,
+        active_run_ids=active_run_ids if active_only else None,
+        db=db,
+    )
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if subscription is not None:
             subscription["last_seq"] = _max_event_seq(events, after_seq)
     if after_seq <= 0:
-        return normalized_subscription_id, events
-    return normalized_subscription_id, [event for event in events if int(event.get("seq") or 0) > after_seq]
+        return normalized_subscription_id, [*events, *replay_snapshots]
+    return normalized_subscription_id, [
+        *[event for event in events if int(event.get("seq") or 0) > after_seq],
+        *replay_snapshots,
+    ]
 
 
 def unsubscribe_activity(subscription_id: str) -> int:
@@ -2832,9 +3017,45 @@ def detach_transport(transport: Transport | None) -> None:
     if transport is None:
         return
     with _lock:
+        subscriptions = [
+            dict(_subscriptions_by_id[subscription_id])
+            for subscription_id in _subscription_ids_by_transport.get(transport, set())
+            if subscription_id in _subscriptions_by_id
+        ]
         unsubscribe_session(transport=transport)
         for subscribers in _subscribers_by_session.values():
             subscribers.discard(transport)
+    checkpoint_batches: list[tuple[Any, list[_runtime_streams.PendingCheckpoint]]] = []
+    for subscription in subscriptions:
+        db = subscription.get("db")
+        if str(subscription.get("kind") or "session") == "activity":
+            pending = _runtime_streams.pending_activity_checkpoints(
+                str(subscription.get("activity_id") or ""),
+                db=db,
+            )
+        else:
+            pending = _runtime_streams.pending_checkpoints(
+                str(subscription.get("conversation_session_id") or ""),
+                db=db,
+            )
+        if pending:
+            checkpoint_batches.append((db, pending))
+    def persist_disconnect_checkpoints() -> None:
+        seen_keys: set[tuple[str, ...]] = set()
+        for db, pending in checkpoint_batches:
+            unique_pending = [entry for entry in pending if entry.key not in seen_keys]
+            seen_keys.update(entry.key for entry in unique_pending)
+            try:
+                _persist_checkpoint_entries(unique_pending, db=db)
+            except Exception:
+                logger.warning("failed to persist stream checkpoint on transport detach", exc_info=True)
+
+    if checkpoint_batches:
+        threading.Thread(
+            target=persist_disconnect_checkpoints,
+            name="hermes-stream-disconnect-checkpoint",
+            daemon=True,
+        ).start()
 
 
 def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:

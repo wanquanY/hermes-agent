@@ -208,6 +208,7 @@ class CliSessionStore(TeamMissionStateMixin):
             self.upsert_team_mission,
         )
         run_team_mission_startup_maintenance(self, logger)
+        self.session_index.reconcile()
 
     @property
     def db_path(self) -> Path:

@@ -85,6 +85,10 @@ _DOVIE_STREAM_TRACE_EVENTS = {
     "message.complete",
     "reasoning.delta",
     "thinking.delta",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.progress",
+    "subagent.tool",
 }
 
 
@@ -106,6 +110,16 @@ def _stream_trace_payload_summary(payload: dict | None) -> dict[str, Any]:
         "payload_len": len(text),
         "payload_sha1": digest,
         "payload_preview": text[:80].replace("\n", "\\n"),
+        "payload_offset": (payload or {}).get("offset"),
+        "subagent_id": str(
+            (payload or {}).get("subagent_id") or (payload or {}).get("subagentId") or ""
+        ),
+        "delegate_call_id": str(
+            (payload or {}).get("delegate_call_id")
+            or (payload or {}).get("delegateCallId")
+            or ""
+        ),
+        "source": str((payload or {}).get("source") or ""),
     }
 
 
@@ -913,7 +927,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
             params["execution_session_id"] = sid
         session_transport = session.get("transport")
         context_transport = current_transport()
-        direct_transport = session_transport or context_transport or _stdio_transport
+        direct_transport = session_transport or context_transport
         if conversation_session_id and (run_id or event == "session.info"):
             event_db = _db_for_stable_session(conversation_session_id)
             frame = {
@@ -935,8 +949,6 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                     **({"activity_id": activity_id, "activityId": activity_id} if activity_id else {}),
                 },
             }
-            frame["seq"] = run_control.next_event_seq(conversation_session_id, db=event_db)
-            params["seq"] = frame["seq"]
             terminal_event = _is_terminal_run_event(event)
             recorded_deliveries = run_control.publish_recorded_event(
                 frame,
@@ -947,6 +959,10 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 if terminal_event
                 else None,
             )
+            params.update(frame)
+            normalized_payload = frame.get("payload")
+            if isinstance(normalized_payload, dict):
+                event_payload = normalized_payload
             if event in _DOVIE_STREAM_TRACE_EVENTS:
                 _trace_stream_route(
                     "record-publish",
@@ -956,7 +972,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                     run_id=run_id,
                     turn_id=turn_id,
                     runtime_scope_key=runtime_scope_key,
-                    seq=frame["seq"],
+                    seq=frame.get("seq") or 0,
                     session_transport=_transport_debug_id(session_transport),
                     context_transport=_transport_debug_id(context_transport),
                     owner_transport=_transport_debug_id(direct_transport),
@@ -976,7 +992,11 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         )
     if payload is not None:
         params["payload"] = payload
-    direct_delivered = write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    direct_frame = {"jsonrpc": "2.0", "method": "event", "params": params}
+    if direct_transport is not None:
+        direct_delivered = direct_transport.write(direct_frame)
+    else:
+        direct_delivered = write_json(direct_frame)
     if event in _DOVIE_STREAM_TRACE_EVENTS:
         _trace_stream_route(
             "direct-write",

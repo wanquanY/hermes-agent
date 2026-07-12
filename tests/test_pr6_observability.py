@@ -23,6 +23,7 @@ Tests use monkeypatch / mock only — no source-code mutation.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,8 +59,15 @@ class _StubDB:
     db_path = "stub-db"
 
     def __init__(self, **methods):
+        self.runs = SimpleNamespace()
         for name, fn in methods.items():
             setattr(self, name, fn)
+            run_method_name = {
+                "append_run_event": "append_event",
+                "fail_orphaned_active_runs": "fail_orphaned",
+            }.get(name)
+            if run_method_name:
+                setattr(self.runs, run_method_name, fn)
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +136,23 @@ class TestS1TerminalEventLabelSplit:
         ]
         assert debug_deferred == [], (
             "main side must not emit DEBUG terminal-event-persist-deferred-to-main"
+        )
+
+    def test_main_side_broadcast_of_atomically_persisted_terminal_is_not_data_loss(self, caplog):
+        frame = _make_terminal_frame()
+
+        with patch("tui_gateway.process_role.is_worker_process", return_value=False):
+            with caplog.at_level(logging.DEBUG, logger="tui_gateway.services.run_control"):
+                run_control.record_event(frame, db=_StubDB(), persist=False)
+
+        assert any(
+            "terminal-event-broadcast-without-repersist" in record.message
+            for record in caplog.records
+        )
+        assert not any(
+            record.levelno == logging.ERROR
+            and "terminal-event-dropped-no-db" in record.message
+            for record in caplog.records
         )
 
     def test_worker_debug_carries_context(self, caplog):

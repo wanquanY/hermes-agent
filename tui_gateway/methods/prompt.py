@@ -876,6 +876,15 @@ def _run_prompt_submit(
     _log_prompt_stage(session, sid, "after-message-start", run_id=turn_run_id, turn_id=turn_id)
 
     def terminalize_if_still_active(reason: str) -> None:
+        from tui_gateway.process_role import is_worker_process
+
+        # Worker events are asynchronous stdout frames. The worker cannot read
+        # main-process DB state as an acknowledgement that its terminal frame
+        # has been applied; doing so races the pipe and previously attempted an
+        # illegal runs.terminate DB RPC. RunTerminalFrame is the main-side
+        # reconciliation barrier for worker execution.
+        if is_worker_process():
+            return
         if session.get("transient") or not turn_run_id:
             return
         conversation_session_id = str(session.get("session_key") or sid)
@@ -1073,21 +1082,43 @@ def _run_prompt_submit(
                 interrupt_metadata["turn_id"] = turn_metadata.get("turn_id")
                 interrupt_metadata["run_id"] = turn_metadata.get("run_id")
             assistant_message["metadata"] = interrupt_metadata
-            last_message = next_history[-1] if next_history else {}
-            if (
-                isinstance(last_message, dict)
-                and last_message.get("role") == "assistant"
-                and not last_message.get("tool_calls")
-                and str(last_message.get("content") or "").strip() == partial
-            ):
-                # Already in history (agent's own loop persisted the
-                # partial as the turn closed) — make sure the marker
-                # propagates onto that existing row too.
-                last_message.setdefault("metadata", {})
-                if isinstance(last_message["metadata"], dict):
-                    last_message["metadata"].update(interrupt_metadata)
-                if not last_message.get("finish_reason"):
-                    last_message["finish_reason"] = "interrupted"
+            current_turn_start = max(
+                (
+                    index
+                    for index, message in enumerate(next_history)
+                    if isinstance(message, dict) and is_current_user_message(message)
+                ),
+                default=-1,
+            )
+            last_tool_boundary = max(
+                (
+                    index
+                    for index, message in enumerate(next_history)
+                    if index > current_turn_start
+                    and isinstance(message, dict)
+                    and (
+                        message.get("role") == "tool"
+                        or bool(message.get("tool_calls"))
+                    )
+                ),
+                default=current_turn_start,
+            )
+            existing_partial = next(
+                (
+                    message
+                    for message in reversed(next_history[last_tool_boundary + 1:])
+                    if isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    and not message.get("tool_calls")
+                    and str(message.get("content") or "").strip() == partial
+                ),
+                None,
+            )
+            if existing_partial is not None:
+                existing_partial.setdefault("metadata", {})
+                if isinstance(existing_partial["metadata"], dict):
+                    existing_partial["metadata"].update(interrupt_metadata)
+                existing_partial["finish_reason"] = "interrupted"
             else:
                 next_history.append(assistant_message)
         with session["history_lock"]:

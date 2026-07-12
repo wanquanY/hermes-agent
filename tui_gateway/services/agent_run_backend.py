@@ -202,6 +202,14 @@ class AgentRunBackend(WorkerRunBackend):
             # stays drained.
             await asyncio.get_running_loop().run_in_executor(None, thread.join)
         finally:
+            try:
+                # EventFrame writes are scheduled from the agent thread. Drain
+                # them before RunTerminalFrame becomes visible to the main
+                # process, otherwise terminal reconciliation can overtake the
+                # final subagent/message lifecycle facts.
+                await bridge.drain()
+            except Exception:
+                _log.exception("[agent-run-backend] bridge drain failed")
             cleared_active = False
             with self._lock:
                 if self._active is active:

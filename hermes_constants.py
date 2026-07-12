@@ -468,6 +468,7 @@ def apply_ipv4_preference(force: bool = False) -> None:
 PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
 
 FINISH_REASON_LENGTH = "length"
+FINISH_REASON_STREAM_ERROR = "stream_error"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

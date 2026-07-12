@@ -198,6 +198,19 @@ def test_ordering_newest_first(tmp_path: Path):
     assert _ids(db.session_index.list()) == ["new", "mid", "old"]
 
 
+def test_list_is_a_pure_read_and_does_not_open_a_unit_of_work(tmp_path: Path, monkeypatch):
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(session_id="s1", started_at=1.0, updated_at=1.0)
+
+    monkeypatch.setattr(
+        db.session_index._unit_of_work,
+        "execute",
+        lambda _operation: (_ for _ in ()).throw(AssertionError("list opened a write transaction")),
+    )
+
+    assert _ids(db.session_index.list()) == ["s1"]
+
+
 def test_keyset_pagination_no_dupes_full_coverage(tmp_path: Path):
     db = open_cli_session_store(tmp_path / "state.db")
     for i in range(10):
@@ -627,6 +640,7 @@ def test_list_session_index_repairs_active_team_runtime_identity_from_leader_run
     )
     db._conn.commit()  # noqa: SLF001 - make the simulated stale row visible.
 
+    db.session_index.reconcile()
     item = next(
         session for session in db.session_index.list()["sessions"]
         if session["session_id"] == "team-session-repair"
@@ -993,6 +1007,7 @@ def test_list_session_index_repairs_team_conversation_row_with_terminal_active_r
     assert int(row["running"]) == 1
     assert row["active_run_id"] == "run-completed"
 
+    db.session_index.reconcile()
     row = next(s for s in db.session_index.list()["sessions"] if s["session_id"] == "team-session-stuck")
     assert row["running"] is False
     assert row["active_run_id"] == ""

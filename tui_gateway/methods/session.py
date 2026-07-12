@@ -1480,20 +1480,6 @@ def _safe_json_decode(value):
         return None
 
 
-_SESSION_INDEX_RECONCILED = False
-
-
-def _ensure_session_index_reconciled(db) -> None:
-    """One-time backfill of the control-plane index from the source of truth
-    (sessions table) per gateway process, on first sidebar read. Idempotent and
-    preserves any live status already projected by write-time hooks."""
-    global _SESSION_INDEX_RECONCILED
-    if _SESSION_INDEX_RECONCILED:
-        return
-    db.session_index.reconcile()
-    _SESSION_INDEX_RECONCILED = True
-
-
 @method("session.index.list")
 def _(rid, params: dict) -> dict:
     """Single-query sidebar read from the control-plane session_index.
@@ -1505,7 +1491,6 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5006)
     try:
-        _ensure_session_index_reconciled(db)
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
         include_transient = is_truthy_value(

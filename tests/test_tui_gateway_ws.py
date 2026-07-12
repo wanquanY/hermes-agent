@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import threading
 
@@ -44,6 +45,125 @@ def test_ws_transport_prioritizes_rpc_response_over_queued_events():
             "interrupt",
             "tool.start",
         ]
+
+    asyncio.run(run())
+
+
+def test_ws_transport_batches_stream_frames_and_flushes_before_control_frame():
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_text(self, line: str) -> None:
+            self.sent.append(json.loads(line))
+
+    async def run() -> None:
+        fake_ws = FakeWebSocket()
+        transport = WSTransport(fake_ws, asyncio.get_running_loop())
+        assert transport.write({"method": "event", "params": {"type": "message.delta", "transient": True, "payload": {"delta": "a"}}})
+        assert transport.write({"method": "event", "params": {"type": "subagent.output_delta", "transient": True, "payload": {"delta": "b"}}})
+        assert fake_ws.sent == []
+
+        assert await transport.write_async({"id": "control", "result": {"ok": True}})
+        assert [frame.get("id") or frame["params"]["type"] for frame in fake_ws.sent] == [
+            "message.delta",
+            "subagent.output_delta",
+            "control",
+        ]
+        transport.close()
+
+    asyncio.run(run())
+
+
+def test_ws_transport_coalesces_contiguous_utf16_stream_and_preserves_tool_boundary():
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_text(self, line: str) -> None:
+            self.sent.append(json.loads(line))
+
+    def delta(text: str, offset: int, source_seq: int) -> dict:
+        return {
+            "method": "event",
+            "params": {
+                "type": "message.delta",
+                "transient": True,
+                "conversation_session_id": "session-1",
+                "execution_session_id": "runtime-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_source_seq": source_seq,
+                "text_stream": {
+                    "mode": "append",
+                    "delta": text,
+                    "text": text,
+                    "offset": offset,
+                },
+                "payload": {
+                    "mode": "append",
+                    "delta": text,
+                    "text": text,
+                    "offset": offset,
+                },
+            },
+        }
+
+    async def run() -> None:
+        fake_ws = FakeWebSocket()
+        transport = WSTransport(fake_ws, asyncio.get_running_loop())
+        assert transport.write(delta("A", 0, 10))
+        assert transport.write(delta("😀", 1, 11))
+        assert transport.write(delta("中", 3, 12))
+        assert transport.write({
+            "method": "event",
+            "params": {
+                "type": "tool.start",
+                "seq": 1,
+                "runtime_source_seq": 13,
+                "payload": {"tool_id": "tool-1", "name": "terminal"},
+            },
+        })
+        assert transport.write(delta("B", 4, 14))
+        await transport.write_async({"id": "control", "result": {"ok": True}})
+
+        assert [
+            frame.get("id") or frame["params"]["type"]
+            for frame in fake_ws.sent
+        ] == ["message.delta", "tool.start", "message.delta", "control"]
+        merged = fake_ws.sent[0]["params"]
+        assert merged["runtime_source_seq"] == 12
+        assert merged["payload"]["delta"] == "A😀中"
+        assert merged["payload"]["text"] == "A😀中"
+        assert merged["payload"]["offset"] == 0
+        assert merged["text_stream"]["delta"] == "A😀中"
+        assert merged["text_stream"]["text"] == "A😀中"
+        assert merged["text_stream"]["offset"] == 0
+        transport.close()
+
+    asyncio.run(run())
+
+
+def test_ws_transport_loop_stall_timeout_does_not_close_transport(monkeypatch):
+    class SlowFuture:
+        def result(self, timeout=None):
+            raise concurrent.futures.TimeoutError()
+
+    def fake_schedule(coroutine, _loop):
+        coroutine.close()
+        return SlowFuture()
+
+    monkeypatch.setattr("agent.async_utils.safe_schedule_threadsafe", fake_schedule)
+
+    async def run() -> None:
+        transport = WSTransport(object(), asyncio.get_running_loop())
+        result = await asyncio.to_thread(
+            transport.write,
+            {"id": "slow", "result": {"ok": True}},
+        )
+        assert result is True
+        assert transport._closed is False  # noqa: SLF001
+        transport.close()
 
     asyncio.run(run())
 

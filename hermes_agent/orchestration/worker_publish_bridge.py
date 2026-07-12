@@ -30,6 +30,7 @@ testable module. The ``AgentRunBackend`` installs it on
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import logging
 import threading
@@ -180,6 +181,7 @@ class WorkerPublishBridge:
         self._installed = False
         self._conversation_session_id: str = ""
         self._active_context_handle: _RunContextHandle | None = None
+        self._pending_emits: set[concurrent.futures.Future[Any]] = set()
         # request_ids already shipped as InteractiveRequestFrame by THIS
         # bridge. Multiple hooks can observe the same request (e.g. the
         # wrapped notify callback fires AND the approval.request event
@@ -240,12 +242,42 @@ class WorkerPublishBridge:
         if self._loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._emit(frame), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._emit(frame), self._loop)
+            with self._lock:
+                self._pending_emits.add(future)
+            future.add_done_callback(self._on_emit_done)
         except RuntimeError:
             # Loop has been closed between our check and the schedule.
             _log.debug("[worker-publish-bridge] event loop closed before emit could be scheduled")
         except Exception:
             _log.exception("[worker-publish-bridge] emit_threadsafe failed")
+
+    def _on_emit_done(self, future: concurrent.futures.Future[Any]) -> None:
+        with self._lock:
+            self._pending_emits.discard(future)
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except Exception:
+            _log.exception("[worker-publish-bridge] async emit failed")
+
+    async def drain(self) -> None:
+        """Wait until every event produced by the finished agent thread is written.
+
+        RunTerminalFrame is the worker/main lifecycle barrier. It must never
+        overtake EventFrames that were scheduled from the agent thread just
+        before it exited (notably subagent.complete and message.complete).
+        """
+        while True:
+            with self._lock:
+                pending = list(self._pending_emits)
+            if not pending:
+                return
+            await asyncio.gather(
+                *(asyncio.wrap_future(future, loop=self._loop) for future in pending),
+                return_exceptions=True,
+            )
 
     # ── unified interactive-request egress (I7) ─────────────────────
 

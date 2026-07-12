@@ -46,7 +46,13 @@ STREAM_IDENTITY_PAYLOAD_KEYS = (
 
 def is_coalescible_stream_delta(event: dict[str, Any]) -> bool:
     event_type = str(event.get("type") or "").strip()
-    return event_type in COALESCIBLE_STREAM_EVENT_TYPES and bool(stream_text(event))
+    payload = _payload(event)
+    return bool(
+        event_type in COALESCIBLE_STREAM_EVENT_TYPES
+        and not payload.get("stream_checkpoint")
+        and not payload.get("streamCheckpoint")
+        and stream_text(event)
+    )
 
 
 def stream_compaction_boundaries(event_type: str) -> frozenset[str]:

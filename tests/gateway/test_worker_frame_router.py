@@ -248,10 +248,8 @@ async def test_on_interactive_request_drops_unknown_kind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_run_terminal_skips_publish_on_completed() -> None:
-    """For a normal completion the worker's agent already published a
-    ``message.complete`` event via the publish hook; the router must
-    NOT re-publish here."""
+async def test_on_run_terminal_reconciles_completed_run() -> None:
+    """RunTerminalFrame is the main-side lifecycle reconciliation barrier."""
     router, _sup, _events, terminals = _make_router()
     await router.on_run_terminal(
         "profile:x",
@@ -263,7 +261,18 @@ async def test_on_run_terminal_skips_publish_on_completed() -> None:
             message="",
         ),
     )
-    assert terminals == []  # NOT published
+    assert terminals == [
+        {
+            "conversation_session_id": "sess-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:x",
+            "execution_session_id": "sess-1",
+            "activity_id": "",
+            "status": "completed",
+            "message": "",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -347,7 +356,8 @@ async def test_activity_terminal_is_persisted_through_activity_service(monkeypat
         }
     ]
     assert any(event.get("type") == "activity.completed" for event in events)
-    assert terminals == []
+    assert len(terminals) == 1
+    assert terminals[0]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -406,7 +416,6 @@ async def test_on_run_terminal_cross_fills_from_record_run_start() -> None:
         conversation_session_id="sess-A",
         turn_id="turn-A",
     )
-    # Use failed so the publish path actually fires (completed skips publish).
     await router.on_run_terminal(
         "profile:x",
         RunTerminalFrame(run_id="run-1", status="failed"),

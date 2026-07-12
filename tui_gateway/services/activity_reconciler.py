@@ -326,7 +326,6 @@ class ActivityReconciler:
             "session_id": stable,
             "conversation_session_id": stable,
             "activity_id": _text(activity_id),
-            "seq": run_control.next_event_seq(stable, db=self._db),
             "payload": event_payload,
         }
         run_control.record_event(frame, db=self._db)

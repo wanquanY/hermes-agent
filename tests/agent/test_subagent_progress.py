@@ -9,6 +9,7 @@ Verifies that:
 """
 
 import io
+import logging
 import sys
 import time
 import threading
@@ -155,6 +156,80 @@ class TestBuildChildProgressCallback:
         summary_text = summary_call.kwargs.get("preview") or summary_call.args[2]
         assert "tool_0" in summary_text
         assert "tool_4" in summary_text
+
+    def test_trace_logs_structural_event_without_changing_relay(self, monkeypatch, caplog):
+        monkeypatch.setenv("DOVIE_STREAM_TRACE", "1")
+        parent = MagicMock()
+        parent.session_id = "session-1"
+        parent._hermes_active_run_id = "run-1"
+        parent._hermes_active_turn_id = "turn-1"
+        parent._delegate_spinner = None
+        parent.tool_progress_callback = MagicMock()
+
+        cb = _build_child_progress_callback(
+            0,
+            "test goal",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+        with caplog.at_level(logging.INFO, logger="tools.delegate_tool"):
+            cb("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        parent.tool_progress_callback.assert_called_once()
+        assert parent.tool_progress_callback.call_args.args[:4] == (
+            "subagent.tool",
+            "terminal",
+            "pwd",
+            {"command": "pwd"},
+        )
+        assert "[dovie-subagent-event-source]" in caplog.text
+        assert "event_type=subagent.tool" in caplog.text
+        assert "run_id=run-1" in caplog.text
+        assert "turn_id=turn-1" in caplog.text
+        assert "status=running" in caplog.text
+        assert "payload_bytes=" in caplog.text
+
+    def test_task_descriptor_is_emitted_once_on_lifecycle_start(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent.tool_progress_callback = MagicMock()
+
+        cb = _build_child_progress_callback(
+            0,
+            "review the repository",
+            parent,
+            subagent_id="subagent-1",
+            parent_id="leader-1",
+            depth=1,
+            model="test-model",
+            toolsets=["terminal"],
+            role="reviewer",
+            context="large immutable task context",
+            delegate_call_id="delegate-1",
+            agent_name="Reviewer",
+        )
+        cb("subagent.start")
+        cb("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        start_payload = parent.tool_progress_callback.call_args_list[0].kwargs
+        tool_payload = parent.tool_progress_callback.call_args_list[1].kwargs
+        assert start_payload["goal"] == "review the repository"
+        assert start_payload["context"] == "large immutable task context"
+        assert start_payload["dispatch_message"] == (
+            "review the repository\n\nlarge immutable task context"
+        )
+        assert start_payload["model"] == "test-model"
+        assert start_payload["toolsets"] == ["terminal"]
+
+        assert tool_payload["subagent_id"] == "subagent-1"
+        assert tool_payload["delegate_call_id"] == "delegate-1"
+        assert tool_payload["parent_id"] == "leader-1"
+        assert "goal" not in tool_payload
+        assert "context" not in tool_payload
+        assert "dispatch_message" not in tool_payload
+        assert "model" not in tool_payload
+        assert "toolsets" not in tool_payload
 
     def test_thinking_relayed_to_gateway(self):
         """Thinking events are relayed as subagent.thinking events."""

@@ -65,6 +65,82 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
 _DOVIE_SUBAGENT_ROLE = "subagent"
 
 
+def _trace_subagent_stream_producer(
+    parent_agent: Any,
+    *,
+    event_type: str,
+    subagent_id: str | None,
+    delegate_call_id: str,
+    task_index: int,
+    offset: int,
+    text: str,
+) -> None:
+    if not is_truthy_value(os.environ.get("DOVIE_STREAM_TRACE")):
+        return
+    logger.info(
+        "[dovie-subagent-stream-source] stage=producer event_type=%s "
+        "session_id=%s run_id=%s turn_id=%s subagent_id=%s delegate_call_id=%s "
+        "task_index=%s offset=%s text_len=%s utf16_len=%s",
+        event_type,
+        str(getattr(parent_agent, "session_id", "") or ""),
+        str(getattr(parent_agent, "_hermes_active_run_id", "") or ""),
+        str(getattr(parent_agent, "_hermes_active_turn_id", "") or ""),
+        str(subagent_id or ""),
+        delegate_call_id,
+        task_index,
+        offset,
+        len(text),
+        len(text.encode("utf-16-le")) // 2,
+    )
+
+
+def _trace_subagent_event_producer(
+    parent_agent: Any,
+    *,
+    event_type: str,
+    subagent_id: str | None,
+    delegate_call_id: str,
+    task_index: int,
+    source_index: int,
+    payload: Dict[str, Any],
+) -> None:
+    if not is_truthy_value(os.environ.get("DOVIE_STREAM_TRACE")):
+        return
+
+    def _json_bytes(value: Any) -> int:
+        try:
+            return len(
+                json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+            )
+        except Exception:
+            return -1
+
+    logger.info(
+        "[dovie-subagent-event-source] stage=producer event_type=%s "
+        "session_id=%s run_id=%s turn_id=%s subagent_id=%s delegate_call_id=%s "
+        "task_index=%s source_index=%s tool_id=%s status=%s tool_count=%s "
+        "preview_bytes=%s args_bytes=%s result_bytes=%s context_bytes=%s "
+        "dispatch_message_bytes=%s payload_bytes=%s",
+        event_type,
+        str(getattr(parent_agent, "session_id", "") or ""),
+        str(getattr(parent_agent, "_hermes_active_run_id", "") or ""),
+        str(getattr(parent_agent, "_hermes_active_turn_id", "") or ""),
+        str(subagent_id or ""),
+        delegate_call_id,
+        task_index,
+        source_index,
+        str(payload.get("tool_id") or ""),
+        str(payload.get("status") or ""),
+        payload.get("tool_count"),
+        _json_bytes(payload.get("preview")),
+        _json_bytes(payload.get("args")),
+        _json_bytes(payload.get("result")),
+        _json_bytes(payload.get("context")),
+        _json_bytes(payload.get("dispatch_message")),
+        _json_bytes(payload),
+    )
+
+
 def _dovie_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -890,11 +966,9 @@ def _build_child_progress_callback(
       CLI:     prints tree-view lines above the parent's delegation spinner
       Gateway: batches tool names and relays to parent's progress callback
 
-    The identity kwargs (``subagent_id``, ``parent_id``, ``depth``, ``model``,
-    ``toolsets``) are threaded into every relayed event so the TUI can
-    reconstruct the live spawn tree and route per-branch controls (kill,
-    pause) back by ``subagent_id``.  All are optional for backward compat —
-    older callers that ignore them still produce a flat list on the TUI.
+    Routing ids are threaded into every event. Immutable task descriptors are
+    carried only by spawn/start; repeating a large task context on every tool
+    lifecycle event makes transport and persistence cost grow with tool count.
 
     Returns None if no display mechanism is available, in which case the
     child agent runs with no progress callback (identical to current behavior).
@@ -930,37 +1004,39 @@ def _build_child_progress_callback(
     _BATCH_SIZE = 5
     _batch: List[str] = []
     _tool_count = [0]  # per-subagent running counter (list for closure mutation)
+    _source_event_count = [0]
     _pending_tools: List[Dict[str, Any]] = []
 
-    def _identity_kwargs() -> Dict[str, Any]:
+    def _identity_kwargs(*, include_descriptor: bool = False) -> Dict[str, Any]:
         kw: Dict[str, Any] = {
             "task_index": task_index,
             "task_count": task_count,
-            "goal": goal_label,
         }
         if subagent_id is not None:
             kw["subagent_id"] = subagent_id
         if parent_id is not None:
             kw["parent_id"] = parent_id
-        if depth is not None:
-            kw["depth"] = depth
-        if model is not None:
-            kw["model"] = model
-        if toolsets is not None:
-            kw["toolsets"] = list(toolsets)
-        if role:
-            kw["role"] = str(role)
-        if normalized_agent_name:
-            kw["agent_name"] = normalized_agent_name
-        if delegation_tool_name:
-            kw["delegation_tool_name"] = delegation_tool_name
-        if context_text:
-            kw["context"] = context_text
-        if dispatch_message:
-            kw["dispatch_message"] = dispatch_message
         if normalized_delegate_call_id:
             kw["delegate_call_id"] = normalized_delegate_call_id
             kw["tool_call_id"] = normalized_delegate_call_id
+        if include_descriptor:
+            kw["goal"] = goal_label
+            if depth is not None:
+                kw["depth"] = depth
+            if model is not None:
+                kw["model"] = model
+            if toolsets is not None:
+                kw["toolsets"] = list(toolsets)
+            if role:
+                kw["role"] = str(role)
+            if normalized_agent_name:
+                kw["agent_name"] = normalized_agent_name
+            if delegation_tool_name:
+                kw["delegation_tool_name"] = delegation_tool_name
+            if context_text:
+                kw["context"] = context_text
+            if dispatch_message:
+                kw["dispatch_message"] = dispatch_message
         kw["tool_count"] = _tool_count[0]
         return kw
 
@@ -969,8 +1045,29 @@ def _build_child_progress_callback(
     ):
         if not parent_cb:
             return
-        payload = _identity_kwargs()
+        payload = _identity_kwargs(
+            include_descriptor=event_type in {
+                "subagent.spawn_requested",
+                "subagent.start",
+            },
+        )
         payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
+        diagnostic_payload = {
+            **payload,
+            "tool_name": tool_name,
+            "preview": preview,
+            "args": args,
+        }
+        _source_event_count[0] += 1
+        _trace_subagent_event_producer(
+            parent_agent,
+            event_type=event_type,
+            subagent_id=subagent_id,
+            delegate_call_id=normalized_delegate_call_id,
+            task_index=task_index,
+            source_index=_source_event_count[0],
+            payload=diagnostic_payload,
+        )
         try:
             parent_cb(event_type, tool_name, preview, args, **payload)
         except Exception as e:
@@ -1196,6 +1293,15 @@ def _build_child_output_delta_callback(
         if not delta:
             return
         try:
+            _trace_subagent_stream_producer(
+                parent_agent,
+                event_type="subagent.output_delta",
+                subagent_id=subagent_id,
+                delegate_call_id=normalized_delegate_call_id,
+                task_index=task_index,
+                offset=stream_offset,
+                text=delta,
+            )
             parent_cb(
                 "subagent.output_delta",
                 tool_name or None,
@@ -1277,6 +1383,15 @@ def _build_child_reasoning_delta_callback(
         if not delta:
             return
         try:
+            _trace_subagent_stream_producer(
+                parent_agent,
+                event_type="subagent.reasoning_delta",
+                subagent_id=subagent_id,
+                delegate_call_id=normalized_delegate_call_id,
+                task_index=task_index,
+                offset=stream_offset,
+                text=delta,
+            )
             parent_cb(
                 "subagent.reasoning_delta",
                 tool_name or None,

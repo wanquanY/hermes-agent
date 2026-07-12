@@ -3062,16 +3062,11 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(m
     assert worker["runtime_scope_key"] == "profile:worker-a"
 
     events = db.list_team_mission_run_events("mission-current")
-    delta_event = next(
-        event
-        for event in events
-        if event["type"] == "team_mission.runtime.event"
+    assert not any(
+        event["type"] == "team_mission.runtime.event"
         and event["payload"]["source_event_type"] == "message.delta"
-        and event["payload"]["node_id"] == "node-worker"
+        for event in events
     )
-    assert delta_event["payload"]["kind"] == "node.output.delta"
-    assert delta_event["payload"]["subject"]["runtime_conversation_session_id"] == "team:mission-current:node:node-worker"
-    assert delta_event["payload"]["text_stream"]["delta"] == "worker-live"
     status_events = [event for event in events if event["type"] == "team_mission.conversation.status"]
     assert status_events
     latest_status = status_events[-1]["payload"]["projection"]
@@ -4104,7 +4099,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
     assert streamed[0]["payload"]["delta"] == "实时"
 
 
-def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_path: Path):
+def test_worker_stream_event_is_live_and_transient_for_owner_subscription(tmp_path: Path):
     from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
@@ -4142,14 +4137,13 @@ def test_worker_event_path_uses_persisted_event_bus_for_owner_subscription(tmp_p
     ]
     assert [event["type"] for event in streamed] == ["message.delta"]
     assert streamed[0]["conversation_session_id"] == "team-session-relay-live"
-    assert streamed[0]["seq"] == 1
+    assert streamed[0]["transient"] is True
+    assert "seq" not in streamed[0]
     assert streamed[0]["runtime_source_seq"] == 77
-    assert streamed[0]["payload"]["runtime_source_seq"] == 77
+    assert streamed[0]["transient"] is True
     assert streamed[0]["payload"]["delta"] == "同步"
     persisted = db.runs.list_events("team-session-relay-live")
-    assert len(persisted) == 1
-    assert persisted[0]["seq"] == 1
-    assert persisted[0]["runtime_source_seq"] == 77
+    assert persisted == []
     db.close()
 
 
@@ -4242,7 +4236,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
     db.close()
 
 
-def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalescing(monkeypatch, tmp_path: Path):
+def test_gateway_emit_stream_subscription_checkpoints_once_at_tool_boundary(monkeypatch, tmp_path: Path):
     from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
@@ -4294,6 +4288,17 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
                 "text": "好",
             },
         )
+        server._emit(
+            "tool.start",
+            execution_session_id,
+            {
+                "run_id": "run-stream",
+                "turn_id": "turn-stream",
+                "runtime_scope_key": "team:mission-stream:leader-conversation",
+                "tool_call_id": "tool-1",
+                "name": "read_file",
+            },
+        )
         time.sleep(0.7)
     finally:
         server.reset_transport(token)
@@ -4315,8 +4320,14 @@ def test_gateway_emit_stream_subscription_persists_append_chunks_without_coalesc
         for event in db.runs.list_events(conversation_session_id)
         if event.get("type") == "message.delta"
     ]
-    assert [event["seq"] for event in persisted_deltas] == [1, 2]
-    assert [(event.get("payload") or {}).get("delta") for event in persisted_deltas] == ["你", "好"]
+    assert len(persisted_deltas) == 1
+    assert (persisted_deltas[0].get("payload") or {}).get("mode") == "append"
+    assert (persisted_deltas[0].get("payload") or {}).get("offset") == 0
+    assert (persisted_deltas[0].get("payload") or {}).get("text") == "你好"
+    assert [event.get("type") for event in db.runs.list_events(conversation_session_id)] == [
+        "message.delta",
+        "tool.start",
+    ]
 
 
 def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery(monkeypatch, tmp_path: Path):
@@ -4654,7 +4665,7 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
         },
         db=db,
     )
-    assert len(db.runs.list_events_by_activity("mission:mission-1")) == 1
+    assert db.runs.list_events_by_activity("mission:mission-1") == []
 
     transport = _MemoryTransport()
     token = server.bind_transport(transport)
@@ -4675,8 +4686,7 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
     assert subscribed["result"]["events"][0]["payload"]["text_stream"]["delta"] == "先前事件"
     assert "source_event" not in subscribed["result"]["events"][0]["payload"]
     assert "source_payload" not in subscribed["result"]["events"][0]["payload"]
-    audit_events = db.list_team_mission_events("mission-1")
-    assert audit_events[0]["payload"]["source_event"]["payload"]["delta"] == "先前事件"
+    assert db.list_team_mission_events("mission-1") == []
 
     run_control.publish_recorded_event(
         {
@@ -4719,7 +4729,31 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
     assert "source_event" not in live_events[-1]["payload"]
     assert "source_payload" not in live_events[-1]["payload"]
 
-    assert len(db.runs.list_events_by_activity("mission:mission-1")) == 2
+    run_control.publish_recorded_event(
+        {
+            "type": "tool.start",
+            "session_id": "runtime-leader",
+            "conversation_session_id": "session-leader",
+            "run_id": "run-leader",
+            "runtime_scope_key": "team:mission-1:leader",
+            "activity_id": "mission:mission-1",
+            "seq": 3,
+            "payload": {
+                "activity_id": "mission:mission-1",
+                "tool_call_id": "tool-1",
+                "name": "read_file",
+            },
+        },
+        db=db,
+    )
+    persisted_activity_events = db.runs.list_events_by_activity("mission:mission-1")
+    assert [event["type"] for event in persisted_activity_events] == [
+        "message.delta",
+        "tool.start",
+    ]
+    assert persisted_activity_events[0]["payload"]["mode"] == "append"
+    assert persisted_activity_events[0]["payload"]["offset"] == 0
+    assert persisted_activity_events[0]["payload"]["text"] == "先前事件实时事件"
 
     removed = server._methods["runtime.activity.unsubscribe"](2, {"subscription_id": subscription_id})
     assert removed["result"] == {"removed": 1}

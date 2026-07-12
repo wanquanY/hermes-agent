@@ -5347,6 +5347,87 @@ def test_prompt_submit_persists_interrupted_turn_when_delta_already_flushed(monk
     assert server._sessions["sid"]["history"] == agent.persisted_messages
 
 
+def test_prompt_submit_marks_existing_partial_after_synthetic_continuation_without_duplicate(monkeypatch):
+    """Cancelling a network-stream continuation must not persist the same text twice."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self):
+            self.persisted_messages = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            turn_metadata=None,
+            **_kwargs,
+        ):
+            partial = "现在是 2026年7月11日 21:29"
+            if stream_callback:
+                stream_callback(partial)
+            session = server._sessions["sid"]
+            with session["history_lock"]:
+                session["interrupted_run_id"] = str(turn_metadata.get("run_id"))
+                session["interrupted_turn_id"] = str(turn_metadata.get("turn_id"))
+            return {
+                "final_response": "Operation interrupted: waiting for continuation.",
+                "interrupted": True,
+                "messages": [
+                    {"role": "user", "content": "现在几点了？", "metadata": dict(turn_metadata)},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call-date",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }],
+                    },
+                    {"role": "tool", "tool_call_id": "call-date", "content": "21:29"},
+                    {"role": "assistant", "content": partial, "finish_reason": "stream_error"},
+                    {
+                        "role": "user",
+                        "content": "Continue exactly where the stream stopped.",
+                        "_synthetic_continuation": True,
+                    },
+                ],
+            }
+
+        def _persist_session(self, messages, conversation_history=None):
+            self.persisted_messages = list(messages)
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request({
+        "id": "1",
+        "method": "prompt.submit",
+        "params": {
+            "_run_registry_reserved": True,
+            "session_id": "sid",
+            "text": "现在几点了？",
+            "client_run_id": "run-stream-error",
+            "turn_id": "turn-stream-error",
+        },
+    })
+
+    matching = [
+        message for message in agent.persisted_messages
+        if message.get("role") == "assistant"
+        and message.get("content") == "现在是 2026年7月11日 21:29"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["finish_reason"] == "interrupted"
+    assert matching[0]["metadata"]["interrupted"] is True
+
+
 def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
     """Auto-title stays disabled when the agent returns an empty reply."""
 
