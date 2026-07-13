@@ -646,6 +646,12 @@ def _submit_message_to_member(
     }
     if not member_requests_codex_runtime and "model" in params:
         submit_params["model"] = params["model"]
+    if not member_requests_codex_runtime and (
+        params.get("model_descriptor") or params.get("modelDescriptor")
+    ):
+        submit_params["model_descriptor"] = (
+            params.get("model_descriptor") or params.get("modelDescriptor")
+        )
     # Dispatch run.submit through the runtime-proxy path so the worker spawns
     # on the member-chat execution scope and runs inside the member's profile home
     # (HERMES_HOME=profiles/<member>). The in-process `_methods["run.submit"]`

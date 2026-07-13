@@ -1,9 +1,13 @@
 """Custom / Ollama (local) provider profile.
 
 Covers any endpoint registered as provider="custom", including local
-Ollama instances. Key quirks:
+Ollama instances and OpenAI-compatible reasoning endpoints (GLM-5.2 on
+Volcengine ARK, vLLM, llama.cpp). Key quirks:
   - ollama_num_ctx → extra_body.options.num_ctx (local context window)
   - reasoning_config disabled → extra_body.think = False
+  - reasoning_config enabled + effort → top-level reasoning_effort
+    (the native OpenAI-compatible format; unset omits it so the endpoint's
+    server default applies)
 """
 
 from typing import Any
@@ -23,6 +27,7 @@ class CustomProfile(ProviderProfile):
         **ctx: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         extra_body: dict[str, Any] = {}
+        top_level: dict[str, Any] = {}
 
         # Ollama context window
         if ollama_num_ctx:
@@ -30,14 +35,37 @@ class CustomProfile(ProviderProfile):
             options["num_ctx"] = ollama_num_ctx
             extra_body["options"] = options
 
-        # Disable thinking when reasoning is turned off
+        # Dovie Cloud is a named custom endpoint at runtime, but its wire is a
+        # stable product contract rather than a vendor API.  Always send the
+        # selected product value as top-level `reasoning_effort`; the Dovie
+        # model registry validates it and translates it for the resolved
+        # upstream provider.
+        requested_provider = str(ctx.get("requested_provider") or "").strip().lower()
+        if requested_provider == "dovie-cloud":
+            if isinstance(reasoning_config, dict):
+                effort = str(reasoning_config.get("effort") or "").strip().lower()
+                if reasoning_config.get("enabled") is False:
+                    top_level["reasoning_effort"] = "none"
+                elif effort:
+                    top_level["reasoning_effort"] = effort
+                elif reasoning_config.get("enabled") is True:
+                    top_level["reasoning_effort"] = "enabled"
+            return extra_body, top_level
+
+        # Custom endpoints do not share one enable flag: Ollama understands
+        # ``think=false``, while GLM/vLLM-style OpenAI-compatible APIs accept
+        # a top-level ``reasoning_effort``. Never force ``think=true`` because
+        # non-Ollama endpoints reject it; an unset effort deliberately leaves
+        # the server default untouched.
         if reasoning_config and isinstance(reasoning_config, dict):
             _effort = (reasoning_config.get("effort") or "").strip().lower()
             _enabled = reasoning_config.get("enabled", True)
             if _effort == "none" or _enabled is False:
                 extra_body["think"] = False
+            elif _effort:
+                top_level["reasoning_effort"] = _effort
 
-        return extra_body, {}
+        return extra_body, top_level
 
     def fetch_models(
         self,
@@ -63,6 +91,9 @@ custom = CustomProfile(
     ),
     env_vars=(),  # No fixed key — custom endpoint
     base_url="",  # User-configured
+    # Without an explicit max_tokens Ollama falls back to a tiny internal
+    # num_predict default. This remains user-overridable per model.
+    default_max_tokens=65536,
 )
 
 register_provider(custom)

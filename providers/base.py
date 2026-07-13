@@ -129,6 +129,14 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def get_max_tokens(self, model: str | None) -> int | None:
+        """Return the output-token default for a model served by this profile.
+
+        Multi-model relays may override this method when upstream models have
+        different completion caps. Simple profiles inherit the single default.
+        """
+        return self.default_max_tokens
+
     def fetch_models(
         self,
         *,

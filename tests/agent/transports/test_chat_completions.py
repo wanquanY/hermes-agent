@@ -98,6 +98,61 @@ class TestChatCompletionsBasic:
         ]
         assert transport.convert_messages(msgs) is msgs
 
+    def test_convert_messages_strips_conversation_storage_metadata(self, transport):
+        msgs = [
+            {
+                "role": "user",
+                "content": "[assistant | Alice | member:a]\nhello",
+                "message_id": "42",
+                "conversation_message_id": "conv-msg-42",
+                "participant_id": "member:a",
+                "metadata": {"speaker_original_role": "assistant"},
+            }
+        ]
+
+        result = transport.convert_messages(msgs)
+
+        assert result == [
+            {
+                "role": "user",
+                "content": "[assistant | Alice | member:a]\nhello",
+            }
+        ]
+        assert "metadata" in msgs[0]
+
+    def test_convert_messages_preserves_consecutive_user_events(self, transport):
+        msgs = [
+            {"role": "user", "content": "first participant event"},
+            {"role": "user", "content": "second participant event"},
+        ]
+
+        result = transport.convert_messages(msgs)
+
+        assert result is msgs
+        assert [message["content"] for message in result] == [
+            "first participant event",
+            "second participant event",
+        ]
+
+    def test_convert_messages_keeps_gemini_thought_signature_only_for_gemini(self, transport):
+        messages = [{
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+                "extra_content": {"google": {"thought_signature": "sig"}},
+            }],
+        }]
+
+        gemini = transport.convert_messages(messages, model="google/gemini-3.1-pro")
+        strict = transport.convert_messages(messages, model="gpt-5.6-luna")
+
+        assert "extra_content" in gemini[0]["tool_calls"][0]
+        assert "extra_content" not in strict[0]["tool_calls"][0]
+        assert "extra_content" in messages[0]["tool_calls"][0]
+
 
 class TestChatCompletionsBuildKwargs:
 
@@ -249,6 +304,31 @@ class TestChatCompletionsBuildKwargs:
         )
         assert kw["extra_body"]["think"] is False
 
+    def test_dovie_cloud_custom_route_uses_stable_reasoning_selector(self, transport):
+        from providers import get_provider_profile
+        profile = get_provider_profile("custom")
+        msgs = [{"role": "user", "content": "Hi"}]
+
+        disabled = transport.build_kwargs(
+            model="qwen3.6-plus",
+            messages=msgs,
+            provider_profile=profile,
+            requested_provider="dovie-cloud",
+            reasoning_config={"enabled": False},
+        )
+        enabled = transport.build_kwargs(
+            model="qwen3.6-plus",
+            messages=msgs,
+            provider_profile=profile,
+            requested_provider="dovie-cloud",
+            reasoning_config={"enabled": True},
+        )
+
+        assert disabled["reasoning_effort"] == "none"
+        assert enabled["reasoning_effort"] == "enabled"
+        assert "extra_body" not in disabled
+        assert "extra_body" not in enabled
+
     def test_gemini_native_without_explicit_reasoning_config_keeps_existing_behavior(self, transport):
         msgs = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
@@ -290,6 +370,20 @@ class TestChatCompletionsBuildKwargs:
             "thinking_level": "high",
         }
 
+    def test_gemini_35_flash_preserves_minimal_thinking_level(self, transport):
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gemini-3.5-flash",
+            messages=msgs,
+            provider_name="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            reasoning_config={"enabled": True, "effort": "minimal"},
+        )
+        assert kw["extra_body"]["thinking_config"] == {
+            "includeThoughts": True,
+            "thinkingLevel": "minimal",
+        }
+
     def test_gemini_native_25_reasoning_only_enables_visible_thoughts(self, transport):
         msgs = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
@@ -314,7 +408,7 @@ class TestChatCompletionsBuildKwargs:
         )
         assert kw["extra_body"]["extra_body"]["google"]["thinking_config"] == {
             "include_thoughts": True,
-            "thinking_level": "low",
+            "thinking_level": "medium",
         }
 
     def test_gemini_native_disabled_reasoning_hides_thoughts(self, transport):
@@ -804,6 +898,35 @@ class TestChatCompletionsNormalize:
         )
         nr = transport.normalize_response(r)
         assert nr.provider_data == {"reasoning_content": "model-extra scratchpad"}
+
+    def test_integer_finish_reason_is_normalized_to_string(self, transport):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="done", tool_calls=None),
+                finish_reason=2,
+            )],
+            usage=None,
+        )
+
+        assert transport.normalize_response(response).finish_reason == "2"
+
+    def test_structured_refusal_is_terminal_content_filter(self, transport):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=None,
+                    refusal="I cannot help with that request.",
+                ),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        normalized = transport.normalize_response(response)
+        assert normalized.content == "I cannot help with that request."
+        assert normalized.finish_reason == "content_filter"
+        assert normalized.provider_data["refusal"] == normalized.content
 
 
 class TestChatCompletionsCacheStats:

@@ -938,7 +938,7 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
 
     from tui_gateway import server
 
-    agent = SimpleNamespace()
+    agent = SimpleNamespace(reasoning_config=None)
     session = {"running": False, "agent": agent}
     monkeypatch.setitem(server._sessions, "runtime-1", session)
     calls = []
@@ -953,14 +953,89 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
         {
             "model": "gpt-5",
             "session_id": "runtime-1",
-            "model_descriptor": {"id": "gpt-5", "provider": "openai"},
+            "model_descriptor": {
+                "id": "gpt-5",
+                "provider": "openai",
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["low", "medium", "high"],
+                "reasoning_effort": "high",
+            },
         },
     )
 
     assert response["result"] == {"key": "model", "value": "gpt-5", "warning": ""}
     assert calls == [("runtime-1", session, "gpt-5")]
-    assert session["model_descriptor"] == {"id": "gpt-5", "provider": "openai"}
-    assert agent.model_descriptor == {"id": "gpt-5", "provider": "openai"}
+    assert session["model_descriptor"] == {
+        "id": "gpt-5",
+        "provider": "openai",
+        "reasoning_enabled": True,
+        "reasoning_efforts": ["low", "medium", "high"],
+        "reasoning_effort": "high",
+    }
+    assert agent.model_descriptor == session["model_descriptor"]
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_model_set_clears_previous_reasoning_override_for_model_default(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    agent = SimpleNamespace(reasoning_config={"enabled": True, "effort": "max"})
+    session = {"running": False, "agent": agent}
+    monkeypatch.setitem(server._sessions, "runtime-default", session)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda _session_id, _session, model: {"value": model, "warning": ""},
+    )
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "custom-reasoner",
+            "session_id": "runtime-default",
+            "model_descriptor": {
+                "id": "custom-reasoner",
+                "reasoning_enabled": True,
+            },
+        },
+    )
+
+    assert "error" not in response
+    assert agent.reasoning_config is None
+
+
+def test_model_set_applies_binary_reasoning_selection(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    agent = SimpleNamespace(reasoning_config=None)
+    session = {"running": False, "agent": agent}
+    monkeypatch.setitem(server._sessions, "runtime-binary", session)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda _session_id, _session, model: {"value": model, "warning": ""},
+    )
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "qwen3.6-plus",
+            "session_id": "runtime-binary",
+            "model_descriptor": {
+                "id": "qwen3.6-plus",
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["none", "enabled"],
+                "reasoning_effort": "enabled",
+            },
+        },
+    )
+
+    assert "error" not in response
+    assert agent.reasoning_config == {"enabled": True}
 
 
 def test_model_set_gateway_method_rejects_running_session(monkeypatch):

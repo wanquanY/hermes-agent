@@ -132,6 +132,10 @@ class TestParseReasoningEffort:
         """The literal "none" disables reasoning explicitly."""
         assert parse_reasoning_effort("none") == {"enabled": False}
 
+    def test_enabled_uses_binary_reasoning_mode(self):
+        """Binary thinking models can opt in without inventing an effort."""
+        assert parse_reasoning_effort("enabled") == {"enabled": True}
+
     @pytest.mark.parametrize("level", list(VALID_REASONING_EFFORTS))
     def test_each_valid_level(self, level):
         """Every level listed in VALID_REASONING_EFFORTS is accepted as-is."""
@@ -157,7 +161,7 @@ class TestParseReasoningEffort:
 
     @pytest.mark.parametrize(
         "value",
-        ["bogus", "very-high", "max", "0", "off", "true", "default"],
+        ["bogus", "very-high", "0", "off", "true", "default"],
     )
     def test_unknown_levels_return_none(self, value):
         """Unrecognized strings fall back to the caller default (None)."""
@@ -166,11 +170,12 @@ class TestParseReasoningEffort:
     def test_known_supported_levels_are_documented(self):
         """Guard against silently dropping a documented level.
 
-        The docstring promises "minimal", "low", "medium", "high", "xhigh".
+        The docstring promises "minimal", "low", "medium", "high", "xhigh",
+        "max", and "ultra".
         If someone removes one from VALID_REASONING_EFFORTS without updating
         the docstring, this test will fail and force the call out.
         """
-        documented = {"minimal", "low", "medium", "high", "xhigh"}
+        documented = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
         assert documented.issubset(set(VALID_REASONING_EFFORTS))
 
 
@@ -262,5 +267,3 @@ class TestSecureParentDir:
         secure_parent_dir(link_target)
         assert len(called_with) == 1
         assert called_with[0] == (str(real_dir), 0o700)
-
-

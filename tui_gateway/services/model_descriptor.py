@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_constants import parse_reasoning_effort
+
 
 def _apply_descriptor_context_window(agent: Any, context_window: Any) -> None:
     """Calibrate the context compressor to the model's admin-configured window.
@@ -43,6 +45,30 @@ def _apply_descriptor_context_window(agent: Any, context_window: Any) -> None:
         pass
 
 
+def _apply_descriptor_reasoning_config(agent: Any, descriptor: dict[str, Any]) -> None:
+    """Apply the registry-validated desktop reasoning choice to the agent."""
+    if agent is None:
+        return
+    if descriptor.get("reasoning_enabled") is False:
+        setattr(agent, "reasoning_config", {"enabled": False})
+        return
+    effort = str(descriptor.get("reasoning_effort") or "").strip().lower()
+    if not effort:
+        if descriptor.get("reasoning_enabled") is True:
+            # A reasoning-capable model without an explicit selection uses its
+            # provider/model default. Clear any override left by the previous
+            # model instead of leaking that model's effort across a switch.
+            setattr(agent, "reasoning_config", None)
+        return
+    supported = descriptor.get("reasoning_efforts")
+    if isinstance(supported, list) and supported and effort not in supported:
+        setattr(agent, "reasoning_config", None)
+        return
+    parsed = parse_reasoning_effort(effort)
+    if parsed is not None:
+        setattr(agent, "reasoning_config", parsed)
+
+
 def normalize_model_descriptor(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -58,6 +84,8 @@ def normalize_model_descriptor(raw: object) -> dict[str, Any]:
         "api_provider",
         "api_format",
         "reasoning_format",
+        "default_reasoning_effort",
+        "reasoning_effort",
     ):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
@@ -81,6 +109,15 @@ def normalize_model_descriptor(raw: object) -> dict[str, Any]:
     if isinstance(request_params, dict):
         descriptor["request_params"] = dict(request_params)
 
+    reasoning_efforts = raw.get("reasoning_efforts")
+    if isinstance(reasoning_efforts, list):
+        normalized_efforts: list[str] = []
+        for value in reasoning_efforts:
+            effort = str(value or "").strip().lower()
+            if effort and effort not in normalized_efforts:
+                normalized_efforts.append(effort)
+        descriptor["reasoning_efforts"] = normalized_efforts
+
     return descriptor
 
 
@@ -97,6 +134,7 @@ def set_session_model_descriptor(
         if agent is not None:
             setattr(agent, "model_descriptor", normalized)
             _apply_descriptor_context_window(agent, normalized.get("context_window"))
+            _apply_descriptor_reasoning_config(agent, normalized)
         return
     if clear_if_empty:
         session.pop("model_descriptor", None)

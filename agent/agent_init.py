@@ -79,10 +79,20 @@ def _normalized_custom_base_url(value: Any) -> str:
 
 
 def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> bool:
-    provider_model = str(entry.get("model", "") or "").strip().lower()
-    if not provider_model:
+    agent_model_norm = str(agent_model or "").strip().lower()
+    models = entry.get("models")
+    catalog: List[str] = []
+    if isinstance(models, dict):
+        catalog = [str(model).strip().lower() for model in models]
+    elif isinstance(models, (list, tuple)):
+        catalog = [str(model).strip().lower() for model in models]
+    if catalog and agent_model_norm in catalog:
         return True
-    return provider_model == str(agent_model or "").strip().lower()
+
+    provider_model = str(entry.get("model", "") or "").strip().lower()
+    if not provider_model and not catalog:
+        return True
+    return provider_model == agent_model_norm
 
 
 def _custom_provider_extra_body_for_agent(
@@ -1301,9 +1311,17 @@ def init_agent(
     compression_threshold = float(_compression_cfg.get("threshold", DEFAULT_COMPRESSION_THRESHOLD))
     try:
         from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
-        _model_cthresh = _cthresh_fn(agent.model)
+        _allow_codex_autoraise = str(
+            _compression_cfg.get("codex_gpt55_autoraise", True)
+        ).lower() in {"true", "1", "yes"}
+        _model_cthresh = _cthresh_fn(
+            agent.model,
+            agent.provider,
+            allow_codex_gpt55_autoraise=_allow_codex_autoraise,
+        )
         if _model_cthresh is not None:
-            compression_threshold = _model_cthresh
+            # Codex auto-raise must not lower an explicitly higher user value.
+            compression_threshold = max(compression_threshold, _model_cthresh)
     except Exception:
         pass
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
