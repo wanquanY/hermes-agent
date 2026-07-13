@@ -3449,8 +3449,12 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(tmp
     assert submitted["draft_text"] == ""
     assert submitted["enabled_toolsets"] == []
     assert submitted["agent_context_mode"] == "team_leader"
-    assert submitted["text"] == "Publish the completed team activity report now."
+    assert submitted["text"] == (
+        "Write the terminal team-task update from the authoritative result "
+        "context already provided."
+    )
     assert "asynchronously woken" in submitted["turn_system_context"]
+    assert "Do not query, re-check" in submitted["turn_system_context"]
     assert "当前进度如下" in submitted["turn_system_context"]
     run_context = json.loads(submitted["run_context_json"])
     assert run_context["conversation_session_id"] == "team-session-1"

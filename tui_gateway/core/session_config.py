@@ -549,26 +549,16 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
 
 
 def _system_prompt_execution_scope_key(session: dict, agent: Any) -> str:
-    session_key = str(session.get("session_key") or getattr(agent, "session_id", "") or "").strip()
-    for context in (
-        session.get("run_context"),
-        getattr(agent, "run_context", None),
-        getattr(agent, "_run_context", None),
-    ):
-        conversation_session_id = str(
-            getattr(context, "conversation_session_id", "") or ""
-        ).strip()
-        execution_scope_key = str(
-            getattr(context, "execution_scope_key", "") or ""
-        ).strip()
-        if (
-            conversation_session_id
-            and execution_scope_key
-            and conversation_session_id == session_key
-            and execution_scope_key != session_key
-        ):
-            return execution_scope_key
-    return ""
+    from agent.system_prompt_cache import system_prompt_cache_scope_key
+
+    session_key = str(
+        session.get("session_key") or getattr(agent, "session_id", "") or ""
+    ).strip()
+    return system_prompt_cache_scope_key(
+        agent,
+        session_id=session_key,
+        contexts=(session.get("run_context"),),
+    )
 
 
 def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:

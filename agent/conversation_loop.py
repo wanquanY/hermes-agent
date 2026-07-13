@@ -65,6 +65,7 @@ from agent.nous_rate_guard import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
+from agent.system_prompt_cache import system_prompt_cache_scope_key
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import (
@@ -117,25 +118,7 @@ def _system_prompt_execution_scope_key(agent) -> str:
     key; ordinary one-agent sessions keep the original byte-stable session
     prompt cache.
     """
-    session_id = str(getattr(agent, "session_id", "") or "").strip()
-    for context in (
-        getattr(agent, "run_context", None),
-        getattr(agent, "_run_context", None),
-    ):
-        conversation_session_id = str(
-            getattr(context, "conversation_session_id", "") or ""
-        ).strip()
-        execution_scope_key = str(
-            getattr(context, "execution_scope_key", "") or ""
-        ).strip()
-        if (
-            conversation_session_id
-            and execution_scope_key
-            and conversation_session_id == session_id
-            and execution_scope_key != session_id
-        ):
-            return execution_scope_key
-    return ""
+    return system_prompt_cache_scope_key(agent)
 
 
 _LEGACY_BRAND_PROMPT_MARKERS = (

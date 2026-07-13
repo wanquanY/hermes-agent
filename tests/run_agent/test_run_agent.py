@@ -1295,6 +1295,31 @@ class TestToolUseEnforcementConfig:
             prompt = a._build_system_prompt()
             assert TOOL_USE_ENFORCEMENT_GUIDANCE not in prompt
 
+    def test_removing_tools_invalidates_enforced_prompt_and_rebuilds_tool_free(
+        self, monkeypatch
+    ):
+        from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
+        from tui_gateway.services.toolset_scope import refresh_agent_tool_filter
+
+        agent = self._make_agent(
+            model="deepseek/deepseek-r1",
+            tool_use_enforcement="auto",
+        )
+        agent._cached_system_prompt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in agent._cached_system_prompt
+
+        monkeypatch.setattr(
+            "model_tools.get_tool_definitions",
+            lambda **_kwargs: [],
+        )
+        refresh_agent_tool_filter(agent, [])
+
+        assert agent.tools == []
+        assert agent.valid_tool_names == set()
+        assert agent._cached_system_prompt is None
+        rebuilt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE not in rebuilt
+
 
 class TestInvalidateSystemPrompt:
     def test_clears_cache(self, agent):

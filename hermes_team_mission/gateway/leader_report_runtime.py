@@ -30,6 +30,12 @@ from hermes_team_mission.runtime.leader_runs import ensure_team_leader_message_r
 RunSubmitter = Callable[[str, dict], dict]
 
 
+_LEADER_REPORT_REQUEST = (
+    "Write the terminal team-task update from the authoritative result context "
+    "already provided."
+)
+
+
 def _promote_result_to_conversation_memory(
     db,
     *,
@@ -151,6 +157,29 @@ def _leader_report_prompt(
     summary_text: str,
     artifact_refs: list[dict],
 ) -> str:
+    terminal_outcome = str(
+        result.get("outcome")
+        or result.get("status")
+        or outcome
+        or mission.get("status")
+        or ""
+    ).strip().lower()
+    if terminal_outcome in {"cancelled", "canceled", "interrupted"}:
+        outcome_guidance = (
+            "The task was cancelled. Say so plainly. Do not claim it completed "
+            "or produced a deliverable unless the result context explicitly "
+            "lists one."
+        )
+    elif terminal_outcome in {"failed", "error", "blocked"}:
+        outcome_guidance = (
+            "The task did not complete successfully. Explain the failure or "
+            "blocker plainly and give only a useful next step supported by the "
+            "result context."
+        )
+    else:
+        outcome_guidance = (
+            "Summarize the delivered result, conclusion, and useful next step."
+        )
     node_results = [
         {
             "kind": str(item.get("kind") or ""),
@@ -197,8 +226,10 @@ def _leader_report_prompt(
     return "\n".join([
         "You are the Team Leader in a Dovie team conversation.",
         "The team task has reached a terminal state and you were asynchronously woken to report the result to the user.",
+        "The mission result context below is authoritative. Do not query, re-check, or infer a different task status.",
         "Write one natural user-facing Leader message in the user's language.",
-        "Focus on the delivered result, conclusion, and useful next step. Do not present raw node/task execution status as the answer.",
+        outcome_guidance,
+        "Do not present raw node/task execution status as the answer.",
         "Do not expose internal IDs, framework names, protocol names, tool calls, handoff details, or implementation mechanics.",
         "Do not say '当前进度如下' or produce a mechanical status dump.",
         "If files were produced, mention the key deliverables naturally. Artifact cards are attached separately, so do not paste long file paths unless they are essential.",
@@ -410,7 +441,7 @@ def submit_mission_leader_report_run(
         "agent_context_mode": "team_leader",
         "cwd": workspace_context["cwd"],
         "workspace": workspace_context["workspace"],
-        "text": "Publish the completed team activity report now.",
+        "text": _LEADER_REPORT_REQUEST,
         "turn_system_context": prompt,
         "user_message_persistence": "external",
         "draft_text": "",

@@ -3898,9 +3898,13 @@ def test_persist_live_system_prompt_uses_execution_scope_cache():
     server._persist_live_session_system_prompt(session)
 
     assert agent._cached_system_prompt == "frontend scoped prompt"
-    assert db.scoped_calls == [
-        ("session-key", "member-chat:session-key:frontend", "frontend scoped prompt")
-    ]
+    assert len(db.scoped_calls) == 1
+    session_id, prompt_scope_key, prompt = db.scoped_calls[0]
+    assert session_id == "session-key"
+    assert prompt_scope_key.startswith(
+        "member-chat:session-key:frontend:prompt-v1:"
+    )
+    assert prompt == "frontend scoped prompt"
 
 
 def test_append_model_switch_marker_skips_empty_conversation():
