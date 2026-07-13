@@ -2,17 +2,17 @@
 
 Each function takes the parent ``AIAgent`` as its first argument
 (``agent``) except for the static helpers (``sanitize_tool_call_arguments``,
-``drop_thinking_only_and_merge_users``) which are stateless.  AIAgent
+``drop_thinking_only_messages``) which are stateless.  AIAgent
 keeps thin forwarders for backward compatibility.
 
 Methods covered:
 * ``convert_to_trajectory_format`` — internal -> trajectory-file format
 * ``sanitize_tool_call_arguments`` — repair corrupted JSON in tool_calls
-* ``repair_message_sequence`` — enforce alternation invariants
+* ``repair_message_sequence`` — remove invalid tool-result messages
 * ``strip_think_blocks`` — remove inline reasoning from stored content
 * ``recover_with_credential_pool`` — rotate pool entries on 429
 * ``try_recover_primary_transport`` — re-create OpenAI client after rate-limit
-* ``drop_thinking_only_and_merge_users`` — Anthropic-style cleanup
+* ``drop_thinking_only_messages`` — remove unreplayable reasoning-only turns
 * ``restore_primary_runtime`` — un-do fallback activation
 * ``extract_reasoning`` — pull reasoning fields out of API responses
 * ``dump_api_request_debug`` — write request body for post-mortem
@@ -336,25 +336,20 @@ def sanitize_tool_call_arguments(
 
 
 def repair_message_sequence(agent, messages: List[Dict]) -> int:
-    """Collapse malformed role-alternation left in the live history.
+    """Remove invalid tool-result messages from a provider-bound copy.
 
-    Providers (OpenAI, OpenRouter, Anthropic) expect strict alternation:
-    after the system message, user/tool alternates with assistant, with
-    no two consecutive user messages and no tool-result that doesn't
-    follow an assistant-with-tool_calls. Violations cause silent empty
-    responses on most providers, which triggers the empty-retry loop.
+    A tool result without a preceding matching assistant tool call is invalid
+    for every supported provider. Consecutive user messages are different:
+    they are valid Chat Completions input and, in a shared conversation, each
+    one is a distinct participant event. They must remain separate here.
 
-    This runs right before the API call as a defensive belt — by the
-    time it fires, the scaffolding strip should already have prevented
-    most shapes, but external callers (gateway multi-queue replay,
-    session resume, cron, explicit conversation_history passed in by
-    host code) can feed in already-broken histories.
+    Provider adapters that require strict alternation (for example native
+    Anthropic or Bedrock) normalize their own wire-format copy later. Keeping
+    that constraint at the adapter boundary prevents provider quirks from
+    rewriting canonical conversation semantics.
 
-    Repairs applied:
-      1. Stray ``tool`` messages whose ``tool_call_id`` doesn't match
-         any preceding assistant tool_call — dropped.
-      2. Consecutive ``user`` messages — merged with newline separator
-         so no user input is lost.
+    This helper mutates the list passed to it, so callers must pass a
+    provider-bound copy rather than the live/persisted history.
 
     Deliberately does NOT rewind orphan ``assistant(tool_calls)+tool``
     pairs that precede a user message — that pattern IS valid when the
@@ -370,7 +365,7 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
 
     repairs = 0
 
-    # Pass 1: drop stray tool messages that don't follow a known
+    # Drop stray tool messages that don't follow a known
     # assistant tool_call_id. Uses a rolling set of known ids refreshed
     # on each assistant message.
     known_tool_ids: set = set()
@@ -401,37 +396,8 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
                 known_tool_ids = set()
             filtered.append(msg)
 
-    # Pass 2: merge consecutive user messages. Preserves all user input
-    # so nothing the user typed is lost.
-    merged: List[Dict] = []
-    for msg in filtered:
-        if (
-            merged
-            and isinstance(msg, dict)
-            and msg.get("role") == "user"
-            and isinstance(merged[-1], dict)
-            and merged[-1].get("role") == "user"
-        ):
-            prev = merged[-1]
-            prev_content = prev.get("content", "")
-            new_content = msg.get("content", "")
-            # Only merge plain-text content; leave multimodal (list)
-            # content alone — collapsing image/audio blocks risks
-            # mangling the attachment structure.
-            if isinstance(prev_content, str) and isinstance(new_content, str):
-                prev["content"] = (
-                    (prev_content + "\n\n" + new_content)
-                    if prev_content and new_content
-                    else (prev_content or new_content)
-                )
-                repairs += 1
-                continue
-        merged.append(msg)
-
     if repairs > 0:
-        # Rewrite in place so downstream paths (persistence, return
-        # value, session DB flush) see the repaired sequence.
-        messages[:] = merged
+        messages[:] = filtered
 
     return repairs
 
@@ -735,10 +701,10 @@ def try_recover_primary_transport(
 
 
 
-def drop_thinking_only_and_merge_users(
+def drop_thinking_only_messages(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Drop thinking-only assistant turns; merge any adjacent user messages left behind.
+    """Drop thinking-only assistant turns from a provider-bound copy.
 
     Runs on the per-call ``api_messages`` copy only. The stored
     conversation history (``agent.messages``) is never mutated, so the
@@ -746,78 +712,33 @@ def drop_thinking_only_and_merge_users(
     session persistence keeps the full trace. Only the wire copy sent to
     the provider is cleaned.
 
-    Why drop-and-merge rather than inject stub text:
+    Why drop rather than inject stub text:
     - Fabricating ``"."`` / ``"(continued)"`` text lies in the history
       and makes future turns see model output the model didn't emit.
-    - Dropping the turn preserves honesty; merging adjacent user messages
-      preserves the provider's role-alternation invariant.
-    - This is the pattern used by Claude Code's ``normalizeMessagesForAPI``
-      (filterOrphanedThinkingOnlyMessages + mergeAdjacentUserMessages).
+    - Dropping the turn preserves honesty.
+    - Any newly adjacent user messages stay distinct. Provider adapters with
+      a strict alternation requirement normalize only their wire-format copy.
     """
     if not messages:
         return messages
 
-    # Pass 1: drop thinking-only assistant turns.
     kept = [m for m in messages if not _ra().AIAgent._is_thinking_only_assistant(m)]
     dropped = len(messages) - len(kept)
     if dropped == 0:
         return messages
 
-    # Pass 2: merge any newly-adjacent user messages.
-    merged: List[Dict[str, Any]] = []
-    merges = 0
-    for m in kept:
-        prev = merged[-1] if merged else None
-        if (
-            prev is not None
-            and prev.get("role") == "user"
-            and m.get("role") == "user"
-        ):
-            prev_content = prev.get("content", "")
-            cur_content = m.get("content", "")
-            # Work on a copy of ``prev`` so the caller's input dicts are
-            # never mutated. ``_sanitize_api_messages`` upstream already
-            # hands us per-call copies, but staying pure here means we
-            # can be called safely from anywhere (tests, other loops).
-            prev_copy = dict(prev)
-            # Only string-content merge is meaningful for role-alternation
-            # purposes. If either side is a list (multimodal), append as a
-            # separate block rather than collapsing.
-            if isinstance(prev_content, str) and isinstance(cur_content, str):
-                sep = "\n\n" if prev_content and cur_content else ""
-                prev_copy["content"] = prev_content + sep + cur_content
-            elif isinstance(prev_content, list) and isinstance(cur_content, list):
-                prev_copy["content"] = list(prev_content) + list(cur_content)
-            elif isinstance(prev_content, list) and isinstance(cur_content, str):
-                if cur_content:
-                    prev_copy["content"] = list(prev_content) + [
-                        {"type": "text", "text": cur_content}
-                    ]
-                else:
-                    prev_copy["content"] = list(prev_content)
-            elif isinstance(prev_content, str) and isinstance(cur_content, list):
-                new_blocks: List[Dict[str, Any]] = []
-                if prev_content:
-                    new_blocks.append({"type": "text", "text": prev_content})
-                new_blocks.extend(cur_content)
-                prev_copy["content"] = new_blocks
-            else:
-                # Unknown content shape — fall back to appending separately
-                # (violates alternation, but safer than raising in a hot path).
-                merged.append(m)
-                continue
-            merged[-1] = prev_copy
-            merges += 1
-        else:
-            merged.append(m)
-
     _ra().logger.debug(
-        "Pre-call sanitizer: dropped %d thinking-only assistant turn(s), "
-        "merged %d adjacent user message(s)",
+        "Pre-call sanitizer: dropped %d thinking-only assistant turn(s)",
         dropped,
-        merges,
     )
-    return merged
+    return kept
+
+
+def drop_thinking_only_and_merge_users(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Compatibility alias; adjacent user events are intentionally preserved."""
+    return drop_thinking_only_messages(messages)
 
 
 
@@ -2234,6 +2155,7 @@ __all__ = [
     "strip_think_blocks",
     "recover_with_credential_pool",
     "try_recover_primary_transport",
+    "drop_thinking_only_messages",
     "drop_thinking_only_and_merge_users",
     "restore_primary_runtime",
     "extract_reasoning",

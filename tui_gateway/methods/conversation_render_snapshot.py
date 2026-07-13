@@ -75,28 +75,26 @@ def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
     return [dict(event) for event in events if _is_structural_run_event(event)]
 
 
-def _ordinary_render_run_events(session_id: str, events: list[Any]) -> list[dict[str, Any]]:
+def _ordinary_render_run_events(
+    session_id: str,
+    events: list[Any],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     db = _get_db()
     if db is None or not session_id:
-        return _structural_run_events(events)
+        return []
     try:
         status = db.runs.session_status(session_id)
     except Exception:
-        return _structural_run_events(events)
+        return []
     active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
-    return [
-        dict(event)
-        for event in events
-        if isinstance(event, dict)
-        and (
-            _is_structural_run_event(event)
-            or (
-                bool(active_run_id)
-                and _text(event.get("type")) in _RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES
-                and _text(event.get("run_id")) == active_run_id
-            )
-        )
-    ]
+    if not active_run_id:
+        return []
+    return _filter_team_render_run_events(
+        events,
+        conversation={"active_run_id": active_run_id},
+        messages=messages,
+    )
 
 
 def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
@@ -664,7 +662,13 @@ def _emit_team_render_diagnostic(stage: str, **fields: Any) -> None:
 
 
 def _message_id(message: dict[str, Any]) -> str:
-    return _text(message.get("message_id") or message.get("messageId") or message.get("id"))
+    return _text(
+        message.get("conversation_message_id")
+        or message.get("conversationMessageId")
+        or message.get("message_id")
+        or message.get("messageId")
+        or message.get("id")
+    )
 
 
 def _message_source_seq(message: dict[str, Any]) -> str:
@@ -812,27 +816,131 @@ def _event_run_id(event: Any) -> str:
     return _text(event.get("run_id") or payload.get("run_id") or payload.get("runId"))
 
 
-def _team_snapshot_active_run_ids(conversation: dict[str, Any], mission: dict[str, Any]) -> set[str]:
-    active = {
-        _text(conversation.get("active_run_id") or conversation.get("activeRunId")),
-        _text(mission.get("active_run_id") or mission.get("activeRunId")),
-    }
-    return {item for item in active if item}
+def _run_turn_segment_key(
+    *,
+    run_id: Any,
+    turn_id: Any,
+    segment: Any,
+    role: Any = "",
+) -> str:
+    run_id = _text(run_id)
+    turn_id = _text(turn_id)
+    if not run_id or not turn_id:
+        return ""
+    try:
+        segment_index = max(0, int(segment or 0))
+    except (TypeError, ValueError):
+        segment_index = 0
+    return "|".join((run_id, turn_id, str(segment_index), _text(role).lower()))
+
+
+def _covered_render_facts(messages: list[dict[str, Any]]) -> dict[str, set[str]]:
+    facts = {"messages": set(), "tools": set(), "reasoning": set()}
+    for message in messages:
+        metadata = _message_metadata(message)
+        role = _text(message.get("role")).lower()
+        message_id = _message_id(message)
+        if message_id:
+            facts["messages"].add(message_id)
+        tool_call_id = _text(
+            message.get("tool_call_id")
+            or message.get("toolCallId")
+            or metadata.get("tool_call_id")
+            or metadata.get("toolCallId")
+            or metadata.get("tool_id")
+        )
+        if tool_call_id:
+            facts["tools"].add(tool_call_id)
+        run_id = metadata.get("run_id") or metadata.get("runId")
+        turn_id = metadata.get("turn_id") or metadata.get("turnId")
+        segment = metadata.get("assistant_segment_index") or metadata.get("assistantSegmentIndex")
+        fact_key = _run_turn_segment_key(
+            run_id=run_id,
+            turn_id=turn_id,
+            segment=segment,
+            role=role,
+        )
+        if fact_key and (message.get("text") or message.get("reasoning")):
+            facts["messages"].add(fact_key)
+        if fact_key and message.get("reasoning"):
+            facts["reasoning"].add(fact_key)
+    return facts
+
+
+def _run_event_is_covered(
+    event: dict[str, Any],
+    covered: dict[str, set[str]],
+    *,
+    inferred_segment: int = 0,
+) -> bool:
+    payload = _record(event.get("payload"))
+    event_type = _text(event.get("type")).lower()
+    message_id = _text(
+        payload.get("message_id")
+        or payload.get("messageId")
+        or event.get("projected_message_id")
+        or event.get("projectedMessageId")
+        or event.get("_projected_message_id")
+    )
+    if message_id and message_id in covered["messages"]:
+        return True
+    tool_call_id = _text(
+        payload.get("tool_call_id")
+        or payload.get("toolCallId")
+        or payload.get("tool_id")
+        or payload.get("toolId")
+    )
+    if event_type.startswith("tool.") and tool_call_id in covered["tools"]:
+        return True
+    role = _text(payload.get("role") or "assistant").lower()
+    segment = payload.get("assistant_segment_index")
+    if segment is None:
+        segment = payload.get("assistantSegmentIndex")
+    if segment is None:
+        segment = inferred_segment
+    fact_key = _run_turn_segment_key(
+        run_id=_event_run_id(event),
+        turn_id=event.get("turn_id") or payload.get("turn_id") or payload.get("turnId"),
+        segment=segment,
+        role=role,
+    )
+    if event_type.startswith("message.") and fact_key in covered["messages"]:
+        return True
+    if (
+        event_type.startswith("reasoning.")
+        or event_type.startswith("thinking.")
+    ) and fact_key in covered["reasoning"]:
+        return True
+    return False
+
+
+def _team_snapshot_active_chat_run_ids(conversation: dict[str, Any]) -> set[str]:
+    """Return only live chat response runs for the conversation.
+
+    A mission run is an independent background activity. Treating its
+    ``active_run_id`` as a leader-chat run replays completed chat history while
+    a team task is running, which makes the render snapshot non-idempotent.
+    """
+    active_run_id = _text(
+        conversation.get("active_run_id") or conversation.get("activeRunId")
+    )
+    return {active_run_id} if active_run_id else set()
 
 
 def _filter_team_render_run_events(
     run_events: list[Any],
     *,
     conversation: dict[str, Any],
-    mission: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    normalized_events = _structural_run_events(run_events)
-    active_run_ids = _team_snapshot_active_run_ids(conversation, mission)
-    running = bool(conversation.get("running") or conversation.get("active_run_id") or conversation.get("activeRunId"))
-    if not running and not active_run_ids:
+    normalized_events = [dict(event) for event in run_events if isinstance(event, dict)]
+    active_run_ids = _team_snapshot_active_chat_run_ids(conversation)
+    if not active_run_ids:
         return []
     covered_run_ids = _covered_render_run_ids(messages)
+    covered_facts = _covered_render_facts(messages)
+    segment_by_turn: dict[str, int] = {}
+    observed_tools_by_turn: dict[str, set[str]] = {}
     filtered: list[dict[str, Any]] = []
     for event in normalized_events:
         run_id = _event_run_id(event)
@@ -840,7 +948,29 @@ def _filter_team_render_run_events(
             continue
         if run_id and run_id in covered_run_ids and run_id not in active_run_ids:
             continue
-        filtered.append(event)
+        payload = _record(event.get("payload"))
+        turn_id = _text(event.get("turn_id") or payload.get("turn_id") or payload.get("turnId"))
+        turn_key = f"{run_id}|{turn_id}" if run_id and turn_id else run_id
+        inferred_segment = segment_by_turn.get(turn_key, 0)
+        if not _run_event_is_covered(
+            event,
+            covered_facts,
+            inferred_segment=inferred_segment,
+        ):
+            filtered.append(event)
+        event_type = _text(event.get("type")).lower()
+        if event_type.startswith("tool.") and turn_key:
+            tool_id = _text(
+                payload.get("tool_call_id")
+                or payload.get("toolCallId")
+                or payload.get("tool_id")
+                or payload.get("toolId")
+                or event.get("seq")
+            )
+            seen = observed_tools_by_turn.setdefault(turn_key, set())
+            if tool_id and tool_id not in seen:
+                seen.add(tool_id)
+                segment_by_turn[turn_key] = inferred_segment + 1
     return filtered
 
 
@@ -1001,7 +1131,10 @@ def _team_conversation_snapshot(
             )
             for message in messages
         ]
-    tool_events = list(page.get("toolEvents") or []) if isinstance(page, dict) else []
+    # Completed tool calls are transcript rows. The render snapshot exposes
+    # only a transcript prefix plus the active chat run tail; a second historic
+    # tool-event lane would create another ordering authority in the client.
+    tool_events: list[dict[str, Any]] = []
     page_info = (
         page.get("pageInfo")
         if isinstance(page, dict) and isinstance(page.get("pageInfo"), dict)
@@ -1055,15 +1188,11 @@ def _team_conversation_snapshot(
         filtered_samples=filtered_message_summaries[:16],
         raw_samples=raw_message_summaries[:24],
     )
-    if is_running:
-        run_events = _filter_team_render_run_events(
-            raw_run_events,
-            conversation=conversation,
-            mission=mission,
-            messages=messages,
-        )
-    else:
-        run_events = []
+    run_events = _filter_team_render_run_events(
+        raw_run_events,
+        conversation=conversation,
+        messages=messages,
+    )
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,
@@ -1122,10 +1251,11 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "session_id": session_id,
             "participants": _participants_for_session(session_id),
             "messages": list(page.get("messages") or []),
-            "toolEvents": list(page.get("toolEvents") or []),
+            "toolEvents": [],
             "runEvents": _ordinary_render_run_events(
                 session_id,
                 list(page.get("runEvents") or []),
+                list(page.get("messages") or []),
             ),
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},
             "branchInfo": page.get("branchInfo") if isinstance(page.get("branchInfo"), dict) else None,

@@ -426,6 +426,16 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
     runtime_scope_key = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
     client_message_id = str(params.get("client_message_id") or "").strip()
+    current_input_conversation_message_id = str(
+        params.get("current_input_conversation_message_id")
+        or params.get("currentInputConversationMessageId")
+        or ""
+    ).strip()
+    current_input_identity = (
+        {"current_input_conversation_message_id": current_input_conversation_message_id}
+        if current_input_conversation_message_id
+        else {}
+    )
     persist_user_message = str(
         params.get("persist_user_message")
         or params.get("persistUserMessage")
@@ -524,6 +534,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "turn_id": turn_id,
             "run_id": run_id,
             "client_message_id": client_message_id,
+            **current_input_identity,
             "text": text,
             "attachments": submitted_attachments,
             "draft_text": str(params.get("draft_text") or text or ""),
@@ -712,6 +723,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "turn_id": turn_id,
                 "run_id": run_id,
                 "client_message_id": client_message_id,
+                **current_input_identity,
                 "attachments": submitted_attachments,
                 "draft_text": str(params.get("draft_text") or text or ""),
                 "persist_user_message": persist_user_message,
@@ -1266,7 +1278,7 @@ def _run_prompt_submit(
             streamer = make_stream_renderer(cols)
             prompt = text
             clean_prompt = (
-                ""
+                None
                 if user_message_persistence == "external"
                 else str((turn_metadata or {}).get("persist_user_message") or prompt or "")
             )
@@ -1475,6 +1487,12 @@ def _run_prompt_submit(
                     stream_callback=_stream,
                     persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
+                    current_input_conversation_message_id=str(
+                        (turn_metadata or {}).get(
+                            "current_input_conversation_message_id"
+                        )
+                        or ""
+                    ),
                 )
                 _log_prompt_stage(
                     session,
@@ -1496,7 +1514,14 @@ def _run_prompt_submit(
                     },
                 )
             except TypeError as exc:
-                if "turn_metadata" not in str(exc) and "persist_user_message" not in str(exc):
+                if not any(
+                    key in str(exc)
+                    for key in (
+                        "turn_metadata",
+                        "persist_user_message",
+                        "current_input_conversation_message_id",
+                    )
+                ):
                     raise
                 _log_prompt_stage(
                     session,

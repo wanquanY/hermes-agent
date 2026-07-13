@@ -142,6 +142,38 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_reuses_persisted_current_input_without_appending_duplicate():
+    agent = _FakeAgent()
+    history = [
+        {
+            "role": "user",
+            "content": "hello",
+            "conversation_message_id": "msg-current",
+        }
+    ]
+
+    ctx = _build(
+        agent,
+        conversation_history=history,
+        current_input_conversation_message_id="msg-current",
+    )
+
+    assert len(ctx.messages) == 1
+    assert ctx.messages[0] is history[0]
+    assert ctx.current_turn_user_idx == 0
+
+
+def test_rejects_missing_persisted_current_input():
+    agent = _FakeAgent()
+
+    with pytest.raises(RuntimeError, match="canonical current input is absent"):
+        _build(
+            agent,
+            conversation_history=[],
+            current_input_conversation_message_id="msg-current",
+        )
+
+
 def test_applies_agent_side_effects():
     agent = _FakeAgent()
     _build(agent)
@@ -242,4 +274,3 @@ def test_between_turns_refresh_no_churn_when_unchanged():
         _build(agent)
 
     assert agent.tools is same  # not replaced → no churn
-

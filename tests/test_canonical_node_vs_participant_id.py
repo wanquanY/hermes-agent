@@ -121,11 +121,12 @@ def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
     )
 
     assert alpha_view[0]["role"] == "assistant"
-    assert alpha_view[0]["content"].endswith("Alpha has the build.")
+    assert alpha_view[0]["content"] == "Alpha has the build."
     assert beta_view[0]["role"] == "user"
-    assert beta_view[0]["content"].startswith(
-        "[assistant | Alpha | member:member-alpha]"
+    assert beta_view[0]["content"] == (
+        "[assistant | Alpha | member:member-alpha]\nAlpha has the build."
     )
+    assert "name" not in beta_view[0]
     assert beta_view[0]["metadata"]["speaker_participant_id"] == "member:member-alpha"
     assert beta_view[0]["metadata"]["speaker_projected_role"] == "user"
 

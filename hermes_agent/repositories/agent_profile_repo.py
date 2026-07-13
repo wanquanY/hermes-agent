@@ -7,11 +7,33 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from functools import wraps
+from typing import Any, Callable, Protocol, TypeVar, cast, runtime_checkable
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_agent_profile_growth import summarize_agent_profile_growth
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+
+
+_MethodT = TypeVar("_MethodT", bound=Callable[..., Any])
+
+
+def _connection_locked(method: _MethodT) -> _MethodT:
+    """Serialize one complete repository operation on its shared connection.
+
+    A profile mutation commonly contains several statements followed by a
+    projection read. Locking individual ``execute`` calls would still allow
+    another request to interleave a cursor operation or commit on the same
+    SQLite handle, so the repository method is the synchronization unit.
+    """
+
+    @wraps(method)
+    def wrapped(self: "AgentProfileRepoImpl", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast(_MethodT, wrapped)
 
 
 @dataclass(frozen=True)
@@ -92,7 +114,9 @@ class AgentProfileRepoImpl:
 
     def __init__(self, conn: RepositoryConnection) -> None:
         self._conn = conn
+        self._lock = lock_for_connection(conn)
 
+    @_connection_locked
     def create_profile(self, spec: ProfileSpec) -> Profile:
         stable = str(spec.profile_id or "").strip()
         if not stable:
@@ -148,6 +172,7 @@ class AgentProfileRepoImpl:
         assert got is not None
         return got
 
+    @_connection_locked
     def get(self, profile_id: str) -> Profile | None:
         stable = str(profile_id or "").strip()
         if not stable:
@@ -166,6 +191,7 @@ class AgentProfileRepoImpl:
             return None
         return _row_to_profile(row)
 
+    @_connection_locked
     def list(
         self,
         *,
@@ -197,6 +223,7 @@ class AgentProfileRepoImpl:
         ).fetchall()
         return [_row_to_profile(row) for row in rows]
 
+    @_connection_locked
     def add_version(self, profile_id: str, version: ProfileVersion) -> None:
         stable_profile = str(profile_id or "").strip()
         stable_version = str(version.version_id or "").strip()
@@ -239,6 +266,7 @@ class AgentProfileRepoImpl:
                 (stable_profile, stable_version),
             )
 
+    @_connection_locked
     def get_growth_summary(self, profile_id: str) -> GrowthSummary:
         stable = str(profile_id or "").strip()
         if not stable:
@@ -263,6 +291,7 @@ class AgentProfileRepoImpl:
             updated_at=float(row["updated_at"] or 0) if isinstance(row, sqlite3.Row) else float(row[5] or 0),
         )
 
+    @_connection_locked
     def fold_removed_profile_versions(self) -> int:
         if not _table_exists(self._conn, "agent_profile_versions"):
             return 0
@@ -328,6 +357,7 @@ class AgentProfileRepoImpl:
         self._conn.execute("DROP TABLE IF EXISTS agent_profile_versions")
         return folded
 
+    @_connection_locked
     def upsert_agent_profile(
         self,
         *,
@@ -453,6 +483,7 @@ class AgentProfileRepoImpl:
         self._conn.commit()
         return self.get_agent_profile(resolved_profile_id)
 
+    @_connection_locked
     def get_agent_profile(self, profile_id: str) -> dict[str, Any]:
         normalized = _text(profile_id)
         if not normalized:
@@ -463,6 +494,7 @@ class AgentProfileRepoImpl:
         ).fetchone()
         return _agent_profile_from_row(row)
 
+    @_connection_locked
     def get_agent_profile_by_slug(self, slug: str) -> dict[str, Any]:
         normalized = _text(slug)
         if not normalized:
@@ -478,6 +510,7 @@ class AgentProfileRepoImpl:
         ).fetchone()
         return _agent_profile_from_row(row)
 
+    @_connection_locked
     def list_agent_profiles(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         if include_archived:
             rows = self._conn.execute(
@@ -493,6 +526,7 @@ class AgentProfileRepoImpl:
             ).fetchall()
         return [profile for profile in (_agent_profile_from_row(row) for row in rows) if profile]
 
+    @_connection_locked
     def archive_agent_profile(self, profile_id: str) -> dict[str, Any]:
         profile = self.get_agent_profile(profile_id)
         if not profile:
@@ -566,6 +600,7 @@ class AgentProfileRepoImpl:
             },
         )
 
+    @_connection_locked
     def upsert_agent_profile_draft(
         self,
         *,
@@ -706,6 +741,7 @@ class AgentProfileRepoImpl:
         self._conn.commit()
         return self.get_agent_profile_draft(resolved_draft_id)
 
+    @_connection_locked
     def get_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
         normalized = _text(draft_id)
         if not normalized:
@@ -716,6 +752,7 @@ class AgentProfileRepoImpl:
         ).fetchone()
         return _agent_profile_draft_from_row(row)
 
+    @_connection_locked
     def list_agent_profile_drafts(
         self,
         *,
@@ -763,6 +800,7 @@ class AgentProfileRepoImpl:
         ).fetchall()
         return [draft for draft in (_agent_profile_draft_from_row(row) for row in rows) if draft]
 
+    @_connection_locked
     def discard_agent_profile_draft(self, draft_id: str) -> dict[str, Any]:
         draft = self.get_agent_profile_draft(draft_id)
         if not draft:

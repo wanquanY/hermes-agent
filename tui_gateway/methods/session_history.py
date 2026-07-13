@@ -98,12 +98,6 @@ def _(rid, params: dict) -> dict:
     target, resolve_err = _resolve_session_row_id(rid, db, target)
     if resolve_err:
         return resolve_err
-    session_row = db.sessions.get(target)
-    if str((session_row or {}).get("conversation_kind") or "").strip().lower() == "team":
-        try:
-            db.team_transcript_projections.backfill([target])
-        except Exception as exc:
-            return _err(rid, 5000, f"team transcript projection backfill failed: {exc}")
     cursor = _decode_page_cursor(params.get("cursor"))
     cursor_id = cursor.get("id")
     try:

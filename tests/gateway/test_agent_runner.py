@@ -177,13 +177,13 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
     assert [msg["role"] for msg in session["history"]] == [
         "user", "assistant", "user"
     ]
-    assert session["history"][0]["content"].endswith("你是谁？")
-    assert session["history"][1]["content"].startswith(
-        "[assistant | You | leader:team-conversation-1]"
+    assert session["history"][0]["content"] == "你是谁？"
+    assert session["history"][1]["content"] == "我是小多，负责团队协调。"
+    assert "name" not in session["history"][1]
+    assert session["history"][2]["content"] == (
+        "[assistant | 前端工程师 | member:frontend]\n我是前端工程师，负责 UI。"
     )
-    assert session["history"][2]["content"].startswith(
-        "[assistant | 前端工程师 | member:frontend]"
-    )
+    assert "name" not in session["history"][2]
     assert session["history"][2]["metadata"]["speaker_participant_id"] == "member:frontend"
     assert session["history"][2]["metadata"]["speaker_projected_role"] == "user"
 

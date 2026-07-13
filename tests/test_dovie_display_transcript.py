@@ -90,14 +90,15 @@ def test_session_messages_returns_dovie_sanitized_cron_prompt(monkeypatch):
     from tui_gateway import server
     from tui_gateway.methods import session as session_methods
 
-    class _DB:
-        def get_session(self, _session_id):
-            return {"id": "cron-session"}
+    class _Sessions:
+        def get(self, _session_id):
+            return {"id": "cron-session", "conversation_kind": "direct"}
 
-        def get_session_by_title(self, _title):
+        def get_by_title(self, _title):
             return None
 
-        def get_messages_page_as_conversation(self, _session_id, **_kwargs):
+    class _Messages:
+        def page_as_conversation(self, _session_id, **_kwargs):
             return {
                 "messages": [
                     {"role": "user", "content": CRON_HINT + "请写一首短诗"},
@@ -105,6 +106,15 @@ def test_session_messages_returns_dovie_sanitized_cron_prompt(monkeypatch):
                 ],
                 "pageInfo": {"hasMoreBefore": False, "hasMoreAfter": False},
             }
+
+    class _Branches:
+        def get_session_branch_info(self, _session_id):
+            return None
+
+    class _DB:
+        sessions = _Sessions()
+        messages = _Messages()
+        branches = _Branches()
 
     monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
 
@@ -127,14 +137,15 @@ def test_session_messages_strips_assistant_structural_boundary_blank_lines(monke
     from tui_gateway import server
     from tui_gateway.methods import session as session_methods
 
-    class _DB:
-        def get_session(self, _session_id):
-            return {"id": "spacing-session"}
+    class _Sessions:
+        def get(self, _session_id):
+            return {"id": "spacing-session", "conversation_kind": "direct"}
 
-        def get_session_by_title(self, _title):
+        def get_by_title(self, _title):
             return None
 
-        def get_messages_page_as_conversation(self, _session_id, **_kwargs):
+    class _Messages:
+        def page_as_conversation(self, _session_id, **_kwargs):
             return {
                 "messages": [
                     {
@@ -147,6 +158,15 @@ def test_session_messages_strips_assistant_structural_boundary_blank_lines(monke
                 ],
                 "pageInfo": {"hasMoreBefore": False, "hasMoreAfter": False},
             }
+
+    class _Branches:
+        def get_session_branch_info(self, _session_id):
+            return None
+
+    class _DB:
+        sessions = _Sessions()
+        messages = _Messages()
+        branches = _Branches()
 
     monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
 
@@ -174,8 +194,8 @@ def test_session_list_returns_dovie_sanitized_title_and_preview(monkeypatch):
     from tui_gateway import server
     from tui_gateway.methods import session as session_methods
 
-    class _DB:
-        def list_sessions_rich(self, **_kwargs):
+    class _Sessions:
+        def list(self, **_kwargs):
             return [
                 {
                     "id": "visible-session",
@@ -187,6 +207,14 @@ def test_session_list_returns_dovie_sanitized_title_and_preview(monkeypatch):
                     "source": "tui",
                 }
             ]
+
+    class _Runs:
+        def session_status(self, _session_id):
+            return {}
+
+    class _DB:
+        sessions = _Sessions()
+        runs = _Runs()
 
     monkeypatch.setattr(session_methods, "_get_db", lambda: _DB())
     monkeypatch.setattr(session_methods, "_live_sessions_by_stored_key", lambda: {})
@@ -240,3 +268,35 @@ def test_history_to_messages_preserves_storage_message_id():
     )
 
     assert [m.get("message_id") for m in messages] == ["8099", "8113", "8111", "42"]
+
+
+def test_history_to_messages_exposes_semantic_conversation_message_id():
+    from tui_gateway.services.transcript_messages import history_to_messages
+
+    messages = history_to_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "stable across restart",
+                "message_id": "8113",
+                "conversation_message_id": "msg_stable_assistant_1",
+            },
+            {
+                "role": "tool",
+                "content": "ok",
+                "tool_call_id": "call-1",
+                "message_id": "8114",
+                "conversation_message_id": "msg_stable_tool_1",
+            },
+        ]
+    )
+
+    assert [message["message_id"] for message in messages] == ["8113", "8114"]
+    assert [message["conversation_message_id"] for message in messages] == [
+        "msg_stable_assistant_1",
+        "msg_stable_tool_1",
+    ]
+    assert [message["conversationMessageId"] for message in messages] == [
+        "msg_stable_assistant_1",
+        "msg_stable_tool_1",
+    ]

@@ -113,6 +113,9 @@ def test_team_render_reads_write_time_projected_messages_from_transcript(
         result = _render_team()
 
         assert [message["text"] for message in result["messages"]] == ["rendered from run_events"]
+        # A running background mission is not an active Leader chat response.
+        # Completed chat events stay in the transcript and never form a live tail.
+        assert result["runEvents"] == []
     finally:
         db.close()
 

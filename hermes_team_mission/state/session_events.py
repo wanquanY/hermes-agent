@@ -294,11 +294,21 @@ class TeamMissionEventMixin:
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
             ):
                 return saved
-            source_event = dict(frame)
-            if isinstance(saved, dict):
-                for key in ("timestamp", "session_id", "conversation_session_id", "runtime_scope_key", "execution_session_id"):
-                    if saved.get(key) is not None and not source_event.get(key):
-                        source_event[key] = saved.get(key)
+            # Projection must consume the canonical row returned by RunService.
+            # The incoming frame intentionally has no seq when planning tools
+            # emit structural events; persistence allocates that seq. Projecting
+            # the pre-write frame made every node.created (and every edge.created)
+            # share runtime_source_seq=0, so the mission audit log deduped all but
+            # the first event of each type. The saved row is the sole durable
+            # event identity and already contains every normalized session field.
+            source_event = dict(saved) if isinstance(saved, dict) else dict(frame)
+            source_seq = _event_seq(frame)
+            if source_seq > 0:
+                # Explicit callers of append_team_mission_run_event own a
+                # runtime source sequence used by node terminal arbitration.
+                # Keep it separate from saved["seq"], which is the canonical
+                # conversation-ledger sequence allocated by persistence.
+                source_event["source_seq"] = source_seq
             self._project_team_mission_run_event_locked(
                 mission_id=mission_id,
                 run_id=run_id,

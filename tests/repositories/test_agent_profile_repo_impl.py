@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -16,10 +17,11 @@ from hermes_agent.repositories import (
     ProfileVersion,
     ensure_agent_profile_repository_schema,
 )
+from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
-def _make_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+def _make_conn(*, check_same_thread: bool = True) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
@@ -60,6 +62,35 @@ def _make_conn() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def test_profile_repository_honors_shared_connection_lock() -> None:
+    conn = _make_conn(check_same_thread=False)
+    repo = AgentProfileRepoImpl(conn)
+    shared_lock = lock_for_connection(conn)
+    started = threading.Event()
+    completed = threading.Event()
+    errors: list[BaseException] = []
+
+    def read_profile() -> None:
+        started.set()
+        try:
+            repo.get_agent_profile("missing")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    with shared_lock:
+        worker = threading.Thread(target=read_profile)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        assert not completed.wait(timeout=0.05)
+
+    worker.join(timeout=1.0)
+    assert completed.is_set()
+    assert errors == []
+    conn.close()
 
 
 def test_impl_is_structural_agent_profile_repo():

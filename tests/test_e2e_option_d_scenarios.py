@@ -379,11 +379,13 @@ async def test_e2e_team_mission_member_chat(
     assert [message["role"] for message in projection] == [
         "user", "assistant", "user"
     ]
-    assert projection[0]["content"].endswith("@Alice please review the release plan.")
-    assert projection[1]["content"].endswith("I will review the release plan as Alice.")
-    assert projection[2]["content"].startswith(
-        "[assistant | Bob | member:member-bob]"
+    assert projection[0]["content"] == "@Alice please review the release plan."
+    assert projection[1]["content"] == "I will review the release plan as Alice."
+    assert projection[2]["content"] == (
+        "[assistant | Bob | member:member-bob]\n"
+        "Bob sees one risk in the test plan."
     )
+    assert "name" not in projection[2]
     assert projection[2]["metadata"]["speaker_projected_role"] == "user"
 
 

@@ -499,6 +499,7 @@ def run_conversation(
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
+    current_input_conversation_message_id: str = "",
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -517,7 +518,10 @@ def run_conversation(
         turn_metadata: Optional metadata for the current user turn. Gateway
             callers use this to persist turn/run IDs and client message IDs
             alongside the transcript.
-                or queuing follow-up prefetch work.
+        current_input_conversation_message_id: Stable identity of a canonical
+            user row that was persisted before execution. When present in the
+            hydrated history, that row is bound as the current input instead
+            of appending a duplicate user message.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -714,12 +718,25 @@ def run_conversation(
             _should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message
-    user_msg = {"role": "user", "content": user_message}
-    if isinstance(turn_metadata, dict) and turn_metadata:
-        user_msg["metadata"] = dict(turn_metadata)
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
+    # Bind the canonical current input when the caller persisted it before
+    # execution (team conversations). Ordinary runtime-owned turns append one
+    # new user row at the explicit TurnMessageBuffer persistence boundary.
+    current_turn_user_message = messages.bind_persisted_current_input(
+        current_input_conversation_message_id
+    )
+    if current_input_conversation_message_id and current_turn_user_message is None:
+        raise RuntimeError(
+            "canonical current input is absent from hydrated conversation history: "
+            f"{current_input_conversation_message_id}"
+        )
+    if current_turn_user_message is None:
+        current_turn_user_message = messages.append_current_input(
+            user_message,
+            metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+        )
+    current_turn_user_idx = messages.current_input_index
+    if current_turn_user_idx is None:
+        raise RuntimeError("current input binding did not produce a message index")
     agent._persist_user_message_idx = current_turn_user_idx
     
     if not agent.quiet_mode:
@@ -1083,31 +1100,23 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
-        # Defensive: repair malformed role-alternation before API call.
-        # Catches cases where the history got wedged into a
-        # ``tool → user`` or ``user → user`` tail (e.g. after empty-
-        # response scaffolding was stripped and a new user message
-        # landed after an orphan tool result). Most providers return
-        # empty content on malformed sequences, which would otherwise
-        # retrigger the empty-retry loop indefinitely.
-        repaired_seq = agent._repair_message_sequence(messages)
-        if repaired_seq > 0:
-            request_logger.info(
-                "Repaired %s message-alternation violations before request (session=%s)",
-                repaired_seq,
-                agent.session_id or "-",
-            )
-
         api_messages = []
-        for idx, msg in enumerate(messages):
+        for msg in messages:
             api_msg = msg.copy()
+
+            # The canonical current input may already be part of hydrated
+            # history. Its provider content is overlaid only on this API copy
+            # so attachment/context enrichment never rewrites the transcript.
+            is_current_input = msg is current_turn_user_message
+            if is_current_input and msg.get("role") == "user":
+                api_msg["content"] = user_message
 
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            if is_current_input and msg.get("role") == "user":
                 _injections = []
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
@@ -1142,6 +1151,17 @@ def run_conversation(
             # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
+
+        # Repair only the provider-bound copy. Canonical/live history keeps
+        # every utterance and its participant boundary; same-role messages are
+        # valid shared-conversation events and must not be flattened here.
+        repaired_seq = agent._repair_message_sequence(api_messages)
+        if repaired_seq > 0:
+            request_logger.info(
+                "Repaired %s provider message-sequence violation(s) (session=%s)",
+                repaired_seq,
+                agent.session_id or "-",
+            )
 
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
@@ -1196,14 +1216,14 @@ def run_conversation(
         api_messages = agent._sanitize_api_messages(api_messages)
 
         # Drop thinking-only assistant turns (reasoning but no visible
-        # output and no tool_calls) and merge any adjacent user messages
-        # left behind. Prevents Anthropic 400s ("The final block in an
+        # output and no tool_calls). Prevents Anthropic 400s ("The final block in an
         # assistant message cannot be `thinking`.") and equivalent errors
         # from third-party Anthropic-compatible gateways that can't replay
         # a thinking-only turn. Runs on the per-call copy only — the
         # stored conversation history keeps the reasoning block for the
-        # UI transcript and session persistence.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+        # UI transcript and session persistence. Newly-adjacent user events
+        # remain separate until a strict provider adapter prepares its wire copy.
+        api_messages = agent._drop_thinking_only_messages(api_messages)
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
@@ -4524,15 +4544,13 @@ def run_conversation(
             # Non-tool errors don't need a synthetic message injected.
             # The error is already printed to the user (line above), and
             # the retry loop continues.  Injecting a fake user/assistant
-            # message pollutes history, burns tokens, and risks violating
-            # role-alternation invariants.
+            # message pollutes history and burns tokens.
 
             # If we're near the limit, break to avoid infinite loops
             if api_call_count >= agent.max_iterations - 1:
                 _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                 final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
-                # Append as assistant so the history stays valid for
-                # session resume (avoids consecutive user messages).
+                # Persist the terminal error as the assistant's actual outcome.
                 messages.append({"role": "assistant", "content": final_response})
                 break
     

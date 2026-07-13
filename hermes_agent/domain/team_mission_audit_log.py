@@ -17,6 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 
+_STRUCTURAL_AUDIT_EVENT_TYPES = {
+    "mission.node.created",
+    "mission.node.updated",
+    "mission.edge.created",
+    "mission.edge.updated",
+}
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -32,6 +40,36 @@ def _json_loads(value: Any, fallback: Any = None) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _emit_structural_append_audit(
+    *,
+    mission_id: str,
+    source_event_type: str,
+    source_seq: int,
+    dedupe_key: str,
+    disposition: str,
+    stored_seq: int = 0,
+) -> None:
+    if _text(source_event_type) not in _STRUCTURAL_AUDIT_EVENT_TYPES:
+        return
+    try:
+        from agent.dovie_diagnostics import emit_dovie_diagnostic
+
+        emit_dovie_diagnostic(
+            "[dovie-team-audit]",
+            {
+                "stage": "hermes.structural-audit-append",
+                "mission_id": _text(mission_id),
+                "source_event_type": _text(source_event_type),
+                "source_seq": int(source_seq or 0),
+                "dedupe_key": _text(dedupe_key),
+                "disposition": _text(disposition),
+                "stored_seq": int(stored_seq or 0),
+            },
+        )
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -71,6 +109,14 @@ class TeamMissionAuditLog:
         if existing is not None:
             duplicate = _row_to_event(existing)
             duplicate["_persistence_disposition"] = "duplicate_mission_event"
+            _emit_structural_append_audit(
+                mission_id=stable_mission,
+                source_event_type=source_event_type,
+                source_seq=source_seq,
+                dedupe_key=stable_dedupe,
+                disposition="duplicate",
+                stored_seq=int(duplicate.get("seq") or 0),
+            )
             return AuditAppendResult(event=duplicate, inserted=False)
         insert_now = float(now if now is not None else time.time())
         seq = self._allocate_seq(stable_mission, updated_at=insert_now)
@@ -116,7 +162,23 @@ class TeamMissionAuditLog:
             ).fetchone()
             duplicate = _row_to_event(existing)
             duplicate["_persistence_disposition"] = "duplicate_mission_event"
+            _emit_structural_append_audit(
+                mission_id=stable_mission,
+                source_event_type=source_event_type,
+                source_seq=source_seq,
+                dedupe_key=stable_dedupe,
+                disposition="integrity_duplicate",
+                stored_seq=int(duplicate.get("seq") or 0),
+            )
             return AuditAppendResult(event=duplicate, inserted=False)
+        _emit_structural_append_audit(
+            mission_id=stable_mission,
+            source_event_type=source_event_type,
+            source_seq=source_seq,
+            dedupe_key=stable_dedupe,
+            disposition="inserted",
+            stored_seq=seq,
+        )
         return AuditAppendResult(event=stored, inserted=True)
 
     def _allocate_seq(self, mission_id: str, *, updated_at: float) -> int:

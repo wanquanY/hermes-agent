@@ -1299,11 +1299,9 @@ class AIAgent:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
 
         Also rewinds past any trailing tool-result / assistant(tool_calls) pair
-        that the failed iteration left hanging. Without this, the tail ends at
-        a raw ``tool`` message and the next user turn lands as
-        ``...tool, user, user`` — a protocol-invalid sequence that most
-        providers silently reject (returns empty content), causing the
-        empty-retry loop to fire forever. See #<TBD>.
+        that the failed iteration left hanging. Without this, later requests
+        can replay an unresolved tool protocol tail, which providers reject or
+        answer with empty content and thereby retrigger the recovery loop.
         """
         # Pass 1: strip the flagged scaffolding messages themselves.
         dropped_scaffolding = False
@@ -1320,9 +1318,8 @@ class AIAgent:
 
         # Pass 2: if we stripped scaffolding, rewind through any trailing
         # tool-result messages plus the assistant(tool_calls) message that
-        # produced them. This preserves role alternation so the next user
-        # message follows a user or assistant message, not an orphan tool
-        # result. Only runs when scaffolding was actually present — normal
+        # produced them. This keeps an orphan tool result out of the next
+        # provider request. Only runs when scaffolding was actually present — normal
         # conversation tails (real tool loops mid-progress) are untouched.
         if not dropped_scaffolding:
             return
@@ -3144,9 +3141,16 @@ class AIAgent:
     def _drop_thinking_only_and_merge_users(
         messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_and_merge_users``."""
-        from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
-        return drop_thinking_only_and_merge_users(messages)
+        """Compatibility alias; adjacent user events are no longer merged."""
+        return AIAgent._drop_thinking_only_messages(messages)
+
+    @staticmethod
+    def _drop_thinking_only_messages(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_messages``."""
+        from agent.agent_runtime_helpers import drop_thinking_only_messages
+        return drop_thinking_only_messages(messages)
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -4853,6 +4857,7 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
+        current_input_conversation_message_id: str = "",
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
@@ -4865,6 +4870,7 @@ class AIAgent:
             stream_callback,
             persist_user_message,
             turn_metadata,
+            current_input_conversation_message_id,
         )
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
             persisted_messages = self._messages_for_persistence(result["messages"])

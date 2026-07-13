@@ -72,6 +72,8 @@ def build_turn_context(
     persist_user_message: Optional[str],
     persist_user_timestamp: Optional[float] = None,
     *,
+    turn_metadata: Optional[Dict[str, Any]] = None,
+    current_input_conversation_message_id: str = "",
     restore_or_build_system_prompt,
     install_safe_stdio,
     sanitize_surrogates,
@@ -238,10 +240,22 @@ def build_turn_context(
             should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message.
-    user_msg = {"role": "user", "content": user_message}
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
+    current_user_message = messages.bind_persisted_current_input(
+        current_input_conversation_message_id
+    )
+    if current_input_conversation_message_id and current_user_message is None:
+        raise RuntimeError(
+            "canonical current input is absent from hydrated conversation history: "
+            f"{current_input_conversation_message_id}"
+        )
+    if current_user_message is None:
+        messages.append_current_input(
+            user_message,
+            metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+        )
+    current_turn_user_idx = messages.current_input_index
+    if current_turn_user_idx is None:
+        raise RuntimeError("current input binding did not produce a message index")
     agent._persist_user_message_idx = current_turn_user_idx
 
     if not agent.quiet_mode:

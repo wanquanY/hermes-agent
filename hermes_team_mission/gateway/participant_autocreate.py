@@ -15,7 +15,12 @@ def _member_id(member: dict[str, Any]) -> str:
 
 
 def _profile_id(member: dict[str, Any]) -> str:
-    return _text(member.get("agent_profile_id") or member.get("agentProfileId"))
+    return _text(
+        member.get("agent_profile_id")
+        or member.get("agentProfileId")
+        or member.get("profile_id")
+        or member.get("profileId")
+    )
 
 
 def _display_name(member: dict[str, Any]) -> str:
@@ -74,7 +79,9 @@ def _leader_member(members: Iterable[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-def _team_members(db: Any, team_id: str, members: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _team_members(
+    db: Any, team_id: str, members: Iterable[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
     if members is not None:
         return [item for item in members if isinstance(item, dict)]
     if team_id:
@@ -83,7 +90,9 @@ def _team_members(db: Any, team_id: str, members: Iterable[dict[str, Any]] | Non
     return []
 
 
-def _warn(source: str, conversation_session_id: str, participant: str, exc: Exception) -> None:
+def _warn(
+    source: str, conversation_session_id: str, participant: str, exc: Exception
+) -> None:
     _log.warning(
         "%s participant auto-create skipped conversation_session_id=%s participant=%s: %s",
         source,
@@ -121,10 +130,14 @@ def ensure_team_conversation_participants(
         _warn(source, conversation_session_id, "user", exc)
 
     leader = _leader_member(resolved_members)
-    leader_profile_params = leader_profile_params if isinstance(leader_profile_params, dict) else {}
+    leader_profile_params = (
+        leader_profile_params if isinstance(leader_profile_params, dict) else {}
+    )
     if team_id:
         try:
-            leader_profile_id = _text(leader_profile_params.get("agent_profile_id")) or _profile_id(leader)
+            leader_profile_id = _text(
+                leader_profile_params.get("agent_profile_id")
+            ) or _profile_id(leader)
             leader_profile = _profile(db, leader_profile_id)
             db.participants.ensure_leader_participant(
                 conversation_session_id,
@@ -176,3 +189,43 @@ def ensure_member_chat_participant(
         )
     except Exception as exc:
         _warn(source, _text(conversation_session_id), f"member:{member_id}", exc)
+
+
+def resolve_participant_display_identity(
+    db: Any,
+    *,
+    conversation_session_id: str,
+    participant_id: str,
+    profile_id: str,
+    fallback_name: str = "",
+    fallback_avatar: str = "",
+) -> tuple[str, str]:
+    """Resolve display data from participant truth, profile, then request data."""
+    try:
+        participant = (
+            db.participants.get_participant(
+                _text(conversation_session_id),
+                _text(participant_id),
+            )
+            or {}
+        )
+    except Exception:
+        participant = {}
+    profile = _profile(db, _text(profile_id))
+    display_name = _text(
+        participant.get("display_name")
+        or profile.get("name")
+        or fallback_name
+        or "Team Member"
+    )
+    display_avatar = _text(
+        participant.get("avatar") or profile.get("avatar") or fallback_avatar
+    )
+    return display_name, display_avatar
+
+
+__all__ = [
+    "ensure_member_chat_participant",
+    "ensure_team_conversation_participants",
+    "resolve_participant_display_identity",
+]

@@ -1,14 +1,11 @@
 """Tests for the thinking-only assistant message sanitizer.
 
-Covers _is_thinking_only_assistant() + _drop_thinking_only_and_merge_users()
+Covers _is_thinking_only_assistant() + _drop_thinking_only_messages()
 in run_agent.py. The sanitizer runs on the per-call api_messages copy and
 drops assistant turns that contain only reasoning (no visible content, no
-tool_calls). Adjacent user messages left behind are merged so role
-alternation is preserved for the provider.
-
-Claude Code uses this exact pattern (filterOrphanedThinkingOnlyMessages +
-mergeAdjacentUserMessages in src/utils/messages.ts). See #16823 for the
-backstory on why the alternative — fabricating "." stub text — was rejected.
+tool_calls). Adjacent user messages left behind stay separate so shared
+conversation participant events are not flattened. Strict role alternation is
+owned by the relevant provider adapter.
 """
 
 from run_agent import AIAgent
@@ -118,47 +115,49 @@ class TestIsThinkingOnlyAssistant:
 
 
 # ---------------------------------------------------------------------------
-# _drop_thinking_only_and_merge_users — the full pass
+# _drop_thinking_only_messages — the full pass
 # ---------------------------------------------------------------------------
 
 
-class TestDropThinkingOnlyAndMergeUsers:
+class TestDropThinkingOnlyMessages:
 
     def test_empty_list_passthrough(self):
-        assert AIAgent._drop_thinking_only_and_merge_users([]) == []
+        assert AIAgent._drop_thinking_only_messages([]) == []
 
     def test_no_thinking_only_messages_is_noop_identity(self):
         msgs = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        out = AIAgent._drop_thinking_only_messages(msgs)
         # Should return the original list untouched (identity) when no changes.
         assert out is msgs
 
-    def test_drops_thinking_only_between_user_messages_and_merges(self):
+    def test_drops_thinking_only_between_user_messages_without_merging(self):
         msgs = [
             {"role": "user", "content": "help me with X"},
             {"role": "assistant", "content": "", "reasoning": "let me think"},
             {"role": "user", "content": "ok continue"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
-        assert len(out) == 1
-        assert out[0]["role"] == "user"
-        assert out[0]["content"] == "help me with X\n\nok continue"
+        out = AIAgent._drop_thinking_only_messages(msgs)
+        assert out == [
+            {"role": "user", "content": "help me with X"},
+            {"role": "user", "content": "ok continue"},
+        ]
 
-    def test_preserves_alternation_after_drop(self):
+    def test_preserves_user_event_boundaries_after_drop(self):
         msgs = [
             {"role": "user", "content": "u1"},
             {"role": "assistant", "content": "", "reasoning": "..."},
             {"role": "user", "content": "u2"},
             {"role": "assistant", "content": "real reply"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        out = AIAgent._drop_thinking_only_messages(msgs)
         roles = [m["role"] for m in out]
-        assert roles == ["user", "assistant"]
-        assert out[0]["content"] == "u1\n\nu2"
-        assert out[1]["content"] == "real reply"
+        assert roles == ["user", "user", "assistant"]
+        assert out[0]["content"] == "u1"
+        assert out[1]["content"] == "u2"
+        assert out[2]["content"] == "real reply"
 
     def test_does_not_merge_when_drop_leaves_non_adjacent_users(self):
         # Thinking-only at end of conversation — no trailing user to merge
@@ -168,26 +167,28 @@ class TestDropThinkingOnlyAndMergeUsers:
             {"role": "user", "content": "u2"},
             {"role": "assistant", "content": "", "reasoning": "..."},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        out = AIAgent._drop_thinking_only_messages(msgs)
         assert [m["role"] for m in out] == ["user", "assistant", "user"]
 
-    def test_multiple_thinking_only_in_sequence_collapses(self):
+    def test_multiple_thinking_only_in_sequence_preserves_users(self):
         msgs = [
             {"role": "user", "content": "u1"},
             {"role": "assistant", "content": "", "reasoning": "r1"},
             {"role": "assistant", "content": "", "reasoning": "r2"},
             {"role": "user", "content": "u2"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
-        assert len(out) == 1
-        assert out[0]["content"] == "u1\n\nu2"
+        out = AIAgent._drop_thinking_only_messages(msgs)
+        assert out == [
+            {"role": "user", "content": "u1"},
+            {"role": "user", "content": "u2"},
+        ]
 
     def test_does_not_touch_stored_messages_original_list_unmutated(self):
         original_first_user = {"role": "user", "content": "u1"}
         original_assistant = {"role": "assistant", "content": "", "reasoning": "..."}
         original_second_user = {"role": "user", "content": "u2"}
         msgs = [original_first_user, original_assistant, original_second_user]
-        AIAgent._drop_thinking_only_and_merge_users(msgs)
+        AIAgent._drop_thinking_only_messages(msgs)
         # Caller passes in a per-call copy already, but the sanitizer itself
         # must not rewrite the dicts it was handed on the drop path.
         # (It CAN mutate merged dicts — those come from the caller's copy.)
@@ -206,34 +207,30 @@ class TestDropThinkingOnlyAndMergeUsers:
             {"role": "assistant", "content": "", "reasoning": "..."},
             {"role": "user", "content": "u2"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        out = AIAgent._drop_thinking_only_messages(msgs)
         assert [m["role"] for m in out] == ["user", "assistant", "tool", "user"]
 
-    def test_merge_concatenates_list_content_user_messages(self):
+    def test_list_content_user_messages_stay_separate(self):
         msgs = [
             {"role": "user", "content": [{"type": "text", "text": "first"}]},
             {"role": "assistant", "content": "", "reasoning": "..."},
             {"role": "user", "content": [{"type": "text", "text": "second"}]},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
-        assert len(out) == 1
-        assert out[0]["content"] == [
-            {"type": "text", "text": "first"},
-            {"type": "text", "text": "second"},
-        ]
+        out = AIAgent._drop_thinking_only_messages(msgs)
+        assert len(out) == 2
+        assert out[0]["content"] == [{"type": "text", "text": "first"}]
+        assert out[1]["content"] == [{"type": "text", "text": "second"}]
 
-    def test_merge_mixed_string_and_list_content(self):
+    def test_mixed_string_and_list_user_content_stays_separate(self):
         msgs = [
             {"role": "user", "content": "plain text"},
             {"role": "assistant", "content": "", "reasoning": "..."},
             {"role": "user", "content": [{"type": "text", "text": "block text"}]},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
-        assert len(out) == 1
-        assert out[0]["content"] == [
-            {"type": "text", "text": "plain text"},
-            {"type": "text", "text": "block text"},
-        ]
+        out = AIAgent._drop_thinking_only_messages(msgs)
+        assert len(out) == 2
+        assert out[0]["content"] == "plain text"
+        assert out[1]["content"] == [{"type": "text", "text": "block text"}]
 
     def test_system_messages_ignored_by_pass(self):
         msgs = [
@@ -242,8 +239,9 @@ class TestDropThinkingOnlyAndMergeUsers:
             {"role": "assistant", "content": "", "reasoning": "..."},
             {"role": "user", "content": "u2"},
         ]
-        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
-        assert len(out) == 2
+        out = AIAgent._drop_thinking_only_messages(msgs)
+        assert len(out) == 3
         assert out[0]["role"] == "system"
         assert out[1]["role"] == "user"
-        assert out[1]["content"] == "u1\n\nu2"
+        assert out[1]["content"] == "u1"
+        assert out[2]["content"] == "u2"

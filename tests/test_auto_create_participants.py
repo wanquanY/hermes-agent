@@ -151,6 +151,7 @@ def test_team_mission_create_inserts_user_leader_and_members(monkeypatch, tmp_pa
 
 def test_member_chat_start_ensures_member_participant_idempotent(monkeypatch, tmp_path: Path) -> None:
     db = _db(tmp_path)
+    _seed_team(db, tmp_path)
     captured: dict = {}
 
     def fake_proxy_run_submit(params: dict) -> dict:
@@ -166,11 +167,9 @@ def test_member_chat_start_ensures_member_participant_idempotent(monkeypatch, tm
             "members": [
                 {
                     "member_id": "member-builder",
-                    "agent_profile_id": "profile-builder",
+                    "profile_id": "profile-builder",
                     "agent_profile_version_id": "version-builder",
                     "role": "builder",
-                    "profile_name": "Builder",
-                    "profile_avatar": "avatar://builder",
                     "dovie_profile": {
                         "hermesHomePath": str(tmp_path / "builder-home"),
                     },

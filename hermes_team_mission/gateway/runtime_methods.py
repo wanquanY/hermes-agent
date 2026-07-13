@@ -10,9 +10,15 @@ from .common import *
 
 _log = logging.getLogger(__name__)
 from .dovie_context import persist_mission_dovie_product_context_from_submit
-from .participant_autocreate import ensure_member_chat_participant
+from .participant_autocreate import (
+    ensure_member_chat_participant,
+    resolve_participant_display_identity,
+)
 from hermes_profile_dir import resolve_default_agent_dir
-from hermes_agent.domain.participants import leader_participant_id, member_participant_id
+from hermes_agent.domain.participants import (
+    leader_participant_id,
+    member_participant_id,
+)
 from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.runtime.team_transcript_writer import UserSubmissionWriter
@@ -58,11 +64,15 @@ def _control_plane_home() -> str:
 
 
 def _target_member_id_from_params(params: dict) -> str:
-    return str(params.get("target_member_id") or params.get("targetMemberId") or "").strip()
+    return str(
+        params.get("target_member_id") or params.get("targetMemberId") or ""
+    ).strip()
 
 
 def _activity_id_from_params(params: dict) -> str:
-    activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
+    activity_id = str(
+        params.get("activity_id") or params.get("activityId") or ""
+    ).strip()
     if activity_id and not ACTIVITY_ID_FORMAT_PATTERN.match(activity_id):
         raise ValueError("activity_id malformed")
     return activity_id
@@ -85,9 +95,7 @@ def _params_request_codex_runtime(params: dict) -> bool:
     if not isinstance(params, dict):
         return False
     runtime_executor = str(
-        params.get("runtime_executor")
-        or params.get("runtimeExecutor")
-        or ""
+        params.get("runtime_executor") or params.get("runtimeExecutor") or ""
     ).strip()
     return runtime_executor.lower() == "codex"
 
@@ -104,9 +112,7 @@ def _codex_contract_dovie_profile_fields(params: dict) -> dict:
         codex_fields["codexHome"] = codex_home
         codex_fields["codex_home"] = codex_home
     codex_account_mode = str(
-        params.get("codex_account_mode")
-        or params.get("codexAccountMode")
-        or ""
+        params.get("codex_account_mode") or params.get("codexAccountMode") or ""
     ).strip()
     if codex_account_mode:
         codex_fields["codexAccountMode"] = codex_account_mode
@@ -162,7 +168,9 @@ def _find_team_member_by_id(members: list[dict], member_id: str) -> dict:
     for member in members or []:
         if not isinstance(member, dict):
             continue
-        mid = str(member.get("member_id") or member.get("memberId") or member.get("id") or "").strip()
+        mid = str(
+            member.get("member_id") or member.get("memberId") or member.get("id") or ""
+        ).strip()
         if mid and mid == member_id:
             return member
     return {}
@@ -202,6 +210,17 @@ def _upsert_team_user_submission_message(
     )
 
 
+def _persisted_conversation_message_id(message: dict | None) -> str:
+    """Return the stable identity required to bind a pre-persisted input."""
+    if not isinstance(message, dict):
+        return ""
+    return str(
+        message.get("conversation_message_id")
+        or message.get("conversationMessageId")
+        or ""
+    ).strip()
+
+
 def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
     """Route a ``run.submit`` for team mission (leader / node / member-
     chat) through the same ``primary_dispatch`` path that single-chat
@@ -233,22 +252,25 @@ def _submit_run_via_worker_with_response(rid, submit_params: dict) -> dict:
         # transport with its own synthetic rid. Construct the
         # JSON-RPC envelope the original caller (with its own rid)
         # expects.
-        return _ok(rid, {
-            "status": "queued",
-            "run_id": str(
-                submit_params.get("run_id")
-                or submit_params.get("client_run_id")
-                or ""
-            ),
-            "turn_id": str(submit_params.get("turn_id") or ""),
-            "conversation_session_id": str(
-                submit_params.get("conversation_session_id")
-                or submit_params.get("session_id")
-                or ""
-            ),
-            "runtime_scope_key": str(submit_params.get("runtime_scope_key") or ""),
-            "source": "primary-run-worker",
-        })
+        return _ok(
+            rid,
+            {
+                "status": "queued",
+                "run_id": str(
+                    submit_params.get("run_id")
+                    or submit_params.get("client_run_id")
+                    or ""
+                ),
+                "turn_id": str(submit_params.get("turn_id") or ""),
+                "conversation_session_id": str(
+                    submit_params.get("conversation_session_id")
+                    or submit_params.get("session_id")
+                    or ""
+                ),
+                "runtime_scope_key": str(submit_params.get("runtime_scope_key") or ""),
+                "source": "primary-run-worker",
+            },
+        )
     # Fallback: no transport (background) → in-process. Wrong env
     # but better than dropping the run.
     run_control._diagnostic_warning(  # noqa: SLF001
@@ -299,7 +321,9 @@ def _proxy_run_submit_via_worker(submit_params: dict) -> dict:
         return {"ok": False, "reason": "loop_not_running"}
     try:
         if asyncio.get_running_loop() is loop:
-            return {"error": "internal run dispatch attempted to synchronously wait on the worker runtime loop"}
+            return {
+                "error": "internal run dispatch attempted to synchronously wait on the worker runtime loop"
+            }
     except RuntimeError:
         pass
     transport = ControlPlaneTransport(loop=loop)
@@ -329,7 +353,9 @@ def submit_mission_leader_report_run(**kwargs) -> dict:
 
 
 try:
-    from hermes_team_mission.runtime.leader_report_dispatch import register_leader_report_submitter
+    from hermes_team_mission.runtime.leader_report_dispatch import (
+        register_leader_report_submitter,
+    )
 
     register_leader_report_submitter(submit_mission_leader_report_run)
 except Exception:
@@ -341,7 +367,15 @@ def _clear_stuck_member_session_run(db, conversation_session_id: str) -> None:
     that did not close cleanly (no reaper guards a member-chat session). Keeps
     multi-turn from hitting 'session busy'."""
     import time as _time
-    terminal = {"completed", "succeeded", "failed", "cancelled", "canceled", "interrupted"}
+
+    terminal = {
+        "completed",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "canceled",
+        "interrupted",
+    }
     try:
         with db._lock:
             rows = db._conn.execute(
@@ -359,7 +393,9 @@ def _clear_stuck_member_session_run(db, conversation_session_id: str) -> None:
             db.runs.upsert(
                 run_id=run_id,
                 session_id=conversation_session_id,
-                runtime_scope_key=str((row["runtime_scope_key"] if hasattr(row, "keys") else row[2]) or ""),
+                runtime_scope_key=str(
+                    (row["runtime_scope_key"] if hasattr(row, "keys") else row[2]) or ""
+                ),
                 turn_id=str((row["turn_id"] if hasattr(row, "keys") else row[3]) or ""),
                 status="interrupted",
                 completed_at=_time.time(),
@@ -389,7 +425,9 @@ def _submit_message_to_member(
     agent never starts ('prompt worker terminal event did not close active run')."""
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
-    members = _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
+    members = _leader_members_from_params(
+        params, mission if isinstance(mission, dict) else {}, db=db
+    )
     member = _find_team_member_by_id(members, target_member_id)
     if not member:
         return _err(rid, 4040, "team member not found")
@@ -397,10 +435,20 @@ def _submit_message_to_member(
         return _err(rid, 4006, "target member must be a worker, not the leader")
     profile_params = _profile_params_from_member(member)
     agent_profile_id = str(profile_params.get("agent_profile_id") or "").strip()
-    dovie_profile = profile_params.get("dovie_profile") if isinstance(profile_params.get("dovie_profile"), dict) else {}
-    hermes_home = str(dovie_profile.get("hermesHomePath") or dovie_profile.get("hermes_home_path") or "").strip()
+    dovie_profile = (
+        profile_params.get("dovie_profile")
+        if isinstance(profile_params.get("dovie_profile"), dict)
+        else {}
+    )
+    hermes_home = str(
+        dovie_profile.get("hermesHomePath")
+        or dovie_profile.get("hermes_home_path")
+        or ""
+    ).strip()
     if not agent_profile_id or not hermes_home:
-        return _err(rid, 4006, "target member profile is not runnable (missing profile home)")
+        return _err(
+            rid, 4006, "target member profile is not runnable (missing profile home)"
+        )
     # Group-chat scope key is per-(conversation, member), NOT the member's
     # profile-default scope. Reason: in a team where multiple members share an
     # underlying agent profile (very common — e.g. all members on
@@ -440,33 +488,6 @@ def _submit_message_to_member(
         or member.get("agentProfileAvatar")
         or ""
     ).strip()
-    ensure_member_chat_participant(
-        db,
-        conversation_session_id=conversation_session_id,
-        member=member,
-        member_id=target_member_id,
-        source="team_mission.member_chat.start",
-    )
-    try:
-        db.participants.upsert_conversation_participant(
-            conversation_session_id=conversation_session_id,
-            participant_id=member_participant_id(target_member_id),
-            role="member",
-            member_id=target_member_id,
-            agent_profile_id=agent_profile_id,
-            agent_profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
-            runtime_scope_key=member_scope,
-            display_name=display_name,
-            avatar=display_avatar,
-        )
-    except Exception as exc:
-        _log.warning(
-            "team_mission.member_chat.start participant enrichment skipped conversation_session_id=%s member_id=%s: %s",
-            conversation_session_id,
-            target_member_id,
-            exc,
-        )
-
     # STEP ORDER FIX (2026-06-27): The original code did
     #   1. append_message(conv_session, role=user, ...)   ← FK FAIL: conv session row doesn't exist yet
     #   2. create memberchat worker session
@@ -500,8 +521,10 @@ def _submit_message_to_member(
     # writes touch messages.session_id.
     conversation_title = _conversation_title_from_submit(db, params, text)
     team_id_for_ensure = str(
-        params.get("team_id") or params.get("teamId")
-        or (mission or {}).get("team_id") or (mission or {}).get("teamId")
+        params.get("team_id")
+        or params.get("teamId")
+        or (mission or {}).get("team_id")
+        or (mission or {}).get("teamId")
         or ""
     ).strip()
     try:
@@ -509,14 +532,24 @@ def _submit_message_to_member(
             conversation_id=conversation_id,
             conversation_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) and mission else {},
-            mission_id=str((mission or {}).get("mission_id") or "") if isinstance(mission, dict) and mission else "",
+            mission_id=str((mission or {}).get("mission_id") or "")
+            if isinstance(mission, dict) and mission
+            else "",
             team_id=team_id_for_ensure,
             title=conversation_title,
             objective=text,
-            workspace_id=workspace_context.get("workspace_id") if isinstance(workspace_context, dict) else "",
-            workspace_path=workspace_context.get("workspace_path") if isinstance(workspace_context, dict) else "",
-            created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or "").strip(),
-            metadata={"display_title_source": "first_user_message"} if conversation_title else None,
+            workspace_id=workspace_context.get("workspace_id")
+            if isinstance(workspace_context, dict)
+            else "",
+            workspace_path=workspace_context.get("workspace_path")
+            if isinstance(workspace_context, dict)
+            else "",
+            created_by_user_id=str(
+                params.get("created_by_user_id") or params.get("createdByUserId") or ""
+            ).strip(),
+            metadata={"display_title_source": "first_user_message"}
+            if conversation_title
+            else None,
         )
     except Exception as exc:
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
@@ -525,22 +558,69 @@ def _submit_message_to_member(
     except Exception as exc:
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
 
-    # 3. Reserve the run/turn identity before writing the user transcript row.
+    # 3. Materialize the member only after its canonical conversation exists.
+    # The request-side member payload is allowed to be sparse; the durable
+    # participant registry and profile repository own visible identity.
+    participant_id = member_participant_id(target_member_id)
+    ensure_member_chat_participant(
+        db,
+        conversation_session_id=conversation_session_id,
+        member=member,
+        member_id=target_member_id,
+        source="team_mission.member_chat.start",
+    )
+    try:
+        db.participants.upsert_conversation_participant(
+            conversation_session_id=conversation_session_id,
+            participant_id=participant_id,
+            role="member",
+            member_id=target_member_id,
+            agent_profile_id=agent_profile_id,
+            agent_profile_version_id=str(
+                profile_params.get("agent_profile_version_id") or ""
+            ),
+            runtime_scope_key=member_scope,
+            display_name=display_name,
+            avatar=display_avatar,
+        )
+    except Exception as exc:
+        _log.warning(
+            "team_mission.member_chat.start participant enrichment skipped conversation_session_id=%s member_id=%s: %s",
+            conversation_session_id,
+            target_member_id,
+            exc,
+        )
+    display_name, display_avatar = resolve_participant_display_identity(
+        db,
+        conversation_session_id=conversation_session_id,
+        participant_id=participant_id,
+        profile_id=agent_profile_id,
+        fallback_name=display_name,
+        fallback_avatar=display_avatar,
+    )
+
+    # 4. Reserve the run/turn identity before writing the user transcript row.
     # The same identity is sent to the worker, so retries/upserts cannot create
     # duplicate user messages and repeated text in later turns remains distinct.
-    optimistic_run_id = str(params.get("client_run_id") or params.get("run_id") or "").strip()
+    optimistic_run_id = str(
+        params.get("client_run_id") or params.get("run_id") or ""
+    ).strip()
     run_id = optimistic_run_id or uuid.uuid4().hex
-    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
-    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+    turn_id = str(
+        params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex
+    ).strip()
+    client_message_id = str(
+        params.get("client_message_id") or params.get("clientMessageId") or ""
+    ).strip()
     draft_text = str(params.get("draft_text") or params.get("draftText") or text)
     submitted_attachments = _submitted_attachments(params)
 
-    # 4. NOW it is safe to record the user's @-message into the shared
+    # 5. NOW it is safe to record the user's @-message into the shared
     # conversation transcript. The conv session row exists, FK satisfied. Use
     # an idempotent projected row; the worker owns execution, not visible user
     # transcript persistence.
     try:
-        _upsert_team_user_submission_message(
+        current_input_message = _upsert_team_user_submission_message(
             db,
             conversation_id=conversation_id,
             conversation_session_id=conversation_session_id,
@@ -557,6 +637,11 @@ def _submit_message_to_member(
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
+    current_input_conversation_message_id = _persisted_conversation_message_id(
+        current_input_message
+    )
+    if not current_input_conversation_message_id:
+        return _err(rid, 5008, "persisted team user message has no stable identity")
 
     member_run_home = _home_from_dovie_profile(dovie_profile)
     control_home = _control_plane_home()
@@ -590,18 +675,20 @@ def _submit_message_to_member(
         **member_actor_fields,
     )
 
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(
+        conversation_session_id
+    )
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
     if not isinstance(ensured_conversation, dict):
         ensured_conversation = {}
 
-    # 5. The worker now runs on the conversation session itself. With no
+    # 6. The worker now runs on the conversation session itself. With no
     # memberchat mirror registry to rewrite run ids, use the frontend's
     # pre-reserved optimistic run id directly when present so terminal frames
     # settle the same conversation-side run the UI is tracking.
 
-    # 6. run.submit with CLEAN member params only — NOT {**params} (which carries
+    # 7. run.submit with CLEAN member params only — NOT {**params} (which carries
     #    the frontend's leader scope/profile and breaks the worker spawn).
     submit_params = {
         "conversation_session_id": conversation_session_id,
@@ -609,8 +696,11 @@ def _submit_message_to_member(
         "client_run_id": run_id,
         "run_id": run_id,
         "turn_id": turn_id,
+        "current_input_conversation_message_id": current_input_conversation_message_id,
         "agent_profile_id": agent_profile_id,
-        "agent_profile_version_id": str(profile_params.get("agent_profile_version_id") or ""),
+        "agent_profile_version_id": str(
+            profile_params.get("agent_profile_version_id") or ""
+        ),
         "runtime_scope_key": member_scope,
         "run_context_json": _run_context_json(run_context),
         "dovie_profile": dovie_profile,
@@ -621,8 +711,6 @@ def _submit_message_to_member(
         # metadata for history hydration.
         "text": text,
         "turn_system_context": _member_conversation_context(
-            conversation_session_id=conversation_session_id,
-            participant_id=member_participant_id(target_member_id),
             display_name=display_name,
             memory_text=member_memory_text,
         ),
@@ -699,17 +787,22 @@ def _submit_message_to_member(
     # a brand-new conv with no mission, but that's fine: the frontend
     # accepts an empty graph here, only the conversation payload is
     # canonical-checked.
-    resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
+    resolved = (
+        db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
+    )
     resolved = resolved if isinstance(resolved, dict) else {}
-    return _ok(rid, {
-        "conversation_id": conversation_id,
-        "conversation_session_id": conversation_session_id,
-        "conversation": ensured_conversation or resolved.get("conversation") or {},
-        "graph": resolved.get("graph") or {},
-        "leader_turn": member_turn,
-        "member_turn": member_turn,
-        "target_member_id": target_member_id,
-    })
+    return _ok(
+        rid,
+        {
+            "conversation_id": conversation_id,
+            "conversation_session_id": conversation_session_id,
+            "conversation": ensured_conversation or resolved.get("conversation") or {},
+            "graph": resolved.get("graph") or {},
+            "leader_turn": member_turn,
+            "member_turn": member_turn,
+            "target_member_id": target_member_id,
+        },
+    )
 
 
 @method("team_mission.message.submit")
@@ -726,7 +819,9 @@ def _(rid, params: dict) -> dict:
     conversation_session_id = _conversation_session_id_from_params(params, {})
     if not mission_id and not conversation_id:
         return _err(rid, 4006, "mission_id or conversation_id required")
-    graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
+    graph = (
+        db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
+    )
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if mission_id and (not isinstance(mission, dict) or not mission):
         if not conversation_id:
@@ -740,11 +835,25 @@ def _(rid, params: dict) -> dict:
     context_mission = mission if isinstance(mission, dict) else {}
     if not mission:
         resolved_identifier = conversation_id
-        resolved = db.resolve_team_mission_conversation(resolved_identifier) if resolved_identifier else {}
+        resolved = (
+            db.resolve_team_mission_conversation(resolved_identifier)
+            if resolved_identifier
+            else {}
+        )
         if isinstance(resolved, dict):
-            conversation = resolved.get("conversation") if isinstance(resolved.get("conversation"), dict) else {}
-            resolved_graph = resolved.get("graph") if isinstance(resolved.get("graph"), dict) else {}
-            resolved_mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
+            conversation = (
+                resolved.get("conversation")
+                if isinstance(resolved.get("conversation"), dict)
+                else {}
+            )
+            resolved_graph = (
+                resolved.get("graph") if isinstance(resolved.get("graph"), dict) else {}
+            )
+            resolved_mission = (
+                resolved.get("mission")
+                if isinstance(resolved.get("mission"), dict)
+                else {}
+            )
             if resolved_mission:
                 context_mission = resolved_mission
                 context_graph = resolved_graph
@@ -752,14 +861,27 @@ def _(rid, params: dict) -> dict:
                     mission = resolved_mission
                     graph = resolved_graph
                     mission_id = str(mission.get("mission_id") or "").strip()
-    identity_mission = mission if isinstance(mission, dict) and mission else context_mission
+    identity_mission = (
+        mission if isinstance(mission, dict) and mission else context_mission
+    )
     if isinstance(identity_mission, dict) and identity_mission:
-        identity_mission = persist_mission_dovie_product_context_from_submit(db, identity_mission, params)
-        if mission and str(mission.get("mission_id") or "") == str(identity_mission.get("mission_id") or ""):
+        identity_mission = persist_mission_dovie_product_context_from_submit(
+            db, identity_mission, params
+        )
+        if mission and str(mission.get("mission_id") or "") == str(
+            identity_mission.get("mission_id") or ""
+        ):
             mission = identity_mission
-        if context_mission and str(context_mission.get("mission_id") or "") == str(identity_mission.get("mission_id") or ""):
+        if context_mission and str(context_mission.get("mission_id") or "") == str(
+            identity_mission.get("mission_id") or ""
+        ):
             context_mission = identity_mission
-    metadata = identity_mission.get("metadata") if isinstance(identity_mission, dict) and isinstance(identity_mission.get("metadata"), dict) else {}
+    metadata = (
+        identity_mission.get("metadata")
+        if isinstance(identity_mission, dict)
+        and isinstance(identity_mission.get("metadata"), dict)
+        else {}
+    )
     conversation_id = (
         conversation_id
         or str((conversation or {}).get("conversation_id") or "").strip()
@@ -785,7 +907,11 @@ def _(rid, params: dict) -> dict:
     }
     archived_team_error = _archived_team_write_error(
         db,
-        _team_id_for_profile(params, mission=identity_mission if isinstance(identity_mission, dict) else {}, conversation=conversation),
+        _team_id_for_profile(
+            params,
+            mission=identity_mission if isinstance(identity_mission, dict) else {},
+            conversation=conversation,
+        ),
     )
     if archived_team_error:
         return _err(rid, 4023, archived_team_error)
@@ -801,7 +927,12 @@ def _(rid, params: dict) -> dict:
                 activity_id=request_activity_id,
                 conversation_id=conversation_id,
                 conversation_session_id=conversation_session_id,
-                team_id=str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
+                team_id=str(
+                    params.get("team_id")
+                    or params.get("teamId")
+                    or (identity_mission or {}).get("team_id")
+                    or ""
+                ),
                 prompt_summary=text,
             )
         except Exception as exc:
@@ -822,24 +953,38 @@ def _(rid, params: dict) -> dict:
             text=text,
         )
     try:
-        params, leader_runtime_context = _resolve_team_leader_runtime_params_for_request(
-            params,
-            (graph if isinstance(graph, dict) and graph else context_graph) if isinstance(context_graph, dict) else {},
-            db,
+        params, leader_runtime_context = (
+            _resolve_team_leader_runtime_params_for_request(
+                params,
+                (graph if isinstance(graph, dict) and graph else context_graph)
+                if isinstance(context_graph, dict)
+                else {},
+                db,
+            )
         )
     except ValueError as exc:
         return _err(rid, 4094, str(exc))
-    prompt_graph = (graph if isinstance(graph, dict) and graph else context_graph) if isinstance(context_graph, dict) else {}
-    profile_params = _leader_profile_params(params, prompt_graph if isinstance(prompt_graph, dict) else {})
+    prompt_graph = (
+        (graph if isinstance(graph, dict) and graph else context_graph)
+        if isinstance(context_graph, dict)
+        else {}
+    )
+    profile_params = _leader_profile_params(
+        params, prompt_graph if isinstance(prompt_graph, dict) else {}
+    )
     runtime_scope_key = _leader_conversation_runtime_scope_key(
         params,
         conversation_id=conversation_id,
         mission_id=mission_id,
     )
-    contract_error = _leader_conversation_runtime_scope_contract_error(params, runtime_scope_key)
+    contract_error = _leader_conversation_runtime_scope_contract_error(
+        params, runtime_scope_key
+    )
     if contract_error:
         return _err(rid, 4094, contract_error)
-    owner_error = _leader_runtime_owner_error(profile_params, leader_runtime_scope_key=runtime_scope_key)
+    owner_error = _leader_runtime_owner_error(
+        profile_params, leader_runtime_scope_key=runtime_scope_key
+    )
     if owner_error:
         return _err(rid, 4094, owner_error)
     try:
@@ -856,13 +1001,30 @@ def _(rid, params: dict) -> dict:
             conversation_session_id=conversation_session_id,
             mission=mission if isinstance(mission, dict) and mission else {},
             mission_id=mission_id if isinstance(mission, dict) and mission else "",
-            team_id=str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
+            team_id=str(
+                params.get("team_id")
+                or params.get("teamId")
+                or (identity_mission or {}).get("team_id")
+                or ""
+            ),
             title=conversation_title,
-            objective=str(params.get("objective") or params.get("prompt") or (identity_mission or {}).get("objective") or text),
+            objective=str(
+                params.get("objective")
+                or params.get("prompt")
+                or (identity_mission or {}).get("objective")
+                or text
+            ),
             workspace_id=workspace_context["workspace_id"],
             workspace_path=workspace_context["workspace_path"],
-            created_by_user_id=str(params.get("created_by_user_id") or params.get("createdByUserId") or (identity_mission or {}).get("created_by_user_id") or ""),
-            metadata={"display_title_source": "first_user_message"} if conversation_title else None,
+            created_by_user_id=str(
+                params.get("created_by_user_id")
+                or params.get("createdByUserId")
+                or (identity_mission or {}).get("created_by_user_id")
+                or ""
+            ),
+            metadata={"display_title_source": "first_user_message"}
+            if conversation_title
+            else None,
         )
         bind_team_mission_session_workspace(
             session_id=conversation_session_id,
@@ -871,7 +1033,12 @@ def _(rid, params: dict) -> dict:
                 "source": "team_mission.message.submit",
                 "conversation_id": conversation_id,
                 **({"mission_id": mission_id} if mission_id else {}),
-                "team_id": str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or ""),
+                "team_id": str(
+                    params.get("team_id")
+                    or params.get("teamId")
+                    or (identity_mission or {}).get("team_id")
+                    or ""
+                ),
             },
         )
         _ensure_team_conversation_session(db, conversation_session_id)
@@ -888,9 +1055,15 @@ def _(rid, params: dict) -> dict:
             "run_bindings": [],
         }
     memory_context, memory_text = {}, ""
-    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
-    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
-    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+    run_id = str(
+        params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex
+    ).strip()
+    turn_id = str(
+        params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex
+    ).strip()
+    client_message_id = str(
+        params.get("client_message_id") or params.get("clientMessageId") or ""
+    ).strip()
     draft_text = str(params.get("draft_text") or params.get("draftText") or text)
     submitted_attachments = _submitted_attachments(params)
     direct_reply = _leader_message_requests_direct_reply(text)
@@ -898,13 +1071,21 @@ def _(rid, params: dict) -> dict:
         "kind": "leader_conversation",
         "conversation_id": conversation_id,
         "conversation_session_id": conversation_session_id,
-        "team_id": str(params.get("team_id") or params.get("teamId") or (identity_mission or {}).get("team_id") or (conversation or {}).get("team_id") or ""),
+        "team_id": str(
+            params.get("team_id")
+            or params.get("teamId")
+            or (identity_mission or {}).get("team_id")
+            or (conversation or {}).get("team_id")
+            or ""
+        ),
         "mode": (mission or {}).get("mode") or str(params.get("mode") or ""),
         "status": (mission or {}).get("status") or "",
         "workspace_id": workspace_context["workspace_id"],
         "workspace_path": workspace_context["workspace_path"],
         "memory": memory_context,
-        "members": _leader_members_from_params(params, mission if isinstance(mission, dict) else {}),
+        "members": _leader_members_from_params(
+            params, mission if isinstance(mission, dict) else {}
+        ),
         "tool_policy": _team_leader_tool_policy(surface="leader_conversation"),
     }
     snapshot_id = _team_capability_snapshot_id(params)
@@ -921,7 +1102,9 @@ def _(rid, params: dict) -> dict:
     # prompt context, but that mission must not own the new run. Otherwise a
     # follow-up after cancel/retry is written to the old mission activity and
     # the current team room never receives the leader's start-task event.
-    activity_mission_id = str(mission_id or "").strip() if explicit_mission_request else ""
+    activity_mission_id = (
+        str(mission_id or "").strip() if explicit_mission_request else ""
+    )
     if request_activity_id:
         leader_activity_id = request_activity_id
         leader_activity_kind = _activity_kind_from_activity_id(
@@ -974,7 +1157,7 @@ def _(rid, params: dict) -> dict:
         **leader_actor_fields,
     )
     try:
-        _upsert_team_user_submission_message(
+        current_input_message = _upsert_team_user_submission_message(
             db,
             conversation_id=conversation_id,
             conversation_session_id=conversation_session_id,
@@ -993,6 +1176,11 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5008, f"team user message persistence failed: {exc}")
+    current_input_conversation_message_id = _persisted_conversation_message_id(
+        current_input_message
+    )
+    if not current_input_conversation_message_id:
+        return _err(rid, 5008, "persisted team user message has no stable identity")
     submit_params = {
         **params,
         **profile_params,
@@ -1001,6 +1189,7 @@ def _(rid, params: dict) -> dict:
         "client_run_id": run_id,
         "run_id": run_id,
         "turn_id": turn_id,
+        "current_input_conversation_message_id": current_input_conversation_message_id,
         "runtime_scope_key": runtime_scope_key,
         "run_context_json": _run_context_json(run_context),
         "agent_context_mode": "team_leader",
@@ -1012,12 +1201,16 @@ def _(rid, params: dict) -> dict:
         "text": text,
         "turn_system_context": (
             _leader_direct_reply_context(
-                graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph,
+                graph=prompt_graph
+                if isinstance(prompt_graph, dict) and prompt_graph
+                else graph,
                 memory_text=effective_memory_text,
             )
             if direct_reply
             else _leader_router_context(
-                graph=prompt_graph if isinstance(prompt_graph, dict) and prompt_graph else graph,
+                graph=prompt_graph
+                if isinstance(prompt_graph, dict) and prompt_graph
+                else graph,
                 memory_text=effective_memory_text,
             )
         ),
@@ -1043,8 +1236,12 @@ def _(rid, params: dict) -> dict:
         ),
     }
     if direct_reply:
-        submit_params["reasoning_config"] = dict(_TEAM_LEADER_DIRECT_REPLY_REASONING_CONFIG)
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
+        submit_params["reasoning_config"] = dict(
+            _TEAM_LEADER_DIRECT_REPLY_REASONING_CONFIG
+        )
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(
+        conversation_session_id
+    )
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
     response = _submit_run_via_worker_with_response(rid, submit_params)
@@ -1059,7 +1256,13 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             attachments=submitted_attachments,
         )
-    ensure_team_leader_message_run_state(db, run_id=run_id, session_id=conversation_session_id, runtime_scope_key=runtime_scope_key, result=result)
+    ensure_team_leader_message_run_state(
+        db,
+        run_id=run_id,
+        session_id=conversation_session_id,
+        runtime_scope_key=runtime_scope_key,
+        result=result,
+    )
     leader_turn = _leader_turn_for_this_submit(
         result,
         run_id=run_id,
@@ -1078,7 +1281,9 @@ def _(rid, params: dict) -> dict:
             "leader_turn": leader_turn,
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
-            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else graph,
+            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id)
+            if mission_id
+            else graph,
         },
     )
 
@@ -1126,17 +1331,19 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params)
     conversation_id = _conversation_id_from_params(params)
     if conversation_id:
-        graph = db.team_mission_graphs.get_team_mission_conversation_graph(conversation_id)
+        graph = db.team_mission_graphs.get_team_mission_conversation_graph(
+            conversation_id
+        )
         if not graph:
             return _err(rid, 4040, "team mission conversation not found")
         mission_ids = _graph_mission_ids(graph)
         if mission_id and mission_id not in mission_ids:
             return _err(rid, 4040, "team mission not found in conversation")
-        graph_mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        graph_mission = (
+            graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        )
         graph_mission_id = str(
-            graph_mission.get("mission_id")
-            or graph_mission.get("missionId")
-            or ""
+            graph_mission.get("mission_id") or graph_mission.get("missionId") or ""
         ).strip()
         result = {
             "mission_id": graph_mission_id or mission_id,
@@ -1181,7 +1388,9 @@ def _(rid, params: dict) -> dict:
     except (TypeError, ValueError):
         after_seq = 0
     limit = _bounded_limit(params.get("limit"), default=2000, maximum=10000)
-    byte_limit = _bounded_byte_limit(params.get("byte_limit") or params.get("byteLimit"))
+    byte_limit = _bounded_byte_limit(
+        params.get("byte_limit") or params.get("byteLimit")
+    )
     raw_events = db.list_team_mission_events(
         mission_id,
         after_seq=after_seq,
@@ -1200,7 +1409,9 @@ def _(rid, params: dict) -> dict:
             "audit_only": True,
             "auditOnly": True,
             "events": events,
-            "last_event_seq": max([int(event.get("seq") or 0) for event in events], default=after_seq),
+            "last_event_seq": max(
+                [int(event.get("seq") or 0) for event in events], default=after_seq
+            ),
             "has_more": has_more,
             "approx_event_bytes": approx_event_bytes,
         },
@@ -1216,7 +1427,9 @@ def _(rid, params: dict) -> dict:
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
     payload = _node_payload_from_params(params)
-    node_id = str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
+    node_id = str(
+        payload.get("node_id") or payload.get("nodeId") or payload.get("id") or ""
+    ).strip()
     if not node_id:
         return _err(rid, 4006, "node_id required")
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
@@ -1224,14 +1437,20 @@ def _(rid, params: dict) -> dict:
     if not isinstance(mission, dict) or not mission:
         return _err(rid, 4040, "team mission not found")
     metadata = payload.get("metadata") or {}
-    output_contract = payload.get("output_contract") or payload.get("outputContract") or {}
+    output_contract = (
+        payload.get("output_contract") or payload.get("outputContract") or {}
+    )
     if not isinstance(metadata, dict):
         return _err(rid, 4004, "node.metadata must be an object")
     if not isinstance(output_contract, dict):
         return _err(rid, 4004, "node.output_contract must be an object")
     metadata = dict(metadata)
-    assignee_member_id = str(payload.get("assignee_member_id") or payload.get("assigneeMemberId") or "").strip()
-    assignee_role = str(payload.get("assignee_role") or payload.get("assigneeRole") or "").strip()
+    assignee_member_id = str(
+        payload.get("assignee_member_id") or payload.get("assigneeMemberId") or ""
+    ).strip()
+    assignee_role = str(
+        payload.get("assignee_role") or payload.get("assigneeRole") or ""
+    ).strip()
     if assignee_member_id:
         metadata.setdefault("assignee_member_id", assignee_member_id)
     if assignee_role:
@@ -1243,11 +1462,17 @@ def _(rid, params: dict) -> dict:
         title=str(payload.get("title") or ""),
         objective=str(payload.get("objective") or ""),
         status=str(payload.get("status") or "ready"),
-        assignee_profile_id=str(payload.get("assignee_profile_id") or payload.get("assigneeProfileId") or ""),
-        assignee_profile_version_id=str(
-            payload.get("assignee_profile_version_id") or payload.get("assigneeProfileVersionId") or ""
+        assignee_profile_id=str(
+            payload.get("assignee_profile_id") or payload.get("assigneeProfileId") or ""
         ),
-        runtime_scope_key=str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or ""),
+        assignee_profile_version_id=str(
+            payload.get("assignee_profile_version_id")
+            or payload.get("assigneeProfileVersionId")
+            or ""
+        ),
+        runtime_scope_key=str(
+            payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or ""
+        ),
         output_contract=output_contract,
         metadata=metadata,
         position_x=float(payload.get("position_x") or payload.get("x") or 0),
@@ -1262,21 +1487,33 @@ def _(rid, params: dict) -> dict:
         )
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
-    node_metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    node_metadata = (
+        node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+    )
     if isinstance(mission, dict) and _is_root_planning_node(node):
-        mission = _activate_mission_task(db, mission, node, source="team_mission.node.create")
+        mission = _activate_mission_task(
+            db, mission, node, source="team_mission.node.create"
+        )
         graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if (
         isinstance(mission, dict)
         and _is_root_planning_node(node)
-        and not _falsey(params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"))
+        and not _falsey(
+            params.get("record_user_task_message")
+            if "record_user_task_message" in params
+            else params.get("recordUserTaskMessage")
+        )
     ):
         _append_team_user_task_message(
             db,
             mission=mission,
             objective=str(node.get("objective") or node.get("title") or ""),
             node_id=str(node.get("node_id") or ""),
-            task_id=str(node_metadata.get("submitted_task_id") or node_metadata.get("task_id") or ""),
+            task_id=str(
+                node_metadata.get("submitted_task_id")
+                or node_metadata.get("task_id")
+                or ""
+            ),
         )
     return _ok(rid, {"mission_id": mission_id, "node": node, "graph": graph})
 
@@ -1290,8 +1527,18 @@ def _(rid, params: dict) -> dict:
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
     payload = _edge_payload_from_params(params)
-    from_node_id = str(payload.get("from_node_id") or payload.get("fromNodeId") or payload.get("source") or "").strip()
-    to_node_id = str(payload.get("to_node_id") or payload.get("toNodeId") or payload.get("target") or "").strip()
+    from_node_id = str(
+        payload.get("from_node_id")
+        or payload.get("fromNodeId")
+        or payload.get("source")
+        or ""
+    ).strip()
+    to_node_id = str(
+        payload.get("to_node_id")
+        or payload.get("toNodeId")
+        or payload.get("target")
+        or ""
+    ).strip()
     if not from_node_id or not to_node_id:
         return _err(rid, 4006, "from_node_id and to_node_id required")
     metadata = payload.get("metadata") or {}
@@ -1299,7 +1546,9 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4004, "edge.metadata must be an object")
     edge = db.upsert_team_mission_edge(
         mission_id=mission_id,
-        edge_id=str(payload.get("edge_id") or payload.get("edgeId") or payload.get("id") or ""),
+        edge_id=str(
+            payload.get("edge_id") or payload.get("edgeId") or payload.get("id") or ""
+        ),
         from_node_id=from_node_id,
         to_node_id=to_node_id,
         kind=str(payload.get("kind") or "depends_on"),
@@ -1312,7 +1561,14 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.edge.created", "payload": {"edge": edge}},
         )
-    return _ok(rid, {"mission_id": mission_id, "edge": edge, "graph": db.team_mission_graphs.get_team_mission_graph(mission_id)})
+    return _ok(
+        rid,
+        {
+            "mission_id": mission_id,
+            "edge": edge,
+            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id),
+        },
+    )
 
 
 @method("team_mission.node.update")
@@ -1322,7 +1578,9 @@ def _(rid, params: dict) -> dict:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
     payload = _node_payload_from_params(params)
-    node_id = str(payload.get("node_id") or payload.get("nodeId") or payload.get("id") or "").strip()
+    node_id = str(
+        payload.get("node_id") or payload.get("nodeId") or payload.get("id") or ""
+    ).strip()
     if not mission_id:
         return _err(rid, 4006, "mission_id required")
     if not node_id:
@@ -1333,15 +1591,23 @@ def _(rid, params: dict) -> dict:
     metadata = dict(existing.get("metadata") or {})
     if isinstance(payload.get("metadata"), dict):
         metadata.update(payload.get("metadata") or {})
-    assignee_member_id = str(payload.get("assignee_member_id") or payload.get("assigneeMemberId") or "").strip()
-    assignee_role = str(payload.get("assignee_role") or payload.get("assigneeRole") or "").strip()
+    assignee_member_id = str(
+        payload.get("assignee_member_id") or payload.get("assigneeMemberId") or ""
+    ).strip()
+    assignee_role = str(
+        payload.get("assignee_role") or payload.get("assigneeRole") or ""
+    ).strip()
     if assignee_member_id:
         metadata.setdefault("assignee_member_id", assignee_member_id)
     if assignee_role:
         metadata.setdefault("assignee_role", assignee_role)
     output_contract = dict(existing.get("output_contract") or {})
-    if isinstance(payload.get("output_contract") or payload.get("outputContract"), dict):
-        output_contract.update(payload.get("output_contract") or payload.get("outputContract") or {})
+    if isinstance(
+        payload.get("output_contract") or payload.get("outputContract"), dict
+    ):
+        output_contract.update(
+            payload.get("output_contract") or payload.get("outputContract") or {}
+        )
     node = db.upsert_team_mission_node(
         mission_id=mission_id,
         node_id=node_id,
@@ -1350,7 +1616,10 @@ def _(rid, params: dict) -> dict:
         objective=str(payload.get("objective") or existing.get("objective") or ""),
         status=str(payload.get("status") or existing.get("status") or "todo"),
         assignee_profile_id=str(
-            payload.get("assignee_profile_id") or payload.get("assigneeProfileId") or existing.get("assignee_profile_id") or ""
+            payload.get("assignee_profile_id")
+            or payload.get("assigneeProfileId")
+            or existing.get("assignee_profile_id")
+            or ""
         ),
         assignee_profile_version_id=str(
             payload.get("assignee_profile_version_id")
@@ -1358,11 +1627,26 @@ def _(rid, params: dict) -> dict:
             or existing.get("assignee_profile_version_id")
             or ""
         ),
-        runtime_scope_key=str(payload.get("runtime_scope_key") or payload.get("runtimeScopeKey") or existing.get("runtime_scope_key") or ""),
+        runtime_scope_key=str(
+            payload.get("runtime_scope_key")
+            or payload.get("runtimeScopeKey")
+            or existing.get("runtime_scope_key")
+            or ""
+        ),
         output_contract=output_contract,
         metadata=metadata,
-        position_x=float(payload.get("position_x") or payload.get("x") or existing.get("position_x") or 0),
-        position_y=float(payload.get("position_y") or payload.get("y") or existing.get("position_y") or 0),
+        position_x=float(
+            payload.get("position_x")
+            or payload.get("x")
+            or existing.get("position_x")
+            or 0
+        ),
+        position_y=float(
+            payload.get("position_y")
+            or payload.get("y")
+            or existing.get("position_y")
+            or 0
+        ),
     )
     run_id = _run_id_from_params(params)
     if run_id:
@@ -1385,7 +1669,12 @@ def _(rid, params: dict) -> dict:
             "mission_id": mission_id,
             "node": node,
             "scheduled": schedule_result,
-            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or db.team_mission_graphs.get_team_mission_graph(mission_id),
+            "graph": (
+                schedule_result.get("graph")
+                if isinstance(schedule_result, dict)
+                else None
+            )
+            or db.team_mission_graphs.get_team_mission_graph(mission_id),
         },
     )
 
@@ -1426,7 +1715,13 @@ def _(rid, params: dict) -> dict:
             "approval_requests": list(result.get("approval_requests") or []),
             "auto_start_ready_nodes": bool(result.get("auto_start_ready_nodes")),
             "scheduled": schedule_result,
-            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None) or result.get("graph") or {},
+            "graph": (
+                schedule_result.get("graph")
+                if isinstance(schedule_result, dict)
+                else None
+            )
+            or result.get("graph")
+            or {},
         },
     )
 
@@ -1448,7 +1743,9 @@ def _(rid, params: dict) -> dict:
         )
         return _err(rid, 4006, "mission_id required")
     task_id_log = str(params.get("task_id") or params.get("taskId") or "")
-    approved_by_log = str(params.get("approved_by") or params.get("approvedBy") or "user")
+    approved_by_log = str(
+        params.get("approved_by") or params.get("approvedBy") or "user"
+    )
     run_id_log = _run_id_from_params(params)
     _log.info(
         "[team_mission.plan.approve] enter mission_id=%s task_id=%s approved_by=%s run_id=%s rid=%s",
@@ -1474,7 +1771,9 @@ def _(rid, params: dict) -> dict:
             continue
         if str(node.get("kind") or "").strip() != "approval_gate":
             continue
-        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        metadata = (
+            node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        )
         node_task_id = str(
             node.get("task_id")
             or node.get("taskId")
@@ -1511,7 +1810,9 @@ def _(rid, params: dict) -> dict:
                     "already_approved": True,
                     "node": sorted(
                         completed_nodes,
-                        key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0),
+                        key=lambda item: float(
+                            item.get("updated_at") or item.get("created_at") or 0
+                        ),
                     )[-1],
                     "scheduled": {},
                     "graph": graph,
@@ -1541,7 +1842,10 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4040, "team mission approval gate not found")
     metadata = dict(approval_node.get("metadata") or {})
     metadata.update({
-        "approved_by": str(params.get("approved_by") or params.get("approvedBy") or "user").strip() or "user",
+        "approved_by": str(
+            params.get("approved_by") or params.get("approvedBy") or "user"
+        ).strip()
+        or "user",
     })
     approved_node = db.upsert_team_mission_node(
         mission_id=mission_id,
@@ -1551,7 +1855,9 @@ def _(rid, params: dict) -> dict:
         objective=str(approval_node.get("objective") or ""),
         status="completed",
         assignee_profile_id=str(approval_node.get("assignee_profile_id") or ""),
-        assignee_profile_version_id=str(approval_node.get("assignee_profile_version_id") or ""),
+        assignee_profile_version_id=str(
+            approval_node.get("assignee_profile_version_id") or ""
+        ),
         runtime_scope_key=str(approval_node.get("runtime_scope_key") or ""),
         output_contract=dict(approval_node.get("output_contract") or {}),
         metadata=metadata,
@@ -1568,7 +1874,11 @@ def _(rid, params: dict) -> dict:
     schedule_result = _schedule_ready_nodes(
         db=db,
         rid=rid,
-        params={"mission_id": mission_id, "task_id": task_id, "limit": params.get("limit")},
+        params={
+            "mission_id": mission_id,
+            "task_id": task_id,
+            "limit": params.get("limit"),
+        },
         trigger="team_mission.plan.approve",
     )
     scheduled_ready_nodes = 0
@@ -1591,7 +1901,11 @@ def _(rid, params: dict) -> dict:
             "mission_id": mission_id,
             "node": approved_node,
             "scheduled": schedule_result,
-            "graph": (schedule_result.get("graph") if isinstance(schedule_result, dict) else None)
+            "graph": (
+                schedule_result.get("graph")
+                if isinstance(schedule_result, dict)
+                else None
+            )
             or db.team_mission_graphs.get_team_mission_graph(mission_id),
         },
     )
@@ -1662,7 +1976,9 @@ def _(rid, params: dict) -> dict:
             "run_id": bound_run_id,
             "conversation_session_id": conversation_session_id,
             "execution_session_id": str(binding.get("execution_session_id") or ""),
-            "runtime_scope_key": str(binding.get("runtime_scope_key") or conversation_session_id),
+            "runtime_scope_key": str(
+                binding.get("runtime_scope_key") or conversation_session_id
+            ),
             "reason": reason or "用户拒绝了团队任务图计划。",
         }
         try:
@@ -1671,10 +1987,14 @@ def _(rid, params: dict) -> dict:
             cancel_errors.append({"run_id": bound_run_id, "message": str(exc)})
             continue
         if isinstance(response, dict) and response.get("error"):
-            error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            error = (
+                response.get("error") if isinstance(response.get("error"), dict) else {}
+            )
             cancel_errors.append({
                 "run_id": bound_run_id,
-                "message": str(error.get("message") or response.get("error") or "run cancel failed"),
+                "message": str(
+                    error.get("message") or response.get("error") or "run cancel failed"
+                ),
             })
             continue
         response_result = (
@@ -1710,7 +2030,9 @@ def _(rid, params: dict) -> dict:
     )
 
 
-def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_id: str) -> list[int]:
+def _recall_collect_conv_message_ids(
+    db, *, conversation_session_id: str, turn_id: str
+) -> list[int]:
     """Find the conv messages that ``session.recall_turn`` is about to
     deactivate for ``turn_id`` — the user message stamped with the turn id,
     plus every subsequent active assistant / mirror row up to (but not
@@ -1739,7 +2061,11 @@ def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_i
                         meta = {}
                 except Exception:
                     meta = {}
-            mt_meta = meta.get("team_mission") if isinstance(meta.get("team_mission"), dict) else {}
+            mt_meta = (
+                meta.get("team_mission")
+                if isinstance(meta.get("team_mission"), dict)
+                else {}
+            )
             if str(m.get("role") or "").lower() == "user" and (
                 str(meta.get("turn_id") or "") == turn_id
                 or str(mt_meta.get("turn_id") or "") == turn_id
@@ -1764,7 +2090,9 @@ def _recall_collect_conv_message_ids(db, *, conversation_session_id: str, turn_i
     return collected
 
 
-def _recall_mission_id_from_run(db, *, run_id: str, params: dict, mission: dict | None) -> str:
+def _recall_mission_id_from_run(
+    db, *, run_id: str, params: dict, mission: dict | None
+) -> str:
     """Resolve the mission id (if any) this recall should cascade-cancel.
 
     Order: explicit param > canonical team_mission_run_bindings > persisted
@@ -1848,9 +2176,17 @@ def _(rid, params: dict) -> dict:
     # Mission identity (only meaningful for B; ignored for A/C).
     resolved_mission = {}
     try:
-        resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
+        resolved = (
+            db.resolve_team_mission_conversation(conversation_id)
+            if conversation_id
+            else {}
+        )
         if isinstance(resolved, dict):
-            resolved_mission = resolved.get("mission") if isinstance(resolved.get("mission"), dict) else {}
+            resolved_mission = (
+                resolved.get("mission")
+                if isinstance(resolved.get("mission"), dict)
+                else {}
+            )
     except Exception:
         resolved_mission = {}
     mission_id = _recall_mission_id_from_run(
@@ -1870,37 +2206,50 @@ def _(rid, params: dict) -> dict:
         # B: leader-triggered mission. team_mission.cancel takes care of every
         # node + binding + worker run cascade — we don't reimplement that.
         try:
-            response = _methods["team_mission.cancel"](rid, {
-                "mission_id": mission_id,
-                "canceled_by": "user",
-                "reason": reason,
-            })
+            response = _methods["team_mission.cancel"](
+                rid,
+                {
+                    "mission_id": mission_id,
+                    "canceled_by": "user",
+                    "reason": reason,
+                },
+            )
         except Exception as exc:
             response = {"error": {"code": 5000, "message": str(exc)}}
         if isinstance(response, dict) and not response.get("error"):
             cancelled_mission_ids.append(mission_id)
-            result_payload = response.get("result") if isinstance(response.get("result"), dict) else {}
-            for run_info in (result_payload.get("canceled_runs") or []):
+            result_payload = (
+                response.get("result")
+                if isinstance(response.get("result"), dict)
+                else {}
+            )
+            for run_info in result_payload.get("canceled_runs") or []:
                 if isinstance(run_info, dict):
                     cancelled_run_ids.append(run_info)
-            for err in (result_payload.get("cancel_errors") or []):
+            for err in result_payload.get("cancel_errors") or []:
                 if isinstance(err, dict):
                     cancel_errors.append(err)
         elif isinstance(response, dict) and response.get("error"):
             cancel_errors.append({
                 "mission_id": mission_id,
-                "message": str(response.get("error", {}).get("message") or "team_mission.cancel failed"),
+                "message": str(
+                    response.get("error", {}).get("message")
+                    or "team_mission.cancel failed"
+                ),
             })
     if not mission_id and optimistic_run_id:
         # A: direct leader/member conversation run. PR-C makes the conversation
         # session the stored session for both surfaces, so no memberchat lookup
         # or fallback target is needed.
         try:
-            cancel_resp = _methods["run.cancel"](rid, {
-                "run_id": optimistic_run_id,
-                "conversation_session_id": conversation_session_id,
-                "reason": reason,
-            })
+            cancel_resp = _methods["run.cancel"](
+                rid,
+                {
+                    "run_id": optimistic_run_id,
+                    "conversation_session_id": conversation_session_id,
+                    "reason": reason,
+                },
+            )
         except Exception as exc:
             cancel_resp = {"error": {"code": 5000, "message": str(exc)}}
         if isinstance(cancel_resp, dict) and not cancel_resp.get("error"):
@@ -1912,7 +2261,10 @@ def _(rid, params: dict) -> dict:
         else:
             cancel_errors.append({
                 "run_id": optimistic_run_id,
-                "message": str((cancel_resp or {}).get("error", {}).get("message") or "leader run.cancel failed"),
+                "message": str(
+                    (cancel_resp or {}).get("error", {}).get("message")
+                    or "leader run.cancel failed"
+                ),
             })
 
     # Step 2 — snapshot the message ids we're about to retract, BEFORE
@@ -1932,7 +2284,9 @@ def _(rid, params: dict) -> dict:
         "turn_id": turn_id,
         "mode": str(params.get("mode") or "restore_to_composer"),
     }
-    client_message_id = str(params.get("client_message_id") or params.get("clientMessageId") or "").strip()
+    client_message_id = str(
+        params.get("client_message_id") or params.get("clientMessageId") or ""
+    ).strip()
     if client_message_id:
         recall_params["client_message_id"] = client_message_id
     if optimistic_run_id:
@@ -1949,9 +2303,11 @@ def _(rid, params: dict) -> dict:
     invalidated_context_ids: list[str] = []
     if affected_source_ids:
         try:
-            invalidated_context_ids = db.conversation_memory.invalidate_summaries_for_events(
-                [str(source_id) for source_id in affected_source_ids],
-                reason=f"conversation turn {turn_id} retracted",
+            invalidated_context_ids = (
+                db.conversation_memory.invalidate_summaries_for_events(
+                    [str(source_id) for source_id in affected_source_ids],
+                    reason=f"conversation turn {turn_id} retracted",
+                )
             )
         except Exception:
             _log.warning(
@@ -1961,25 +2317,28 @@ def _(rid, params: dict) -> dict:
                 exc_info=True,
             )
 
-    return _ok(rid, {
-        "status": "recalled",
-        "conversation_id": conversation_id,
-        "conversation_session_id": conversation_session_id,
-        "turn_id": turn_id,
-        "recalled": {
-            "removed_messages": int(recall_result.get("removed_messages") or 0),
-            "source_message_ids": affected_source_ids,
-            "invalidated_context_ids": invalidated_context_ids,
-            "interrupted": bool(recall_result.get("interrupted")),
-            "draft": recall_result.get("draft") or {},
+    return _ok(
+        rid,
+        {
+            "status": "recalled",
+            "conversation_id": conversation_id,
+            "conversation_session_id": conversation_session_id,
+            "turn_id": turn_id,
+            "recalled": {
+                "removed_messages": int(recall_result.get("removed_messages") or 0),
+                "source_message_ids": affected_source_ids,
+                "invalidated_context_ids": invalidated_context_ids,
+                "interrupted": bool(recall_result.get("interrupted")),
+                "draft": recall_result.get("draft") or {},
+            },
+            "cancelled": {
+                "mission_ids": cancelled_mission_ids,
+                "runs": cancelled_run_ids,
+                "errors": cancel_errors,
+            },
+            "cascade_type": "B" if cancelled_mission_ids else "A",
         },
-        "cancelled": {
-            "mission_ids": cancelled_mission_ids,
-            "runs": cancelled_run_ids,
-            "errors": cancel_errors,
-        },
-        "cascade_type": "B" if cancelled_mission_ids else "A",
-    })
+    )
 
 
 def _resolve_cancel_mission_id(db, params: dict) -> str:
@@ -1992,9 +2351,7 @@ def _resolve_cancel_mission_id(db, params: dict) -> str:
         if not isinstance(mission, dict):
             return ""
         return str(
-            mission.get("mission_id")
-            or mission.get("missionId")
-            or candidate
+            mission.get("mission_id") or mission.get("missionId") or candidate
         ).strip()
 
     explicit_mission_id = _mission_id_from_params(params)
@@ -2017,10 +2374,22 @@ def _resolve_cancel_mission_id(db, params: dict) -> str:
         projection = resolver(identifier) if callable(resolver) else {}
         if not isinstance(projection, dict):
             continue
-        conversation = projection.get("conversation") if isinstance(projection.get("conversation"), dict) else {}
-        projection_mission = projection.get("mission") if isinstance(projection.get("mission"), dict) else {}
-        graph = projection.get("graph") if isinstance(projection.get("graph"), dict) else {}
-        graph_mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        conversation = (
+            projection.get("conversation")
+            if isinstance(projection.get("conversation"), dict)
+            else {}
+        )
+        projection_mission = (
+            projection.get("mission")
+            if isinstance(projection.get("mission"), dict)
+            else {}
+        )
+        graph = (
+            projection.get("graph") if isinstance(projection.get("graph"), dict) else {}
+        )
+        graph_mission = (
+            graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
+        )
         for candidate in (
             conversation.get("active_mission_id"),
             conversation.get("activeMissionId"),
@@ -2040,15 +2409,23 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5008)
-    if not (_mission_id_from_params(params) or _conversation_id_from_params(params, {}) or _conversation_session_id_from_params(params, {})):
+    if not (
+        _mission_id_from_params(params)
+        or _conversation_id_from_params(params, {})
+        or _conversation_session_id_from_params(params, {})
+    ):
         return _err(rid, 4006, "mission_id or conversation_id required")
     mission_id = _resolve_cancel_mission_id(db, params)
     if not mission_id:
         return _err(rid, 4040, "team mission not found")
-    reason = str(params.get("reason") or "").strip() or "Team Mission cancelled by user."
+    reason = (
+        str(params.get("reason") or "").strip() or "Team Mission cancelled by user."
+    )
     result = db.cancel_team_mission(
         mission_id=mission_id,
-        canceled_by=str(params.get("canceled_by") or params.get("canceledBy") or "user"),
+        canceled_by=str(
+            params.get("canceled_by") or params.get("canceledBy") or "user"
+        ),
         reason=reason,
     )
     if not result:
@@ -2063,12 +2440,16 @@ def _(rid, params: dict) -> dict:
         if not run_id or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)
-        conversation_session_id = str(binding.get("session_id") or binding.get("conversation_session_id") or "").strip()
+        conversation_session_id = str(
+            binding.get("session_id") or binding.get("conversation_session_id") or ""
+        ).strip()
         cancel_params = {
             "run_id": run_id,
             "conversation_session_id": conversation_session_id,
             "execution_session_id": str(binding.get("execution_session_id") or ""),
-            "runtime_scope_key": str(binding.get("runtime_scope_key") or conversation_session_id),
+            "runtime_scope_key": str(
+                binding.get("runtime_scope_key") or conversation_session_id
+            ),
             "reason": reason,
         }
         try:
@@ -2077,13 +2458,21 @@ def _(rid, params: dict) -> dict:
             cancel_errors.append({"run_id": run_id, "message": str(exc)})
             continue
         if isinstance(response, dict) and response.get("error"):
-            error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            error = (
+                response.get("error") if isinstance(response.get("error"), dict) else {}
+            )
             cancel_errors.append({
                 "run_id": run_id,
-                "message": str(error.get("message") or response.get("error") or "run cancel failed"),
+                "message": str(
+                    error.get("message") or response.get("error") or "run cancel failed"
+                ),
             })
             continue
-        response_result = response.get("result") if isinstance(response, dict) and isinstance(response.get("result"), dict) else {}
+        response_result = (
+            response.get("result")
+            if isinstance(response, dict) and isinstance(response.get("result"), dict)
+            else {}
+        )
         canceled_runs.append({
             "run_id": run_id,
             "conversation_session_id": conversation_session_id,
@@ -2138,7 +2527,9 @@ def _(rid, params: dict) -> dict:
         node_id=node_id,
         run_id=run_id,
         session_id=conversation_session_id,
-        execution_session_id=str(params.get("execution_session_id") or params.get("executionSessionId") or ""),
+        execution_session_id=str(
+            params.get("execution_session_id") or params.get("executionSessionId") or ""
+        ),
         runtime_scope_key=runtime_scope_key,
         role=str(params.get("role") or node.get("kind") or "worker"),
         metadata={"source": "team_mission.node.bind_run"},
@@ -2154,7 +2545,11 @@ def _(rid, params: dict) -> dict:
         assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
         runtime_scope_key=runtime_scope_key,
         output_contract=dict(node.get("output_contract") or {}),
-        metadata={**dict(node.get("metadata") or {}), "conversation_session_id": conversation_session_id, "run_id": run_id},
+        metadata={
+            **dict(node.get("metadata") or {}),
+            "conversation_session_id": conversation_session_id,
+            "run_id": run_id,
+        },
         position_x=float(node.get("position_x") or 0),
         position_y=float(node.get("position_y") or 0),
     )
@@ -2187,9 +2582,17 @@ def _(rid, params: dict) -> dict:
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = dict(node.get("metadata") or {})
-    mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
-    conversation_id = _conversation_id_from_params(params, mission_metadata) or str((mission or {}).get("conversation_id") or mission_id)
-    conversation_session_id = _conversation_session_id_from_params(params, mission_metadata) or _team_conversation_session_id(mission if isinstance(mission, dict) else {})
+    mission_metadata = (
+        mission.get("metadata")
+        if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict)
+        else {}
+    )
+    conversation_id = _conversation_id_from_params(params, mission_metadata) or str(
+        (mission or {}).get("conversation_id") or mission_id
+    )
+    conversation_session_id = _conversation_session_id_from_params(
+        params, mission_metadata
+    ) or _team_conversation_session_id(mission if isinstance(mission, dict) else {})
     visible_conversation_session_id = conversation_session_id
     if isinstance(mission, dict) and mission:
         db.ensure_team_mission_conversation(
@@ -2198,19 +2601,32 @@ def _(rid, params: dict) -> dict:
             mission=mission,
         )
     if isinstance(mission, dict) and _is_root_planning_node(node):
-        mission = _activate_mission_task(db, mission, node, source="team_mission.node.start")
+        mission = _activate_mission_task(
+            db, mission, node, source="team_mission.node.start"
+        )
         graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if (
         isinstance(mission, dict)
         and _is_root_planning_node(node)
-        and not _falsey(params.get("record_user_task_message") if "record_user_task_message" in params else params.get("recordUserTaskMessage"))
+        and not _falsey(
+            params.get("record_user_task_message")
+            if "record_user_task_message" in params
+            else params.get("recordUserTaskMessage")
+        )
     ):
         _append_team_user_task_message(
             db,
             mission=mission,
-            objective=str(node.get("objective") or node.get("title") or mission.get("objective") or ""),
+            objective=str(
+                node.get("objective")
+                or node.get("title")
+                or mission.get("objective")
+                or ""
+            ),
             node_id=node_id,
-            task_id=str(metadata.get("submitted_task_id") or metadata.get("task_id") or ""),
+            task_id=str(
+                metadata.get("submitted_task_id") or metadata.get("task_id") or ""
+            ),
         )
     conversation_session_id = str(
         params.get("conversation_session_id")
@@ -2219,7 +2635,9 @@ def _(rid, params: dict) -> dict:
         or _default_node_session_id(mission_id, node_id)
     ).strip()
     try:
-        profile_params = _node_profile_params(params, mission if isinstance(mission, dict) else {}, node, db=db)
+        profile_params = _node_profile_params(
+            params, mission if isinstance(mission, dict) else {}, node, db=db
+        )
     except ValueError as exc:
         return _err(rid, 4094, str(exc))
     runtime_scope_key = str(
@@ -2229,10 +2647,16 @@ def _(rid, params: dict) -> dict:
         or node.get("runtime_scope_key")
         or conversation_session_id
     ).strip()
-    run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
-    turn_id = str(params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex).strip()
+    run_id = str(
+        params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex
+    ).strip()
+    turn_id = str(
+        params.get("turn_id") or params.get("turnId") or uuid.uuid4().hex
+    ).strip()
     if not db.sessions.get(conversation_session_id):
-        db.sessions.create(conversation_session_id, source="team_mission", transient=False)
+        db.sessions.create(
+            conversation_session_id, source="team_mission", transient=False
+        )
     try:
         workspace_context = resolve_team_mission_workspace_context(
             params,
@@ -2253,11 +2677,15 @@ def _(rid, params: dict) -> dict:
             "team_id": str((mission or {}).get("team_id") or ""),
         },
     )
-    runtime_session_error = _ensure_team_mission_runtime_session_shell(conversation_session_id)
+    runtime_session_error = _ensure_team_mission_runtime_session_shell(
+        conversation_session_id
+    )
     if runtime_session_error:
         return _err(rid, 5008, runtime_session_error)
     leader_control_node = _is_team_leader_control_node(node)
-    base_text = _strategy_start_text(params, mission if isinstance(mission, dict) else {}, node)
+    base_text = _strategy_start_text(
+        params, mission if isinstance(mission, dict) else {}, node
+    )
     memory_context, memory_text = _team_memory_for_node(
         db,
         params,
@@ -2309,12 +2737,14 @@ def _(rid, params: dict) -> dict:
     ).strip()
     node_context_params = params
     if not _dovie_product_context_from_params(node_context_params):
-        mission_dovie_context = (
-            mission_metadata.get("dovie_product_context")
-            or mission_metadata.get("dovieProductContext")
-        )
+        mission_dovie_context = mission_metadata.get(
+            "dovie_product_context"
+        ) or mission_metadata.get("dovieProductContext")
         if mission_dovie_context:
-            node_context_params = {**params, "dovie_product_context": mission_dovie_context}
+            node_context_params = {
+                **params,
+                "dovie_product_context": mission_dovie_context,
+            }
     task_id = str(
         metadata.get("task_id")
         or metadata.get("taskId")
@@ -2322,18 +2752,30 @@ def _(rid, params: dict) -> dict:
         or metadata.get("submittedTaskId")
         or ""
     ).strip()
-    mission_metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
+    mission_metadata = (
+        mission.get("metadata")
+        if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict)
+        else {}
+    )
     leader_members = (
-        _leader_members_from_params(params, mission if isinstance(mission, dict) else {}, db=db)
+        _leader_members_from_params(
+            params, mission if isinstance(mission, dict) else {}, db=db
+        )
         if leader_control_node
         else []
     )
-    active_task = dict(mission_metadata.get("active_task") or {}) if isinstance(mission_metadata.get("active_task"), dict) else {}
+    active_task = (
+        dict(mission_metadata.get("active_task") or {})
+        if isinstance(mission_metadata.get("active_task"), dict)
+        else {}
+    )
     if not active_task and _is_root_planning_node(node):
         active_task = {
             "task_id": task_id,
             "title": str(node.get("title") or mission.get("title") or "").strip(),
-            "objective": str(node.get("objective") or mission.get("objective") or "").strip(),
+            "objective": str(
+                node.get("objective") or mission.get("objective") or ""
+            ).strip(),
             "root_node_id": node_id,
         }
     node_participant_id = (
@@ -2413,7 +2855,11 @@ def _(rid, params: dict) -> dict:
         execution_session_id="",
         runtime_scope_key=runtime_scope_key,
         role=_node_role(node),
-        metadata={**binding_metadata, "prebound": True, "run_context_json": _run_context_json(run_context)},
+        metadata={
+            **binding_metadata,
+            "prebound": True,
+            "run_context_json": _run_context_json(run_context),
+        },
     )
     submit_params = {
         **params,
@@ -2436,12 +2882,22 @@ def _(rid, params: dict) -> dict:
         "turn_system_context": turn_system_context,
         "user_message_persistence": "external",
         "enabled_toolsets": enabled_toolsets,
-        **({"disabled_toolsets": _leader_disabled_toolsets(params)} if leader_control_node else {}),
-        **({"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE} if leader_control_node or enabled_toolsets else {}),
+        **(
+            {"disabled_toolsets": _leader_disabled_toolsets(params)}
+            if leader_control_node
+            else {}
+        ),
+        **(
+            {"toolset_scope": _TEAM_LEADER_TOOLSET_SCOPE}
+            if leader_control_node or enabled_toolsets
+            else {}
+        ),
         "dovie_product_context": _team_dovie_product_context(
             node_context_params,
             team_mission={
-                "kind": "leader_planning_node" if leader_control_node else "mission_node",
+                "kind": "leader_planning_node"
+                if leader_control_node
+                else "mission_node",
                 "surface": "mission_node",
                 "mission_id": mission_id,
                 "conversation_id": conversation_id,
@@ -2455,13 +2911,21 @@ def _(rid, params: dict) -> dict:
                 "node_role": _node_role(node),
                 "node_phase": _node_phase(node),
                 "active_task": active_task,
-                "task_brief": worker_context.get("task_brief") if worker_context else _node_task_brief(node),
+                "task_brief": worker_context.get("task_brief")
+                if worker_context
+                else _node_task_brief(node),
                 "output_contract": node.get("output_contract") or {},
                 "memory": memory_context,
                 "activity_context_snapshot": {
                     "snapshot_id": activity_context_snapshot.get("snapshot_id") or "",
-                    "activity_context_revision": activity_context_snapshot.get("activity_context_revision") or 0,
-                    "conversation_revision": activity_context_snapshot.get("conversation_revision") or 0,
+                    "activity_context_revision": activity_context_snapshot.get(
+                        "activity_context_revision"
+                    )
+                    or 0,
+                    "conversation_revision": activity_context_snapshot.get(
+                        "conversation_revision"
+                    )
+                    or 0,
                     "selected_memory_ids": activity_context_memory_ids,
                 },
                 **({"members": leader_members} if leader_members else {}),
@@ -2471,7 +2935,11 @@ def _(rid, params: dict) -> dict:
                     if key not in {"text", "task_brief", "memory"}
                 },
                 "delegate_inherits_parent_tools": not leader_control_node,
-                **({"tool_policy": _team_leader_tool_policy(surface="leader_node")} if leader_control_node else {}),
+                **(
+                    {"tool_policy": _team_leader_tool_policy(surface="leader_node")}
+                    if leader_control_node
+                    else {}
+                ),
             },
             executing_agent_profile_id=agent_profile_id,
             agent_role="team_leader" if leader_control_node else "team_member",
@@ -2479,7 +2947,11 @@ def _(rid, params: dict) -> dict:
     }
     response = _submit_run_via_worker_with_response(rid, submit_params)
     if isinstance(response, dict) and response.get("error"):
-        response_error = response.get("error") if isinstance(response.get("error"), dict) else {"error": response.get("error")}
+        response_error = (
+            response.get("error")
+            if isinstance(response.get("error"), dict)
+            else {"error": response.get("error")}
+        )
         failure = classify_team_mission_failure("error", response_error)
         node = db.upsert_team_mission_node(
             mission_id=mission_id,
@@ -2489,18 +2961,26 @@ def _(rid, params: dict) -> dict:
             objective=str(node.get("objective") or ""),
             status="blocked",
             assignee_profile_id=str(node.get("assignee_profile_id") or ""),
-            assignee_profile_version_id=str(node.get("assignee_profile_version_id") or ""),
+            assignee_profile_version_id=str(
+                node.get("assignee_profile_version_id") or ""
+            ),
             runtime_scope_key=runtime_scope_key,
             output_contract=dict(node.get("output_contract") or {}),
             metadata={
                 **metadata,
                 "conversation_session_id": conversation_session_id,
-                "start_error": str(response_error.get("message") or response_error.get("error") or ""),
+                "start_error": str(
+                    response_error.get("message") or response_error.get("error") or ""
+                ),
                 "effective_toolsets": enabled_toolsets,
-                **({
-                    "start_error_reason_code": failure["reason_code"],
-                    "start_error_recoverability": failure["recoverability"],
-                } if failure else {}),
+                **(
+                    {
+                        "start_error_reason_code": failure["reason_code"],
+                        "start_error_recoverability": failure["recoverability"],
+                    }
+                    if failure
+                    else {}
+                ),
             },
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),
@@ -2509,7 +2989,9 @@ def _(rid, params: dict) -> dict:
     result = response.get("result") if isinstance(response, dict) else {}
     result_run_id = str((result or {}).get("run_id") or run_id).strip()
     result_turn_id = str((result or {}).get("turn_id") or turn_id).strip()
-    result_scope = str((result or {}).get("runtime_scope_key") or runtime_scope_key).strip()
+    result_scope = str(
+        (result or {}).get("runtime_scope_key") or runtime_scope_key
+    ).strip()
     binding_metadata["turn_id"] = result_turn_id
     binding = db.bind_team_mission_run(
         mission_id=mission_id,
@@ -2597,7 +3079,6 @@ def _(rid, params: dict) -> dict:
     if not result:
         return _err(rid, 4040, "team mission not found")
     return _ok(rid, result)
-
 
 
 # Export underscore-prefixed helpers for the compatibility facade.

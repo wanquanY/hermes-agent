@@ -14,6 +14,11 @@ from hermes_team_mission.runtime.failure import classify_team_mission_failure
 TEAM_MISSION_EVENT_PROTOCOL = "team_mission.event.v1"
 TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
+_MESSAGE_TEXT_STREAM_EVENT_TYPES = {"message.start", "message.delta", "message.complete"}
+_REASONING_TEXT_STREAM_CHANNELS = {
+    "reasoning.delta": "reasoning",
+    "thinking.delta": "thinking",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +58,13 @@ def event_payload(event: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 def _emit_team_event_log_diagnostic(stage: str, **fields: Any) -> None:
+    # Per-token stream success logs drown the structural/audit boundary that
+    # this diagnostic is meant to expose. Keep drops, errors and lifecycle
+    # facts; runtime delivery already emits sampled stream counters.
+    if stage in {"runtime-event-project-start", "runtime-event-appended"} and text(
+        fields.get("event_type") or fields.get("source_event_type")
+    ).endswith(".delta"):
+        return
     try:
         from agent.dovie_diagnostics import emit_dovie_diagnostic
 
@@ -255,29 +267,38 @@ def _payload_int(payload: Dict[str, Any], key: str) -> int | None:
 
 def _text_stream_contract(source_event: Dict[str, Any], subject: Dict[str, Any]) -> Dict[str, Any]:
     event_type = source_event_type(source_event)
-    if event_type not in {"message.start", "message.delta", "message.complete"}:
+    is_message_stream = event_type in _MESSAGE_TEXT_STREAM_EVENT_TYPES
+    stream_channel = "assistant" if is_message_stream else _REASONING_TEXT_STREAM_CHANNELS.get(event_type, "")
+    if not stream_channel:
         return {}
     payload = event_payload(source_event)
     mode = text(payload.get("mode")).lower()
+    is_delta = event_type == "message.delta" or event_type in _REASONING_TEXT_STREAM_CHANNELS
     if event_type == "message.delta":
         if _is_snapshot_message_delta(source_event):
             return {}
+    if is_delta:
         if mode in {"", "append"}:
             mode = "append"
     stream_id = _first_text(
         payload.get("stream_id"),
         payload.get("streamId"),
-        f"{subject.get('runtime_conversation_session_id') or subject.get('conversation_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:assistant",
+        f"{subject.get('runtime_conversation_session_id') or subject.get('conversation_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:{stream_channel}",
     )
     fragment = _payload_stream_fragment(payload)
     contract: Dict[str, Any] = {
         "stream_id": stream_id,
         "subject": subject,
-        "event": event_type.replace("message.", ""),
+        "event": event_type.rsplit(".", 1)[-1],
         "mode": mode,
         "run_id": subject.get("run_id", ""),
         "turn_id": subject.get("turn_id", ""),
     }
+    if not is_message_stream:
+        # Reasoning is a first-class stream owned by the run/node. It must not
+        # be projected as assistant prose, otherwise speaker and message
+        # boundaries become ambiguous in team conversations.
+        contract["channel"] = stream_channel
     client_message_id = _first_text(
         payload.get("client_message_id"),
         payload.get("clientMessageId"),
@@ -286,7 +307,7 @@ def _text_stream_contract(source_event: Dict[str, Any], subject: Dict[str, Any])
     )
     if client_message_id:
         contract["client_message_id"] = client_message_id
-    if event_type == "message.delta":
+    if is_delta:
         contract["delta"] = fragment
         contract["text"] = fragment
         offset = _payload_int(payload, "offset")

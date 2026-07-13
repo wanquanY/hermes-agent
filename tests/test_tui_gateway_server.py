@@ -4831,11 +4831,15 @@ def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(
             self.seen_prompt = None
             self.seen_system_context = None
             self.seen_persist_user_message = None
+            self.seen_current_input_message_id = None
 
         def run_conversation(self, prompt, **kwargs):
             self.seen_prompt = prompt
             self.seen_system_context = self.ephemeral_system_prompt
             self.seen_persist_user_message = kwargs.get("persist_user_message")
+            self.seen_current_input_message_id = kwargs.get(
+                "current_input_conversation_message_id"
+            )
             return {
                 "final_response": "done",
                 "messages": [
@@ -4865,6 +4869,7 @@ def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(
                     "turn_id": "turn-system-context",
                     "turn_system_context": "trusted team policy",
                     "user_message_persistence": "external",
+                    "current_input_conversation_message_id": "msg-current",
                 },
             }
         )
@@ -4873,7 +4878,8 @@ def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(
 
     assert agent.seen_prompt == "pure user input"
     assert agent.seen_system_context == "profile persona\n\ntrusted team policy"
-    assert agent.seen_persist_user_message == ""
+    assert agent.seen_persist_user_message is None
+    assert agent.seen_current_input_message_id == "msg-current"
     assert agent.ephemeral_system_prompt == "profile persona"
 
 

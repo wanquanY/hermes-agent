@@ -78,6 +78,10 @@ TEAM_MISSION_ACTIVITY_INTERACTIVE_SOURCE_EVENT_TYPES = {
     "secret.request",
     "clarify.request",
 }
+TEAM_MISSION_ACTIVITY_REASONING_SOURCE_EVENT_TYPES = {
+    "reasoning.delta",
+    "thinking.delta",
+}
 TEAM_MISSION_ACTIVITY_TOOL_PAYLOAD_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tool_call_id", ("toolCallId", "tool_id", "toolId")),
     ("tool_name", ("toolName", "name")),
@@ -115,6 +119,23 @@ def text(value: Any) -> str:
 
 
 def _emit_activity_diagnostic(stage: str, **fields: Any) -> None:
+    # Empty replay polls are the steady state of every active subscription and
+    # do not help identify an event-loss boundary. Likewise, a live event with
+    # no matching subscription has no frontend delivery path to diagnose.
+    if stage == "list-activity-events" and not int(fields.get("raw_count") or 0) and not int(
+        fields.get("matched_count") or 0
+    ):
+        return
+    if stage == "deliver-appended-event-match" and not int(
+        fields.get("matched_subscription_count") or 0
+    ):
+        return
+    event = fields.get("event") if isinstance(fields.get("event"), dict) else {}
+    if stage in {"deliver-appended-event-match", "deliver-appended-event-written"} and (
+        text(event.get("text_event")) == "delta"
+        or text(event.get("source_event_type")).endswith(".delta")
+    ):
+        return
     try:
         from agent.dovie_diagnostics import emit_dovie_diagnostic
 
@@ -454,6 +475,34 @@ def _copy_interactive_payload_fields(
             target[key] = value
 
 
+def _copy_reasoning_payload_fields(
+    target: dict[str, Any],
+    *,
+    text_stream: dict[str, Any],
+    source_event_type: str,
+) -> None:
+    """Keep the canonical reasoning payload after audit fields are stripped.
+
+    The compact event reconstructs the original canonical source event on the
+    client. ReasoningDeltaPayload/ThinkingDeltaPayload require ``text`` while
+    ``text_stream`` carries ordering and stream identity. Both are part of the
+    ABI; neither should depend on the audit-only source_event blob.
+    """
+    if source_event_type not in TEAM_MISSION_ACTIVITY_REASONING_SOURCE_EVENT_TYPES:
+        return
+    if "delta" in text_stream:
+        fragment = "" if text_stream.get("delta") is None else str(text_stream.get("delta"))
+    elif "text" in text_stream:
+        fragment = "" if text_stream.get("text") is None else str(text_stream.get("text"))
+    else:
+        return
+    target["text"] = fragment
+    target["delta"] = fragment
+    for key in ("mode", "offset", "channel", "stream_id", "client_message_id"):
+        if key in text_stream and text_stream.get(key) not in (None, ""):
+            target[key] = text_stream[key]
+
+
 def transport_event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str, Any]:
     """Project a persisted Team Mission audit event to the live activity ABI.
 
@@ -504,6 +553,11 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         compact_payload,
         payload=payload,
         source_payload=source_payload,
+        source_event_type=source_event_type,
+    )
+    _copy_reasoning_payload_fields(
+        compact_payload,
+        text_stream=text_stream,
         source_event_type=source_event_type,
     )
     _copy_compact_payload_fields(

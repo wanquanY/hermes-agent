@@ -209,6 +209,7 @@ _sessions_lock = threading.RLock()
 _prompt_lock = threading.Lock()
 _session_resume_lock = threading.Lock()
 _profile_env_lock = threading.RLock()
+_control_plane_db_lock = threading.RLock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
@@ -638,6 +639,11 @@ def _is_control_plane_conversation_session_id(conversation_session_id: str) -> b
 
 
 def _get_control_plane_db(*, use_active_profile: bool = True):
+    with _control_plane_db_lock:
+        return _get_control_plane_db_locked(use_active_profile=use_active_profile)
+
+
+def _get_control_plane_db_locked(*, use_active_profile: bool = True):
     global _db, _db_error
     # ``use_active_profile`` is retained for older callers, but Option D makes
     # the control plane a root-level singleton. ``DOVIE_HERMES_CONTROL_HOME``

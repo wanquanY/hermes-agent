@@ -459,10 +459,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["runEvents"] == []
-        assert len(response["result"]["toolEvents"]) == 1
-        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
-        assert response["result"]["toolEvents"][0]["payload"]["name"] == "team_mission_start_task"
+        assert response["result"]["toolEvents"] == []
     finally:
         db.close()
 
@@ -552,9 +549,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["projection"]["activeResult"]["status"] == "completed"
         assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
         assert response["result"]["runEvents"] == []
-        assert len(response["result"]["toolEvents"]) == 1
-        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
+        assert response["result"]["toolEvents"] == []
         watermarks = response["result"]["projection"]["activityWatermarks"]
         assert {item["activity_id"] for item in watermarks} >= {
             "chat:team-session-1",
@@ -654,9 +649,15 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["conversation"]["running"] is True
         assert response["result"]["conversation"]["active_run_id"] == "active-team-run-1"
-        assert [event["run_id"] for event in response["result"]["runEvents"]] == ["active-team-run-1"]
-        assert [event["type"] for event in response["result"]["runEvents"]] == ["tool.start"]
-        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-1"
+        assert [event["run_id"] for event in response["result"]["runEvents"]] == [
+            "active-team-run-1",
+            "active-team-run-1",
+        ]
+        assert [event["type"] for event in response["result"]["runEvents"]] == [
+            "message.delta",
+            "tool.start",
+        ]
+        assert response["result"]["runEvents"][1]["payload"]["tool_id"] == "tool-1"
     finally:
         db.close()
 

@@ -116,9 +116,11 @@ def test_member_worker_preserves_other_assistant_speaker_ownership(monkeypatch, 
     history = _hydrate_worker_history(monkeypatch, tmp_path, db)
 
     assert history[0]["role"] == "user"
-    assert history[0]["content"].startswith(
-        f"[assistant | Leader Name | {LEADER_PARTICIPANT_ID}]"
+    assert history[0]["content"] == (
+        f"[assistant | Leader Name | {LEADER_PARTICIPANT_ID}]\n"
+        "I am Hermes Agent and will lead this task."
     )
+    assert "name" not in history[0]
     assert history[0]["metadata"]["speaker_participant_id"] == LEADER_PARTICIPANT_ID
     assert history[0]["metadata"]["speaker_projected_role"] == "user"
 
@@ -129,9 +131,8 @@ def test_member_own_replies_kept_as_assistant(monkeypatch, tmp_path: Path) -> No
     history = _hydrate_worker_history(monkeypatch, tmp_path, db)
 
     assert history[1]["role"] == "assistant"
-    assert history[1]["content"].startswith(
-        f"[assistant | You | {ALICE_PARTICIPANT_ID}]"
-    )
+    assert history[1]["content"] == "Alice previous reply in her own persona."
+    assert "name" not in history[1]
     assert history[1]["metadata"]["speaker_participant_id"] == ALICE_PARTICIPANT_ID
 
 
@@ -153,10 +154,11 @@ def test_leader_mission_hydration_uses_same_participant_perspective(
     )
 
     assert [message["role"] for message in history] == ["assistant", "user"]
-    assert history[0]["content"].startswith(
-        f"[assistant | You | {LEADER_PARTICIPANT_ID}]"
+    assert history[0]["content"] == "I am Hermes Agent and will lead this task."
+    assert "name" not in history[0]
+    assert history[1]["content"] == (
+        f"[assistant | Alice | {ALICE_PARTICIPANT_ID}]\n"
+        "Alice previous reply in her own persona."
     )
-    assert history[1]["content"].startswith(
-        f"[assistant | Alice | {ALICE_PARTICIPANT_ID}]"
-    )
+    assert "name" not in history[1]
     assert history[1]["metadata"]["speaker_participant_id"] == ALICE_PARTICIPANT_ID

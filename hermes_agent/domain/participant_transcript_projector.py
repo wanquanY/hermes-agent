@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_agent.domain.participant_message_content import (
+    LEGACY_SPEAKER_ENVELOPE_VERSION,
+    strip_legacy_speaker_envelopes,
+)
 
-SPEAKER_ENVELOPE_VERSION = "participant-speaker-v1"
+
+PARTICIPANT_PROJECTION_VERSION = "participant-perspective-v3"
+_SUPPORTED_PROJECTION_VERSIONS = {
+    "participant-structured-v2",
+    PARTICIPANT_PROJECTION_VERSION,
+}
+# Backward-compatible import for callers that still identify the retired v1
+# format.  New projection metadata uses ``PARTICIPANT_PROJECTION_VERSION``.
+SPEAKER_ENVELOPE_VERSION = LEGACY_SPEAKER_ENVELOPE_VERSION
 
 
 def _text(value: Any) -> str:
@@ -47,16 +59,29 @@ def _speaker_name(
     return participant_id or "Unknown Participant"
 
 
-def _speaker_envelope(
-    *,
-    role: str,
-    participant_id: str,
-    speaker_name: str,
-    viewing_participant_id: str,
+def _foreign_speaker_envelope(
+    *, original_role: str, participant_id: str, speaker_name: str
 ) -> str:
-    ownership = "You" if participant_id and participant_id == viewing_participant_id else speaker_name
-    identity = participant_id or "unknown"
-    return f"[{role} | {ownership} | {identity}]"
+    """Encode foreign ownership in transient provider-facing content only."""
+    return (
+        f"[{original_role} | {speaker_name or 'Unknown Participant'} | "
+        f"{participant_id or 'unknown'}]"
+    )
+
+
+def _original_role(role: str, metadata: dict[str, Any]) -> str:
+    projected_version = _text(metadata.get("speaker_projection_version"))
+    legacy_version = _text(metadata.get("speaker_envelope_version"))
+    candidate = _text(metadata.get("speaker_original_role"))
+    if (
+        candidate in {"user", "assistant"}
+        and projected_version in _SUPPORTED_PROJECTION_VERSIONS
+    ) or (
+        candidate in {"user", "assistant"}
+        and legacy_version == LEGACY_SPEAKER_ENVELOPE_VERSION
+    ):
+        return candidate
+    return role
 
 
 def project_participant_transcript(
@@ -65,14 +90,24 @@ def project_participant_transcript(
     viewing_participant_id: str,
     participants: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return a clean OpenAI-compatible history with deterministic speakers.
+    """Return a clean OpenAI-compatible history for one participant.
 
     Only the viewing participant's own prior utterances retain the provider
-    ``assistant`` role. Every other assistant utterance becomes attributed
-    conversational input under the provider ``user`` role. A foreign speaker
-    must never be promoted to ``system`` (which would grant their utterance
-    instruction priority), nor remain ``assistant`` (which would transfer the
-    speaker's persona and commitments to the viewing actor).
+    ``assistant`` role and keeps its canonical body without an identity prefix.
+    A real user's message likewise remains a plain ``user`` message. Every
+    foreign assistant utterance becomes conversational input under the
+    provider ``user`` role with a transient speaker envelope in its content.
+
+    The envelope exists only in this participant-specific provider view. It is
+    never persisted into the canonical transcript. We deliberately do not use
+    the provider ``name`` field for foreign assistants: once their role is
+    projected to ``user``, a user name makes them indistinguishable from the
+    real human user and causes the model to transfer Leader/member identity to
+    the human speaker.
+
+    A foreign speaker must never be promoted to ``system`` (which would grant
+    their utterance instruction priority), nor remain ``assistant`` (which
+    would transfer the speaker's persona and commitments to the viewing actor).
 
     Tool-call sequences belonging to another or unknown actor are removed
     because replaying them as the viewing actor would transfer action ownership.
@@ -83,6 +118,7 @@ def project_participant_transcript(
         for item in participants or []
         if isinstance(item, dict) and _text(item.get("participant_id"))
     }
+    known_participant_ids = set(participant_by_id)
     projected: list[dict[str, Any]] = []
     drop_following_tools = False
     for raw in messages or []:
@@ -105,19 +141,25 @@ def project_participant_transcript(
             continue
 
         metadata = _metadata(message)
-        if (
-            metadata.get("speaker_envelope_version") == SPEAKER_ENVELOPE_VERSION
-            and _text(metadata.get("speaker_projected_role")) == role
-        ):
-            projected.append(message)
-            continue
-
+        original_role = _original_role(role, metadata)
         participant_id = _participant_id(message)
-        if role == "user" and not participant_id:
+        if original_role == "user" and not participant_id:
             participant_id = "user"
         speaker_name = _speaker_name(participant_id, participant_by_id, message)
-        foreign_assistant = role == "assistant" and participant_id != viewing
+        foreign_assistant = original_role == "assistant" and participant_id != viewing
+        own_assistant = original_role == "assistant" and participant_id == viewing
         content = message.get("content")
+        if isinstance(content, str):
+            content, _ = strip_legacy_speaker_envelopes(
+                content,
+                participant_id=participant_id,
+                known_participant_ids=known_participant_ids,
+                trusted_legacy_projection=(
+                    _text(metadata.get("speaker_envelope_version"))
+                    == LEGACY_SPEAKER_ENVELOPE_VERSION
+                ),
+            )
+            message["content"] = content
         if not isinstance(content, str) or not content.strip():
             if foreign_assistant:
                 drop_following_tools = True
@@ -125,27 +167,26 @@ def project_participant_transcript(
             projected.append(message)
             continue
 
-        envelope = _speaker_envelope(
-            role=role,
-            participant_id=participant_id,
-            speaker_name=speaker_name,
-            viewing_participant_id=viewing,
+        projected_role = (
+            "assistant" if own_assistant else "user" if foreign_assistant else role
         )
-        if not content.startswith(envelope):
-            message["content"] = f"{envelope}\n{content}"
-        metadata.update(
-            {
-                "speaker_envelope_version": SPEAKER_ENVELOPE_VERSION,
-                "speaker_participant_id": participant_id,
-                "speaker_display_name": speaker_name,
-                "speaker_original_role": role,
-                "speaker_projected_role": "user" if foreign_assistant else role,
-            }
-        )
+        metadata.pop("speaker_envelope_version", None)
+        metadata.update({
+            "speaker_projection_version": PARTICIPANT_PROJECTION_VERSION,
+            "speaker_participant_id": participant_id,
+            "speaker_display_name": speaker_name,
+            "speaker_original_role": original_role,
+            "speaker_projected_role": projected_role,
+        })
         message["metadata"] = metadata
+        message["role"] = projected_role
+        message.pop("name", None)
 
         if foreign_assistant:
-            message["role"] = "user"
+            message["content"] = (
+                f"{_foreign_speaker_envelope(original_role=original_role, participant_id=participant_id, speaker_name=speaker_name)}\n"
+                f"{content}"
+            )
             for key in (
                 "tool_calls",
                 "tool_call_id",
@@ -159,4 +200,8 @@ def project_participant_transcript(
     return projected
 
 
-__all__ = ["SPEAKER_ENVELOPE_VERSION", "project_participant_transcript"]
+__all__ = [
+    "PARTICIPANT_PROJECTION_VERSION",
+    "SPEAKER_ENVELOPE_VERSION",
+    "project_participant_transcript",
+]
