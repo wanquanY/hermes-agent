@@ -29,6 +29,27 @@ class _FakeDB:
     def __init__(self) -> None:
         self.append_calls: list[dict] = []
         self._team_mission_projecting = False
+        owner = self
+
+        class _Runs:
+            @staticmethod
+            def get(_run_id: str):
+                return None
+
+            @staticmethod
+            def append_event(
+                stable: str,
+                frame: dict,
+                *,
+                participant_id: str = "",
+            ) -> dict:
+                return owner.append_run_event(
+                    stable,
+                    frame,
+                    participant_id=participant_id,
+                )
+
+        self.runs = _Runs()
 
     def append_run_event(self, stable: str, frame: dict, *, participant_id: str = "") -> dict:
         self.append_calls.append({
@@ -86,6 +107,37 @@ def test_worker_process_refuses_to_persist_with_persist_false(monkeypatch):
     db = _FakeDB()
     run_control.record_event(_frame(), db=db, persist=False)
     assert db.append_calls == []
+
+
+def test_worker_process_cannot_terminate_run_directly(monkeypatch):
+    class _Runs:
+        def __init__(self) -> None:
+            self.terminate_calls = []
+
+        def terminate(self, **kwargs):
+            self.terminate_calls.append(kwargs)
+            raise AssertionError("worker must not reach terminal persistence")
+
+    class _TerminalDB:
+        def __init__(self) -> None:
+            self.runs = _Runs()
+
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    db = _TerminalDB()
+
+    with pytest.raises(
+        run_control.WorkerTerminalOwnershipError,
+        match="RunTerminalFrame",
+    ):
+        run_control.terminate_run(
+            conversation_session_id="sess-1",
+            run_id="run-1",
+            status="failed",
+            message="boom",
+            db=db,
+        )
+
+    assert db.runs.terminate_calls == []
 
 
 def test_mark_as_worker_process_helper_flips_bit():

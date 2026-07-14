@@ -975,6 +975,7 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
     }
     assert agent.model_descriptor == session["model_descriptor"]
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+    assert agent.request_overrides["reasoning_effort"] == "high"
 
 
 def test_worker_prompt_uses_preselected_control_plane_model_without_switch_probe(
@@ -1088,6 +1089,93 @@ def test_direct_prompt_still_uses_canonical_model_switch(monkeypatch):
 
     assert switch_calls == [("runtime-direct", session, "glm-5.2")]
     assert session["model_descriptor"] == {"id": "glm-5.2"}
+
+
+def test_worker_prompt_failure_defers_terminal_transition_to_main(monkeypatch):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    db_lookups = []
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(
+        server,
+        "_db_for_stable_session",
+        lambda session_id: db_lookups.append(session_id),
+    )
+
+    prompt_methods._mark_prompt_run_failed(
+        run_id="run-worker-failure",
+        conversation_session_id="conversation-worker-failure",
+        runtime_scope_key="profile:test",
+        turn_id="turn-worker-failure",
+        message="preflight failed",
+    )
+
+    assert db_lookups == []
+
+
+def test_pending_model_descriptor_is_replayed_when_agent_is_bound():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import (
+        bind_session_agent,
+        set_session_model_descriptor,
+    )
+
+    session = {"agent": None}
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "gpt-5.6-luna",
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+            "reasoning_effort": "xhigh",
+            "request_params": {"reasoning_effort": "medium"},
+        },
+    )
+    agent = SimpleNamespace(
+        reasoning_config=None,
+        request_overrides={"service_tier": "priority"},
+    )
+
+    bind_session_agent(session, agent)
+
+    assert session["agent"] is agent
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+    assert agent.request_overrides == {
+        "service_tier": "priority",
+        "reasoning_effort": "xhigh",
+    }
+
+
+def test_clearing_model_descriptor_restores_shadowed_request_override():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+    agent = SimpleNamespace(
+        reasoning_config=None,
+        request_overrides={"reasoning_effort": "low", "service_tier": "priority"},
+    )
+    session = {"agent": agent}
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "gpt-5.6-luna",
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+            "reasoning_effort": "xhigh",
+            "request_params": {"reasoning_effort": "medium"},
+        },
+    )
+    assert agent.request_overrides["reasoning_effort"] == "xhigh"
+
+    set_session_model_descriptor(session, {}, clear_if_empty=True)
+
+    assert agent.request_overrides == {
+        "reasoning_effort": "low",
+        "service_tier": "priority",
+    }
 
 
 def test_model_set_clears_previous_reasoning_override_for_model_default(monkeypatch):

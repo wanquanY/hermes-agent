@@ -25,6 +25,7 @@ from agent.prompt_builder import (
     _get_context_file_max_chars,
     _CONTEXT_FILE_DYNAMIC_CEILING,
     DEFAULT_AGENT_IDENTITY,
+    HERMES_AGENT_HELP_GUIDANCE,
     drain_truncation_warnings,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
@@ -950,6 +951,12 @@ class TestStripYamlFrontmatter:
 class TestPromptBuilderConstants:
     def test_default_identity_non_empty(self):
         assert len(DEFAULT_AGENT_IDENTITY) > 50
+
+    def test_dovie_help_guidance_uses_product_facing_language(self):
+        guidance = HERMES_AGENT_HELP_GUIDANCE.lower()
+        assert "dovie" in guidance
+        assert "internal implementation" not in guidance
+        assert "do not present" not in guidance
 
     def test_platform_hints_known_platforms(self):
         assert "whatsapp" in PLATFORM_HINTS

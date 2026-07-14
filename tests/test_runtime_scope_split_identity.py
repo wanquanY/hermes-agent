@@ -48,13 +48,15 @@ def _supervisor() -> WorkerSupervisor:
 
 
 def _worker(scope: RuntimeScope) -> RunWorker:
-    return RunWorker(
+    worker = RunWorker(
         scope=scope,
         process=_FakeProcess(),
         inbound_queue=asyncio.Queue(),
         created_at=time.time(),
         last_used_at=time.time(),
     )
+    worker.ready_event.set()
+    return worker
 
 
 def test_runtime_scope_worker_identity_is_tuple_of_scope_and_conv() -> None:

@@ -715,6 +715,61 @@ def test_make_agent_codex_runtime_profile_defaults_provider():
     assert mock_agent.call_args.kwargs["provider"] == "openai-codex"
 
 
+def test_make_agent_hermes_executor_keeps_configured_cloud_provider():
+    """The ordinary Dovie executor must not be mistaken for Codex.
+
+    Dovie profile context always carries ``runtime_executor=hermes`` for the
+    native Hermes runtime.  Treating every non-empty executor as Codex routes a
+    managed cloud model into the Codex OAuth adapter and fails before the first
+    provider request when the user has no local Codex credentials.
+    """
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+        "api_key": "runtime-token",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
+    }
+    override = {
+        "model": "deepseek-v4-pro",
+        "runtime_executor": "hermes",
+        "model_explicit": True,
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ) as mock_resolve,
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent("sid-hermes", "key-hermes", model_override=override)
+
+    mock_resolve.assert_called_once_with(
+        requested=None,
+        target_model="deepseek-v4-pro",
+        runtime_executor="hermes",
+    )
+    kwargs = mock_agent.call_args.kwargs
+    assert kwargs["model"] == "deepseek-v4-pro"
+    assert kwargs["provider"] == "custom"
+    assert kwargs["api_mode"] == "chat_completions"
+
+
 def test_member_chat_profile_context_builds_byo_codex_agent_without_turn_model():
     from types import SimpleNamespace
 

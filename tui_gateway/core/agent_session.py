@@ -328,14 +328,27 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
+    old_agent = session.get("agent")
+    reasoning_override = getattr(old_agent, "reasoning_config", None)
+    if reasoning_override is None:
+        reasoning_override = session.get("create_reasoning_override")
+    service_tier_override = getattr(old_agent, "service_tier", None)
+    if service_tier_override is None:
+        service_tier_override = session.get("create_service_tier_override")
     tokens = _set_session_context(session["session_key"])
     try:
         new_agent = _make_agent(
-            sid, session["session_key"], session_id=session["session_key"]
+            sid,
+            session["session_key"],
+            session_id=session["session_key"],
+            reasoning_config_override=reasoning_override,
+            service_tier_override=service_tier_override,
         )
     finally:
         _clear_session_context(tokens)
-    session["agent"] = new_agent
+    from tui_gateway.services.model_descriptor import bind_session_agent
+
+    bind_session_agent(session, new_agent)
     session["attached_images"] = []
     session["edit_snapshots"] = {}
     session["image_counter"] = 0
@@ -434,6 +447,8 @@ def _make_agent(
     agent_context_mode: str | None = None,
     model_override: dict | None = None,
     profile_context: dict | None = None,
+    reasoning_config_override: dict | None = None,
+    service_tier_override: str | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -600,13 +615,21 @@ def _make_agent(
             requested_provider = _persisted_provider
         else:
             model, requested_provider = _resolve_startup_runtime()
-    if _runtime_executor:
+    from hermes_cli.runtime_provider import _normalize_runtime_executor as _norm_runtime_executor
+
+    normalized_runtime_executor = _norm_runtime_executor(_runtime_executor)
+    if normalized_runtime_executor == "codex_app_server":
+        # A Codex executor owns the provider boundary because it launches the
+        # Codex app-server instead of Hermes' native model client.  Other
+        # executor labels (notably Dovie's ordinary ``hermes`` profile value)
+        # are orchestration metadata and must never rewrite the configured
+        # inference provider to OpenAI Codex.
         requested_provider = _runtime_provider_override or "openai-codex"
+
     # Guard: refuse to spawn a forced Codex app-server without an isolated
     # employee CODEX_HOME. Silently falling back to the user's ~/.codex would
     # blend platform-employee state with the user's personal Codex account.
-    from hermes_cli.runtime_provider import _normalize_runtime_executor as _norm_runtime_executor
-    if _norm_runtime_executor(_runtime_executor) == "codex_app_server" and not _codex_home:
+    if normalized_runtime_executor == "codex_app_server" and not _codex_home:
         raise ValueError(
             "codex_app_server runtime requires codex_home; refusing to fall back to user home"
         )
@@ -690,8 +713,16 @@ def _make_agent(
         quiet_mode=True,
         verbose_logging=_load_tool_progress_mode() == "verbose",
         model_context_window=descriptor_context_window,
-        reasoning_config=_load_reasoning_config(),
-        service_tier=_load_service_tier(),
+        reasoning_config=(
+            reasoning_config_override
+            if reasoning_config_override is not None
+            else _load_reasoning_config()
+        ),
+        service_tier=(
+            service_tier_override
+            if service_tier_override is not None
+            else _load_service_tier()
+        ),
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         platform="tui",

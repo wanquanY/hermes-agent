@@ -8,6 +8,7 @@ Add, remove, or reorder entries here — both `hermes setup` and
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.error
@@ -3313,6 +3314,7 @@ def probe_api_models(
             "resolved_base_url": "",
             "suggested_base_url": None,
             "used_fallback": False,
+            "errors": [],
         }
 
     if _is_github_models_base_url(normalized):
@@ -3323,6 +3325,7 @@ def probe_api_models(
             "resolved_base_url": COPILOT_BASE_URL,
             "suggested_base_url": None,
             "used_fallback": False,
+            "errors": [],
         }
 
     if normalized.endswith("/v1"):
@@ -3335,6 +3338,7 @@ def probe_api_models(
         candidates.append((alternate_base, True))
 
     tried: list[str] = []
+    errors: list[dict[str, str]] = []
     headers: dict[str, str] = {"User-Agent": _HERMES_USER_AGENT}
     if api_key and api_mode == "anthropic_messages":
         headers["x-api-key"] = api_key
@@ -3357,16 +3361,31 @@ def probe_api_models(
                     "resolved_base_url": candidate_base.rstrip("/"),
                     "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
                     "used_fallback": is_fallback,
+                    "errors": errors,
                 }
-        except Exception:
+        except Exception as exc:
+            errors.append(
+                {
+                    "url": url,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                }
+            )
             continue
 
+    logging.getLogger(__name__).warning(
+        "model catalog probe exhausted base_url=%s attempts=%s errors=%s",
+        normalized,
+        len(tried),
+        errors,
+    )
     return {
         "models": None,
         "probed_url": tried[0] if tried else normalized.rstrip("/") + "/models",
         "resolved_base_url": normalized,
         "suggested_base_url": alternate_base if alternate_base != normalized else None,
         "used_fallback": False,
+        "errors": errors,
     }
 
 
@@ -3689,6 +3708,14 @@ def validate_requested_model(
             )
         if probe.get("suggested_base_url"):
             message += f"\n  If this server expects `/v1`, try base URL: `{probe.get('suggested_base_url')}`"
+        probe_errors = probe.get("errors")
+        if isinstance(probe_errors, list) and probe_errors:
+            last_error = probe_errors[-1]
+            if isinstance(last_error, dict):
+                error_type = str(last_error.get("error_type") or "error")
+                error_message = str(last_error.get("message") or "").strip()
+                if error_message:
+                    message += f"\n  Last verification error: {error_type}: {error_message}"
 
         return {
             "accepted": api_mode == "anthropic_messages",

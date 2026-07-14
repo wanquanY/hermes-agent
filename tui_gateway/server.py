@@ -40,6 +40,7 @@ from tui_gateway.services.media import (
 )
 from hermes_agent.storage.cli_session_store import open_cli_session_store as _open_cli_session_store
 from tui_gateway.services.model_descriptor import (
+    bind_session_agent as _bind_session_agent,
     normalize_model_descriptor as _normalize_model_descriptor,
     set_session_model_descriptor as _set_session_model_descriptor,
 )
@@ -1311,7 +1312,17 @@ def _start_agent_build(sid: str, session: dict) -> None:
             tokens = _set_session_context(key, terminal_cwd=cwd)
             try:
                 _log_agent_build_stage(sid, current, "make-agent-start")
-                agent = _make_agent(sid, key, cwd=cwd)
+                agent = _make_agent(
+                    sid,
+                    key,
+                    cwd=cwd,
+                    reasoning_config_override=current.get(
+                        "create_reasoning_override"
+                    ),
+                    service_tier_override=current.get(
+                        "create_service_tier_override"
+                    ),
+                )
                 _log_agent_build_stage(
                     sid,
                     current,
@@ -1326,7 +1337,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
-            current["agent"] = agent
+            _bind_session_agent(current, agent)
 
             try:
                 _log_agent_build_stage(sid, current, "slash-worker-start")

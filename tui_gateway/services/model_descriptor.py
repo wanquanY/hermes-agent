@@ -5,6 +5,16 @@ from typing import Any
 from hermes_constants import parse_reasoning_effort
 
 
+_RESERVED_REQUEST_PARAM_KEYS = {
+    "messages",
+    "model",
+    "stream",
+    "stream_options",
+    "timeout",
+    "tools",
+}
+
+
 def _apply_descriptor_context_window(agent: Any, context_window: Any) -> None:
     """Calibrate the context compressor to the model's admin-configured window.
 
@@ -67,6 +77,73 @@ def _apply_descriptor_reasoning_config(agent: Any, descriptor: dict[str, Any]) -
     parsed = parse_reasoning_effort(effort)
     if parsed is not None:
         setattr(agent, "reasoning_config", parsed)
+
+
+def _restore_descriptor_request_overrides(agent: Any) -> dict[str, Any]:
+    """Remove the previous descriptor layer without disturbing agent settings.
+
+    ``request_overrides`` also carries independent session settings such as
+    service tier.  A model switch must therefore restore values shadowed by the
+    previous descriptor instead of replacing the whole mapping or blindly
+    deleting keys.
+    """
+    overrides = dict(getattr(agent, "request_overrides", None) or {})
+    shadowed = getattr(agent, "_model_descriptor_request_override_shadow", None)
+    if not isinstance(shadowed, dict):
+        return overrides
+    for key, state in shadowed.items():
+        if not isinstance(state, tuple) or len(state) != 2:
+            continue
+        existed, value = state
+        if existed:
+            overrides[key] = value
+        else:
+            overrides.pop(key, None)
+    return overrides
+
+
+def _descriptor_request_overrides(descriptor: dict[str, Any]) -> dict[str, Any]:
+    """Build the trusted per-model request layer for the active selection.
+
+    Dovie's LLM proxy accepts ``reasoning_effort`` as a stable product-level
+    selector and converts it to the resolved provider's native request shape.
+    The catalog's ``request_params`` contains other registry-approved top-level
+    parameters.  Core chat identity fields remain owned by Hermes and are never
+    accepted from the descriptor.
+    """
+    request_params = descriptor.get("request_params")
+    overrides = dict(request_params) if isinstance(request_params, dict) else {}
+    for key in _RESERVED_REQUEST_PARAM_KEYS:
+        overrides.pop(key, None)
+
+    effort = str(descriptor.get("reasoning_effort") or "").strip().lower()
+    supported = descriptor.get("reasoning_efforts")
+    if effort and (
+        not isinstance(supported, list)
+        or not supported
+        or effort in supported
+    ):
+        overrides["reasoning_effort"] = effort
+    elif effort:
+        # Never fall back to a catalog default after the client supplied an
+        # invalid selection; let the proxy/model default apply instead.
+        overrides.pop("reasoning_effort", None)
+    elif descriptor.get("reasoning_enabled") is False:
+        overrides.pop("reasoning_effort", None)
+    return overrides
+
+
+def _apply_descriptor_request_overrides(agent: Any, descriptor: dict[str, Any]) -> None:
+    if agent is None:
+        return
+    overrides = _restore_descriptor_request_overrides(agent)
+    descriptor_overrides = _descriptor_request_overrides(descriptor)
+    shadowed: dict[str, tuple[bool, Any]] = {}
+    for key, value in descriptor_overrides.items():
+        shadowed[key] = (key in overrides, overrides.get(key))
+        overrides[key] = value
+    setattr(agent, "request_overrides", overrides)
+    setattr(agent, "_model_descriptor_request_override_shadow", shadowed)
 
 
 def normalize_model_descriptor(raw: object) -> dict[str, Any]:
@@ -135,8 +212,33 @@ def set_session_model_descriptor(
             setattr(agent, "model_descriptor", normalized)
             _apply_descriptor_context_window(agent, normalized.get("context_window"))
             _apply_descriptor_reasoning_config(agent, normalized)
+            _apply_descriptor_request_overrides(agent, normalized)
+            if "reasoning_enabled" in normalized or "reasoning_effort" in normalized:
+                session["create_reasoning_override"] = getattr(
+                    agent, "reasoning_config", None
+                )
         return
     if clear_if_empty:
         session.pop("model_descriptor", None)
-        if agent is not None and hasattr(agent, "model_descriptor"):
-            setattr(agent, "model_descriptor", {})
+        if agent is not None:
+            if hasattr(agent, "model_descriptor"):
+                setattr(agent, "model_descriptor", {})
+            setattr(
+                agent,
+                "request_overrides",
+                _restore_descriptor_request_overrides(agent),
+            )
+            setattr(agent, "_model_descriptor_request_override_shadow", {})
+
+
+def bind_session_agent(session: dict[str, Any], agent: Any) -> None:
+    """Bind a newly built agent and replay pending session model semantics.
+
+    Agent creation is intentionally deferred.  Model descriptors can therefore
+    arrive before an agent exists; every lifecycle path that installs a fresh
+    agent must replay the descriptor before the first model request.
+    """
+    session["agent"] = agent
+    descriptor = session.get("model_descriptor")
+    if isinstance(descriptor, dict) and descriptor:
+        set_session_model_descriptor(session, descriptor)

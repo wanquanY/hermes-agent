@@ -187,6 +187,14 @@ def _mark_prompt_run_failed(
     turn_id: str = "",
     message: str = "",
 ) -> None:
+    from tui_gateway.process_role import is_worker_process
+
+    # Worker processes are event sources, never terminal-state writers.  The
+    # AgentRunBackend converts the raised prompt failure into RunTerminalFrame;
+    # WorkerFrameRouter applies that frame in the main process and publishes
+    # the live terminal event after the DB transition commits.
+    if is_worker_process():
+        return
     db = _db_for_stable_session(conversation_session_id)
     if db is None or not run_id or not conversation_session_id:
         return
@@ -210,19 +218,22 @@ def _mark_prompt_run_cancelled(
     turn_id: str = "",
     message: str = "",
 ) -> dict:
-    db = _db_for_stable_session(conversation_session_id)
+    from tui_gateway.process_role import is_worker_process
+
     event = None
-    if db is not None and run_id and conversation_session_id:
-        event = run_control.terminate_run(
-            conversation_session_id=conversation_session_id,
-            run_id=run_id,
-            turn_id=turn_id,
-            runtime_scope_key=runtime_scope_key or conversation_session_id,
-            status="cancelled",
-            message=message or "cancelled before prompt start",
-            db=db,
-            owner_transport=current_transport(),
-        )
+    if not is_worker_process():
+        db = _db_for_stable_session(conversation_session_id)
+        if db is not None and run_id and conversation_session_id:
+            event = run_control.terminate_run(
+                conversation_session_id=conversation_session_id,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=runtime_scope_key or conversation_session_id,
+                status="cancelled",
+                message=message or "cancelled before prompt start",
+                db=db,
+                owner_transport=current_transport(),
+            )
     return {
         "status": "cancelled",
         "run_id": run_id,

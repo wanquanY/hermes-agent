@@ -91,6 +91,11 @@ _RUN_OPENING_EVENT_TYPES = {
 
 logger = logging.getLogger(__name__)
 
+
+class WorkerTerminalOwnershipError(RuntimeError):
+    """A worker attempted to persist a terminal run transition directly."""
+
+
 _STREAM_TRACE_EVENT_TYPES = {
     "message.start",
     "message.delta",
@@ -2400,6 +2405,13 @@ def terminate_run(
     db: Any = None,
     owner_transport: Transport | None = None,
 ) -> dict[str, Any]:
+    from tui_gateway.process_role import is_worker_process
+
+    if is_worker_process():
+        raise WorkerTerminalOwnershipError(
+            "worker processes must emit RunTerminalFrame; "
+            "the main process owns terminal persistence and delivery"
+        )
     stable = str(conversation_session_id or execution_session_id or "").strip()
     normalized_run_id = str(run_id or "").strip()
     if not stable or not normalized_run_id:

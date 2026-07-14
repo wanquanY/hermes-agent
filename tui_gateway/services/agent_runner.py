@@ -33,6 +33,7 @@ Phase 5c.2 deliberately leaves several follow-ups for Phase 5d / 6:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import threading
 import time
@@ -327,13 +328,25 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
             )
             if isinstance(persisted_config, str) and persisted_config.strip():
                 persisted_config = json.loads(persisted_config)
+            if isinstance(persisted_config, dict):
+                persisted_reasoning = persisted_config.get("reasoning_config")
+                if isinstance(persisted_reasoning, dict):
+                    session_record["create_reasoning_override"] = dict(
+                        persisted_reasoning
+                    )
+                persisted_tier = str(
+                    persisted_config.get("service_tier") or ""
+                ).strip()
+                if persisted_tier:
+                    session_record["create_service_tier_override"] = persisted_tier
             persisted_model = str(
                 persisted_session.get("model")
                 if isinstance(persisted_session, dict)
                 else ""
             ).strip()
             if (
-                persisted_model
+                not requested_model
+                and persisted_model
                 and isinstance(persisted_config, dict)
                 and bool(persisted_config.get("model_explicit"))
             ):

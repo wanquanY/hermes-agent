@@ -31,6 +31,21 @@ from tui_gateway.services.agent_runner import (
 from hermes_team_mission.domain.run_context import RunContext
 
 
+@pytest.fixture(autouse=True)
+def _restore_worker_environment_globals():
+    """Keep process-global worker bootstrap state isolated between tests."""
+    from tui_gateway import server as _server
+    from tui_gateway.services import agent_runner as _agent_runner
+
+    original_setup_done = _agent_runner._setup_done
+    original_stdio_transport = _server._stdio_transport
+    try:
+        yield
+    finally:
+        _agent_runner._setup_done = original_setup_done
+        _server._stdio_transport = original_stdio_transport
+
+
 def test_noop_transport_write_returns_true() -> None:
     t = _NoopTransport()
     assert t.write({"jsonrpc": "2.0", "method": "event", "params": {}}) is True
@@ -105,6 +120,102 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
     assert sessions[sid] is session
     assert session["agent"] is None
     assert starts == []
+
+
+def test_worker_session_restores_explicit_model_from_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A worker can recover an explicit model when the frame omits it."""
+    from tui_gateway import server as _server
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    session_id = "stored-session-with-explicit-model"
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id=session_id,
+        source="dovie",
+        model="deepseek-v4-pro",
+        model_config={
+            "model_explicit": True,
+            "reasoning_config": {"enabled": True, "effort": "xhigh"},
+            "service_tier": "priority",
+        },
+    )
+    persisted_session = db.sessions.get(session_id)
+    assert isinstance(persisted_session, dict)
+    assert isinstance(persisted_session["model_config"], str)
+
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
+
+    sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="run-restore-model",
+            turn_id="turn-restore-model",
+            conversation_session_id=session_id,
+            prompt="hello",
+            params={"runtime_scope_key": "profile:test"},
+        )
+    )
+
+    assert sessions[sid] is session
+    assert session["model_override"] == {
+        "model": "deepseek-v4-pro",
+        "model_explicit": True,
+    }
+    assert session["create_reasoning_override"] == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+    assert session["create_service_tier_override"] == "priority"
+
+
+def test_worker_session_turn_model_takes_precedence_over_persisted_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The control-plane turn selection is newer than the stored fallback."""
+    from tui_gateway import server as _server
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    session_id = "stored-session-with-new-turn-model"
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id=session_id,
+        source="dovie",
+        model="stale-model",
+        model_config={"model_explicit": True},
+    )
+
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
+
+    _sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="run-new-model",
+            turn_id="turn-new-model",
+            conversation_session_id=session_id,
+            prompt="hello",
+            params={
+                "runtime_scope_key": "profile:test",
+                "model": "turn-selected-model",
+            },
+        )
+    )
+
+    assert session["model_override"] == {
+        "model": "turn-selected-model",
+        "model_explicit": True,
+    }
 
 
 def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(

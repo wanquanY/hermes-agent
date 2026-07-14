@@ -285,6 +285,21 @@ class TestFetchApiModels:
         assert probe["resolved_base_url"] == "http://localhost:8000/v1"
         assert probe["used_fallback"] is True
 
+    def test_probe_api_models_preserves_failure_diagnostics(self):
+        with patch(
+            "hermes_cli.models.urllib.request.urlopen",
+            side_effect=TimeoutError("catalog timed out"),
+        ):
+            probe = probe_api_models("key", "https://example.com/v1")
+
+        assert probe["models"] is None
+        assert [item["url"] for item in probe["errors"]] == [
+            "https://example.com/v1/models",
+            "https://example.com/models",
+        ]
+        assert all(item["error_type"] == "TimeoutError" for item in probe["errors"])
+        assert all("catalog timed out" in item["message"] for item in probe["errors"])
+
     def test_probe_api_models_uses_copilot_catalog(self):
         class _Resp:
             def __enter__(self):

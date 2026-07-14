@@ -161,8 +161,7 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "If the user asks about configuring, setting up, or using Dovie itself, "
     "treat Dovie as the product identity. Use the available Dovie runtime, "
     "profile, config, tool, or documentation capabilities before answering "
-    "when they are available. Do not present internal implementation names as "
-    "the product identity."
+    "when they are available."
 )
 
 MEMORY_GUIDANCE = (
