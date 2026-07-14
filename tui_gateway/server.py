@@ -34,6 +34,7 @@ from tui_gateway.services.media import (
     image_meta as _image_meta,
 )
 from tui_gateway.services.model_descriptor import (
+    authoritative_catalog_model_id as _authoritative_catalog_model_id,
     normalize_model_descriptor as _normalize_model_descriptor,
     set_session_model_descriptor as _set_session_model_descriptor,
 )

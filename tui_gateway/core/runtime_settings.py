@@ -405,6 +405,7 @@ def _apply_model_switch(
     confirm_expensive_model: bool = False,
     pin_session_override: bool = True,
     parsed_flags: tuple[str, str, bool, bool, bool] | None = None,
+    catalog_model_id: str = "",
 ) -> dict:
     from hermes_cli.model_switch import (
         parse_model_flags,
@@ -448,6 +449,30 @@ def _apply_model_switch(
         else:
             current_api_key = str(_runtime_key or "")
 
+    # ``model.set`` and prompt RPCs are declarative session state.  Re-applying
+    # the model already owned by the live agent is a pure local no-op: do it
+    # before credential resolution or optional remote catalog discovery so a
+    # route change cannot become network-dependent.  Explicit provider/global
+    # CLI commands still enter the full switch pipeline.
+    if (
+        agent is not None
+        and is_session
+        and not explicit_provider
+        and model_input == str(current_model or "").strip()
+    ):
+        if pin_session_override:
+            session["model_override"] = {
+                "model": current_model,
+                "provider": (current_provider or None),
+                "base_url": (current_base_url or None),
+                "api_mode": (getattr(agent, "api_mode", "") or None),
+            }
+        return {
+            "value": current_model,
+            "warning": "",
+            "confirm_required": False,
+        }
+
     # Load user-defined providers so switch_model can resolve named custom
     # endpoints (e.g. "ollama-launch") and validate against saved model lists.
     user_provs = None
@@ -471,6 +496,7 @@ def _apply_model_switch(
         explicit_provider=explicit_provider,
         user_providers=user_provs,
         custom_providers=custom_provs,
+        catalog_model_id=catalog_model_id,
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")

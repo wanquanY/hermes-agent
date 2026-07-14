@@ -882,8 +882,8 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
     monkeypatch.setitem(server._sessions, "runtime-1", session)
     calls = []
 
-    def fake_apply_model_switch(session_id, active_session, model):
-        calls.append((session_id, active_session, model))
+    def fake_apply_model_switch(session_id, active_session, model, **kwargs):
+        calls.append((session_id, active_session, model, kwargs))
         return {"value": model, "warning": ""}
 
     monkeypatch.setattr(server, "_apply_model_switch", fake_apply_model_switch)
@@ -892,14 +892,137 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
         {
             "model": "gpt-5",
             "session_id": "runtime-1",
-            "model_descriptor": {"id": "gpt-5", "provider": "openai"},
+            "model_descriptor": {
+                "id": "gpt-5",
+                "catalog_source": "dovie_model_registry",
+                "provider": "openai",
+            },
         },
     )
 
     assert response["result"] == {"key": "model", "value": "gpt-5", "warning": ""}
-    assert calls == [("runtime-1", session, "gpt-5")]
-    assert session["model_descriptor"] == {"id": "gpt-5", "provider": "openai"}
-    assert agent.model_descriptor == {"id": "gpt-5", "provider": "openai"}
+    assert calls == [(
+        "runtime-1",
+        session,
+        "gpt-5",
+        {
+            "parsed_flags": ("gpt-5", "", False, False, True),
+            "catalog_model_id": "gpt-5",
+        },
+    )]
+    assert session["model_descriptor"] == {
+        "id": "gpt-5",
+        "catalog_source": "dovie_model_registry",
+        "provider": "openai",
+    }
+    assert agent.model_descriptor == session["model_descriptor"]
+
+
+def test_model_set_rejects_mismatched_catalog_descriptor(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    session = {"running": False, "agent": SimpleNamespace()}
+    monkeypatch.setitem(server._sessions, "runtime-mismatch", session)
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "gpt-5",
+            "session_id": "runtime-mismatch",
+            "model_descriptor": {
+                "id": "glm-5.2",
+                "catalog_source": "dovie_model_registry",
+            },
+        },
+    )
+
+    assert response["error"]["code"] == 4002
+    assert "descriptor id" in response["error"]["message"]
+
+
+def test_model_set_same_session_model_is_network_free(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    agent = SimpleNamespace(
+        model="deepseek-v4-pro",
+        provider="custom",
+        base_url="https://api.doviemate.com/api/v1/llm-proxy/v1",
+        api_key="runtime-token",
+        api_mode="chat_completions",
+    )
+    session = {"running": False, "agent": agent}
+    monkeypatch.setitem(server._sessions, "runtime-same-model", session)
+
+    def unexpected_switch(**_kwargs):
+        raise AssertionError("same-session model reapply must stay local")
+
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", unexpected_switch)
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "deepseek-v4-pro",
+            "session_id": "runtime-same-model",
+            "model_descriptor": {
+                "id": "deepseek-v4-pro",
+                "catalog_source": "dovie_model_registry",
+                "provider": "Dovie Cloud",
+            },
+        },
+    )
+
+    assert response["result"] == {
+        "key": "model",
+        "value": "deepseek-v4-pro",
+        "warning": "",
+    }
+    assert session["model_override"] == {
+        "model": "deepseek-v4-pro",
+        "provider": "custom",
+        "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+        "api_mode": "chat_completions",
+    }
+
+
+def test_prompt_model_selection_is_session_scoped(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {"running": False, "agent": SimpleNamespace()}
+    calls = []
+    monkeypatch.setattr(
+        prompt_methods,
+        "_apply_model_switch",
+        lambda sid, active_session, model, **kwargs: calls.append(
+            (sid, active_session, model, kwargs)
+        ),
+    )
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-prompt",
+        session,
+        "gpt-5",
+        {"id": "gpt-5", "catalog_source": "dovie_model_registry"},
+    )
+
+    assert calls == [(
+        "runtime-prompt",
+        session,
+        "gpt-5",
+        {
+            "parsed_flags": ("gpt-5", "", False, False, True),
+            "catalog_model_id": "gpt-5",
+        },
+    )]
+    assert session["model_descriptor"] == {
+        "id": "gpt-5",
+        "catalog_source": "dovie_model_registry",
+    }
 
 
 def test_model_set_gateway_method_rejects_running_session(monkeypatch):

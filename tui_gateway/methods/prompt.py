@@ -120,6 +120,28 @@ def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
     return "complete"
 
 
+def _apply_prompt_model_selection(
+    sid: str,
+    session: dict,
+    requested_model: str,
+    model_descriptor: dict,
+) -> None:
+    """Apply a prompt-selected model only to the addressed conversation."""
+    catalog_model_id = _authoritative_catalog_model_id(model_descriptor)
+    switch_options = {
+        "parsed_flags": (requested_model, "", False, False, True),
+    }
+    if catalog_model_id:
+        switch_options["catalog_model_id"] = catalog_model_id
+    _apply_model_switch(
+        sid,
+        session,
+        requested_model,
+        **switch_options,
+    )
+    _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
+
+
 def _mark_prompt_run_failed(
     *,
     run_id: str,
@@ -477,11 +499,11 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
 
     if requested_model:
         try:
-            _apply_model_switch(sid, session, requested_model)
-            _set_session_model_descriptor(
+            _apply_prompt_model_selection(
+                sid,
                 session,
+                requested_model,
                 model_descriptor,
-                clear_if_empty=True,
             )
         except Exception as e:
             with session["history_lock"]:
