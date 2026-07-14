@@ -72,6 +72,13 @@ class _LeaseState:
         return bool(self.inflight)
 
 
+@dataclass
+class _WarmState:
+    worker: RunWorker
+    profile_env_fingerprint: _EnvFingerprint
+    ready_at: float
+
+
 class WorkerLeaseManager:
     """Per-conversation worker subprocess pool with lease semantics."""
 
@@ -92,6 +99,9 @@ class WorkerLeaseManager:
         self._states: dict[_StateKey, _LeaseState] = {}
         self._locks: dict[_StateKey, asyncio.Lock] = {}
         self._run_to_state_key: dict[str, _StateKey] = {}
+        self._warm_states: dict[str, _WarmState] = {}
+        self._warm_locks: dict[str, asyncio.Lock] = {}
+        self._warm_tasks: set[asyncio.Task[Any]] = set()
         self._lock = asyncio.Lock()
         self._closing = False
         self._last_reap_at = 0.0
@@ -162,7 +172,13 @@ class WorkerLeaseManager:
                 await self._handle_dead_worker(key, state, reason="worker exited before acquire")
 
             scope = self._scope_for(conv, profile_context, scope_key=scope_key)
-            worker = await self._supervisor.ensure(scope, env_overrides=profile_env)
+            worker = await self._claim_warm_worker(
+                scope,
+                profile_env_fingerprint,
+            )
+            claimed_warm_worker = worker is not None
+            if worker is None:
+                worker = await self._supervisor.ensure(scope, env_overrides=profile_env)
             now = time.time()
             state = _LeaseState(
                 conversation_id=conv,
@@ -173,14 +189,66 @@ class WorkerLeaseManager:
             )
             self._states[key] = state
             _worker_pool_log(
-                "pool-lease-spawn",
+                "pool-lease-warm-claim" if claimed_warm_worker else "pool-lease-spawn",
                 conversation_id=conv,
                 scope_key=worker.scope_key,
                 worker_conversation_id=worker.conversation_id,
                 pid=worker.process.pid if worker.process else None,
                 profile_env_keys=sorted(profile_env),
             )
+            if claimed_warm_worker:
+                self._schedule_warm_replenishment(profile_context, scope.runtime_scope_key)
             return WorkerLease(conversation_id=conv, worker=worker, acquired_at=now)
+
+    async def ensure_warm(
+        self,
+        profile_context: dict,
+        *,
+        scope_key: str | None = None,
+    ) -> RunWorker:
+        """Maintain one fully bootstrapped, conversation-unbound worker.
+
+        The worker is profile-scoped but has no conversation identity until
+        ``get_or_spawn`` atomically claims it.  A claimed process is never
+        returned to this pool, preserving strict conversation isolation.
+        """
+
+        scope = self._scope_for("", profile_context, scope_key=scope_key)
+        normalized_scope_key = str(scope.runtime_scope_key or "").strip()
+        if not normalized_scope_key:
+            raise ValueError("runtime scope key required for worker warmup")
+        env = self._profile_env_overrides(profile_context)
+        fingerprint = self._env_fingerprint(env)
+        warm_lock = await self._warm_lock_for(normalized_scope_key)
+        async with warm_lock:
+            current = self._warm_states.get(normalized_scope_key)
+            if (
+                current is not None
+                and current.worker.running()
+                and current.profile_env_fingerprint == fingerprint
+            ):
+                return current.worker
+            if current is not None:
+                self._warm_states.pop(normalized_scope_key, None)
+                await self._supervisor.shutdown(
+                    current.worker.scope_key,
+                    current.worker.conversation_id,
+                )
+            worker = await self._supervisor.ensure(scope, env_overrides=env)
+            self._warm_states[normalized_scope_key] = _WarmState(
+                worker=worker,
+                profile_env_fingerprint=fingerprint,
+                ready_at=time.time(),
+            )
+            _worker_pool_log(
+                "pool-warm-ready",
+                scope_key=normalized_scope_key,
+                pid=worker.process.pid if worker.process else None,
+                bootstrap_ms=worker.bootstrap_ms,
+                bootstrap_stages_ms=worker.bootstrap_stages_ms,
+                profile_env_keys=sorted(env),
+            )
+            return worker
 
     async def release(self, conversation_id: str, scope_key: str | None = None) -> None:
         """Mark worker idle. In-flight runs still block idle reaping.
@@ -237,11 +305,19 @@ class WorkerLeaseManager:
                 await task
             except asyncio.CancelledError:
                 _log.debug("[worker-lease-manager] reap task cancelled during shutdown")
+        warm_tasks = list(self._warm_tasks)
+        self._warm_tasks.clear()
+        for warm_task in warm_tasks:
+            warm_task.cancel()
+        if warm_tasks:
+            await asyncio.gather(*warm_tasks, return_exceptions=True)
         await self._supervisor.shutdown_all()
         async with self._lock:
             self._states.clear()
             self._locks.clear()
             self._run_to_state_key.clear()
+            self._warm_states.clear()
+            self._warm_locks.clear()
 
     def stats(self) -> dict:
         """Return worker counts and reap timing diagnostics."""
@@ -258,6 +334,19 @@ class WorkerLeaseManager:
             "runningWorkerCount": sum(1 for s in states if s.worker.running()),
             "activeWorkerCount": len(active),
             "idleWorkerCount": len(idle),
+            "warmWorkerCount": sum(
+                1 for state in self._warm_states.values() if state.worker.running()
+            ),
+            "warmWorkers": [
+                {
+                    "scopeKey": scope_key,
+                    "pid": state.worker.process.pid if state.worker.running() else None,
+                    "running": state.worker.running(),
+                    "readyAt": state.ready_at,
+                    "bootstrapMs": state.worker.bootstrap_ms,
+                }
+                for scope_key, state in sorted(self._warm_states.items())
+            ],
             "lastReapAt": self._last_reap_at,
             "reapTickSeconds": self._reap_tick_s,
             "idleReapAfterSeconds": self._idle_reap_after_s,
@@ -585,6 +674,58 @@ class WorkerLeaseManager:
                 lock = asyncio.Lock()
                 self._locks[key] = lock
             return lock
+
+    async def _warm_lock_for(self, scope_key: str) -> asyncio.Lock:
+        async with self._lock:
+            lock = self._warm_locks.get(scope_key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._warm_locks[scope_key] = lock
+            return lock
+
+    async def _claim_warm_worker(
+        self,
+        scope: RuntimeScope,
+        fingerprint: _EnvFingerprint,
+    ) -> RunWorker | None:
+        scope_key = scope.runtime_scope_key
+        warm_lock = await self._warm_lock_for(scope_key)
+        async with warm_lock:
+            state = self._warm_states.get(scope_key)
+            if state is None:
+                return None
+            if not state.worker.running() or state.profile_env_fingerprint != fingerprint:
+                self._warm_states.pop(scope_key, None)
+                await self._supervisor.shutdown(
+                    state.worker.scope_key,
+                    state.worker.conversation_id,
+                )
+                return None
+            self._warm_states.pop(scope_key, None)
+            return await self._supervisor.rebind(state.worker, scope)
+
+    def _schedule_warm_replenishment(
+        self,
+        profile_context: dict,
+        scope_key: str,
+    ) -> None:
+        if self._closing:
+            return
+
+        async def replenish() -> None:
+            try:
+                await self.ensure_warm(profile_context, scope_key=scope_key)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.exception("[worker-pool] warm worker replenishment failed scope=%s", scope_key)
+
+        task = asyncio.create_task(
+            replenish(),
+            name=f"worker-pool-warm[{scope_key}]",
+        )
+        self._warm_tasks.add(task)
+        task.add_done_callback(self._warm_tasks.discard)
 
     async def _drop_lock(self, key: _StateKey) -> None:
         async with self._lock:

@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
@@ -155,12 +156,28 @@ class DBRpcRequestFrame:
     db_scope: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class WorkerReadyFrame:
+    """Worker bootstrap barrier consumed by ``WorkerSupervisor``.
+
+    A subprocess is not usable merely because ``Popen`` succeeded.  This
+    frame is emitted only after the legacy gateway environment and the
+    static agent/tool modules have finished loading.
+    """
+
+    ready: bool
+    bootstrap_ms: float
+    stages_ms: dict[str, float] = field(default_factory=dict)
+    error: str = ""
+
+
 OutgoingFrame = Union[
     EventFrame,
     InteractiveRequestFrame,
     RunTerminalFrame,
     LogFrame,
     DBRpcRequestFrame,
+    WorkerReadyFrame,
 ]
 
 
@@ -394,6 +411,27 @@ def decode_outgoing(line: str) -> OutgoingFrame:
             level=_require_str(obj, "level", op=op),
             text=_require_str(obj, "text", op=op),
         )
+    if op == "worker.ready":
+        ready = obj.get("ready")
+        if not isinstance(ready, bool):
+            raise FrameDecodeError("worker.ready: field 'ready' must be a boolean")
+        bootstrap_ms = obj.get("bootstrap_ms", 0.0)
+        if not isinstance(bootstrap_ms, (int, float)):
+            raise FrameDecodeError("worker.ready: field 'bootstrap_ms' must be a number")
+        raw_stages = _optional_mapping(obj, "stages_ms")
+        stages_ms: dict[str, float] = {}
+        for key, value in raw_stages.items():
+            if not isinstance(value, (int, float)):
+                raise FrameDecodeError(
+                    f"worker.ready: stage {key!r} duration must be a number"
+                )
+            stages_ms[str(key)] = float(value)
+        return WorkerReadyFrame(
+            ready=ready,
+            bootstrap_ms=float(bootstrap_ms),
+            stages_ms=stages_ms,
+            error=_optional_str(obj, "error"),
+        )
     raise FrameDecodeError(f"unknown outbound op {op!r}")
 
 
@@ -433,6 +471,15 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
         }
         if frame.db_scope:
             body["db_scope"] = frame.db_scope
+    elif isinstance(frame, WorkerReadyFrame):
+        body = {
+            "op": "worker.ready",
+            "ready": frame.ready,
+            "bootstrap_ms": frame.bootstrap_ms,
+            "stages_ms": frame.stages_ms,
+        }
+        if frame.error:
+            body["error"] = frame.error
     else:  # pragma: no cover — exhausted by Union
         raise TypeError(f"unknown outgoing frame type: {type(frame)!r}")
     # ``ensure_ascii=False`` keeps non-ASCII frames compact (event
@@ -829,6 +876,39 @@ def _build_default_backend() -> WorkerRunBackend:
     return AgentRunBackend(runner=run_agent)
 
 
+def _prepare_worker_runtime() -> dict[str, float]:
+    """Load process-static runtime state before accepting the first turn.
+
+    ``AIAgent`` itself remains turn-specific because model credentials,
+    toolset overrides, cwd and session history are request data.  Importing
+    its implementation and the tool/plugin registry is process-static and is
+    exactly the cold-start work that belongs behind ``runtime.ensure``.
+    """
+
+    stages: dict[str, float] = {}
+    started = time.perf_counter()
+    from tui_gateway.services.agent_runner import setup_worker_environment
+
+    setup_worker_environment()
+    stages["gateway_environment"] = round((time.perf_counter() - started) * 1000, 3)
+
+    started = time.perf_counter()
+    import run_agent  # noqa: F401 -- intentional process-static warmup
+
+    stages["agent_modules"] = round((time.perf_counter() - started) * 1000, 3)
+
+    started = time.perf_counter()
+    # Materialize the default tool-schema snapshot once.  Profile/turn-specific
+    # filters still receive their own cache key later; plugin discovery and the
+    # common schema assembly no longer sit on the first user turn.
+    run_agent.get_tool_definitions(quiet_mode=True)
+    stages["default_tool_catalog"] = round(
+        (time.perf_counter() - started) * 1000,
+        3,
+    )
+    return stages
+
+
 async def _main_async() -> int:
     # R1 architectural invariant: this process is a worker; the
     # main sidecar is the sole writer of run_events. Flip the
@@ -858,7 +938,20 @@ async def _main_async() -> int:
     set_default_worker_db_proxy(db_proxy)
     set_default_worker_rpc_proxy(rpc_proxy)
     set_default_activity_event_bus(activity_bus)
-    backend: WorkerRunBackend = _build_default_backend()
+    bootstrap_started = time.perf_counter()
+    try:
+        stages_ms = _prepare_worker_runtime()
+        backend: WorkerRunBackend = _build_default_backend()
+        stages_ms["backend"] = round(
+            (time.perf_counter() - bootstrap_started) * 1000
+            - sum(stages_ms.values()),
+            3,
+        )
+        bootstrap_error = ""
+    except Exception as exc:
+        backend = _StubBackend()
+        stages_ms = {}
+        bootstrap_error = f"{type(exc).__name__}: {exc}"
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
 
@@ -871,6 +964,20 @@ async def _main_async() -> int:
         handler=_build_default_handler(backend, responder, active_runs),
         db_reply_handler=_handle_jsonrpc_reply,
     )
+    bootstrap_ms = round((time.perf_counter() - bootstrap_started) * 1000, 3)
+    await proto.emit(
+        WorkerReadyFrame(
+            ready=not bootstrap_error,
+            bootstrap_ms=bootstrap_ms,
+            stages_ms=stages_ms,
+            error=bootstrap_error,
+        )
+    )
+    if bootstrap_error:
+        await proto.emit_log("error", f"run_worker: bootstrap failed: {bootstrap_error}")
+        return 1
+    # Keep the stable lifecycle log consumed by diagnostics/tests; the
+    # structured readiness details travel in WorkerReadyFrame above.
     await proto.emit_log("info", "run_worker: started")
     try:
         await proto.run()

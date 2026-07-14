@@ -1097,11 +1097,8 @@ def test_profile_prepare_runtime_preserves_draft_scope():
     assert response["result"]["transient"] is True
 
 
-def test_runtime_ensure_is_no_op_after_phase6():
-    """Phase 6: runtime.ensure no longer pre-warms a sub-sidecar
-    (``WorkerSupervisor`` spawns workers lazily on the first
-    ``run.submit``). It's kept as a frontend-compat stub that just
-    echoes the scope + reports ready."""
+def test_runtime_ensure_never_reports_false_readiness_outside_async_dispatch():
+    """The registry fallback must not resurrect the old fake-ready ABI."""
     from tui_gateway import server
 
     response = server._methods["runtime.ensure"](
@@ -1117,12 +1114,9 @@ def test_runtime_ensure_is_no_op_after_phase6():
         },
     )
 
-    assert response["result"]["ready"] is True
-    assert response["result"]["status"] == "ready"
-    assert response["result"]["runtime_scope_key"] == "profile:agent-a"
-    # No worker spawned in-band — the supervisor-spawn happens on
-    # run.submit, not here.
-    assert "worker" not in response["result"]
+    assert response["error"]["code"] == 5024
+    assert response["error"]["data"]["ready"] is False
+    assert response["error"]["data"]["runtime_scope_key"] == "profile:agent-a"
 
 
 def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):

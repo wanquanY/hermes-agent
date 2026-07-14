@@ -61,6 +61,14 @@ class _FakeSupervisor:
         worker.process.returncode = -15
         return True
 
+    async def rebind(self, worker: RunWorker, scope: RuntimeScope) -> RunWorker:
+        source = worker.scope.worker_identity
+        assert self.workers.get(source) is worker
+        self.workers.pop(source)
+        worker.scope = scope
+        self.workers[scope.worker_identity] = worker
+        return worker
+
     async def shutdown_all(self) -> None:
         self.shutdown_all_called = True
         for worker in self.workers.values():
@@ -104,6 +112,49 @@ async def test_get_or_spawn_new_conv_spawns_worker() -> None:
         assert supervisor.ensure_calls[0].conversation_id == "conv-1"
         assert supervisor.ensure_calls[0].worker_identity == ("profile:profile-1", "conv-1")
         assert supervisor.ensure_calls[0].agent_profile_id == "profile-1"
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_warm_worker_is_claimed_once_and_replenished() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
+    try:
+        warm = await pool.ensure_warm(_profile())
+        assert warm.conversation_id == ""
+        assert pool.stats()["warmWorkerCount"] == 1
+
+        lease = await pool.get_or_spawn("conv-1", _profile())
+        assert lease.worker is warm
+        assert lease.worker_conversation_id == "conv-1"
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert pool.stats()["warmWorkerCount"] == 1
+        assert len(supervisor.ensure_calls) == 2
+        assert supervisor.ensure_calls[1].conversation_id == ""
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_conversations_cannot_claim_same_warm_worker() -> None:
+    supervisor = _FakeSupervisor(ensure_delay_s=0.01)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
+    try:
+        warm = await pool.ensure_warm(_profile())
+        first, second = await asyncio.gather(
+            pool.get_or_spawn("conv-1", _profile()),
+            pool.get_or_spawn("conv-2", _profile()),
+        )
+
+        assert first.worker is warm or second.worker is warm
+        assert first.worker is not second.worker
+        assert {first.worker.conversation_id, second.worker.conversation_id} == {
+            "conv-1",
+            "conv-2",
+        }
     finally:
         await pool.shutdown()
 

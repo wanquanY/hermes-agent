@@ -32,6 +32,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     ShutdownFrame,
     WorkerProtocol,
+    WorkerReadyFrame,
     WorkerRunBackend,
     _build_default_handler,
     _StubBackend,
@@ -177,6 +178,20 @@ def test_encode_log() -> None:
     assert out == {"op": "log", "level": "warn", "text": "something"}
 
 
+def test_encode_worker_ready() -> None:
+    frame = WorkerReadyFrame(
+        ready=True,
+        bootstrap_ms=123.5,
+        stages_ms={"agent_modules": 100.0},
+    )
+    assert _roundtrip_out(frame) == {
+        "op": "worker.ready",
+        "ready": True,
+        "bootstrap_ms": 123.5,
+        "stages_ms": {"agent_modules": 100.0},
+    }
+
+
 def test_encode_no_trailing_newline() -> None:
     assert "\n" not in encode_outgoing(LogFrame(level="info", text="x"))
 
@@ -214,6 +229,7 @@ def test_incoming_encode_decode_roundtrip(frame) -> None:
         InteractiveRequestFrame(kind="clarify", request_id="x", payload={"q": "ok?"}),
         RunTerminalFrame(run_id="r1", status="completed"),
         LogFrame(level="info", text="boot"),
+        WorkerReadyFrame(ready=True, bootstrap_ms=10.0, stages_ms={"backend": 1.0}),
     ],
 )
 def test_outgoing_encode_decode_roundtrip(frame) -> None:

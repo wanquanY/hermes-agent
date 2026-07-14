@@ -358,6 +358,8 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
     # intercept both — the prompt.submit one catches any caller that
     # bypasses the desktop runtime client (CLI tools, tests).
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    if method == "runtime.ensure":
+        return await _dispatch_runtime_ensure(req, transport, params)
     if method == "runtime.cloud_proxy.update":
         return await _dispatch_runtime_cloud_proxy_update(req, transport, params)
     if method == "run.cancel":
@@ -372,6 +374,71 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         # route through worker.
         return False
     return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+async def _dispatch_runtime_ensure(
+    req: dict,
+    transport: Any,
+    params: dict,
+) -> bool:
+    """Make the stable readiness RPC a real worker bootstrap barrier."""
+
+    rid = req.get("id")
+    scope = runtime_scope_from_request(req)
+    if not scope.runtime_scope_key:
+        scope = RuntimeScope(
+            agent_profile_id=scope.agent_profile_id or "agent-default",
+            runtime_scope_key="profile:agent-default",
+            hermes_home=scope.hermes_home,
+        )
+    started = time.perf_counter()
+    try:
+        worker = await worker_pool().ensure_warm(
+            _profile_context_for_worker_pool(scope, params),
+            scope_key=scope.runtime_scope_key,
+        )
+    except Exception as exc:
+        _worker_run_log(
+            "runtime-ensure-error",
+            request_id=rid,
+            scope_key=scope.runtime_scope_key,
+            agent_profile_id=scope.agent_profile_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _ack_error(
+            transport,
+            rid,
+            code=5024,
+            message=f"runtime warmup failed: {exc}",
+        )
+        return True
+    ensure_ms = round((time.perf_counter() - started) * 1000, 3)
+    result = {
+        "status": "ready",
+        "ready": True,
+        "agent_profile_id": scope.agent_profile_id,
+        "runtime_scope_key": scope.runtime_scope_key,
+        "worker": {
+            "pid": worker.process.pid if worker.process else None,
+            "bootstrap_ms": worker.bootstrap_ms,
+            "bootstrap_stages_ms": dict(worker.bootstrap_stages_ms),
+            "ensure_ms": ensure_ms,
+            "warm": True,
+            "conversation_bound": False,
+        },
+    }
+    _worker_run_log(
+        "runtime-ensure-ready",
+        request_id=rid,
+        scope_key=scope.runtime_scope_key,
+        agent_profile_id=scope.agent_profile_id,
+        ensure_ms=ensure_ms,
+        worker_pid=worker.process.pid if worker.process else None,
+        bootstrap_ms=worker.bootstrap_ms,
+        bootstrap_stages_ms=worker.bootstrap_stages_ms,
+    )
+    await _ack_ok(transport, rid, result=result)
+    return True
 
 
 async def _dispatch_runtime_cloud_proxy_update(

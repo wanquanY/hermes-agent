@@ -29,6 +29,7 @@ from tui_gateway.run_worker import (
     RunCancelFrame,
     RunStartFrame,
     RunTerminalFrame,
+    WorkerReadyFrame,
     encode_outgoing,
 )
 from tui_gateway.services.runtime_scope import RuntimeScope
@@ -249,6 +250,9 @@ async def test_spawn_configures_large_worker_stdio_limit(monkeypatch, tmp_path) 
     async def fake_create_subprocess_exec(*args, **kwargs):
         captured["limit"] = kwargs["limit"]
         stdout = asyncio.StreamReader(limit=kwargs["limit"])
+        stdout.feed_data(
+            (encode_outgoing(WorkerReadyFrame(ready=True, bootstrap_ms=1.0)) + "\n").encode()
+        )
         stdout.feed_eof()
         return _FakeProcess(stdout)
 
@@ -298,6 +302,29 @@ async def test_read_loop_dispatches_large_event_frame(tmp_path) -> None:
     assert len(collector.events) == 1
     assert collector.events[0][0] == "profile:test-e2e"
     assert collector.events[0][1].params["payload"]["text"] == large_text
+
+
+@pytest.mark.asyncio
+async def test_rebind_atomically_claims_ready_worker(tmp_path) -> None:
+    collector = _Collector()
+    sup = _make_supervisor(collector)
+    try:
+        warm = await sup.ensure(_scope(tmp_path))
+        target = RuntimeScope(
+            agent_profile_id="prof-test",
+            runtime_scope_key=warm.scope_key,
+            conversation_id="conversation-1",
+            hermes_home=str(tmp_path),
+        )
+
+        claimed = await sup.rebind(warm, target)
+
+        assert claimed is warm
+        assert sup.get(target.runtime_scope_key, "") is None
+        assert sup.get(target.runtime_scope_key, "conversation-1") is warm
+        assert warm.conversation_id == "conversation-1"
+    finally:
+        await sup.shutdown_all()
 
 
 @pytest.mark.asyncio

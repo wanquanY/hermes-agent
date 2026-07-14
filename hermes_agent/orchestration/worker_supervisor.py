@@ -32,6 +32,7 @@ from tui_gateway.run_worker import (
     RunStartFrame,
     RunTerminalFrame,
     ShutdownFrame,
+    WorkerReadyFrame,
     decode_outgoing,
     encode_incoming,
 )
@@ -89,6 +90,7 @@ LogCallback = Callable[[str, str, LogFrame], Awaitable[None]]
 
 _DEFAULT_QUEUE_MAXSIZE = 1024
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 3.0
+_DEFAULT_READY_TIMEOUT_S = 30.0
 _SIGTERM_GRACE_S = 2.0
 _WORKER_STDIO_LIMIT_ENV = "HERMES_WORKER_STDIO_LIMIT_BYTES"
 _MIN_WORKER_STDIO_LIMIT_BYTES = 1024 * 1024
@@ -251,6 +253,10 @@ class RunWorker:
     read_task: Optional[asyncio.Task] = None
     dispatch_task: Optional[asyncio.Task] = None
     closing: bool = False
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    ready_error: str = ""
+    bootstrap_ms: float = 0.0
+    bootstrap_stages_ms: dict[str, float] = field(default_factory=dict)
 
     @property
     def scope_key(self) -> str:
@@ -291,6 +297,10 @@ class RunWorker:
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
             "returncode": self.process.returncode,
+            "ready": self.ready_event.is_set() and not self.ready_error,
+            "readyError": self.ready_error or None,
+            "bootstrapMs": self.bootstrap_ms,
+            "bootstrapStagesMs": dict(self.bootstrap_stages_ms),
         }
 
 
@@ -332,6 +342,7 @@ class WorkerSupervisor:
         scope: RuntimeScope,
         *,
         env_overrides: Optional[dict[str, str]] = None,
+        ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_S,
     ) -> RunWorker:
         if not scope.runtime_scope_key:
             raise RuntimeError("WorkerSupervisor.ensure: runtime_scope_key required")
@@ -340,13 +351,63 @@ class WorkerSupervisor:
             existing = self._workers.get(identity)
             if existing is not None and existing.running():
                 existing.mark_used()
-                return existing
-            if existing is not None:
-                # Process died — drop and respawn.
-                self._workers.pop(identity, None)
-            worker = await self._spawn_locked(scope, env_overrides or {})
-            self._workers[identity] = worker
-            return worker
+                worker = existing
+            else:
+                if existing is not None:
+                    # Process died — drop and respawn.
+                    self._workers.pop(identity, None)
+                worker = await self._spawn_locked(scope, env_overrides or {})
+                self._workers[identity] = worker
+        try:
+            await asyncio.wait_for(worker.ready_event.wait(), timeout=ready_timeout_s)
+        except TimeoutError as exc:
+            await self.shutdown(worker.scope_key, worker.conversation_id)
+            raise RuntimeError(
+                f"run worker bootstrap timed out after {ready_timeout_s:.1f}s"
+            ) from exc
+        if worker.ready_error:
+            await self.shutdown(worker.scope_key, worker.conversation_id)
+            raise RuntimeError(f"run worker bootstrap failed: {worker.ready_error}")
+        return worker
+
+    async def rebind(self, worker: RunWorker, scope: RuntimeScope) -> RunWorker:
+        """Atomically claim an unbound warm worker for one conversation."""
+        if not scope.runtime_scope_key or not scope.conversation_id:
+            raise ValueError("rebind target requires runtime_scope_key and conversation_id")
+        source_identity = worker.identity
+        target_identity = scope.worker_identity
+        async with self._lock:
+            if self._workers.get(source_identity) is not worker or not worker.running():
+                raise RuntimeError("warm worker is no longer available")
+            target = self._workers.get(target_identity)
+            if target is not None and target is not worker and target.running():
+                raise RuntimeError(f"worker already bound to {target_identity!r}")
+            self._workers.pop(source_identity, None)
+            self._workers.pop(target_identity, None)
+            worker.scope = scope
+            worker.mark_used()
+            self._workers[target_identity] = worker
+        env_updates = {
+            "DOVIE_HERMES_RUNTIME_SCOPE_KEY": scope.runtime_scope_key,
+            "DOVIE_CONVERSATION_ID": scope.conversation_id,
+            "DOVIE_AGENT_PROFILE_ID": scope.agent_profile_id,
+        }
+        if not await self._send_frame_to_worker(
+            worker,
+            RuntimeEnvUpdateFrame(env_updates=env_updates),
+        ):
+            async with self._lock:
+                self._workers.pop(target_identity, None)
+            await self._terminate(worker)
+            raise RuntimeError("failed to bind warm worker runtime environment")
+        _worker_supervisor_log(
+            "supervisor-warm-worker-claimed",
+            scope_key=scope.runtime_scope_key,
+            conversation_id=scope.conversation_id,
+            worker_pid=worker.process.pid if worker.process else None,
+            bootstrap_ms=worker.bootstrap_ms,
+        )
+        return worker
 
     def get(self, scope_key: str, conversation_id: str = "") -> Optional[RunWorker]:
         return self._workers.get((scope_key, conversation_id or ""))
@@ -606,6 +667,9 @@ class WorkerSupervisor:
             while True:
                 frame = await worker.inbound_queue.get()
                 if frame is None:
+                    if not worker.ready_event.is_set():
+                        worker.ready_error = worker.ready_error or "worker exited before readiness"
+                        worker.ready_event.set()
                     return
                 try:
                     await self._dispatch_one(worker, frame)
@@ -663,6 +727,21 @@ class WorkerSupervisor:
                         "[worker-log] scope=%s level=%s text=%s",
                         scope_key, frame.level, frame.text,
                     )
+            elif isinstance(frame, WorkerReadyFrame):
+                worker.bootstrap_ms = frame.bootstrap_ms
+                worker.bootstrap_stages_ms = dict(frame.stages_ms)
+                worker.ready_error = "" if frame.ready else (frame.error or "unknown bootstrap error")
+                worker.ready_event.set()
+                _worker_supervisor_log(
+                    "supervisor-worker-ready",
+                    scope_key=scope_key,
+                    conversation_id=worker.conversation_id,
+                    worker_pid=worker.process.pid if worker.process else None,
+                    ready=frame.ready,
+                    bootstrap_ms=frame.bootstrap_ms,
+                    stages_ms=frame.stages_ms,
+                    error=frame.error,
+                )
             else:  # pragma: no cover — exhausted by Union
                 _log.warning(
                     "[worker-supervisor] %s unknown frame type %r",

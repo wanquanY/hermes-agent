@@ -82,23 +82,20 @@ def _(rid, params: dict) -> dict:
 
 @method("runtime.ensure")
 def _(rid, params: dict) -> dict:
-    """Phase 6 stub: kept for frontend compatibility.
+    """Reject paths that bypass the async worker-runtime dispatcher.
 
-    The legacy worker pre-warm path (spawning a sub-sidecar) is gone.
-    The new ``WorkerSupervisor`` spawns workers lazily on the first
-    ``run.submit`` for a scope, so ``runtime.ensure`` has no real work
-    to do — just acknowledge the scope and return ready=True. Frontend
-    runtime readiness machinery (``DesktopSessionRuntime`` etc.) still
-    calls this method on session attach as a liveness check."""
+    Production transports call ``worker_runtime.primary_dispatch`` before
+    this registry.  Returning a synthetic readiness result here would revive
+    the exact false-ready contract that caused first-turn cold starts.
+    """
     scope = _profile_runtime_scope_from_params(params or {})
-    return _ok(
+    response = _err(
         rid,
-        {
-            "status": "ready",
-            "ready": True,
-            **scope,
-        },
+        5024,
+        "runtime.ensure requires the async worker-runtime transport",
     )
+    response["error"]["data"] = {"status": "unavailable", "ready": False, **scope}
+    return response
 
 
 @method("runtime.status")

@@ -172,6 +172,51 @@ async def test_primary_dispatch_skips_non_submit_methods() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_ensure_waits_for_real_warm_worker(monkeypatch) -> None:
+    transport = _RecordingTransport()
+    scope = RuntimeScope(
+        agent_profile_id="test",
+        runtime_scope_key="profile:test",
+        hermes_home="/tmp/test-hermes-home",
+    )
+    worker = _fake_worker(scope)
+    worker.ready_event.set()
+    worker.bootstrap_ms = 321.0
+    worker.bootstrap_stages_ms = {"agent_modules": 300.0}
+
+    class _FakePool:
+        async def ensure_warm(self, profile_context, *, scope_key=None):
+            assert scope_key == "profile:test"
+            assert profile_context["agent_profile_id"] == "test"
+            return worker
+
+    monkeypatch.setattr(worker_runtime, "worker_pool", lambda: _FakePool())
+    req = {
+        "jsonrpc": "2.0",
+        "id": "ensure-1",
+        "method": "runtime.ensure",
+        "params": {
+            "agent_profile_id": "test",
+            "runtime_scope_key": "profile:test",
+            "dovie_profile": {
+                "id": "test",
+                "runtimeScopeKey": "profile:test",
+                "hermesHomePath": "/tmp/test-hermes-home",
+            },
+        },
+    }
+
+    handled = await worker_runtime.primary_dispatch(req, transport)
+
+    assert handled is True
+    result = transport.written[0]["result"]
+    assert result["ready"] is True
+    assert result["worker"]["warm"] is True
+    assert result["worker"]["conversation_bound"] is False
+    assert result["worker"]["bootstrap_ms"] == 321.0
+
+
+@pytest.mark.asyncio
 async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
     """frontend sends ``run.submit`` (not ``prompt.submit``) as the
     canonical chat entry — intercept it just like prompt.submit."""
