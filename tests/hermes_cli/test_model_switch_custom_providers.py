@@ -140,6 +140,41 @@ def test_same_custom_provider_switch_preserves_current_api_key(monkeypatch):
     assert result.api_key == "dovie-access-token"
 
 
+def test_authoritative_catalog_model_skips_remote_custom_endpoint_probe(monkeypatch):
+    """A control-plane catalog decision must not depend on another TLS probe."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "api_key": "dovie-runtime-token",
+            "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+            "api_mode": "chat_completions",
+        },
+    )
+
+    def unexpected_validation(*_args, **_kwargs):
+        raise AssertionError("authoritative catalog model must skip live validation")
+
+    monkeypatch.setattr(
+        "hermes_cli.models.validate_requested_model",
+        unexpected_validation,
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+
+    result = switch_model(
+        raw_input="deepseek-v4-pro",
+        current_provider="custom",
+        current_model="gpt-5.5",
+        current_base_url="https://api.doviemate.com/api/v1/llm-proxy/v1",
+        current_api_key="dovie-runtime-token",
+        catalog_model_id="deepseek-v4-pro",
+    )
+
+    assert result.success is True
+    assert result.new_model == "deepseek-v4-pro"
+    assert result.target_provider == "custom"
+
+
 def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):
     """Multiple custom_providers entries sharing a name should produce one row
     with all models collected, not N duplicate rows."""

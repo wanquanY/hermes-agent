@@ -3699,7 +3699,8 @@ def validate_requested_model(
 
         message = (
             f"Note: could not reach this custom endpoint's model listing at `{probe.get('probed_url')}`. "
-            f"Hermes will still save `{requested}`, but the endpoint should expose `/models` for verification."
+            f"Hermes accepted `{requested}` without verification; the endpoint should expose `/models` "
+            "to enable typo detection and model suggestions."
         )
         if api_mode == "anthropic_messages":
             message += (
@@ -3718,7 +3719,7 @@ def validate_requested_model(
                     message += f"\n  Last verification error: {error_type}: {error_message}"
 
         return {
-            "accepted": api_mode == "anthropic_messages",
+            "accepted": True,
             "persist": True,
             "recognized": False,
             "message": message,

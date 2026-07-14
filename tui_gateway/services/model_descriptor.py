@@ -160,6 +160,7 @@ def normalize_model_descriptor(raw: object) -> dict[str, Any]:
         "provider",
         "api_provider",
         "api_format",
+        "catalog_source",
         "reasoning_format",
         "default_reasoning_effort",
         "reasoning_effort",
@@ -196,6 +197,23 @@ def normalize_model_descriptor(raw: object) -> dict[str, Any]:
         descriptor["reasoning_efforts"] = normalized_efforts
 
     return descriptor
+
+
+def authoritative_catalog_model_id(raw: object) -> str:
+    """Return the model id when a caller supplied catalog authority.
+
+    Gateway clients such as Dovie resolve their selectable models from an
+    authenticated control-plane registry before calling ``model.set``.  The
+    descriptor carries that provenance explicitly so the local runtime can
+    consume the registry decision instead of synchronously probing the remote
+    inference endpoint's optional ``/models`` surface again.
+
+    A bare ``{"id": ...}`` descriptor remains metadata-only and therefore
+    does not bypass the interactive custom-endpoint validation path.
+    """
+    descriptor = normalize_model_descriptor(raw)
+    catalog_source = str(descriptor.get("catalog_source") or "").strip()
+    return str(descriptor.get("id") or "").strip() if catalog_source else ""
 
 
 def set_session_model_descriptor(

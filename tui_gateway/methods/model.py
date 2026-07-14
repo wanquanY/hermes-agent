@@ -20,6 +20,16 @@ def _(rid, params: dict) -> dict:
     session_id = params.get("session_id", "")
     session = _sessions.get(session_id)
     try:
+        descriptor = _normalize_model_descriptor(
+            params.get("model_descriptor") or params.get("modelDescriptor")
+        )
+        if descriptor and descriptor["id"] != value:
+            return _err(
+                rid,
+                4002,
+                "model descriptor id must match model value",
+            )
+        catalog_model_id = _authoritative_catalog_model_id(descriptor)
         if session:
             # Keep model mutation outside in-flight turns. agent.switch_model()
             # mutates provider/model/client state that run_conversation reads.
@@ -29,16 +39,35 @@ def _(rid, params: dict) -> dict:
                     4009,
                     "session busy — /interrupt the current turn before switching models",
                 )
-            result = _apply_model_switch(session_id, session, value)
+            switch_options = {
+                # ``model.set`` addresses one explicit runtime session.  A UI
+                # selection must never rewrite the profile-global model just
+                # because the CLI's interactive /model default is persistent.
+                "parsed_flags": (value, "", False, False, True),
+            }
+            if catalog_model_id:
+                switch_options["catalog_model_id"] = catalog_model_id
+            result = _apply_model_switch(
+                session_id,
+                session,
+                value,
+                **switch_options,
+            )
             _set_session_model_descriptor(
                 session,
-                _normalize_model_descriptor(
-                    params.get("model_descriptor") or params.get("modelDescriptor")
-                ),
+                descriptor,
                 clear_if_empty=True,
             )
         else:
-            result = _apply_model_switch("", {"agent": None}, value)
+            if catalog_model_id:
+                result = _apply_model_switch(
+                    "",
+                    {"agent": None},
+                    value,
+                    catalog_model_id=catalog_model_id,
+                )
+            else:
+                result = _apply_model_switch("", {"agent": None}, value)
         return _ok(
             rid,
             {"key": "model", "value": result["value"], "warning": result["warning"]},

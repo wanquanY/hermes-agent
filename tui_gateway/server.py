@@ -40,6 +40,7 @@ from tui_gateway.services.media import (
 )
 from hermes_agent.storage.cli_session_store import open_cli_session_store as _open_cli_session_store
 from tui_gateway.services.model_descriptor import (
+    authoritative_catalog_model_id as _authoritative_catalog_model_id,
     bind_session_agent as _bind_session_agent,
     normalize_model_descriptor as _normalize_model_descriptor,
     set_session_model_descriptor as _set_session_model_descriptor,

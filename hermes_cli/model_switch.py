@@ -673,6 +673,7 @@ def switch_model(
     explicit_provider: str = "",
     user_providers: dict = None,
     custom_providers: list | None = None,
+    catalog_model_id: str = "",
 ) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
@@ -707,6 +708,9 @@ def switch_model(
         explicit_provider: From --provider flag (empty = no explicit provider).
         user_providers: The ``providers:`` dict from config.yaml (for user endpoints).
         custom_providers: The ``custom_providers:`` list from config.yaml.
+        catalog_model_id: Exact model id already resolved by an authoritative
+            caller-side catalog.  When it matches the final normalized model,
+            skip optional live ``/models`` discovery.
 
     Returns:
         ModelSwitchResult with all information the caller needs.
@@ -968,21 +972,40 @@ def switch_model(
     new_model = normalize_model_for_provider(new_model, target_provider)
 
     # --- Validate ---
-    try:
-        validation = validate_requested_model(
-            new_model,
-            target_provider,
-            api_key=api_key,
-            base_url=base_url,
-            api_mode=api_mode or None,
-        )
-    except Exception as e:
+    # Product gateways can already own an authenticated, policy-filtered model
+    # registry.  Re-probing their inference endpoint here duplicates that
+    # authority, adds a fresh TLS connection to every switch, and makes a local
+    # state transition fail when the optional remote catalog is slow.  Only
+    # bypass discovery for an exact post-normalization match; aliases or
+    # provider normalization mismatches still use the canonical validation
+    # pipeline.
+    normalized_catalog_model_id = normalize_model_for_provider(
+        str(catalog_model_id or "").strip(),
+        target_provider,
+    )
+    if normalized_catalog_model_id and normalized_catalog_model_id == new_model:
         validation = {
-            "accepted": False,
-            "persist": False,
-            "recognized": False,
-            "message": f"Could not validate `{new_model}`: {e}",
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "message": None,
         }
+    else:
+        try:
+            validation = validate_requested_model(
+                new_model,
+                target_provider,
+                api_key=api_key,
+                base_url=base_url,
+                api_mode=api_mode or None,
+            )
+        except Exception as e:
+            validation = {
+                "accepted": False,
+                "persist": False,
+                "recognized": False,
+                "message": f"Could not validate `{new_model}`: {e}",
+            }
 
     # Override rejection if model is in the user's saved provider config.
     # API /v1/models may not list cloud/aliased models even though the server supports them.

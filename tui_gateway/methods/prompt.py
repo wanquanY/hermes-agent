@@ -175,7 +175,20 @@ def _apply_prompt_model_selection(
     # Interactive/direct TUI callers still use the canonical model-switch
     # pipeline.  Only commit the descriptor after a successful switch so a
     # rejected model cannot mutate the currently-running agent's semantics.
-    _apply_model_switch(sid, session, requested_model)
+    catalog_model_id = _authoritative_catalog_model_id(model_descriptor)
+    switch_options = {
+        # A prompt-selected model belongs to this conversation.  Keep the
+        # terminal CLI's global persistence policy out of the RPC contract.
+        "parsed_flags": (requested_model, "", False, False, True),
+    }
+    if catalog_model_id:
+        switch_options["catalog_model_id"] = catalog_model_id
+    _apply_model_switch(
+        sid,
+        session,
+        requested_model,
+        **switch_options,
+    )
     _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
 
 
