@@ -132,6 +132,53 @@ def test_make_agent_restores_persisted_session_toolsets():
     assert mock_agent.call_args.kwargs["disabled_toolsets"] == ["delegation"]
 
 
+def test_make_agent_forwards_descriptor_context_window_before_agent_init():
+    """Dovie catalog metadata must bypass remote /models discovery at init."""
+
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+        "api_key": "token-a",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {"agent": {"system_prompt": ""}}
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=None),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="off"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway import server
+
+        server._sessions["sid-context-window"] = {
+            "model_descriptor": {
+                "id": "deepseek-v4-pro",
+                "context_window": 200_000,
+            },
+        }
+        try:
+            server._make_agent(
+                "sid-context-window",
+                "stored-context-window",
+                model_override={
+                    "model": "deepseek-v4-pro",
+                    "model_explicit": True,
+                },
+            )
+        finally:
+            server._sessions.pop("sid-context-window", None)
+
+    assert mock_agent.call_args.kwargs["model_context_window"] == 200_000
+
+
 def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
     from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 

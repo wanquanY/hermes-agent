@@ -472,6 +472,18 @@ def _make_agent(
     _override = model_override if isinstance(model_override, dict) else (_sessions.get(sid) or {}).get("model_override")
     _override = _override if isinstance(_override, dict) else None
     session_context = dict(_sessions.get(sid) or {})
+    session_model_descriptor = session_context.get("model_descriptor")
+    descriptor_context_window = (
+        session_model_descriptor.get("context_window")
+        if isinstance(session_model_descriptor, dict)
+        else None
+    )
+    if not (
+        isinstance(descriptor_context_window, int)
+        and not isinstance(descriptor_context_window, bool)
+        and descriptor_context_window > 0
+    ):
+        descriptor_context_window = None
     _profile_context = (
         profile_context
         if isinstance(profile_context, dict)
@@ -677,6 +689,7 @@ def _make_agent(
         credential_pool=runtime.get("credential_pool"),
         quiet_mode=True,
         verbose_logging=_load_tool_progress_mode() == "verbose",
+        model_context_window=descriptor_context_window,
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
         enabled_toolsets=enabled_toolsets,

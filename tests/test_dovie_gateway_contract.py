@@ -977,6 +977,119 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
 
 
+def test_worker_prompt_uses_preselected_control_plane_model_without_switch_probe(
+    monkeypatch,
+):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+    switch_calls = []
+
+    def unexpected_switch(*args, **kwargs):
+        switch_calls.append((args, kwargs))
+        raise AssertionError("worker bootstrap must not enter remote model validation")
+
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(server, "_apply_model_switch", unexpected_switch)
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-worker",
+        session,
+        "glm-5.2",
+        {
+            "id": "glm-5.2",
+            "reasoning_enabled": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert switch_calls == []
+    assert session["model_override"] == {
+        "model": "glm-5.2",
+        "model_explicit": True,
+    }
+    assert session["model_descriptor"] == {
+        "id": "glm-5.2",
+        "reasoning_enabled": True,
+        "reasoning_effort": "high",
+    }
+
+
+def test_worker_prompt_does_not_probe_models_when_optional_descriptor_is_absent(
+    monkeypatch,
+):
+    """Internal worker routing already selected the model in RunStartFrame."""
+
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+
+    def unexpected_switch(*_args, **_kwargs):
+        raise AssertionError("worker bootstrap must not probe relay /models")
+
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(server, "_apply_model_switch", unexpected_switch)
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-worker",
+        session,
+        "glm-5.2",
+        {},
+    )
+
+    assert session["model_override"] == {
+        "model": "glm-5.2",
+        "model_explicit": True,
+    }
+    assert "model_descriptor" not in session
+
+
+def test_direct_prompt_still_uses_canonical_model_switch(monkeypatch):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+    switch_calls = []
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", False)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda sid, active_session, model: switch_calls.append(
+            (sid, active_session, model)
+        ),
+    )
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-direct",
+        session,
+        "glm-5.2",
+        {"id": "glm-5.2"},
+    )
+
+    assert switch_calls == [("runtime-direct", session, "glm-5.2")]
+    assert session["model_descriptor"] == {"id": "glm-5.2"}
+
+
 def test_model_set_clears_previous_reasoning_override_for_model_default(monkeypatch):
     from types import SimpleNamespace
 

@@ -121,6 +121,64 @@ def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
     return "complete"
 
 
+def _worker_bootstrap_model_is_preselected(
+    session: dict,
+    requested_model: str,
+    _model_descriptor: dict,
+) -> bool:
+    """Return whether the control plane already selected this worker model.
+
+    ``RunStartFrame`` materialization stores the turn's explicit model in the
+    worker session before ``prompt.submit`` runs.  Replaying that selection
+    through the interactive ``/model`` pipeline is both redundant and wrong:
+    it performs synchronous provider discovery before the agent even exists.
+    The override is materialized from the same immutable RunStartFrame as the
+    prompt request, so an exact model match is the authority boundary.  A
+    descriptor enriches reasoning/context semantics when present, but must not
+    be required: internal team and restored-session runs can legitimately omit
+    it, and routing those runs through interactive ``/model`` validation makes
+    first-token delivery depend on a relay exposing a reachable ``/models``.
+    """
+    from tui_gateway.process_role import is_worker_process
+
+    if not is_worker_process() or session.get("agent") is not None:
+        return False
+    override = session.get("model_override")
+    if not isinstance(override, dict):
+        return False
+    override_model = str(override.get("model") or "").strip()
+    return bool(
+        requested_model
+        and override_model == requested_model
+        and bool(override.get("model_explicit"))
+    )
+
+
+def _apply_prompt_model_selection(
+    sid: str,
+    session: dict,
+    requested_model: str,
+    model_descriptor: dict,
+) -> None:
+    """Apply a prompt model without re-validating worker bootstrap state."""
+    if _worker_bootstrap_model_is_preselected(
+        session,
+        requested_model,
+        model_descriptor,
+    ):
+        # The deferred agent build consumes session["model_override"].  Bind
+        # the descriptor now so bind_session_agent() replays reasoning/context
+        # semantics before the first provider request.
+        _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
+        return
+
+    # Interactive/direct TUI callers still use the canonical model-switch
+    # pipeline.  Only commit the descriptor after a successful switch so a
+    # rejected model cannot mutate the currently-running agent's semantics.
+    _apply_model_switch(sid, session, requested_model)
+    _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
+
+
 def _mark_prompt_run_failed(
     *,
     run_id: str,
@@ -603,11 +661,11 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
 
     if requested_model:
         try:
-            _apply_model_switch(sid, session, requested_model)
-            _set_session_model_descriptor(
+            _apply_prompt_model_selection(
+                sid,
                 session,
+                requested_model,
                 model_descriptor,
-                clear_if_empty=True,
             )
         except Exception as e:
             with session["history_lock"]:

@@ -219,6 +219,7 @@ def init_agent(
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
     cwd: str = None,
+    model_context_window: int = None,
 ):
     """
     Initialize the AI Agent.
@@ -1394,8 +1395,19 @@ def init_agent(
                 )
     agent._session_init_model_config["max_tokens"] = agent.max_tokens
 
-    # Read explicit context_length override from model config
-    if isinstance(_model_cfg, dict):
+    # A caller-owned model registry can provide the selected model's context
+    # window as part of the immutable runtime descriptor.  Consume it before
+    # constructing the context engine so remote OpenAI-compatible relays do
+    # not block first-token delivery on a speculative ``/models`` probe.
+    # Standalone Hermes callers continue to use model.context_length or the
+    # provider discovery chain when no descriptor value is supplied.
+    if (
+        isinstance(model_context_window, int)
+        and not isinstance(model_context_window, bool)
+        and model_context_window > 0
+    ):
+        _config_context_length = model_context_window
+    elif isinstance(_model_cfg, dict):
         _config_context_length = _model_cfg.get("context_length")
     else:
         _config_context_length = None
@@ -1484,6 +1496,7 @@ def init_agent(
     # Persist for reuse on switch_model / fallback activation. Must come
     # AFTER the custom_providers branch so per-model overrides aren't lost.
     agent._config_context_length = _config_context_length
+    agent._session_init_model_config["context_length"] = _config_context_length
 
     agent._ensure_lmstudio_runtime_loaded(_config_context_length)
 
