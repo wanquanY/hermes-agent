@@ -50,6 +50,14 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
         "activity_commands",
     }.issubset(tables)
     assert _schema_version(db_path) == CURRENT_SCHEMA_VERSION
+    conn = sqlite3.connect(db_path)
+    try:
+        run_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("runs")').fetchall()
+        }
+        assert {"worker_id", "agent_profile_id"}.issubset(run_columns)
+    finally:
+        conn.close()
 
 
 def test_half_upgraded_database_runs_pending_owner_migrations(
@@ -77,6 +85,10 @@ def test_half_upgraded_database_runs_pending_owner_migrations(
             row[1] for row in conn.execute('PRAGMA table_info("messages")').fetchall()
         }
         assert {"participant_id", "activity_id", "frame_blob"}.issubset(run_event_columns)
+        run_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("runs")').fetchall()
+        }
+        assert {"worker_id", "agent_profile_id"}.issubset(run_columns)
         assert "participant_id" in message_columns
         assert {
             "session_system_prompts",

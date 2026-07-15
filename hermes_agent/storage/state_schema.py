@@ -253,6 +253,8 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     runtime_scope_key TEXT,
+    worker_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
     turn_id TEXT,
     execution_session_id TEXT,
     status TEXT NOT NULL,

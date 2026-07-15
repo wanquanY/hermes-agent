@@ -38,6 +38,7 @@ from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.turn_message_buffer import TurnMessageBuffer
 from agent.message_sanitization import (
+    close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates,
@@ -732,11 +733,27 @@ def run_conversation(
             "canonical current input is absent from hydrated conversation history: "
             f"{current_input_conversation_message_id}"
         )
+    pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
+    expected_persisted_content = (
+        persist_user_message if persist_user_message is not None else user_message
+    )
     if current_turn_user_message is None:
-        current_turn_user_message = messages.append_current_input(
-            user_message,
-            metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
-        )
+        if (
+            isinstance(pending_cli_message, dict)
+            and pending_cli_message.get("role") == "user"
+            and pending_cli_message.get("content") == expected_persisted_content
+        ):
+            current_turn_user_message = messages.append_existing_current_input(
+                pending_cli_message,
+                api_content=user_message,
+                metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+            )
+        else:
+            agent._pending_cli_user_message = None
+            current_turn_user_message = messages.append_current_input(
+                user_message,
+                metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+            )
     current_turn_user_idx = messages.current_input_index
     if current_turn_user_idx is None:
         raise RuntimeError("current input binding did not produce a message index")
@@ -772,7 +789,14 @@ def run_conversation(
     # exists. The final turn flush below will append assistant/tool rows by using
     # the same TurnMessageBuffer boundary and persist_message_key idempotency.
     try:
-        agent._persist_session(messages, conversation_history)
+        persist_lock = getattr(agent, "_session_persist_lock", None)
+        if persist_lock is None:
+            agent._persist_session(messages, conversation_history)
+            agent._pending_cli_user_message = None
+        else:
+            with persist_lock:
+                agent._persist_session(messages, conversation_history)
+                agent._pending_cli_user_message = None
     except Exception:
         logger.warning(
             "Early turn-start session persistence failed for session=%s",
@@ -1723,10 +1747,15 @@ def run_conversation(
                     while time.time() < sleep_end:
                         if agent._interrupt_requested:
                             agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            interrupt_text = (
+                                "Operation interrupted during retry "
+                                f"({_failure_hint}, attempt {retry_count}/{max_retries})."
+                            )
+                            close_interrupted_tool_sequence(messages, interrupt_text)
                             agent._persist_session(messages, conversation_history)
                             agent.clear_interrupt()
                             return {
-                                "final_response": f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
+                                "final_response": interrupt_text,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
@@ -2849,10 +2878,15 @@ def run_conversation(
                 # Check for interrupt before deciding to retry
                 if agent._interrupt_requested:
                     agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
+                    interrupt_text = (
+                        "Operation interrupted: handling API error "
+                        f"({error_type}: {agent._clean_error_message(str(api_error))})."
+                    )
+                    close_interrupted_tool_sequence(messages, interrupt_text)
                     agent._persist_session(messages, conversation_history)
                     agent.clear_interrupt()
                     return {
-                        "final_response": f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))}).",
+                        "final_response": interrupt_text,
                         "messages": messages,
                         "api_calls": api_call_count,
                         "completed": False,
@@ -3520,10 +3554,15 @@ def run_conversation(
                 while time.time() < sleep_end:
                     if agent._interrupt_requested:
                         agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                        interrupt_text = (
+                            "Operation interrupted: retrying API call after error "
+                            f"(retry {retry_count}/{max_retries})."
+                        )
+                        close_interrupted_tool_sequence(messages, interrupt_text)
                         agent._persist_session(messages, conversation_history)
                         agent.clear_interrupt()
                         return {
-                            "final_response": f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+                            "final_response": interrupt_text,
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
@@ -4563,6 +4602,8 @@ def run_conversation(
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
     agent._drop_trailing_empty_response_scaffolding(messages)
+    if interrupted:
+        close_interrupted_tool_sequence(messages, final_response)
     agent._persist_session(messages, conversation_history)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────

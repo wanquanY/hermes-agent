@@ -386,6 +386,7 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             tc_id = msg.get("tool_call_id")
             if tc_id and tc_id in known_tool_ids:
                 filtered.append(msg)
+                known_tool_ids.discard(tc_id)
             else:
                 repairs += 1
         else:
@@ -1611,6 +1612,52 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             continue
         filtered.append(msg)
     messages = filtered
+
+    # Normalize tool protocol structure on the provider-bound copy only.
+    # Canonical history remains byte-stable while strict providers never see
+    # empty arrays or a duplicated call/result id.
+    seen_call_ids: set[str] = set()
+    seen_result_ids: set[str] = set()
+    normalized: List[Dict[str, Any]] = []
+    removed_references = 0
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant" and "tool_calls" in msg:
+            raw_tool_calls = msg.get("tool_calls")
+            if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+                normalized.append({key: value for key, value in msg.items() if key != "tool_calls"})
+                removed_references += 1
+                continue
+            kept_tool_calls = []
+            for tool_call in raw_tool_calls:
+                call_id = _ra().AIAgent._get_tool_call_id_static(tool_call)
+                if call_id and call_id in seen_call_ids:
+                    removed_references += 1
+                    continue
+                if call_id:
+                    seen_call_ids.add(call_id)
+                kept_tool_calls.append(tool_call)
+            if not kept_tool_calls:
+                normalized.append({key: value for key, value in msg.items() if key != "tool_calls"})
+            elif len(kept_tool_calls) != len(raw_tool_calls):
+                normalized.append({**msg, "tool_calls": kept_tool_calls})
+            else:
+                normalized.append(msg)
+            continue
+        if role == "tool":
+            result_id = str(msg.get("tool_call_id") or "").strip()
+            if result_id and result_id in seen_result_ids:
+                removed_references += 1
+                continue
+            if result_id:
+                seen_result_ids.add(result_id)
+        normalized.append(msg)
+    messages = normalized
+    if removed_references:
+        _ra().logger.debug(
+            "Pre-call sanitizer: normalized %d empty or duplicate tool reference(s)",
+            removed_references,
+        )
 
     surviving_call_ids: set = set()
     for msg in messages:

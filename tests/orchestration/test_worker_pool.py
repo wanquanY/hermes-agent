@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from hermes_agent.domain.run_identity import CrossWiredRunError
 from hermes_agent.orchestration import InflightRun, WorkerPool
 
 
@@ -36,14 +37,43 @@ def test_record_run_terminal_unknown_run_returns_none():
     assert pool.record_run_terminal("unknown") is None
 
 
-def test_worker_swap_moves_run_to_new_worker():
+def test_worker_swap_is_rejected_as_cross_wired_identity():
     pool = WorkerPool()
-    pool.record_run_start(worker_id="w1", run_id="r1", session_id="s1")
-    pool.record_run_start(worker_id="w2", run_id="r1", session_id="s1")
+    original = pool.record_run_start(
+        worker_id="w1", run_id="r1", session_id="s1", now=10
+    )
 
-    assert pool.get("r1").worker_id == "w2"
-    assert pool.runs_for_worker("w1") == []
-    assert [r.run_id for r in pool.runs_for_worker("w2")] == ["r1"]
+    with pytest.raises(CrossWiredRunError) as raised:
+        pool.record_run_start(worker_id="w2", run_id="r1", session_id="s1")
+
+    assert raised.value.mismatch_fields == ("worker_id",)
+    assert pool.get("r1") is original
+    assert pool.runs_for_worker("w1") == [original]
+    assert pool.runs_for_worker("w2") == []
+
+
+def test_same_identity_retry_preserves_original_allocation():
+    pool = WorkerPool()
+    original = pool.record_run_start(
+        worker_id="w1",
+        run_id="r1",
+        session_id="s1",
+        runtime_scope_key="scope-1",
+        agent_profile_id="profile-1",
+        now=10,
+    )
+
+    retried = pool.record_run_start(
+        worker_id="w1",
+        run_id="r1",
+        session_id="s1",
+        runtime_scope_key="scope-1",
+        agent_profile_id="profile-1",
+        now=99,
+    )
+
+    assert retried is original
+    assert retried.allocated_at == 10
 
 
 def test_runs_for_worker_lists_sorted():

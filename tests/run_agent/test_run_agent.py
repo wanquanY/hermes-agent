@@ -5441,6 +5441,25 @@ class TestPersistUserMessageOverride:
         first_db_write = agent._session_db.messages.append.call_args_list[0].kwargs
         assert first_db_write["content"] == "Hello there"
 
+    def test_persistence_projection_preserves_multimodal_live_content(self, agent):
+        clean_content = [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "local://image"}},
+        ]
+        provider_content = [
+            {"type": "text", "text": "API-only prefix: describe this"},
+            {"type": "image_url", "image_url": {"url": "local://image"}},
+        ]
+        messages = [{"role": "user", "content": provider_content}]
+        agent._persist_user_message_idx = 0
+        agent._persist_user_message_override = clean_content
+
+        persisted = agent._messages_for_persistence(messages)
+
+        assert messages[0]["content"] is provider_content
+        assert messages[0]["content"][0]["text"].startswith("API-only")
+        assert persisted[0]["content"] == clean_content
+
     def test_api_only_user_instruction_reaches_provider_but_not_returned_history(self, agent):
         TestRunConversation()._setup_agent(agent)
         agent._session_persistence_disabled = True
@@ -5467,6 +5486,45 @@ class TestPersistUserMessageOverride:
         returned_users = [message for message in result["messages"] if message.get("role") == "user"]
         assert returned_users[-1]["content"] == ""
         assert result["final_response"] == "The terminal report is ready."
+
+
+def test_persist_session_serializes_snapshot_decisions():
+    """Concurrent close/worker writers never enter persistence together."""
+    import threading
+    import time
+
+    agent = AIAgent.__new__(AIAgent)
+    agent._session_persist_lock = threading.RLock()
+    active = 0
+    maximum_active = 0
+    calls = []
+    state_lock = threading.Lock()
+
+    def persist_unlocked(messages, conversation_history=None):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        calls.append(messages[0]["content"])
+        with state_lock:
+            active -= 1
+
+    agent._persist_session_unlocked = persist_unlocked
+    threads = [
+        threading.Thread(
+            target=agent._persist_session,
+            args=([{"role": "user", "content": value}], []),
+        )
+        for value in ("close", "worker")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_active == 1
+    assert sorted(calls) == ["close", "worker"]
 
 
 class TestReasoningReplayForStrictProviders:

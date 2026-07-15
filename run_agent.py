@@ -1290,6 +1290,17 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        persist_lock = getattr(self, "_session_persist_lock", None)
+        if persist_lock is None:
+            return self._persist_session_unlocked(messages, conversation_history)
+        with persist_lock:
+            return self._persist_session_unlocked(messages, conversation_history)
+
+    def _persist_session_unlocked(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+    ):
         if getattr(self, "_session_persistence_disabled", False):
             self._session_messages = self._messages_for_persistence(messages)
             return
@@ -1734,6 +1745,27 @@ class AIAgent:
             pass
 
     def _flush_messages_to_session_db(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        source_buffer_id: int | None = None,
+    ):
+        persist_lock = getattr(self, "_session_persist_lock", None)
+        if persist_lock is None:
+            return self._flush_messages_to_session_db_unlocked(
+                messages,
+                conversation_history,
+                source_buffer_id=source_buffer_id,
+            )
+        with persist_lock:
+            return self._flush_messages_to_session_db_unlocked(
+                messages,
+                conversation_history,
+                source_buffer_id=source_buffer_id,
+            )
+
+    def _flush_messages_to_session_db_unlocked(
         self,
         messages: List[Dict],
         conversation_history: List[Dict] = None,

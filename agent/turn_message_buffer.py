@@ -106,6 +106,26 @@ class TurnMessageBuffer(list):
         self._hermes_current_input_message = message
         return message
 
+    def append_existing_current_input(
+        self,
+        message: dict[str, Any],
+        *,
+        api_content: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reuse a CLI-staged user dict across the close/worker handoff."""
+        if not isinstance(message, dict) or message.get("role") != "user":
+            raise ValueError("current input must be a user message dict")
+        message["content"] = api_content
+        if metadata:
+            existing = message.get("metadata")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged.update(metadata)
+            message["metadata"] = merged
+        self.append(message)
+        self._hermes_current_input_message = message
+        return message
+
     def _clamp_index(self, value: int | None) -> int:
         try:
             index = int(value if value is not None else len(self))

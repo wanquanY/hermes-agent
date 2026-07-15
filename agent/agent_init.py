@@ -590,6 +590,10 @@ def init_agent(
     # (e.g. CLI voice mode adds a temporary prefix for the live call only).
     agent._persist_user_message_idx = None
     agent._persist_user_message_override = None
+    # CLI close and worker turn persistence can run on different threads.
+    # Serialize the full snapshot/cursor decision, not only the SQLite write.
+    agent._session_persist_lock = threading.RLock()
+    agent._pending_cli_user_message = None
 
     # Cache anthropic image-to-text fallbacks per image payload/URL so a
     # single tool loop does not repeatedly re-run auxiliary vision on the

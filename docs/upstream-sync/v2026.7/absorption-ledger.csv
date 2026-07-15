@@ -20,7 +20,7 @@ RT4,capability,11,absorb,httpx keepalive pool 生命周期,8324dd19c;51c1ba697,�
 RT5,capability,5,absorb,interrupted turn 孤儿 tool 修剪,81d2dc5d0;2d286a6d0,阶段5三条 early-return 路径测试通过,当前 finalizer 只有诊断没有修剪,
 RT6,capability,5,absorb,pre-API 空 tool_calls 与重复 id 清洗,a7932d86c;dba585c17,阶段5所有 transport 消息不变量测试通过,本地清洗不完整,
 RT7,capability,5,absorb,resume freshness 持久化信号,c2db3ed7d,阶段5重启恢复测试通过,当前不能只依赖进程内状态,
-RT8,capability,5,absorb,delegate 级联 visited set,56255f83f,阶段5环与重复引用测试通过,本地需要验证并统一遍历 owner,
+RT8,capability,5,superseded,delegate 级联 visited set,56255f83f,阶段5自环/双向环/多父引用只删除显式目标且子 transcript 保留,当前 repository/application service 已用子会话脱钩保留取代递归级联删除,
 A1,capability,7,absorb,通用 approval gate 与 hook 升级,f512d6f02;117f49b7d,阶段7所有 tool surface 统一审批测试通过,本地缺少单一 approval seam,
 A2,capability,7,absorb,tool 级持久审批 rule key,36308f066,阶段7 session 与 permanent 规则测试通过,本地缺少 reason hash 规则,
 A3,capability,7,absorb,用户 deny 配置硬拦,e2fe529ef,阶段7 deny 零 handler 调用测试通过,本地缺少统一 deny 前置门禁,

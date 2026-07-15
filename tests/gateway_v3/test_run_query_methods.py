@@ -24,6 +24,8 @@ def _make_conn() -> sqlite3.Connection:
             run_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
+            worker_id TEXT NOT NULL DEFAULT '',
+            agent_profile_id TEXT NOT NULL DEFAULT '',
             turn_id TEXT,
             execution_session_id TEXT,
             status TEXT NOT NULL,
@@ -76,7 +78,16 @@ def _wired():
 
 def test_run_get_returns_projection():
     conn, repo, registry = _wired()
-    repo.create_run("s1", RunSpec(run_id="r1", session_id="s1", turn_id="t1"))
+    repo.create_run(
+        "s1",
+        RunSpec(
+            run_id="r1",
+            session_id="s1",
+            turn_id="t1",
+            worker_id="worker-1",
+            agent_profile_id="profile-1",
+        ),
+    )
     resp = dispatch(
         registry,
         {"id": "req", "method": "run.get", "params": {"runId": "r1"}},
@@ -86,6 +97,8 @@ def test_run_get_returns_projection():
     assert resp["result"]["run_id"] == "r1"
     assert resp["result"]["status"] == "running"
     assert resp["result"]["turn_id"] == "t1"
+    assert resp["result"]["worker_id"] == "worker-1"
+    assert resp["result"]["agent_profile_id"] == "profile-1"
 
 
 def test_run_get_missing_returns_5004():

@@ -35,6 +35,7 @@ from hermes_agent.domain.interaction import (
     InteractionResponse,
     InternalRunEventType,
 )
+from hermes_agent.domain.run_identity import CrossWiredRunError, RunIdentity
 
 __all__ = [
     "CANONICAL_EVENT_ARM_COUNT",
@@ -64,4 +65,6 @@ __all__ = [
     "InteractionRequest",
     "InteractionResponse",
     "InteractionRegistry",
+    "CrossWiredRunError",
+    "RunIdentity",
 ]
