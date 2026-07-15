@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from hermes_agent.domain.compression_lease_service import CompressionLeaseService
+from hermes_agent.application.compression_lease_service import CompressionLeaseService
 from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 

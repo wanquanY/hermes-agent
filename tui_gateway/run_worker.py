@@ -74,6 +74,7 @@ class InteractiveResponseFrame:
     kind: str
     request_id: str
     answer: Any
+    conversation_session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -303,6 +304,7 @@ def decode_incoming(line: str) -> IncomingFrame:
             kind=kind,
             request_id=_require_str(obj, "request_id", op=op),
             answer=obj.get("answer"),
+            conversation_session_id=_optional_str(obj, "conversation_session_id"),
         )
     if op == "event":
         kind = _require_str(obj, "kind", op=op)
@@ -346,6 +348,8 @@ def encode_incoming(frame: IncomingFrame) -> str:
             "request_id": frame.request_id,
             "answer": frame.answer,
         }
+        if frame.conversation_session_id:
+            body["conversation_session_id"] = frame.conversation_session_id
     elif isinstance(frame, ActivityEventFrame):
         body = {"op": "event", "kind": frame.kind, "event": frame.event}
     elif isinstance(frame, RuntimeEnvUpdateFrame):
@@ -815,7 +819,23 @@ def _build_default_handler(
             await backend.cancel(frame.run_id)
         elif isinstance(frame, InteractiveResponseFrame):
             resolved = await responder.resolve(frame)
-            if not resolved:
+            if resolved:
+                payload: dict[str, Any] = {"request_id": frame.request_id}
+                # Never copy credentials into the event stream.  Clarification
+                # and approval choices are safe, useful lifecycle context;
+                # secret/sudo answers must remain inside the responder only.
+                if frame.kind in {"clarify", "approval"}:
+                    payload["choice"] = frame.answer
+                await proto.emit(
+                    EventFrame(
+                        params={
+                            "type": f"{frame.kind}.resolved",
+                            "conversation_session_id": frame.conversation_session_id,
+                            "payload": payload,
+                        }
+                    )
+                )
+            else:
                 await proto.emit_log(
                     "warn",
                     f"interactive.response: no pending {frame.kind} "

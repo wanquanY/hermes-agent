@@ -14,51 +14,17 @@ from hermes_agent.gateway import (
 )
 from hermes_agent.gateway.methods.run_methods import register_lifecycle
 from hermes_agent.orchestration import RunOrchestrator, WorkerPool
+from hermes_agent.storage.state_schema import SCHEMA_SQL
 
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE sessions (id TEXT PRIMARY KEY);
-        CREATE TABLE runs (
-            run_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            runtime_scope_key TEXT,
-            turn_id TEXT,
-            execution_session_id TEXT,
-            status TEXT NOT NULL,
-            started_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            completed_at REAL,
-            last_seq INTEGER DEFAULT 0,
-            terminal_seq INTEGER NOT NULL DEFAULT 0,
-            terminal_degraded INTEGER NOT NULL DEFAULT 0,
-            terminal_cause TEXT NOT NULL DEFAULT '',
-            error TEXT,
-            metadata_json TEXT
-        );
-        CREATE TABLE run_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            run_id TEXT,
-            seq INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            turn_id TEXT,
-            timestamp REAL NOT NULL,
-            payload_json TEXT,
-            event_json TEXT NOT NULL,
-            UNIQUE(session_id, seq)
-        );
-        CREATE TABLE seq_counter (
-            session_id TEXT PRIMARY KEY,
-            next_seq INTEGER NOT NULL CHECK (next_seq >= 1),
-            updated_at REAL NOT NULL DEFAULT 0
-        );
-        """
+    conn.executescript(SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, updated_at) "
+        "VALUES ('s1', 'test', 0, 0)"
     )
-    conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
     conn.execute(
         "INSERT INTO runs (run_id, session_id, status, started_at, updated_at) "
         "VALUES ('r1', 's1', 'running', 0, 0)"

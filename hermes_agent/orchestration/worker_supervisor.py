@@ -168,6 +168,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "participants.list_conversation_participants",
         "participants.resolve_participant_id",
         "prune_team_mission_events",
+        "runs.has_event_source",
         "reduce_team_mission_graph",
         "reduce_team_mission_run_event",
         "resolve_team_mission_conversation",

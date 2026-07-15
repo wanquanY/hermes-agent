@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-15T05:02:57.756252+00:00",
+  "repository": "/Users/yangwanquan/syngents/code/hermes-agent-upstream-absorption-v2026.7",
+  "local": {
+    "ref": "10ccb9801fe773db3f5ccbb4f9a06987c9d04dd7",
+    "sha": "10ccb9801fe773db3f5ccbb4f9a06987c9d04dd7",
+    "unique_commits": 818
+  },
+  "upstream": {
+    "ref": "6997dc81cd21dc88c6cb808a1fb3626b6ce71254",
+    "sha": "6997dc81cd21dc88c6cb808a1fb3626b6ce71254",
+    "unique_commits": 6313
+  },
+  "merge_base": "1264fab15660b7341aee6123e332e58b91fe2bca",
+  "changed_files": {
+    "local": 1728,
+    "upstream": 4808,
+    "overlap": 638,
+    "runtime_core_overlap": 136
+  },
+  "runtime_core_pattern": "^(?:agent/|gateway/|tools/|hermes_agent/|hermes_cli/|tui_gateway/|cron/|run_agent\\.py$|model_tools\\.py$|hermes_state\\.py$)"
+}

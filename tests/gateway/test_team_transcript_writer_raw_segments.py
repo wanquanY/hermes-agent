@@ -6,7 +6,7 @@ from typing import Any
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 from hermes_team_mission.runtime.team_transcript_writer import RuntimeTranscriptWriter
 

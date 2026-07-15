@@ -20,7 +20,7 @@ from unittest.mock import patch
 from hermes_gateway.config import Platform, GatewayConfig
 from hermes_gateway.session import SessionSource, SessionStore, build_session_key
 from hermes_agent.repositories.session_repo import SessionRepoImpl
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
 
 @pytest.fixture()

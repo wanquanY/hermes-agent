@@ -85,7 +85,7 @@ def test_team_mission_conversation_execution_session_ids_gateway_is_lightweight(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -195,7 +195,7 @@ def _seed_registry_team(db, tmp_path: Path) -> None:
 def test_team_capability_gateway_get_refresh_and_bind(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -249,7 +249,7 @@ def test_team_capability_gateway_builds_snapshot_from_registry_team_id(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -313,7 +313,7 @@ def test_team_capability_gateway_builds_snapshot_from_registry_team_id(
 def test_team_profile_get_falls_back_to_mission_metadata_members(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -510,7 +510,7 @@ def test_team_profile_get_resolves_conversation_registry_without_active_mission(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -547,7 +547,7 @@ def test_leader_team_profile_tool_resolves_conversation_registry(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     team_mission = team_mission_gateway()
     leader_tools = importlib.import_module("hermes_team_mission.tools.leader")
@@ -596,7 +596,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -708,7 +708,7 @@ def test_team_mission_gateway_methods_create_graph_and_replay_events(
 def test_team_mission_snapshot_and_result_rpc_return_canonical_read_models(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -786,7 +786,7 @@ def test_team_mission_snapshot_and_result_rpc_return_canonical_read_models(
 def test_team_mission_snapshot_get_returns_conversation_snapshot_without_active_mission(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -836,7 +836,7 @@ def test_team_mission_create_rejects_autonomous_override_for_supervised_team(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -867,7 +867,7 @@ def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_p
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -932,7 +932,7 @@ def test_team_mission_graph_rejects_mission_from_another_conversation(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -975,7 +975,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1049,7 +1049,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1140,7 +1140,7 @@ def test_team_mission_message_submit_rejects_session_id_as_conversation_identity
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1167,7 +1167,7 @@ def test_team_mission_member_submit_carries_run_context_json(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1325,7 +1325,7 @@ def test_team_mission_message_submit_conversation_only_does_not_bind_previous_ac
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1432,7 +1432,7 @@ def test_team_conversation_detail_returns_registry_team_members(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1501,7 +1501,7 @@ def test_team_conversation_detail_returns_registry_team_members(
 
 
 def test_team_conversation_message_page_uses_cli_store_message_codec(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_team_mission.state.conversation import (
         team_mission_conversation_message_page,
     )
@@ -1531,7 +1531,7 @@ def test_team_mission_node_create_requires_existing_mission(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1558,7 +1558,7 @@ def test_team_mission_node_create_requires_existing_mission(
 def test_team_mission_plan_complete_requires_leader_planned_finalizers(tmp_path: Path):
     import hermes_team_mission.tools.planning  # noqa: F401
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tools.registry import registry
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1616,7 +1616,7 @@ def test_team_conversation_resolve_returns_error_when_conversation_is_missing(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1637,7 +1637,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1702,7 +1702,7 @@ def test_team_mission_message_submit_routes_to_leader_without_starting_node(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1834,7 +1834,7 @@ def test_team_mission_message_submit_direct_reply_disables_tools_and_reasoning(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1895,7 +1895,7 @@ def test_team_mission_message_submit_explicit_start_task_overrides_negated_direc
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1968,7 +1968,7 @@ def test_team_mission_message_submit_registers_worker_runtime_session_shell(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2038,7 +2038,7 @@ def test_team_mission_message_submit_forwards_leader_profile_context(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2131,7 +2131,7 @@ def test_team_mission_message_submit_keeps_team_scope_out_of_profile_owner_check
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2182,7 +2182,7 @@ def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_ru
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2246,7 +2246,7 @@ def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2279,7 +2279,7 @@ def test_team_mission_conversation_ensure_uses_conversation_scope_for_bound_miss
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2345,7 +2345,7 @@ def test_team_mission_message_submit_rejects_wrong_owner_runtime_scope(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2398,7 +2398,7 @@ def test_team_mission_message_submit_rejects_profile_scope_as_team_execution_sco
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2441,7 +2441,7 @@ def test_team_mission_message_submit_merges_requested_leader_conversation_toolse
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2581,7 +2581,7 @@ def test_team_mission_member_node_start_keeps_delegation_available(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2656,7 +2656,7 @@ def test_team_mission_message_submit_does_not_inject_other_conversation_memory(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2747,7 +2747,7 @@ def test_team_mission_conversation_ensure_creates_missing_stable_session(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2796,7 +2796,7 @@ def test_team_mission_conversation_ensure_can_repair_session_without_graph(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2823,7 +2823,7 @@ def test_archived_team_history_is_readable_but_team_writes_are_rejected(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2895,7 +2895,7 @@ def test_team_mission_conversation_rename_gateway_updates_canonical_state(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2935,7 +2935,7 @@ def test_team_mission_conversation_delete_gateway_blocks_active_leader_run(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -2980,7 +2980,7 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services.artifacts import (
         list_artifacts,
@@ -3095,7 +3095,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(
 
     import tools.team_mission_leader_tools  # noqa: F401
     import tools.team_mission_planning_tools  # noqa: F401
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tools.registry import registry
     from tui_gateway import server
 
@@ -3340,7 +3340,7 @@ def test_team_mission_plan_approve_uses_requested_mission_native_graph(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -3432,7 +3432,7 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -3571,7 +3571,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -3649,7 +3649,7 @@ def test_team_mission_direct_root_task_activation_replaces_draft_objective(
 
 
 def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -3712,7 +3712,7 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
 def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
     tmp_path: Path,
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -3847,7 +3847,7 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
 def test_submit_mission_leader_report_run_queues_leader_without_user_message(
     tmp_path: Path,
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_team_mission.gateway.leader_report_runtime import (
         submit_mission_leader_report_run,
     )
@@ -3957,7 +3957,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(
 def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscriber(
     tmp_path: Path,
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -4046,7 +4046,7 @@ def test_team_mission_synthesis_stream_does_not_publish_to_conversation_subscrib
 def test_team_mission_tools_use_control_plane_db_inside_profile_worker(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_team_mission.runtime.profile_scope import gateway_call
     from tools import team_mission_leader_tools, team_mission_planning_tools
     from tui_gateway import server
@@ -4085,7 +4085,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -4188,7 +4188,7 @@ def test_team_mission_node_start_prebinds_run_before_fast_synthesis_events(
 def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_deliverable(
     tmp_path: Path,
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -4252,7 +4252,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -4340,7 +4340,7 @@ def test_team_mission_cancel_marks_graph_and_cancels_active_runs(
 def test_team_mission_cancel_resolves_active_mission_from_conversation_id(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -4395,7 +4395,7 @@ def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -4455,7 +4455,7 @@ def test_team_mission_cancel_reaps_zombie_run_on_already_terminal_mission(
 def test_gateway_emit_publishes_terminal_event_to_session_subscribers(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -4523,7 +4523,7 @@ def test_gateway_emit_publishes_terminal_event_to_session_subscribers(
 
 
 def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -4566,7 +4566,7 @@ def test_event_bus_delivers_explicit_subscription_on_owner_transport(tmp_path: P
 def test_worker_stream_event_is_live_and_transient_for_owner_subscription(
     tmp_path: Path,
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -4614,7 +4614,7 @@ def test_worker_stream_event_is_live_and_transient_for_owner_subscription(
 
 
 def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -4707,7 +4707,7 @@ def test_worker_terminal_event_updates_owner_team_mission_db(tmp_path: Path):
 def test_gateway_emit_stream_subscription_checkpoints_once_at_tool_boundary(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -4805,7 +4805,7 @@ def test_gateway_emit_stream_subscription_checkpoints_once_at_tool_boundary(
 def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
@@ -4861,7 +4861,7 @@ def test_run_control_subscription_poll_delivers_new_append_after_direct_delivery
 def test_run_control_subscription_poll_delivers_persisted_append_events_without_suffix_cropping(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
@@ -4935,7 +4935,7 @@ def test_run_control_subscription_poll_delivers_persisted_append_events_without_
 def test_active_only_subscription_keeps_seen_live_run_for_terminal_polling(
     monkeypatch, tmp_path: Path
 ):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     monkeypatch.setattr(run_control, "_STREAM_TRACE_EVENT_TYPES", set())
@@ -5003,7 +5003,7 @@ def test_team_mission_plan_approval_event_is_projected_to_mission_event_log(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5078,7 +5078,7 @@ def test_team_mission_plan_approval_event_is_projected_to_mission_event_log(
 def test_team_mission_gateway_rejects_invalid_manual_graph(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5109,7 +5109,7 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -5277,7 +5277,7 @@ def test_runtime_activity_subscribe_uses_compact_team_mission_transport_events(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5350,7 +5350,7 @@ def test_runtime_activity_subscribe_preserves_structural_transport_payload(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5451,7 +5451,7 @@ def test_runtime_activity_subscribe_preserves_structural_transport_payload(
 def test_team_mission_events_replay_is_byte_paged(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5519,7 +5519,7 @@ def test_runtime_activity_subscribe_streams_team_mission_completion_event(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -5652,7 +5652,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5749,7 +5749,7 @@ def test_team_mission_node_history_reads_runtime_from_hermes_store(
 def test_team_mission_node_history_filters_stream_chunks(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5839,7 +5839,7 @@ def test_team_mission_node_history_resolves_active_conversation_mission(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -5921,7 +5921,7 @@ def test_team_mission_node_history_keeps_transcript_readable_when_graph_is_missi
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission_history = team_mission_history_gateway()
@@ -5965,7 +5965,7 @@ def test_team_mission_planner_methods_mutate_graph_and_emit_events(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6108,7 +6108,7 @@ def test_team_mission_node_start_reuses_run_submit_and_binds_worker_run(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6210,7 +6210,7 @@ def test_team_mission_node_start_registers_worker_runtime_session_shell(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6285,7 +6285,7 @@ def test_team_mission_node_start_forwards_assignee_profile_context(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6363,7 +6363,7 @@ def test_team_mission_node_start_forwards_assignee_profile_context(
 
 
 def test_team_mission_bound_worker_run_event_updates_node_status(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -6429,7 +6429,7 @@ def test_team_mission_schedule_ready_starts_only_dependency_ready_nodes(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6505,7 +6505,7 @@ def test_team_mission_schedule_ready_marks_claimed_node_blocked_when_start_fails
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6551,7 +6551,7 @@ def test_team_mission_schedule_ready_skips_autonomous_high_risk_nodes(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6607,7 +6607,7 @@ def test_team_mission_schedule_ready_respects_policy_parallel_capacity(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6665,7 +6665,7 @@ def test_team_mission_schedule_ready_respects_policy_parallel_capacity(
 def test_team_mission_schedule_ready_scopes_to_active_task(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6721,7 +6721,7 @@ def test_team_mission_schedule_ready_caps_policy_parallel_limit_at_five(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6769,7 +6769,7 @@ def test_team_mission_schedule_ready_starts_legacy_auto_created_verifier(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -6825,7 +6825,7 @@ def test_team_mission_terminal_event_auto_starts_unblocked_child_node(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -6926,7 +6926,7 @@ def test_team_mission_node_start_injects_only_frozen_conversation_memory(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -7008,7 +7008,7 @@ def test_conversation_memory_gateway_enforces_propose_commit_lifecycle(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -7092,7 +7092,7 @@ def test_team_mission_terminal_event_starts_legacy_auto_verifier_finalizer(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
     from tui_gateway.services import run_control
 
@@ -7176,7 +7176,7 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
     can observe what the recall method routes to (and skip the heavy real
     cancellation paths)."""
     import importlib
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()

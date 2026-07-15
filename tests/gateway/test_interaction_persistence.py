@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services.interaction_registry import pending_interactions
 from tui_gateway.services.interaction_registry import persist_interaction_event
 from hermes_agent.orchestration.worker_frame_router import PendingEntry

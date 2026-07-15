@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services.persistence.gateway_store import GatewayStateStore
 from tui_gateway.services.storage_stats import collect_storage_stats
 

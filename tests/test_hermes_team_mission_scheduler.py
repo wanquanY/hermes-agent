@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.runtime.failure import REASON_PROVIDER_RATE_LIMITED
 from hermes_team_mission.runtime.scheduler import TeamMissionReadyScheduler
 

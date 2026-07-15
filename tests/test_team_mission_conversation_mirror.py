@@ -18,7 +18,7 @@ class _MemoryTransport:
 
 
 def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_report_once(monkeypatch, tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_team_mission.runtime import leader_report_dispatch
     from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
     from tui_gateway.services import run_control
@@ -149,7 +149,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
 
 
 def test_leader_report_completion_uses_canonical_result_and_records_message_id(monkeypatch, tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_team_mission.runtime import leader_report_dispatch
     from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
     from tui_gateway.services import run_control
@@ -277,7 +277,7 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
 
 
 def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -352,7 +352,7 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_stream_tail(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -476,7 +476,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -531,18 +531,32 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             },
         }
         run_control.remember_transport_delivery(transport, direct_event)
-        persisted_event = db.runs.append_event("root-session-1", direct_event)
+        run_control.record_event(
+            direct_event,
+            owner_transport=transport,
+            skip_owner_transport=True,
+            db=db,
+        )
+        persisted_event = next(
+            event
+            for event in db.runs.list_events(
+                "root-session-1", run_id="run-root"
+            )
+            if event["type"] == "message.complete"
+        )
 
         activity_subscription_id, mission_terminals = run_control.subscribe_activity(
             activity_id="mission:mission-1",
             transport=None,
             db=db,
+            debug_replay_audit=True,
         )
         assert mission_terminals
-        assert persisted_event["seq"] != direct_event["seq"]
-        assert persisted_event["runtime_source_seq"] == direct_event["seq"]
-        assert mission_terminals[0]["seq"] == persisted_event["runtime_source_seq"]
-        assert mission_terminals[0]["source_seq"] == persisted_event["runtime_source_seq"]
+        assert persisted_event["seq"] == direct_event["seq"]
+        # The runtime ledger owns a dense canonical sequence, while debug
+        # audit replay preserves the producer's original source cursor.
+        assert persisted_event["seq"] == 1
+        assert mission_terminals[0]["source_seq"] == 1168
         assert mission_terminals[0]["payload"]["source_event_type"] == "message.complete"
         run_control.unsubscribe_activity(subscription_id=activity_subscription_id)
 
@@ -561,7 +575,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -663,7 +677,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
 
 
 def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
@@ -732,7 +746,7 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
 
 
 def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 
@@ -796,7 +810,7 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
 
 
 def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
@@ -867,7 +881,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
 
 
 def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
@@ -943,7 +957,7 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
 def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path: Path):
     import json
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1042,7 +1056,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
 def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_path: Path):
     import json
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 

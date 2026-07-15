@@ -190,7 +190,7 @@ _P2_HERMES_STATE_STORE_MAX_METHODS = 0
 
 _GOD_OBJECT_MAX_CLASS_METHODS = 80
 _GOD_OBJECT_BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
-_GOD_OBJECT_EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
+_GOD_OBJECT_EXCLUDE_PREFIXES = ("hermes_agent/composition/migrations/",)
 _COMPOSED_GOD_OBJECT_EXCLUDE_TREES = ("channels/",)
 _COMPOSED_GOD_OBJECT_ALLOWLIST_CLASSES = frozenset({"HermesStateStore"})
 

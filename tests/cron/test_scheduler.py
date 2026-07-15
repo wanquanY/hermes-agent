@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
@@ -45,12 +46,17 @@ def test_append_dovie_current_session_result(monkeypatch):
     calls = []
 
     class FakeSessionStore:
-        def ensure_session(self, session_id, source="unknown", model=None, **kwargs):
-            calls.append(("ensure", session_id, source, model))
-
-        def append_message(self, session_id, role, content, metadata=None, **kwargs):
-            calls.append(("append", session_id, role, content, metadata))
-            return 1
+        def __init__(self):
+            self.sessions = SimpleNamespace(
+                ensure=lambda session_id, source="unknown", model=None, **kwargs: calls.append(
+                    ("ensure", session_id, source, model)
+                )
+            )
+            self.messages = SimpleNamespace(
+                append=lambda session_id, role, content, metadata=None, **kwargs: (
+                    calls.append(("append", session_id, role, content, metadata)) or 1
+                )
+            )
 
         def close(self):
             calls.append(("close",))
@@ -85,12 +91,17 @@ def test_deliver_dovie_new_session_result(monkeypatch):
     calls = []
 
     class FakeSessionStore:
-        def ensure_session(self, session_id, source="unknown", model=None, **kwargs):
-            calls.append(("ensure", session_id, source, model))
-
-        def append_message(self, session_id, role, content, metadata=None, **kwargs):
-            calls.append(("append", session_id, role, content, metadata))
-            return 1
+        def __init__(self):
+            self.sessions = SimpleNamespace(
+                ensure=lambda session_id, source="unknown", model=None, **kwargs: calls.append(
+                    ("ensure", session_id, source, model)
+                )
+            )
+            self.messages = SimpleNamespace(
+                append=lambda session_id, role, content, metadata=None, **kwargs: (
+                    calls.append(("append", session_id, role, content, metadata)) or 1
+                )
+            )
 
         def close(self):
             calls.append(("close",))

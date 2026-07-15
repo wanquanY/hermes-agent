@@ -40,7 +40,7 @@ from typing import Any, List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
@@ -2160,6 +2160,93 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+def run_one_job(
+    job: dict,
+    *,
+    adapters=None,
+    loop=None,
+    verbose: bool = True,
+) -> bool:
+    """Run one claimed cron job through the canonical execution lifecycle.
+
+    Scheduler ticks, external-provider fires, and the immediate ``cronjob
+    action=run`` path all use this owner so output persistence, delivery,
+    empty-response handling, and final status cannot drift.
+    """
+    try:
+        success, output, final_response, error = run_job(job)
+
+        output_file = save_job_output(job["id"], output)
+        if verbose:
+            logger.info("Output saved to: %s", output_file)
+
+        deliver_content = (
+            final_response
+            if success
+            else _summarize_cron_failure_for_delivery(job, error)
+        )
+        should_deliver = bool(deliver_content.strip())
+        if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+            logger.info(
+                "Job '%s': agent returned %s — skipping delivery",
+                job["id"],
+                SILENT_MARKER,
+            )
+            should_deliver = False
+
+        delivery_error = None
+        if should_deliver:
+            try:
+                delivery_error = _deliver_result(
+                    job,
+                    deliver_content,
+                    adapters=adapters,
+                    loop=loop,
+                )
+            except Exception as delivery_exc:
+                delivery_error = str(delivery_exc)
+                logger.error("Delivery failed for job %s: %s", job["id"], delivery_exc)
+
+        dovie_append_error = _deliver_dovie_bound_result(
+            job,
+            success=success,
+            final_response=final_response,
+            error=error,
+        )
+        if dovie_append_error:
+            delivery_error = "; ".join(
+                part
+                for part in (
+                    delivery_error,
+                    f"dovie current-session append failed: {dovie_append_error}",
+                )
+                if part
+            )
+
+        if success and not final_response.strip():
+            success = False
+            error = (
+                "Agent completed but produced empty response "
+                "(model error, timeout, or misconfiguration)"
+            )
+
+        mark_kwargs = {"delivery_error": delivery_error}
+        execution_session_id = job.get("_execution_session_id")
+        if execution_session_id:
+            mark_kwargs["session_id"] = execution_session_id
+        mark_job_run(job["id"], success, error, **mark_kwargs)
+        return True
+
+    except Exception as exc:
+        logger.error("Error processing job %s: %s", job["id"], exc)
+        mark_kwargs = {}
+        execution_session_id = job.get("_execution_session_id")
+        if execution_session_id:
+            mark_kwargs["session_id"] = execution_session_id
+        mark_job_run(job["id"], False, str(exc), **mark_kwargs)
+        return False
+
+
 def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
     """
     Check and run all due jobs.
@@ -2238,74 +2325,6 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 _max_workers if _max_workers else "unbounded",
             )
 
-        def _process_job(job: dict) -> bool:
-            """Run one due job end-to-end: execute, save, deliver, mark."""
-            try:
-                success, output, final_response, error = run_job(job)
-
-                output_file = save_job_output(job["id"], output)
-                if verbose:
-                    logger.info("Output saved to: %s", output_file)
-
-                # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else _summarize_cron_failure_for_delivery(job, error)
-                # Treat whitespace-only final responses the same as empty
-                # responses: do not deliver a blank message, and let the
-                # empty-response guard below mark the run as a soft failure.
-                should_deliver = bool(deliver_content.strip())
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
-
-                delivery_error = None
-                if should_deliver:
-                    try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
-                    except Exception as de:
-                        delivery_error = str(de)
-                        logger.error("Delivery failed for job %s: %s", job["id"], de)
-
-                dovie_append_error = _deliver_dovie_bound_result(
-                    job,
-                    success=success,
-                    final_response=final_response,
-                    error=error,
-                )
-                if dovie_append_error:
-                    delivery_error = "; ".join(
-                        part
-                        for part in (
-                            delivery_error,
-                            f"dovie current-session append failed: {dovie_append_error}",
-                        )
-                        if part
-                    )
-
-                # Treat empty final_response as a soft failure so last_status
-                # is not "ok" — the agent ran but produced nothing useful.
-                # (issue #8585)
-                if success and not final_response.strip():
-                    success = False
-                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
-
-                mark_kwargs = {"delivery_error": delivery_error}
-                execution_session_id = job.get("_execution_session_id")
-                if execution_session_id:
-                    mark_kwargs["session_id"] = execution_session_id
-                mark_job_run(job["id"], success, error, **mark_kwargs)
-                return True
-
-            except Exception as e:
-                logger.error("Error processing job %s: %s", job['id'], e)
-                mark_kwargs = {}
-                execution_session_id = job.get("_execution_session_id")
-                if execution_session_id:
-                    mark_kwargs["session_id"] = execution_session_id
-                mark_job_run(job["id"], False, str(e), **mark_kwargs)
-                return False
-
         # Partition due jobs: jobs with a per-job workdir and/or profile touch
         # process-global runtime state inside run_job. Workdir jobs temporarily
         # set os.environ["TERMINAL_CWD"]; profile jobs use a context-local
@@ -2343,7 +2362,13 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
             def _run_and_release(j=job, ctx=_ctx):
                 try:
-                    return ctx.run(_process_job, j)
+                    return ctx.run(
+                        run_one_job,
+                        j,
+                        adapters=adapters,
+                        loop=loop,
+                        verbose=verbose,
+                    )
                 finally:
                     with _running_lock:
                         _running_job_ids.discard(j["id"])

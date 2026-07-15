@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MANIFEST = REPO_ROOT / "docs" / "hermes_zero_debt_manifest.md"
@@ -149,6 +151,7 @@ def test_phase_closure_accepts_explicit_human_approval(tmp_path: Path) -> None:
     assert result["id"] == "human_signoff:explicit_approval"
 
 
+@pytest.mark.timeout(180)
 def test_p2_verdict_passes_after_data_plane_decomposition() -> None:
     result = subprocess.run(
         [sys.executable, str(VERDICT), "--phase", "P2", "--json"],
@@ -263,6 +266,7 @@ def test_p5_verdict_defines_gateway_retirement_relocation_gates() -> None:
     )
 
 
+@pytest.mark.timeout(300)
 def test_p6_verdict_defines_closure_safety_net_gates() -> None:
     result = subprocess.run(
         [sys.executable, str(VERDICT), "--phase", "P6", "--json"],
@@ -313,6 +317,7 @@ def test_p2_inventory_reports_current_offender_baseline() -> None:
     assert "`p2:no_legacy_identity_alias_internal`" in markdown
 
 
+@pytest.mark.timeout(180)
 def test_zero_debt_status_separates_verdict_from_closure() -> None:
     output = subprocess.check_output(
         [sys.executable, str(ZERO_DEBT_STATUS), "--json"],

@@ -9,8 +9,8 @@ layers =
     hermes_agent.transport
     hermes_agent.gateway
     hermes_agent.orchestration
+    hermes_agent.composition
+    hermes_agent.application
     hermes_agent.repositories
-    hermes_agent.domain
     hermes_agent.storage
-ignore_imports =
-    hermes_agent.storage.migrations.* -> hermes_agent.domain.seq_allocator
+    hermes_agent.domain

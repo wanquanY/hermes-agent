@@ -4,8 +4,8 @@ import importlib
 import sqlite3
 from pathlib import Path
 
-from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -254,7 +254,7 @@ def test_identity_fk_migration_rolls_back_on_unhandled_fk_violation(tmp_path: Pa
         before_run_events = conn.execute("SELECT COUNT(*) FROM run_events").fetchone()[0]
 
         migration = importlib.import_module(
-            "hermes_agent.storage.migrations.0040_identity_fk_and_orphan_cleanup"
+            "hermes_agent.composition.migrations.0040_identity_fk_and_orphan_cleanup"
         )
         try:
             migration.apply(conn.cursor())

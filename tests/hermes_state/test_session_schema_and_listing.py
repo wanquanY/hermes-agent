@@ -5,10 +5,10 @@ import time
 
 import pytest
 
-from hermes_agent.domain.session_service import SessionService
-from hermes_agent.storage.cli_session_store import open_cli_session_store
-from hermes_agent.storage.migration_operations import parse_schema_columns
-from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.application.session_service import SessionService
+from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_agent.composition.migration_operations import parse_schema_columns
+from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
 from hermes_agent.storage.state_schema import SCHEMA_SQL
 
 

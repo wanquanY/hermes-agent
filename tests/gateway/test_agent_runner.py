@@ -129,7 +129,7 @@ def test_worker_session_restores_explicit_model_from_persisted_config(
     """A worker can recover an explicit model when the frame omits it."""
     from tui_gateway import server as _server
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     session_id = "stored-session-with-explicit-model"
     db = open_cli_session_store(tmp_path / "state.db")
@@ -182,7 +182,7 @@ def test_worker_session_turn_model_takes_precedence_over_persisted_model(
     """The control-plane turn selection is newer than the stored fallback."""
     from tui_gateway import server as _server
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     session_id = "stored-session-with-new-turn-model"
     db = open_cli_session_store(tmp_path / "state.db")
@@ -224,7 +224,7 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
 ) -> None:
     from tui_gateway import server as _server
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     db.sessions.create(

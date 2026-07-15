@@ -21,8 +21,8 @@ import json
 import sqlite3
 
 from hermes_agent.domain.event_ledger import EventLedger
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
-from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 from tui_gateway.services import run_control, runtime_scope
 

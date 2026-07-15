@@ -16,6 +16,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     return home
@@ -494,9 +495,9 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path):
     from tools import kanban_tools as kt
 
     # Materialize real files so os.path.isfile passes inside the helper.
-    chart_path = tmp_path / "q3-revenue.png"
+    chart_path = kanban_home / "q3-revenue.png"
     chart_path.write_bytes(b"PNG-fake-bytes")
-    report_path = tmp_path / "report.pdf"
+    report_path = kanban_home / "report.pdf"
     report_path.write_bytes(b"%PDF-fake")
 
     conn = kb.connect()
@@ -580,7 +581,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
     from hermes_gateway.config import Platform
     from tools import kanban_tools as kt
 
-    real_pdf = tmp_path / "real.pdf"
+    real_pdf = kanban_home / "real.pdf"
     real_pdf.write_bytes(b"%PDF-fake")
 
     conn = kb.connect()

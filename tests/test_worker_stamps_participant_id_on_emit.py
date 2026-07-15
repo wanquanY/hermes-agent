@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame, OutgoingFrame
 from tui_gateway.services import run_control

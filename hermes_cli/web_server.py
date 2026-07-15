@@ -11,6 +11,8 @@ Usage:
 
 from contextlib import contextmanager
 import asyncio
+import base64
+import binascii
 import hmac
 import importlib.util
 import json
@@ -19,9 +21,11 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -47,9 +51,11 @@ from hermes_cli.config import (
     save_env_value,
     remove_env_value,
     check_config_version,
+    detect_install_method,
+    recommended_update_command_for_method,
     redact_key,
 )
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from channels.runtime_status import get_running_pid, read_runtime_status
 from utils import env_var_enabled
 
@@ -734,10 +740,214 @@ _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
 }
 _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
 
+_MEDIA_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+}
+_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _media_serve_roots() -> List[Path]:
+    """Return the symlink-resolved roots that may be served as dashboard media."""
+    roots: List[Path] = []
+    for root in (
+        get_hermes_home() / "images",
+        get_hermes_home() / "screenshots",
+        get_hermes_home() / "cache",
+    ):
+        try:
+            roots.append(root.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
+@app.get("/api/media")
+async def get_media(path: str):
+    """Serve a gateway-local image without exposing arbitrary filesystem data."""
+    try:
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported media type")
+    if not any(target == root or root in target.parents for root in _media_serve_roots()):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.stat().st_size > _MEDIA_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
+    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    return {
+        "data_url": (
+            f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"
+        )
+    }
+
 
 def _audio_extension_for_mime(mime_type: str) -> str:
     normalized = (mime_type or "").split(";", 1)[0].strip().lower()
     return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
+
+
+@app.post("/api/audio/transcribe")
+async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
+    data_url = (payload.data_url or "").strip()
+    if not data_url.startswith("data:") or "," not in data_url:
+        raise HTTPException(status_code=400, detail="Invalid audio payload")
+    header, encoded = data_url.split(",", 1)
+    if ";base64" not in header:
+        raise HTTPException(status_code=400, detail="Audio payload must be base64 encoded")
+    mime_type = (
+        payload.mime_type or header[5:].split(";", 1)[0] or "audio/webm"
+    ).strip()
+    normalized_mime = mime_type.split(";", 1)[0].lower()
+    if not (normalized_mime.startswith("audio/") or normalized_mime == "video/webm"):
+        raise HTTPException(status_code=400, detail="Payload must be an audio recording")
+    try:
+        audio_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Audio payload is not valid base64")
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Audio recording is empty")
+    if len(audio_bytes) > _MAX_TRANSCRIPTION_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Audio recording is too large")
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="hermes-desktop-voice-",
+            suffix=_audio_extension_for_mime(mime_type),
+            delete=False,
+        ) as handle:
+            handle.write(audio_bytes)
+            temp_path = handle.name
+        from tools.transcription_tools import transcribe_audio
+
+        result = await asyncio.to_thread(transcribe_audio, temp_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("Desktop voice transcription failed")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}")
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error") or "Transcription failed",
+        )
+    return {
+        "ok": True,
+        "transcript": str(result.get("transcript") or "").strip(),
+        "provider": result.get("provider"),
+    }
+
+
+class TTSSpeakRequest(BaseModel):
+    text: str
+
+
+@app.get("/api/audio/elevenlabs/voices")
+async def get_elevenlabs_voices():
+    api_key = (
+        load_env().get("ELEVENLABS_API_KEY")
+        or os.environ.get("ELEVENLABS_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        return {"available": False, "voices": []}
+
+    request = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/voices",
+        headers={"Accept": "application/json", "xi-api-key": api_key},
+    )
+
+    def _fetch() -> Dict[str, Any]:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        response_payload = await asyncio.to_thread(_fetch)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return {"available": False, "voices": [], "error": "unauthorized"}
+        raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
+
+    voices = []
+    for voice in response_payload.get("voices") or []:
+        if not isinstance(voice, dict):
+            continue
+        voice_id = str(voice.get("voice_id") or "").strip()
+        if not voice_id:
+            continue
+        name = str(voice.get("name") or voice_id)
+        category = str(voice.get("category") or "").strip()
+        voices.append({
+            "voice_id": voice_id,
+            "name": name,
+            "label": f"{name} ({category})" if category else name,
+        })
+    voices.sort(key=lambda item: item["label"].lower())
+    return {"available": True, "voices": voices}
+
+
+@app.post("/api/audio/speak")
+async def speak_text(payload: TTSSpeakRequest):
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    try:
+        from tools.tts_tool import text_to_speech_tool
+
+        raw_result = await asyncio.to_thread(text_to_speech_tool, text)
+        result = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+    except Exception as exc:
+        _log.exception("Desktop voice TTS failed")
+        raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
+    if not isinstance(result, dict) or not result.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=(result or {}).get("error") or "Speech synthesis failed",
+        )
+    file_path = str(result.get("file_path") or "")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=500, detail="Audio file missing")
+    mime_type = {
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+    }.get(Path(file_path).suffix.lower(), "audio/mpeg")
+    try:
+        audio_bytes = Path(file_path).read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read audio: {exc}")
+    finally:
+        try:
+            os.unlink(file_path)
+        except OSError:
+            pass
+    encoded = base64.b64encode(audio_bytes).decode("ascii")
+    return {
+        "ok": True,
+        "data_url": f"data:{mime_type};base64,{encoded}",
+        "mime_type": mime_type,
+        "provider": result.get("provider"),
+    }
 
 
 class ModelAssignment(BaseModel):
@@ -758,11 +968,16 @@ class ModelAssignment(BaseModel):
     # reads model.base_url from config (it ignores OPENAI_BASE_URL), so this is
     # the path that actually wires a local endpoint into resolution.
     base_url: str = ""
+    api_key: str = ""
     confirm_expensive_model: bool = False
 
 
 def _apply_main_model_assignment(
-    model_cfg: "Any", provider: str, model: str, base_url: str = ""
+    model_cfg: "Any",
+    provider: str,
+    model: str,
+    base_url: str = "",
+    api_key: str = "",
 ) -> dict:
     """Apply a main-slot model assignment to a ``model`` config dict in place.
 
@@ -1003,6 +1218,23 @@ _ACTION_LOG_FILES: Dict[str, str] = {
 # ``name`` → most recently spawned Popen handle.  Used so ``status`` can
 # report liveness and exit code without shelling out to ``ps``.
 _ACTION_PROCS: Dict[str, subprocess.Popen] = {}
+_ACTION_RESULTS: Dict[str, Dict[str, Any]] = {}
+
+
+def _record_completed_action(name: str, message: str, exit_code: int = 1) -> None:
+    """Persist the status and log of an action completed without a process."""
+    log_file_name = _ACTION_LOG_FILES[name]
+    _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _ACTION_LOG_DIR / log_file_name
+    with open(log_path, "ab", buffering=0) as log_file:
+        log_file.write(
+            f"\n=== {name} completed {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode()
+        )
+        log_file.write(message.encode("utf-8", errors="replace"))
+        if not message.endswith("\n"):
+            log_file.write(b"\n")
+    _ACTION_PROCS.pop(name, None)
+    _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": None}
 
 
 def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
@@ -1037,6 +1269,8 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
         popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen(cmd, **popen_kwargs)
+    log_file.close()
+    _ACTION_RESULTS.pop(name, None)
     _ACTION_PROCS[name] = proc
     return proc
 
@@ -1073,6 +1307,21 @@ async def restart_gateway():
 @app.post("/api/hermes/update")
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
+    install_method = detect_install_method(PROJECT_ROOT)
+    if install_method == "docker":
+        command = recommended_update_command_for_method(install_method)
+        message = (
+            "Docker installations must be updated outside the dashboard. "
+            f"Run: {command}"
+        )
+        _record_completed_action("hermes-update", message)
+        return {
+            "ok": False,
+            "pid": None,
+            "name": "hermes-update",
+            "error": "docker_update_unsupported",
+            "message": message,
+        }
     try:
         proc = _spawn_hermes_action(["update"], "hermes-update")
     except Exception as exc:
@@ -1097,13 +1346,21 @@ async def get_action_status(name: str, lines: int = 200):
 
     proc = _ACTION_PROCS.get(name)
     if proc is None:
+        result = _ACTION_RESULTS.get(name)
         running = False
-        exit_code: Optional[int] = None
-        pid: Optional[int] = None
+        exit_code = result.get("exit_code") if result else None
+        pid = result.get("pid") if result else None
     else:
         exit_code = proc.poll()
         running = exit_code is None
         pid = proc.pid
+        if exit_code is not None:
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": pid}
+            _ACTION_PROCS.pop(name, None)
 
     return {
         "name": name,
@@ -1578,6 +1835,90 @@ def get_model_options():
         raise HTTPException(status_code=500, detail="Failed to list model options")
 
 
+def _parse_model_ids(resp: Any) -> List[str]:
+    """Extract ids from common OpenAI-compatible model-list response shapes."""
+    try:
+        if not resp.is_success:
+            return []
+        payload = resp.json()
+    except Exception:
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        return []
+    model_ids: List[str] = []
+    for item in data:
+        model_id = (
+            str(item.get("id") or "").strip()
+            if isinstance(item, dict)
+            else str(item or "").strip()
+        )
+        if model_id:
+            model_ids.append(model_id)
+    return model_ids
+
+
+@app.get("/api/model/recommended-default")
+def get_recommended_default_model(provider: str = ""):
+    """Return the curated initial model, honoring the Nous account tier."""
+    slug = (provider or "").strip().lower()
+    if slug == "nous":
+        try:
+            from hermes_cli.models import (
+                check_nous_free_tier,
+                get_curated_nous_model_ids,
+                get_pricing_for_provider,
+                partition_nous_models_by_tier,
+                union_with_portal_free_recommendations,
+                union_with_portal_paid_recommendations,
+            )
+            from hermes_cli.auth import get_provider_auth_state
+
+            model_ids = get_curated_nous_model_ids()
+            pricing = get_pricing_for_provider("nous") or {}
+            free_tier = check_nous_free_tier(force_fresh=True)
+            try:
+                auth_state = get_provider_auth_state("nous") or {}
+                portal_url = auth_state.get("portal_base_url", "") or ""
+            except Exception:
+                portal_url = ""
+            if free_tier:
+                model_ids, pricing = union_with_portal_free_recommendations(
+                    model_ids, pricing, portal_url
+                )
+                model_ids, _ = partition_nous_models_by_tier(
+                    model_ids, pricing, free_tier=True
+                )
+            else:
+                model_ids, pricing = union_with_portal_paid_recommendations(
+                    model_ids, pricing, portal_url
+                )
+            return {
+                "provider": "nous",
+                "model": model_ids[0] if model_ids else "",
+                "free_tier": bool(free_tier),
+            }
+        except Exception:
+            _log.exception("GET /api/model/recommended-default (nous) failed")
+            return {"provider": "nous", "model": "", "free_tier": None}
+
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
+        payload = build_models_payload(load_picker_context())
+        for row in payload.get("providers", []):
+            if str(row.get("slug", "")).lower() == slug:
+                models = row.get("models") or []
+                return {
+                    "provider": slug,
+                    "model": models[0] if models else "",
+                    "free_tier": None,
+                }
+    except Exception:
+        _log.exception("GET /api/model/recommended-default failed")
+    return {"provider": slug, "model": "", "free_tier": None}
+
+
 @app.get("/api/model/auxiliary")
 def get_auxiliary_models():
     """Return current auxiliary task assignments.
@@ -1634,13 +1975,13 @@ async def set_model_assignment(body: ModelAssignment):
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
     task = (body.task or "").strip().lower()
+    base_url = (body.base_url or "").strip()
+    api_key = (body.api_key or "").strip()
 
     if scope not in {"main", "auxiliary"}:
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
 
     try:
-        cfg = load_config()
-
         if model and not body.confirm_expensive_model:
             try:
                 from hermes_cli.model_cost_guard import expensive_model_warning
@@ -1664,67 +2005,15 @@ async def set_model_assignment(body: ModelAssignment):
                     "confirm_required": True,
                     "confirm_message": warning.message,
                 }
-
-        if scope == "main":
-            if not provider or not model:
-                raise HTTPException(status_code=400, detail="provider and model required for main")
-            model_cfg = cfg.get("model", {})
-            if not isinstance(model_cfg, dict):
-                model_cfg = {}
-            model_cfg["provider"] = provider
-            model_cfg["default"] = model
-            # Clear stale base_url so the resolver picks the provider's own default.
-            if "base_url" in model_cfg and model_cfg.get("base_url"):
-                model_cfg["base_url"] = ""
-            # Also clear hardcoded context_length override — new model may have
-            # a different context window.
-            if "context_length" in model_cfg:
-                model_cfg.pop("context_length", None)
-            cfg["model"] = model_cfg
-            save_config(cfg)
-            return {"ok": True, "scope": "main", "provider": provider, "model": model}
-
-        # scope == "auxiliary"
-        aux = cfg.get("auxiliary")
-        if not isinstance(aux, dict):
-            aux = {}
-
-        if task == "__reset__":
-            # Reset every slot to provider="auto", model="" — keeps other fields intact.
-            for slot in _AUX_TASK_SLOTS:
-                slot_cfg = aux.get(slot)
-                if not isinstance(slot_cfg, dict):
-                    slot_cfg = {}
-                slot_cfg["provider"] = "auto"
-                slot_cfg["model"] = ""
-                aux[slot] = slot_cfg
-            cfg["auxiliary"] = aux
-            save_config(cfg)
-            return {"ok": True, "scope": "auxiliary", "reset": True}
-
-        if not provider:
-            raise HTTPException(status_code=400, detail="provider required for auxiliary")
-
-        targets = [task] if task else list(_AUX_TASK_SLOTS)
-        for slot in targets:
-            if slot not in _AUX_TASK_SLOTS:
-                raise HTTPException(status_code=400, detail=f"unknown auxiliary task: {slot}")
-            slot_cfg = aux.get(slot)
-            if not isinstance(slot_cfg, dict):
-                slot_cfg = {}
-            slot_cfg["provider"] = provider
-            slot_cfg["model"] = model
-            aux[slot] = slot_cfg
-
-        cfg["auxiliary"] = aux
-        save_config(cfg)
-        return {
-            "ok": True,
-            "scope": "auxiliary",
-            "tasks": targets,
-            "provider": provider,
-            "model": model,
-        }
+        return await asyncio.to_thread(
+            _apply_model_assignment_sync,
+            scope,
+            provider,
+            model,
+            task,
+            base_url,
+            api_key,
+        )
     except HTTPException:
         raise
     except Exception:
@@ -1957,9 +2246,79 @@ async def update_config(body: ConfigUpdate):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+_MESSAGING_KEYS_PAGE_KEYS = frozenset({
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_PROXY_KEY",
+    "GATEWAY_PROXY_URL",
+})
+
+
+def _platform_env_prefixes(platform_id: str) -> tuple[str, ...]:
+    """Return the environment-variable prefixes owned by a channel card."""
+    aliases = {
+        "email": ("EMAIL_",),
+        "homeassistant": ("HASS_",),
+        "qqbot": ("QQ_", "QQBOT_"),
+        "sms": ("TWILIO_",),
+        "wecom": ("WECOM_BOT_", "WECOM_SECRET"),
+        "wecom_callback": ("WECOM_CALLBACK_",),
+    }
+    return aliases.get(
+        platform_id,
+        (platform_id.upper().replace("-", "_") + "_",),
+    )
+
+
+def _build_catalog_entry(platform_id: str, plugin_entry: Any = None) -> Dict[str, Any]:
+    """Build the channel-owned env contract from the canonical env registry."""
+    from hermes_cli.config import _EXTRA_ENV_KEYS
+
+    prefixes = _platform_env_prefixes(platform_id)
+    env_vars = {
+            name
+            for name, info in OPTIONAL_ENV_VARS.items()
+            if info.get("category") == "messaging"
+            and name not in _MESSAGING_KEYS_PAGE_KEYS
+            and any(name.startswith(prefix) for prefix in prefixes)
+    }
+    env_vars.update(
+        name
+        for name in _EXTRA_ENV_KEYS
+        if any(name.startswith(prefix) for prefix in prefixes)
+    )
+    # Channel adapters share the allow-all policy key even where older config
+    # catalogs have not yet gained a hand-authored metadata row for it.
+    env_vars.add(prefixes[0] + "ALLOW_ALL_USERS")
+    return {
+        "id": platform_id,
+        "name": platform_id.replace("_", " ").title(),
+        "description": "",
+        "docs_url": "",
+        "env_vars": tuple(sorted(env_vars)),
+        "required_env": tuple(getattr(plugin_entry, "required_env", ()) or ()),
+    }
+
+
+def _channel_managed_env_keys() -> frozenset[str]:
+    """Return messaging-platform keys managed by the Channels page."""
+    try:
+        from channels.config import Platform
+
+        keys: set[str] = set()
+        for platform in Platform:
+            if platform.value == "local":
+                continue
+            keys.update(_build_catalog_entry(platform.value)["env_vars"])
+        return frozenset(keys)
+    except Exception:
+        _log.debug("could not build channel-managed env key set", exc_info=True)
+        return frozenset()
+
+
 @app.get("/api/env")
 async def get_env_vars():
     env_on_disk = load_env()
+    channel_keys = _channel_managed_env_keys()
     result = {}
     for var_name, info in OPTIONAL_ENV_VARS.items():
         value = env_on_disk.get(var_name)
@@ -1972,6 +2331,7 @@ async def get_env_vars():
             "is_password": info.get("password", False),
             "tools": info.get("tools", []),
             "advanced": info.get("advanced", False),
+            "channel_managed": var_name in channel_keys,
         }
     return result
 
@@ -3487,6 +3847,44 @@ class MCPServerCreate(BaseModel):
     profile: Optional[str] = None
 
 
+def _mcp_server_config_from_create(body: MCPServerCreate) -> Dict[str, Any]:
+    """Normalize the dashboard/profile DTO into the persisted MCP contract."""
+    server_config: Dict[str, Any] = {}
+    if body.url:
+        server_config["url"] = body.url.strip()
+    if body.command:
+        server_config["command"] = body.command.strip()
+        if body.args:
+            server_config["args"] = list(body.args)
+    if body.env:
+        server_config["env"] = dict(body.env)
+    if body.auth:
+        server_config["auth"] = body.auth
+    return server_config
+
+
+def _write_profile_mcp_servers(
+    profile_dir: Path,
+    servers: List[MCPServerCreate],
+) -> int:
+    """Persist only safe MCP entries into an explicitly selected profile."""
+    from hermes_cli.mcp_config import _save_mcp_server
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(profile_dir)
+    try:
+        written = 0
+        for body in servers:
+            name = str(body.name or "").strip()
+            if not name:
+                continue
+            if _save_mcp_server(name, _mcp_server_config_from_create(body)):
+                written += 1
+        return written
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _redact_mcp_env(env: Dict[str, Any]) -> Dict[str, str]:
     """Mask secret-shaped MCP env values for read responses."""
     out: Dict[str, str] = {}
@@ -3544,21 +3942,15 @@ async def add_mcp_server(body: MCPServerCreate, profile: Optional[str] = None):
             detail="Provide either a URL (HTTP/SSE server) or a command (stdio server)",
         )
 
-    server_config: Dict[str, Any] = {}
-    if body.url:
-        server_config["url"] = body.url.strip()
-    if body.command:
-        server_config["command"] = body.command.strip()
-        if body.args:
-            server_config["args"] = list(body.args)
-    if body.env:
-        server_config["env"] = dict(body.env)
-    if body.auth:
-        server_config["auth"] = body.auth
+    server_config = _mcp_server_config_from_create(body)
 
     try:
         with _profile_scope(body.profile or profile):
-            _save_mcp_server(name, server_config)
+            if not _save_mcp_server(name, server_config):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"MCP server '{name}' rejected by security policy",
+                )
     except HTTPException:
         raise
     except Exception as exc:
@@ -5840,7 +6232,7 @@ def mount_spa(application: FastAPI):
         ``__HERMES_AUTH_REQUIRED__`` flag lets the SPA pick the right
         auth scheme for /api/pty and /api/ws (ticket vs token).
         """
-        html = _index_path.read_text()
+        html = _index_path.read_text(encoding="utf-8")
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
         gated_js = "true" if gated else "false"
@@ -5890,7 +6282,7 @@ def mount_spa(application: FastAPI):
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        css = css_path.read_text()
+        css = css_path.read_text(encoding="utf-8")
         if prefix:
             for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
                 css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
@@ -6212,6 +6604,37 @@ async def set_dashboard_theme(body: ThemeSetBody):
     config["dashboard"]["theme"] = body.name
     save_config(config)
     return {"ok": True, "theme": body.name}
+
+
+_FONT_DEFAULT_ID = "theme"
+_FONT_CHOICES = frozenset({
+    "system-sans", "system-serif", "system-mono",
+    "inter", "ibm-plex-sans", "work-sans", "atkinson-hyperlegible", "dm-sans",
+    "spectral", "fraunces", "source-serif",
+    "jetbrains-mono", "ibm-plex-mono", "space-mono",
+})
+
+
+@app.get("/api/dashboard/font")
+async def get_dashboard_font():
+    config = load_config()
+    font = cfg_get(config, "dashboard", "font", default=_FONT_DEFAULT_ID)
+    if font not in _FONT_CHOICES:
+        font = _FONT_DEFAULT_ID
+    return {"font": font}
+
+
+class FontSetBody(BaseModel):
+    font: str
+
+
+@app.put("/api/dashboard/font")
+async def set_dashboard_font(body: FontSetBody):
+    font = body.font if body.font in _FONT_CHOICES else _FONT_DEFAULT_ID
+    config = load_config()
+    config.setdefault("dashboard", {})["font"] = font
+    save_config(config)
+    return {"ok": True, "font": font}
 
 
 # ---------------------------------------------------------------------------

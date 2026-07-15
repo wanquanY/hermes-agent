@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_agent_profile_registry_latest_profile_is_native_hermes_state(tmp_path: Path):

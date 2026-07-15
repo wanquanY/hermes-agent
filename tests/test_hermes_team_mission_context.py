@@ -8,7 +8,7 @@ from hermes_team_mission.context.worker_context import build_team_mission_worker
 from hermes_team_mission.context.worker_context import prior_node_attempts
 from hermes_team_mission.context.worker_context import recent_node_events
 from hermes_team_mission.context.worker_context import team_mission_graph_summary
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def test_team_mission_worker_context_is_bounded_and_keeps_refs():

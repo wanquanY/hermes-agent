@@ -11,7 +11,12 @@ def test_team_mission_legacy_entrypoints_are_absent() -> None:
     assert not (ROOT / "hermes_state_team_missions.py").exists()
     assert not (ROOT / "tui_gateway" / "methods" / "team_mission.py").exists()
     assert not (ROOT / "tui_gateway" / "methods" / "team_mission_history.py").exists()
-    assert not list((ROOT / "tui_gateway" / "services").glob("team_mission_*.py"))
+    transport_projection_owners = {
+        ROOT / "tui_gateway" / "services" / "team_mission_activity_events.py",
+    }
+    assert set((ROOT / "tui_gateway" / "services").glob("team_mission_*.py")) == (
+        transport_projection_owners
+    )
 
 
 def test_team_mission_production_code_does_not_import_legacy_boundaries() -> None:

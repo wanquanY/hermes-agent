@@ -23,7 +23,7 @@ normalize_whatsapp_identifier = canonical_whatsapp_identifier
 
 def _session_store_with_storage(tmp_path):
     from hermes_agent.repositories.session_repo import SessionRepoImpl
-    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+    from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
     conn = connect_session_repository_db(tmp_path / "state.db")
     return SessionStore(
@@ -581,7 +581,7 @@ class TestSessionStoreSwitchSession:
 
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-        from hermes_agent.storage.session_repository_db import connect_session_repository_db
+        from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
         config = GatewayConfig()
         conn = connect_session_repository_db(tmp_path / "state.db")

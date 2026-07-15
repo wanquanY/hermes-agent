@@ -11,28 +11,28 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 V3_PKG = REPO_ROOT / "hermes_agent"
-MIGRATION_PREFIX = "hermes_agent/storage/migrations/"
+MIGRATION_PREFIX = "hermes_agent/composition/migrations/"
 
 
 # Aggregate table -> files authorized to physically write it.
 TABLE_OWNERS: dict[str, set[str]] = {
     "sessions": {
         "hermes_agent/repositories/session_repo.py",
-        "hermes_agent/domain/session_deletion.py",
+        "hermes_agent/application/session_deletion.py",
     },
     "session_index": {
         "hermes_agent/repositories/session_repo.py",
-        "hermes_agent/domain/session_deletion.py",
+        "hermes_agent/application/session_deletion.py",
     },
     "session_branches": {"hermes_agent/repositories/session_repo.py"},
     "session_handoffs": {"hermes_agent/repositories/session_repo.py"},
     "session_lineage": {
         "hermes_agent/repositories/session_repo.py",
-        "hermes_agent/domain/session_deletion.py",
+        "hermes_agent/application/session_deletion.py",
     },
     "session_branch_requests": {
         "hermes_agent/repositories/session_repo.py",
-        "hermes_agent/domain/session_deletion.py",
+        "hermes_agent/application/session_deletion.py",
     },
     "messages": {"hermes_agent/repositories/message_repo.py"},
     "runs": {

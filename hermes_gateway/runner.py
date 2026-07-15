@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hermes_bootstrap  # noqa: F401 - configure UTF-8 stdio before runtime imports
+
 import asyncio
 import dataclasses
 import logging

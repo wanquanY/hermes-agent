@@ -15,7 +15,7 @@ from channels.session_identity import SessionSource, build_session_key
 from hermes_agent.read_models.message_history import MessageHistoryReadModel
 from hermes_agent.repositories.message_repo import MessageRepository
 from hermes_agent.repositories.session_repo import SessionFilter, SessionRepo, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_gateway.config import GatewayConfig
 from hermes_gateway.session_entry import SessionEntry
 from utils import atomic_replace

@@ -207,7 +207,7 @@ def _create_session_store_for_oneshot():
     advertised but every call returns "message history unavailable".
     """
     try:
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         return open_cli_session_store()
     except Exception as exc:

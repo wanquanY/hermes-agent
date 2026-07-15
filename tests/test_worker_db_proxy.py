@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.run_worker import DBRpcRequestFrame
 from tui_gateway import server
 from hermes_agent.orchestration.worker_db_proxy import (

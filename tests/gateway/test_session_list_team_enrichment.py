@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 from tui_gateway.services.workspace import bind_session_workspace
 
@@ -12,7 +12,6 @@ def _setup(monkeypatch, tmp_path: Path) -> CliSessionStore:
     session_methods = importlib.import_module("tui_gateway.methods.session")
     db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
-    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
     return db
 
 

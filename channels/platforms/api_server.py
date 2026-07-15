@@ -90,7 +90,7 @@ from channels.platforms.api_server_support import (
     cors_middleware,
     security_headers_middleware,
 )
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 logger = logging.getLogger(__name__)
 

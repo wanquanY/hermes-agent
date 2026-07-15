@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_team_mission.state.conversation import delete_team_mission_conversation
 from hermes_team_mission.state.memory import (
     team_mission_binding_events,

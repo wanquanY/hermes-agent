@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
@@ -135,52 +135,6 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     # Project pending state AFTER emit so the FE receives the event before
     # the sidebar flips — preserves the "popup shows, then spinner becomes
     # waiting badge" intuition for users watching both views.
-    _project_block_state(sid, present=True)
-    try:
-        ev.wait(timeout=timeout)
-    finally:
-        _project_block_state(sid, present=False)
-    with _prompt_lock:
-        _pending.pop(rid, None)
-        return _answers.pop(rid, "")
-    try:
-        # Diagnostic — short-lived. Captures every event type that flows
-        # through _block so we can tell at a glance whether a missing
-        # popup is a backend (event not emitted) or frontend (event
-        # arrived but no handler) issue. We also dump the session keys
-        # that _emit will derive runtime_scope_key / conversation_session_id
-        # from, because subscription filtering downstream rejects events
-        # whose runtime_scope_key doesn't match the FE-side scope key,
-        # and that mismatch is invisible from the event_type alone.
-        import sys as _sys
-        _choices_n = len((payload or {}).get("choices") or []) if isinstance(payload, dict) else 0
-        try:
-            with _sessions_lock:
-                _sess = dict(_sessions.get(sid) or {})
-        except Exception:
-            _sess = {}
-        _line = (
-            f"[doxie-block-enter] event={event} sid={sid} rid={rid} "
-            f"choices={_choices_n} timeout={timeout} "
-            f"session_key={_sess.get('session_key') or ''!r} "
-            f"active_runtime_scope_key={_sess.get('active_runtime_scope_key') or ''!r} "
-            f"runtime_scope_key={_sess.get('runtime_scope_key') or ''!r} "
-            f"active_run_id={_sess.get('active_run_id') or ''!r}"
-        )
-        print(_line, file=_sys.stderr, flush=True)
-        logger.warning(_line)
-    except Exception:
-        pass
-    # Project pending-input state to the canonical sidebar truth.
-    #
-    # This is THE choke point for every blocking user-input prompt in Dovie:
-    # clarify.request, sudo.request, secret.request, approval.request etc.
-    # Dovie's tool callbacks (see tui_gateway/services/tool_events.py) wire
-    # the agent's clarify_callback to ``_block(...)`` instead of the
-    # worker event-stream path handled by ``WorkerFrameRouter``.
-    #
-    # Projecting from here covers every Dovie blocking prompt with one
-    # write. Best-effort: any DB issue must NOT alter the block timing.
     _project_block_state(sid, present=True)
     try:
         ev.wait(timeout=timeout)

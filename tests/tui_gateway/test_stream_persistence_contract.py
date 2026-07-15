@@ -1,8 +1,6 @@
-import time
-
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control
 from tui_gateway.services import team_mission_activity_events
 from tui_gateway.services.subagent_snapshots import build_subagent_run_snapshots
@@ -156,7 +154,7 @@ def test_team_activity_projection_keeps_transient_source_out_of_cursor_fields():
 
     assert projected["transient"] is True
     assert projected["runtime_source_seq"] == 5_751
-    assert projected["source_seq"] == 5_751
+    assert projected["source_seq"] == 0
     assert "seq" not in projected
     assert "activity_event_seq" not in projected
     assert "team_mission_event_seq" not in projected
@@ -341,14 +339,7 @@ def test_transport_disconnect_persists_one_active_stream_snapshot(tmp_path):
     )
 
     run_control.detach_transport(transport)
-    deadline = time.time() + 2
-    events = []
-    while time.time() < deadline:
-        events = db.runs.list_events(session_id)
-        if events:
-            break
-        time.sleep(0.01)
-
+    events = db.runs.list_events(session_id)
     assert len(events) == 1
     assert events[0]["type"] == "message.delta"
     assert events[0]["payload"]["mode"] == "append"

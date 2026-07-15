@@ -27,7 +27,7 @@ def _setup_db(monkeypatch, tmp_path: Path):
     Seeds a mission + node + run binding + session so that
     ``team_mission.node.history`` resolves to ``session-worker``.
     """
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()

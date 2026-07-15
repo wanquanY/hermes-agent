@@ -117,7 +117,7 @@ def _make_codex_agent():
 
 
 def _make_team_codex_agent(tmp_path, *, session_id="team-session-team-conversation-cx-h3"):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     db.sessions.create(session_id=session_id, source="team_mission", model="test")
@@ -539,9 +539,8 @@ class TestRunConversationCodexPath:
         assert not client_mock.chat.completions.create.called
 
     def test_gateway_terminal_cwd_seeds_codex_thread_cwd(self, monkeypatch, tmp_path):
-        """Gateway sessions set TERMINAL_CWD without stamping agent.session_cwd.
-        Codex app-server must still start in that configured workspace instead
-        of falling back to the Hermes daemon process cwd."""
+        """Gateway sessions promote TERMINAL_CWD to the agent's canonical cwd,
+        and Codex app-server starts in that configured workspace."""
         from agent.transports.codex_app_server_session import (
             CodexAppServerSession, TurnResult,
         )
@@ -566,7 +565,7 @@ class TestRunConversationCodexPath:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
 
         agent = _make_codex_agent()
-        assert not hasattr(agent, "session_cwd")
+        assert agent.session_cwd == str(tmp_path)
         with patch.object(agent, "_spawn_background_review", return_value=None):
             agent.run_conversation("hi")
 

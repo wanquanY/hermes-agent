@@ -8,7 +8,7 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
+from hermes_agent.composition.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 
 
@@ -1236,7 +1236,7 @@ def _session(agent=None, **extra):
 
 
 def _title_gateway_db(tmp_path, rows=()):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "title-state.db")
     for session_id, title in rows:
@@ -1245,7 +1245,7 @@ def _title_gateway_db(tmp_path, rows=()):
 
 
 def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "resume-state.db")
     for row in rows:
@@ -4601,7 +4601,7 @@ def test_session_delete_propagates_db_exception(monkeypatch, tmp_path):
 
 
 def test_session_delete_removes_branched_session_fk_graph(monkeypatch, tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     db.sessions.create("source", "tui")
@@ -5652,7 +5652,7 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
 
 class _MostRecentDB:
     def __init__(self, rows):
-        from hermes_agent.storage.cli_session_store import CliSessionStore
+        from hermes_agent.composition.cli_session_store import CliSessionStore
 
         self._conn = sqlite3.connect(":memory:")
         self._conn.row_factory = sqlite3.Row

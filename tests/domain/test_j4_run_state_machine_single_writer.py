@@ -39,7 +39,7 @@ _TERMINATOR_WRITERS = {
 _RUN_MATERIALIZED_VIEW_WRITERS = {
     "hermes_agent/repositories/run_repo.py",
 }
-_MIGRATION_ROOTS = {"hermes_agent/storage/migrations"}
+_MIGRATION_ROOTS = {"hermes_agent/composition/migrations"}
 # ``scripts/`` is CI/audit tooling (``scripts/zero_debt/verdict.py`` is
 # itself a shadow-writer scanner containing the pattern strings) — not
 # production runtime.

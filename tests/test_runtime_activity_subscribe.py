@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 from tui_gateway.services import run_control
 from tui_gateway.services.activity_reconciler import ActivityReconciler

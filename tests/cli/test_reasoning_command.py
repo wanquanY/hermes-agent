@@ -381,8 +381,8 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
         cli.show_reasoning = show_reasoning
         cli.streaming_enabled = streaming_enabled
         cli.verbose = verbose
-        cli._stream_reasoning_delta = lambda text: ("stream", text)
-        cli._on_reasoning = lambda text: ("preview", text)
+        cli._stream_reasoning_delta = MagicMock()
+        cli._on_reasoning = MagicMock()
         return cli
 
     def test_show_reasoning_non_streaming_uses_final_box_only(self):
@@ -395,14 +395,16 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
 
         callback = cli._current_reasoning_callback()
         self.assertIsNotNone(callback)
-        self.assertEqual(callback("x"), ("stream", "x"))
+        self.assertIsNone(callback("x"))
+        cli._stream_reasoning_delta.assert_called_once_with("x")
 
     def test_verbose_without_show_reasoning_uses_preview_callback(self):
         cli = self._make_cli(show_reasoning=False, streaming_enabled=False, verbose=True)
 
         callback = cli._current_reasoning_callback()
         self.assertIsNotNone(callback)
-        self.assertEqual(callback("x"), ("preview", "x"))
+        self.assertIsNone(callback("x"))
+        cli._on_reasoning.assert_called_once_with("x")
 
 
 # ---------------------------------------------------------------------------

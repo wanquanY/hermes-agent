@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
-from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
 from tests.hermes_state.support import business_payload
 
 

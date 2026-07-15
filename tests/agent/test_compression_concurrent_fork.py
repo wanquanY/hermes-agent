@@ -36,24 +36,33 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def _build_agent_with_db(db: CliSessionStore, session_id: str):
     """Build an AIAgent that's wired to ``db`` and pinned to ``session_id``."""
-    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), patch(
+        "agent.model_metadata.get_model_context_length",
+        return_value=128_000,
+    ):
         from run_agent import AIAgent
 
-        agent = AIAgent(
-            api_key="test-key",
-            base_url="https://openrouter.ai/api/v1",
-            model="test/model",
-            quiet_mode=True,
-            session_db=db,
-            session_id=session_id,
-            skip_context_files=True,
-            skip_memory=True,
-        )
+        # ContextCompressor imports the resolver into its own module namespace,
+        # so isolate that reference as well after run_agent has loaded it.
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=128_000,
+        ):
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                quiet_mode=True,
+                session_db=db,
+                session_id=session_id,
+                skip_context_files=True,
+                skip_memory=True,
+            )
 
     # Stub the compressor so it returns deterministic output and DOESN'T make
     # an LLM call.  Sleep inside compress() so the two threads' rotations

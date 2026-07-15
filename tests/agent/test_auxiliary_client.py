@@ -1,6 +1,7 @@
 """Tests for agent.auxiliary_client resolution chain, provider overrides, and model overrides."""
 
 import json
+import base64
 import logging
 import os
 import time
@@ -29,6 +30,15 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
 )
+
+
+def _jwt_with_claims(claims: dict) -> str:
+    """Build an unsigned JWT-shaped token for expiry/scope unit tests."""
+    def _part(payload: dict) -> str:
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_part({'alg': 'none', 'typ': 'JWT'})}.{_part(claims)}.signature"
 
 
 @pytest.fixture(autouse=True)

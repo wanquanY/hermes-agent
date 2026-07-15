@@ -24,7 +24,7 @@ def _execution_scope_identity(
     session_id: str | None = None,
     contexts: Iterable[Any] = (),
 ) -> tuple[str, Any | None]:
-    stable_session_id = str(
+    conversation_identity = str(
         session_id or getattr(agent, "session_id", "") or ""
     ).strip()
     candidates = (
@@ -42,8 +42,8 @@ def _execution_scope_identity(
         if (
             conversation_session_id
             and execution_scope_key
-            and conversation_session_id == stable_session_id
-            and execution_scope_key != stable_session_id
+            and conversation_session_id == conversation_identity
+            and execution_scope_key != conversation_identity
         ):
             return execution_scope_key, context
     return "", None

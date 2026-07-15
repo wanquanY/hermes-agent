@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_path: Path):
-    from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+    from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
 
     db_path = tmp_path / "state.db"
     db = open_cli_session_store(db_path)
@@ -59,6 +59,9 @@ def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_pat
             (legacy_event_json, "mission-legacy", stored["seq"]),
         )
         db._conn.execute("UPDATE schema_version SET version = ?", (38,))  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001 - force the declarative migration to replay.
+            "DELETE FROM applied_migrations WHERE version = 39"
+        )
     finally:
         db.close()
 

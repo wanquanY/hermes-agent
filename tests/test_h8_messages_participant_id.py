@@ -5,8 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services import run_control
 
 

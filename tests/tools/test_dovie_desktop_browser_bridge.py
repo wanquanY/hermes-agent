@@ -42,7 +42,7 @@ def test_dovie_browser_bridge_uses_desktop_browser_commands(monkeypatch):
 
 def test_dovie_browser_bridge_prefers_session_context(monkeypatch):
     from dovie_extension import browser_bridge
-    from gateway import session_context
+    from channels import session_context
 
     monkeypatch.setenv("DOVIE_BROWSER_SESSION_ID", "browser:electron:global")
     tokens = session_context.set_session_vars(

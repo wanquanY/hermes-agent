@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _insert_session_info(store, *, seq: int, model: str) -> None:

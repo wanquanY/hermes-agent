@@ -93,7 +93,7 @@ def test_handle_leader_run_team_profile_calls_gateway_team_profile_rpc(monkeypat
     monkeypatch.setattr(
         profile_tools,
         "gateway_call",
-        lambda method, params: calls.append((method, params)) or _gateway_success(),
+        lambda method, params, **_kwargs: calls.append((method, params)) or _gateway_success(),
     )
 
     result = _json(profile_tools._handle_leader_run_team_profile({}, SimpleNamespace()))
@@ -114,7 +114,7 @@ def test_handle_leader_run_team_profile_calls_gateway_team_profile_rpc(monkeypat
 
 def test_handle_leader_run_team_profile_does_not_call_db_get_team_capability_snapshot(monkeypatch) -> None:
     monkeypatch.setattr(profile_tools, "_leader_run_context", lambda _args, _parent_agent=None: _leader_run_ctx())
-    monkeypatch.setattr(profile_tools, "gateway_call", lambda _method, _params: _gateway_success())
+    monkeypatch.setattr(profile_tools, "gateway_call", lambda _method, _params, **_kwargs: _gateway_success())
 
     result = _json(profile_tools._handle_leader_run_team_profile({}, SimpleNamespace()))
 
@@ -124,7 +124,7 @@ def test_handle_leader_run_team_profile_does_not_call_db_get_team_capability_sna
 
 def test_handle_leader_run_team_profile_returns_snapshot_when_rpc_succeeds(monkeypatch) -> None:
     monkeypatch.setattr(profile_tools, "_leader_run_context", lambda _args, _parent_agent=None: _leader_run_ctx())
-    monkeypatch.setattr(profile_tools, "gateway_call", lambda _method, _params: _gateway_success())
+    monkeypatch.setattr(profile_tools, "gateway_call", lambda _method, _params, **_kwargs: _gateway_success())
 
     result = _json(profile_tools._handle_leader_run_team_profile({"detail": "assignment"}, SimpleNamespace()))
 
@@ -141,7 +141,7 @@ def test_handle_leader_run_team_profile_returns_error_when_rpc_fails(monkeypatch
     monkeypatch.setattr(
         profile_tools,
         "gateway_call",
-        lambda _method, _params: {"error": {"message": "team capability snapshot not found"}},
+        lambda _method, _params, **_kwargs: {"error": {"message": "team capability snapshot not found"}},
     )
 
     result = _json(profile_tools._handle_leader_run_team_profile({}, SimpleNamespace()))
@@ -245,7 +245,7 @@ def test_handle_leader_team_profile_still_works_via_gateway_call_path(monkeypatc
     monkeypatch.setattr(
         profile_tools,
         "gateway_call",
-        lambda method, params: calls.append((method, params)) or _gateway_success(),
+        lambda method, params, **_kwargs: calls.append((method, params)) or _gateway_success(),
     )
 
     result = _json(profile_tools._handle_leader_team_profile({}, SimpleNamespace()))

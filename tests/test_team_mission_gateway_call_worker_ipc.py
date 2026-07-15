@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hermes_team_mission.runtime import profile_scope
-from hermes_agent.storage.cli_session_store import CliSessionStore
+from hermes_agent.composition.cli_session_store import CliSessionStore
 from hermes_agent.orchestration.worker_supervisor import DB_RPC_ALLOWED_METHODS
 from hermes_agent.orchestration.worker_rpc_proxy import set_default_worker_rpc_proxy
 

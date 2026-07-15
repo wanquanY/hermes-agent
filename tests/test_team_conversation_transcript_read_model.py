@@ -1,4 +1,4 @@
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def _create_team_session(db: CliSessionStore, session_id: str) -> None:

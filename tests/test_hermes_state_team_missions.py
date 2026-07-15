@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Path):
@@ -3751,7 +3751,7 @@ def test_team_mission_events_store_only_canonical_event_json(tmp_path: Path):
 
 
 def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_path: Path):
-    from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+    from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
 
     db_path = tmp_path / "state.db"
     db = open_cli_session_store(db_path)

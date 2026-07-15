@@ -43,6 +43,7 @@ def _run_copilot_switch(
             "hermes_cli.models.validate_requested_model",
             return_value=_MOCK_VALIDATION,
         ),
+        patch("hermes_cli.models.fetch_github_model_catalog", return_value=[]),
         patch("hermes_cli.model_switch.get_model_info", return_value=None),
         patch("hermes_cli.model_switch.get_model_capabilities", return_value=None),
         patch("hermes_cli.models.detect_provider_for_model", return_value=None),

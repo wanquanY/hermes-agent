@@ -105,7 +105,13 @@ def test_p0_3_find_interaction_anchor_seq_helper_exists():
 
 def test_p0_3_migration_persists_anchor_seq_column():
     """spec §7.4 —— run_events.anchor_seq 列由 migration 0042 建。"""
-    mig = REPO_ROOT / "hermes_agent" / "storage" / "migrations" / "0042_interaction_events_persist.py"
+    mig = (
+        REPO_ROOT
+        / "hermes_agent"
+        / "composition"
+        / "migrations"
+        / "0042_interaction_events_persist.py"
+    )
     src = mig.read_text(encoding="utf-8")
     assert "anchor_seq" in src, (
         "migration 0042 里没有 anchor_seq —— spec §7.4 要求该列"

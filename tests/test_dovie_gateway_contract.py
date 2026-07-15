@@ -233,15 +233,15 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.result.get": "hermes_team_mission.gateway.snapshot_methods",
         "team_mission.events": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.message.submit": "hermes_team_mission.gateway.runtime_methods",
-        "team_mission.cancel": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.cancel": "hermes_team_mission.gateway.runtime_lifecycle_methods",
         "team_mission.node.create": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.edge.create": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.node.update": "hermes_team_mission.gateway.runtime_methods",
-        "team_mission.node.bind_run": "hermes_team_mission.gateway.runtime_methods",
-        "team_mission.node.start": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.node.bind_run": "hermes_team_mission.gateway.runtime_lifecycle_methods",
+        "team_mission.node.start": "hermes_team_mission.gateway.runtime_lifecycle_methods",
         "team_mission.plan.complete": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.plan.approve": "hermes_team_mission.gateway.runtime_methods",
-        "team_mission.schedule.ready": "hermes_team_mission.gateway.runtime_methods",
+        "team_mission.schedule.ready": "hermes_team_mission.gateway.runtime_lifecycle_methods",
         "team_mission.node.history": "hermes_team_mission.gateway.history_methods",
         "conversation.memory.propose": "hermes_team_mission.gateway.conversation_memory_methods",
         "conversation.memory.commit": "hermes_team_mission.gateway.conversation_memory_methods",
@@ -274,7 +274,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
 def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     session_methods = importlib.import_module("tui_gateway.methods.session")
@@ -317,7 +317,7 @@ def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tm
 def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -400,7 +400,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
 def test_conversation_render_snapshot_returns_completed_team_projection_without_runtime_replay_events(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -467,7 +467,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
 def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -567,7 +567,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
 def test_conversation_render_snapshot_returns_active_team_structural_runtime_events(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -689,7 +689,7 @@ def test_conversation_render_snapshot_cap_drops_oversized_single_items():
 def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -777,7 +777,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
 def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_summary(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -856,7 +856,7 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
 def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_messages(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -1458,7 +1458,7 @@ def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):
 
 
 def test_session_db_persists_run_registry_and_event_log(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:
@@ -1526,7 +1526,7 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
 
 
 def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:
@@ -1597,7 +1597,7 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
 
 
 def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, caplog):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1641,7 +1641,7 @@ def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, c
 
 
 def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, caplog):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1674,7 +1674,7 @@ def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, c
 
 
 def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path, caplog):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1707,7 +1707,7 @@ def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path,
 
 
 def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, caplog):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1745,7 +1745,7 @@ def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, cap
 
 
 def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:
@@ -1782,7 +1782,7 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
 
 
 def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1827,7 +1827,7 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
 def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     run_methods = importlib.import_module("tui_gateway.methods.run")
@@ -1894,7 +1894,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
 
 
 def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -1942,7 +1942,7 @@ def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
 def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -1982,7 +1982,7 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
 
 
 def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:
@@ -2027,7 +2027,7 @@ def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp
 
 
 def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:
@@ -2082,7 +2082,7 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
 
 
 def test_session_db_replays_run_events_by_runtime_scope(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "state.db")
     try:

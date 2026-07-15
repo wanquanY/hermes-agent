@@ -139,6 +139,18 @@ def test_gateway_run_agent_codex_path_handles_internal_401_refresh(monkeypatch):
     )
     monkeypatch.setenv("HERMES_TOOL_PROGRESS", "false")
     monkeypatch.setenv("HERMES_MODEL", "gpt-5.3-codex")
+    monkeypatch.setattr(
+        "hermes_gateway.gateway_runtime_config.GatewayRuntimeConfigService.resolve_session_agent_runtime",
+        lambda self, **kwargs: (
+            "gpt-5.3-codex",
+            {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key": "codex-token",
+            },
+        ),
+    )
 
     _Codex401ThenSuccessAgent.refresh_attempts = 0
     _Codex401ThenSuccessAgent.last_init = {}
@@ -159,8 +171,7 @@ def test_gateway_run_agent_codex_path_handles_internal_401_refresh(monkeypatch):
     # Ensure model resolution returns the codex model even if xdist
     # leaked env vars cleared HERMES_MODEL.
     monkeypatch.setattr(
-        gateway_run.GatewayRunner,
-        "_resolve_turn_agent_config",
+        "hermes_gateway.gateway_runtime_config.GatewayRuntimeConfigService.resolve_turn_agent_config",
         lambda self, msg, model, runtime: {
             "model": model or "gpt-5.3-codex",
             "runtime": runtime,

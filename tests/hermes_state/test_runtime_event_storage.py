@@ -6,7 +6,7 @@ from pathlib import Path
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tests.hermes_state.support import business_payload
 
 
@@ -121,6 +121,7 @@ def test_existing_session_info_events_backfill_session_runtime_state(tmp_path):
             },
         )
         legacy._conn.execute("DELETE FROM session_runtime_state")
+        legacy._conn.execute("DELETE FROM applied_migrations WHERE version >= 33")
         legacy._conn.execute("UPDATE schema_version SET version = 32")
         legacy._conn.commit()
     finally:

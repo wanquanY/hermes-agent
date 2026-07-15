@@ -224,11 +224,11 @@ class TestS8OrphanRecoveryMainOnly:
         from tui_gateway.services import run_control
 
         with patch('tui_gateway.process_role.is_worker_process', return_value=True):
-            with patch.object(run_control, '_db_method') as mock_db_method:
+            with patch.object(run_control, '_run_method') as mock_run_method:
                 result = run_control._recover_orphaned_active_runs()
 
                 assert result == 0, "worker 侧应该返回 0"
-                mock_db_method.assert_not_called(), \
+                mock_run_method.assert_not_called(), \
                     "worker 侧不应该调用 DB 方法"
 
     def test_main_runs_scan(self):
@@ -237,11 +237,12 @@ class TestS8OrphanRecoveryMainOnly:
 
         mock_method = MagicMock(return_value=3)
         with patch('tui_gateway.process_role.is_worker_process', return_value=False):
-            with patch.object(run_control, '_db_method', return_value=mock_method):
-                result = run_control._recover_orphaned_active_runs()
+            with patch.object(run_control, '_run_method', return_value=mock_method):
+                result = run_control._recover_orphaned_active_runs(object())
 
                 mock_method.assert_called(), \
                     "main 侧应该调用 DB 扫描方法"
+                assert result == 3
 
     def test_worker_returns_zero_with_db(self):
         """worker 侧即使有 DB 也返回 0，不扫描。"""
@@ -249,7 +250,7 @@ class TestS8OrphanRecoveryMainOnly:
 
         mock_method = MagicMock(return_value=999)
         with patch('tui_gateway.process_role.is_worker_process', return_value=True):
-            with patch.object(run_control, '_db_method', return_value=mock_method):
+            with patch.object(run_control, '_run_method', return_value=mock_method):
                 result = run_control._recover_orphaned_active_runs()
 
                 assert result == 0, \

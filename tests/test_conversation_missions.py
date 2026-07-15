@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 
 

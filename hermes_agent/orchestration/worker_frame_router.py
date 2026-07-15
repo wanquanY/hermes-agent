@@ -798,7 +798,10 @@ class WorkerFrameRouter:
             pending.scope_key,
             pending.conversation_id,
             InteractiveResponseFrame(
-                kind=pending.kind, request_id=request_id, answer=answer,
+                kind=pending.kind,
+                request_id=request_id,
+                answer=answer,
+                conversation_session_id=pending.conversation_session_id,
             ),
         )
         if ok:

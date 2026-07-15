@@ -1019,6 +1019,8 @@ def _build_child_progress_callback(
         if normalized_delegate_call_id:
             kw["delegate_call_id"] = normalized_delegate_call_id
             kw["tool_call_id"] = normalized_delegate_call_id
+        if delegation_tool_name:
+            kw["delegation_tool_name"] = delegation_tool_name
         if include_descriptor:
             kw["goal"] = goal_label
             if depth is not None:
@@ -1031,8 +1033,6 @@ def _build_child_progress_callback(
                 kw["role"] = str(role)
             if normalized_agent_name:
                 kw["agent_name"] = normalized_agent_name
-            if delegation_tool_name:
-                kw["delegation_tool_name"] = delegation_tool_name
             if context_text:
                 kw["context"] = context_text
             if dispatch_message:

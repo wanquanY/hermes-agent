@@ -2,7 +2,7 @@
 
 import re
 
-from hermes_agent.domain.session_analytics_service import SessionAnalyticsService
+from hermes_agent.application.session_analytics_service import SessionAnalyticsService
 
 
 def test_session_cols_no_injection_chars():

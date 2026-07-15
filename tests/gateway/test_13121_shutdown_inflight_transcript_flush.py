@@ -135,7 +135,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         # Isolated state.db.
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from run_agent import AIAgent
 
         db = open_cli_session_store(db_path=tmp_path / "state.db")
@@ -208,7 +208,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         duplicate rows when _finalize_shutdown_agents re-flushes."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from run_agent import AIAgent
 
         db = open_cli_session_store(db_path=tmp_path / "state.db")

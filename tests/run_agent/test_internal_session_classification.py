@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from run_agent import AIAgent
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_agent_persists_internal_execution_classification(tmp_path) -> None:

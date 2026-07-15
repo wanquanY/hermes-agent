@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_team_mission.context.worker_context import cap_text
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 _log = logging.getLogger(__name__)
 

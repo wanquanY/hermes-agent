@@ -12,56 +12,13 @@ from hermes_agent.gateway import (
 )
 from hermes_agent.gateway.methods import session_methods
 from hermes_agent.repositories import SessionRepoImpl, SessionSpec
+from hermes_agent.storage.state_schema import SCHEMA_SQL
 
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            title TEXT,
-            display_title TEXT,
-            display_title_source TEXT,
-            session_kind TEXT NOT NULL DEFAULT 'hermes_session',
-            conversation_kind TEXT NOT NULL DEFAULT 'direct',
-            parent_session_id TEXT,
-            started_at REAL NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL DEFAULT 0,
-            ended_at REAL,
-            end_reason TEXT
-        );
-        CREATE TABLE session_index (
-            session_id TEXT PRIMARY KEY,
-            owner_agent_profile_id TEXT NOT NULL DEFAULT '',
-            owner_profile_version_id TEXT NOT NULL DEFAULT '',
-            runtime_scope_key TEXT NOT NULL DEFAULT '',
-            title TEXT NOT NULL DEFAULT '',
-            preview TEXT NOT NULL DEFAULT '',
-            source TEXT NOT NULL DEFAULT '',
-            session_kind TEXT NOT NULL DEFAULT '',
-            conversation_kind TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'idle',
-            running INTEGER NOT NULL DEFAULT 0,
-            waiting_approval INTEGER NOT NULL DEFAULT 0,
-            active_run_id TEXT NOT NULL DEFAULT '',
-            active_execution_session_id TEXT NOT NULL DEFAULT '',
-            pending_approval_count INTEGER NOT NULL DEFAULT 0,
-            message_count INTEGER NOT NULL DEFAULT 0,
-            started_at REAL NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL DEFAULT 0,
-            last_activity REAL
-        );
-        CREATE TABLE session_branches (
-            child_session_id TEXT PRIMARY KEY,
-            parent_session_id TEXT NOT NULL,
-            branch_from_seq INTEGER NOT NULL,
-            created_at REAL NOT NULL
-        );
-        """
-    )
+    conn.executescript(SCHEMA_SQL)
     return conn
 
 

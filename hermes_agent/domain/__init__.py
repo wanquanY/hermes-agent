@@ -1,4 +1,4 @@
-"""Hermes domain services (spec §2).
+"""Hermes domain model and pure policy (spec §2).
 
 Exposes the canonical event contract (§6.2) so callers can import from
 ``hermes_agent.domain`` without deep paths.

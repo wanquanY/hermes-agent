@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_repair_removes_only_dangling_non_authoritative_records(tmp_path):

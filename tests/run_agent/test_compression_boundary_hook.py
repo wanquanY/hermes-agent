@@ -36,7 +36,7 @@ class TestCompressionBoundaryHook:
             )
 
     def test_on_session_start_called_with_compression_boundary(self):
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")
@@ -131,7 +131,7 @@ class TestCompressionBoundaryHook:
 
     def test_hook_failure_does_not_break_compression(self):
         """If the context engine raises from on_session_start, compression still completes."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hermes_agent.domain.session_deletion import SessionDeletionService
+from hermes_agent.application.session_deletion import SessionDeletionService
 
 
 def _conn() -> sqlite3.Connection:

@@ -10,7 +10,7 @@ Two locks:
 
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services.run_control import record_event
 
 
@@ -158,7 +158,7 @@ def test_run_event_routes_by_conversation_session_id_without_mission(tmp_path: P
     db.runs.append_event(
         "plain-conv",
         {
-            "type": "message.delta",
+            "type": "message.complete",
             "session_id": "plain-conv",
             "conversation_session_id": "plain-conv",
             "run_id": "run-x",
@@ -199,7 +199,7 @@ def test_record_event_stamps_participant_id_for_leader(tmp_path: Path):
 
     record_event(
         {
-            "type": "message.delta",
+            "type": "message.complete",
             "session_id": "team-session-1",
             "conversation_session_id": "team-session-1",
             "run_id": "run-leader",
@@ -237,7 +237,7 @@ def test_record_event_stamps_participant_id_for_member_by_profile(tmp_path: Path
 
     record_event(
         {
-            "type": "message.delta",
+            "type": "message.complete",
             "session_id": "team-session-1",
             "conversation_session_id": "team-session-1",
             "run_id": "run-alice",
@@ -265,7 +265,7 @@ def test_record_event_with_no_hints_does_not_stamp(tmp_path: Path):
 
     record_event(
         {
-            "type": "message.delta",
+            "type": "message.complete",
             "session_id": "plain-conv",
             "conversation_session_id": "plain-conv",
             "run_id": "run-y",

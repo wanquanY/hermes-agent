@@ -239,7 +239,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # Tencent — Hy3 Preview (Hunyuan) with 256K context window.
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
     # static fallback so cache and offline both agree (issue #22268).
-    "hy3-preview": 262144,
+    "hy3": 262144,
+    "hy3-preview": 262144,  # legacy alias retained for existing profiles
     "hy3": 262144,
     # Nemotron — NVIDIA's open-weights series (128K context across all sizes)
     "nemotron": 131072,
@@ -499,7 +500,10 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=2.0, headers=headers) as client:
+        # Local inference discovery must never inherit HTTP(S)_PROXY: routing
+        # loopback probes through a corporate proxy turns an immediate
+        # connection refusal into a long network timeout.
+        with httpx.Client(timeout=2.0, headers=headers, trust_env=False) as client:
             # LM Studio exposes /api/v1/models — check first (most specific)
             try:
                 r = client.get(f"{server_url}/api/v1/models")
@@ -1085,7 +1089,7 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=3.0, headers=headers) as client:
+        with httpx.Client(timeout=3.0, headers=headers, trust_env=False) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
             if resp.status_code != 200:
                 return None
@@ -1141,7 +1145,7 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     headers = _auth_headers(api_key)
 
     try:
-        with httpx.Client(timeout=5.0, headers=headers) as client:
+        with httpx.Client(timeout=5.0, headers=headers, trust_env=False) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": model})
             if resp.status_code != 200:
                 return None
@@ -1231,7 +1235,7 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
         server_type = None
 
     try:
-        with httpx.Client(timeout=3.0, headers=headers) as client:
+        with httpx.Client(timeout=3.0, headers=headers, trust_env=False) as client:
             # Ollama: /api/show returns model details with context info
             if server_type == "ollama":
                 resp = client.post(f"{server_url}/api/show", json={"name": model})
@@ -1724,26 +1728,10 @@ def get_model_context_length(
                 "in config.yaml to override.",
                 model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
             )
-            # 3b. Before falling back to the hard 256K default, consult the
-            # hardcoded catalog as a last resort.  A proxied/custom Anthropic
-            # gateway (e.g. corporate proxy) fails the Ollama/local probes
-            # above, but the model name may still match an entry in
-            # DEFAULT_CONTEXT_LENGTHS (e.g. "claude-opus-4-8" → 1M).
-            # Without this, the early return here short-circuits the catalog
-            # lookup at step 8 and silently caps context at 256K.
-            model_lower = model.lower()
-            for default_model, length in sorted(
-                DEFAULT_CONTEXT_LENGTHS.items(),
-                key=lambda x: len(x[0]),
-                reverse=True,
-            ):
-                if default_model in model_lower:
-                    logger.info(
-                        "Using hardcoded context length %s for model %r "
-                        "(custom endpoint, catalog match on %r)",
-                        f"{length:,}", model, default_model,
-                    )
-                    return length
+            # A custom endpoint owns the model contract. If its metadata and
+            # native probes do not disclose a window, a same-named public
+            # catalog entry is not authoritative (the endpoint may host a
+            # quantized or otherwise constrained build).
             return DEFAULT_FALLBACK_CONTEXT
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)

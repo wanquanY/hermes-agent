@@ -55,7 +55,7 @@ def _session_context_from_submit(submitted: dict) -> dict:
 
 
 def test_member_submit_inherits_leader_cloud_query_and_sets_executing_profile(monkeypatch, tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -107,7 +107,7 @@ def test_member_submit_inherits_leader_cloud_query_and_sets_executing_profile(mo
 
 
 def test_node_start_inherits_mission_cloud_query_and_sets_executing_profile(monkeypatch, tmp_path: Path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()

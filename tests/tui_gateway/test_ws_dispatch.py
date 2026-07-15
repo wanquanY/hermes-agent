@@ -394,7 +394,7 @@ def test_team_mission_create_does_not_proxy_from_nested_members():
 
 
 def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_path, monkeypatch):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     control_home = tmp_path / "control"
@@ -465,7 +465,7 @@ def test_team_mission_emit_uses_control_db_while_profile_context_is_active(tmp_p
 def test_team_mission_agent_uses_control_db_while_profile_context_is_active(tmp_path, monkeypatch):
     import hermes_cli.runtime_provider as runtime_provider
     import run_agent
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     control_home = tmp_path / "control"
@@ -509,7 +509,7 @@ def test_team_mission_agent_uses_control_db_while_profile_context_is_active(tmp_
 
 
 def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -555,7 +555,7 @@ def test_run_control_does_not_deliver_duplicate_terminal_events(tmp_path):
 
 
 def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -621,7 +621,7 @@ def test_run_control_does_not_deliver_stream_events_after_terminal(tmp_path):
 
 
 def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -692,7 +692,7 @@ def test_run_control_live_publish_preserves_append_stream_delta_chunks(tmp_path)
 
 
 def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -770,7 +770,7 @@ def test_run_control_fans_out_team_mission_activity_event_after_persist(tmp_path
 
 
 def test_run_control_session_subscription_ignores_team_mission_projection_events(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -833,7 +833,7 @@ def test_run_control_session_subscription_ignores_team_mission_projection_events
 
 
 def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")
@@ -884,7 +884,7 @@ def test_run_control_replaces_duplicate_session_subscriptions_per_transport(tmp_
 
 
 def test_run_control_replaces_duplicate_activity_subscriptions_per_transport(tmp_path):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
     db = open_cli_session_store(tmp_path / "state.db")

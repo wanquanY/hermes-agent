@@ -13,7 +13,7 @@ METHOD_SCAN_DIRS = (
 
 # Frozen legacy omissions: these methods are registered on the JSON-RPC gateway
 # but were not part of the Dovie manifest surface at the M-3 follow-up audit.
-# New @method registrations must be added to METHOD_MODULES instead of this set.
+# New @method registrations must be added to REQUIRED_GATEWAY_METHODS instead of this set.
 EXPLICITLY_OMITTED_FROM_MANIFEST = {
     "agents.list",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "artifacts.prune",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
@@ -133,10 +133,13 @@ def _literal_string_collection(value: ast.AST, name: str) -> set[str]:
     return methods
 
 
-def parse_method_modules_keys(path: str) -> set[str]:
+def parse_gateway_method_keys(path: str) -> set[str]:
     if path != "dovie_extension/manifest.py":
         raise AssertionError(f"unexpected manifest path: {path}")
-    return _literal_string_collection(_static_assignment("METHOD_MODULES"), "METHOD_MODULES")
+    return _literal_string_collection(
+        _static_assignment("REQUIRED_GATEWAY_METHODS"),
+        "REQUIRED_GATEWAY_METHODS",
+    )
 
 
 def parse_required_methods(path: str) -> set[str]:
@@ -185,36 +188,32 @@ def collect_method_decorators_recursively(paths: list[str]) -> set[str]:
 
 
 def test_all_registered_methods_declared_in_manifest() -> None:
-    """Static AST scan: every @method must be declared in METHOD_MODULES or omitted."""
+    """Static AST scan: every @method belongs to the declared gateway ABI or omissions."""
     registered = collect_method_decorators_recursively(list(METHOD_SCAN_DIRS))
-    manifest_keys = parse_method_modules_keys("dovie_extension/manifest.py")
+    manifest_keys = parse_gateway_method_keys("dovie_extension/manifest.py")
 
     gap = registered - manifest_keys - EXPLICITLY_OMITTED_FROM_MANIFEST
     assert not gap, (
-        "Methods registered via @method but missing from manifest METHOD_MODULES:\n"
+        "Methods registered via @method but missing from REQUIRED_GATEWAY_METHODS:\n"
         + "\n".join(f"- {method}" for method in sorted(gap))
     )
 
 
-def test_no_dead_entries_in_manifest_method_modules() -> None:
-    """Every METHOD_MODULES entry must have an @method registration in the codebase."""
-    registered = collect_method_decorators_recursively(list(METHOD_SCAN_DIRS))
-    manifest_keys = parse_method_modules_keys("dovie_extension/manifest.py")
+def test_gateway_capabilities_exposes_declared_gateway_abi() -> None:
+    """The runtime capability payload must expose the static gateway ABI verbatim."""
+    from dovie_extension.manifest import gateway_capabilities
 
-    dead = manifest_keys - registered
-    assert not dead, (
-        "METHOD_MODULES entries with no @method registration:\n"
-        + "\n".join(f"- {method}" for method in sorted(dead))
-    )
+    manifest_keys = parse_gateway_method_keys("dovie_extension/manifest.py")
+    assert set(gateway_capabilities()["methods"]) == manifest_keys
 
 
-def test_required_methods_subset_of_method_modules() -> None:
-    """REQUIRED_METHODS must be a subset of METHOD_MODULES keys."""
+def test_required_methods_subset_of_gateway_methods() -> None:
+    """REQUIRED_METHODS must be a subset of the declared gateway ABI."""
     required = parse_required_methods("dovie_extension/manifest.py")
-    manifest_keys = parse_method_modules_keys("dovie_extension/manifest.py")
+    manifest_keys = parse_gateway_method_keys("dovie_extension/manifest.py")
 
     missing = required - manifest_keys
     assert not missing, (
-        "REQUIRED_METHODS entries not in METHOD_MODULES:\n"
+        "REQUIRED_METHODS entries not in REQUIRED_GATEWAY_METHODS:\n"
         + "\n".join(f"- {method}" for method in sorted(missing))
     )

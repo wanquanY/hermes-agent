@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_agent.domain.session_branch_service import SessionBranchService
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.application.session_branch_service import SessionBranchService
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent

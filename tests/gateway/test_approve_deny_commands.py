@@ -362,11 +362,23 @@ class TestBlockingApprovalE2E:
 
     def setup_method(self):
         _clear_approval_state()
+        # This class verifies queueing/blocking semantics, not Tirith binary
+        # installation. Keep the external scanner out of the timing window so
+        # the worker is guaranteed to reach the approval queue deterministically.
+        self._tirith_patch = patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "allow", "findings": [], "summary": ""},
+        )
+        self._tirith_patch.start()
         os.environ.pop("HERMES_YOLO_MODE", None)
         os.environ.pop("HERMES_INTERACTIVE", None)
         os.environ.pop("HERMES_GATEWAY_SESSION", None)
         os.environ.pop("HERMES_EXEC_ASK", None)
         os.environ.pop("HERMES_SESSION_KEY", None)
+
+    def teardown_method(self):
+        self._tirith_patch.stop()
+        _clear_approval_state()
 
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
@@ -628,7 +640,7 @@ class TestFallbackNoCallback:
     def setup_method(self):
         _clear_approval_state()
 
-    def test_no_callback_returns_approval_required(self):
+    def test_no_callback_returns_approval_required(self, monkeypatch):
         """Without a registered callback, the fallback returns pending_approval.
 
         PR #6d495d9e7 renamed the LLM-visible status from ``approval_required``
@@ -636,6 +648,13 @@ class TestFallbackNoCallback:
         failed tool call.
         """
         from tools.approval import check_all_command_guards, _pending
+
+        # This test owns the no-callback approval contract, not the optional
+        # Tirith binary lifecycle.  Keep the guard deterministic and offline.
+        monkeypatch.setattr(
+            "tools.tirith_security.check_command_security",
+            lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        )
 
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = "no-callback-test"

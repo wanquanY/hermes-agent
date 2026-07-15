@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _migration_module(version: int = 48):
@@ -14,7 +14,7 @@ def _migration_module(version: int = 48):
         if version == 48
         else "retire_team_mission_memory_tables.py"
     )
-    path = Path(__file__).parents[2] / f"hermes_agent/storage/migrations/{version:04d}_{suffix}"
+    path = Path(__file__).parents[2] / f"hermes_agent/composition/migrations/{version:04d}_{suffix}"
     spec = importlib.util.spec_from_file_location(f"migration_{version:04d}_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

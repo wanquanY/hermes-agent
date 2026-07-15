@@ -19,7 +19,15 @@ from tools.approval import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_approval_state():
+def _clear_approval_state(monkeypatch):
+    # YOLO tests own the dangerous-command decision but do not test the
+    # optional Tirith installer/scanner. Prevent network installation from
+    # leaking into this unit-test boundary.
+    monkeypatch.setattr(
+        tools.tirith_security,
+        "check_command_security",
+        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+    )
     approval_module._permanent_approved.clear()
     approval_module.clear_session("default")
     approval_module.clear_session("test-session")

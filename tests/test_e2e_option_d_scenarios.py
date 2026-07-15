@@ -12,7 +12,7 @@ import pytest_asyncio
 
 from agent.activity_event_bus import ActivityEventBus
 from agent.conversation_loop import _drain_activity_events_for_api
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame

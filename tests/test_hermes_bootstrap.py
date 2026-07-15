@@ -284,6 +284,8 @@ class TestEntryPointsImportBootstrap:
 
         first_import_node = None
         for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 first_import_node = node
                 break

@@ -9,7 +9,7 @@ from hermes_agent.gateway import AllowAllResolver, MethodRegistry
 from hermes_agent.gateway.methods import session_methods
 from hermes_agent.gateway.pipeline import dispatch
 from hermes_agent.repositories.session_repo import SessionRepoImpl
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
 
 def _registry(conn: sqlite3.Connection) -> MethodRegistry:

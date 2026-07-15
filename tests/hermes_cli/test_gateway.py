@@ -10,9 +10,9 @@ import hermes_cli.gateway as gateway
 
 
 def _install_fake_gateway_run(monkeypatch, start_gateway):
-    module = ModuleType("gateway.run")
+    module = ModuleType("hermes_gateway.runner")
     module.start_gateway = start_gateway
-    monkeypatch.setitem(sys.modules, "gateway.run", module)
+    monkeypatch.setitem(sys.modules, "hermes_gateway.runner", module)
     # ``run_gateway()`` calls ``refresh_systemd_unit_if_needed()`` on every
     # invocation so that restart settings stay current after exit-code-75
     # respawns. That helper writes to ``Path.home() / ".config/systemd/user

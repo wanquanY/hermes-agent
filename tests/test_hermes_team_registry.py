@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
@@ -220,7 +220,7 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
 def test_team_registry_gateway_detail_list_works_with_cli_session_store(monkeypatch, tmp_path: Path):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_registry = importlib.import_module("tui_gateway.methods.team_registry")

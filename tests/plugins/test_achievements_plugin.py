@@ -51,10 +51,10 @@ def plugin_api(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     # Stash monkeypatch so ``_install_fake_session_store`` can use it to
-    # swap ``sys.modules['hermes_agent.storage.cli_session_store']`` with auto-restoration. Without
+    # swap ``sys.modules['hermes_agent.composition.cli_session_store']`` with auto-restoration. Without
     # this, a raw ``sys.modules[...] = fake`` assignment would leak the
     # fake into later tests in the same xdist worker — breaking every
-    # test that does ``from hermes_agent.storage.cli_session_store import open_cli_session_store``.
+    # test that does ``from hermes_agent.composition.cli_session_store import open_cli_session_store``.
     module._test_monkeypatch = monkeypatch
     yield module
 
@@ -121,15 +121,15 @@ def _install_fake_session_store(plugin_api, fake_db):
     """Inject a fake session store so ``scan_sessions`` finds it via its local import.
 
     Uses the monkeypatch stashed on ``plugin_api`` by the fixture, so the
-    ``sys.modules['hermes_agent.storage.cli_session_store']`` swap is
+    ``sys.modules['hermes_agent.composition.cli_session_store']`` swap is
     auto-restored at test teardown
     and cannot leak into unrelated tests in the same xdist worker.
     """
-    fake_module = type(sys)("hermes_agent.storage.cli_session_store")
+    fake_module = type(sys)("hermes_agent.composition.cli_session_store")
     fake_module.open_cli_session_store = lambda: fake_db
     plugin_api._test_monkeypatch.setitem(
         sys.modules,
-        "hermes_agent.storage.cli_session_store",
+        "hermes_agent.composition.cli_session_store",
         fake_module,
     )
 

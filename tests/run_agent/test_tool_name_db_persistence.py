@@ -38,7 +38,7 @@ def test_tool_name_persisted_to_session_db():
     agent._flush_messages_to_session_db(messages)
 
     tool_appends = [
-        c for c in session_db.append_message.call_args_list
+        c for c in session_db.messages.append.call_args_list
         if c.kwargs.get("role") == "tool"
     ]
     assert len(tool_appends) == 1

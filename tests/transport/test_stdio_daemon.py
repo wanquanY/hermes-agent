@@ -15,6 +15,9 @@ from hermes_agent.transport.stdio_daemon import (
     build_registry_and_router,
     run_daemon,
 )
+from hermes_agent.composition.session_repository_db import (
+    ensure_session_repository_schema,
+)
 
 
 _SCHEMA = """
@@ -158,6 +161,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    ensure_session_repository_schema(conn)
     conn.commit()
     return conn
 

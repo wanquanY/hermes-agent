@@ -70,7 +70,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _add_accept_hooks_flag(parser) -> None:
@@ -2862,6 +2862,9 @@ def _model_flow_openrouter(config, current_model=""):
         model["provider"] = "openrouter"
         model["base_url"] = OPENROUTER_BASE_URL
         model["api_mode"] = "chat_completions"
+        from hermes_cli.config import clear_model_endpoint_credentials
+
+        clear_model_endpoint_credentials(model, clear_api_mode=False)
         save_config(cfg)
         deactivate_provider()
         print(f"Default model set to: {selected} (via OpenRouter)")
@@ -3098,6 +3101,9 @@ def _model_flow_nous(config, current_model="", args=None):
             model_cfg["base_url"] = inference_url.rstrip("/")
         else:
             model_cfg.pop("base_url", None)
+        from hermes_cli.config import clear_model_endpoint_credentials
+
+        clear_model_endpoint_credentials(model_cfg)
         config["model"] = model_cfg
         # Clear any custom endpoint that might conflict
         if get_env_value("OPENAI_BASE_URL"):
@@ -5886,20 +5892,15 @@ def _model_flow_anthropic(config, current_model=""):
         elif cc_available:
             print("  Claude Code credentials: ✓ (auto-detected)")
         print()
-        print("    1. Use existing credentials")
-        print("    2. Reauthenticate (new OAuth login)")
-        print("    3. Cancel")
-        print()
-        try:
-            choice = input("  Choice [1/2/3]: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            choice = "1"
+        from hermes_cli.model_setup_flows import _prompt_auth_credentials_choice
 
-        if choice == "2":
+        choice = _prompt_auth_credentials_choice("Anthropic credentials:")
+
+        if choice == "reauth":
             needs_auth = True
-        elif choice == "3":
+        elif choice == "cancel":
             return
-        # choice == "1" or default: use existing, proceed to model selection
+        # choice == "use": use existing, proceed to model selection
 
     if needs_auth:
         # Show auth method choice
@@ -5966,6 +5967,9 @@ def _model_flow_anthropic(config, current_model=""):
             cfg["model"] = model
         model["provider"] = "anthropic"
         model.pop("base_url", None)
+        from hermes_cli.config import clear_model_endpoint_credentials
+
+        clear_model_endpoint_credentials(model)
         save_config(cfg)
         deactivate_provider()
 

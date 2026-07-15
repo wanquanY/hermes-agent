@@ -217,7 +217,7 @@ def _get_session_store() -> Optional[Any]:
     """
     try:
         from hermes_constants import get_hermes_home
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         home = str(get_hermes_home())
     except Exception as exc:  # pragma: no cover
