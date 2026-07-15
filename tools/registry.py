@@ -18,6 +18,7 @@ import ast
 import importlib
 import json
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -176,6 +177,10 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
+        # Durable plugin package policy. Authorization is bound to the module
+        # that defines a handler, so delayed threads and direct registry imports
+        # cannot escape the decision made at plugin discovery.
+        self._plugin_override_policy: Dict[str, dict] = {}
         self._toolset_checks: Dict[str, Callable] = {}
         self._toolset_aliases: Dict[str, str] = {}
         # MCP dynamic refresh can mutate the registry while other threads are
@@ -254,6 +259,45 @@ class ToolRegistry:
     # Registration
     # ------------------------------------------------------------------
 
+    def register_plugin_override_policy(
+        self,
+        module_namespace: str,
+        *,
+        plugin_id: str,
+        capability_declared: bool,
+        operator_opt_in: bool,
+    ) -> None:
+        with self._lock:
+            self._plugin_override_policy[module_namespace] = {
+                "plugin_id": plugin_id,
+                "capability_declared": bool(capability_declared),
+                "operator_opt_in": bool(operator_opt_in),
+            }
+
+    def _plugin_owner_of(self, handler: Callable) -> Optional[str]:
+        module_name = getattr(handler, "__module__", "") or ""
+        try:
+            module_name = handler.__globals__.get("__name__", module_name)  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        for namespace in sorted(self._plugin_override_policy, key=len, reverse=True):
+            if module_name == namespace or module_name.startswith(namespace + "."):
+                return namespace
+        if module_name.startswith("hermes_plugins."):
+            return ".".join(module_name.split(".")[:2])
+        return None
+
+    @staticmethod
+    def _caller_module() -> str:
+        try:
+            return sys._getframe(2).f_globals.get("__name__", "") or ""
+        except Exception:
+            return ""
+
+    def _plugin_policy_allows_override(self, namespace: str) -> bool:
+        policy = self._plugin_override_policy.get(namespace) or {}
+        return bool(policy.get("capability_declared") and policy.get("operator_opt_in"))
+
     def register(
         self,
         name: str,
@@ -292,6 +336,20 @@ class ToolRegistry:
                         name, toolset, existing.toolset,
                     )
                 elif override:
+                    owner = self._plugin_owner_of(handler)
+                    if owner is not None and not self._plugin_policy_allows_override(owner):
+                        policy = self._plugin_override_policy.get(owner) or {}
+                        plugin_id = policy.get("plugin_id") or owner
+                        logger.error(
+                            "Tool registration REJECTED: plugin %r attempted to override %r "
+                            "without both manifest capability 'tool_override' and operator opt-in",
+                            plugin_id, name,
+                        )
+                        raise PermissionError(
+                            f"Plugin {plugin_id!r} cannot override tool {name!r}; declare "
+                            "capability 'tool_override' and set "
+                            f"plugins.entries.{plugin_id}.allow_tool_override: true."
+                        )
                     # Explicit plugin opt-in: replace the existing tool.
                     # Logged at INFO so the override is auditable in agent.log.
                     logger.info(
@@ -309,7 +367,7 @@ class ToolRegistry:
                         "intentional, or deregister the existing tool first.",
                         name, toolset, existing.toolset,
                     )
-                    return
+                    return False
             self._tools[name] = ToolEntry(
                 name=name,
                 toolset=toolset,
@@ -326,6 +384,7 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
+            return True
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -335,9 +394,29 @@ class ToolRegistry:
         when a server sends ``notifications/tools/list_changed``.
         """
         with self._lock:
-            entry = self._tools.pop(name, None)
+            entry = self._tools.get(name)
             if entry is None:
                 return
+            if not entry.toolset.startswith("mcp-"):
+                caller_module = self._caller_module()
+                caller_owner = None
+                for namespace in sorted(self._plugin_override_policy, key=len, reverse=True):
+                    if caller_module == namespace or caller_module.startswith(namespace + "."):
+                        caller_owner = namespace
+                        break
+                if caller_owner is None and caller_module.startswith("hermes_plugins."):
+                    caller_owner = ".".join(caller_module.split(".")[:2])
+                entry_owner = self._plugin_owner_of(entry.handler)
+                if (
+                    caller_owner is not None
+                    and caller_owner != entry_owner
+                    and not self._plugin_policy_allows_override(caller_owner)
+                ):
+                    raise PermissionError(
+                        f"Plugin module {caller_module!r} cannot deregister tool {name!r} "
+                        "owned by core or another plugin without tool_override capability and opt-in."
+                    )
+            del self._tools[name]
             # Drop the toolset check and aliases if this was the last tool in
             # that toolset.
             toolset_still_exists = any(

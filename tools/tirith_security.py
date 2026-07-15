@@ -101,6 +101,49 @@ _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_
 _install_lock = threading.Lock()
 _install_thread: threading.Thread | None = None
 
+# Consecutive operational-failure breaker. Gateway sessions may scan in
+# parallel, so transition and counter updates are synchronized.
+_CRASH_LIMIT = 3
+_crash_count = 0
+_circuit_open = False
+_breaker_lock = threading.Lock()
+
+
+def _record_tirith_failure() -> None:
+    global _crash_count, _circuit_open
+    opened_now = False
+    with _breaker_lock:
+        if _circuit_open:
+            return
+        _crash_count += 1
+        if _crash_count >= _CRASH_LIMIT:
+            _circuit_open = True
+            opened_now = True
+    if opened_now:
+        logger.warning(
+            "tirith circuit breaker opened after %d consecutive operational failures",
+            _CRASH_LIMIT,
+        )
+
+
+def _record_tirith_success() -> None:
+    global _crash_count
+    with _breaker_lock:
+        if not _circuit_open:
+            _crash_count = 0
+
+
+def _tirith_circuit_is_open() -> bool:
+    with _breaker_lock:
+        return _circuit_open
+
+
+def _reset_tirith_breaker() -> None:
+    global _crash_count, _circuit_open
+    with _breaker_lock:
+        _crash_count = 0
+        _circuit_open = False
+
 # Warning de-duplication. The spawn/path warnings live in the hot path —
 # without this dedupe set, a Windows install where ``tirith`` isn't on PATH
 # (e.g. background install thread still running, or install marked failed)
@@ -128,6 +171,7 @@ def _reset_spawn_warning_state() -> None:
     """
     with _warned_lock:
         _warned_messages.clear()
+    _reset_tirith_breaker()
 
 # Disk-persistent failure marker — avoids retry across process restarts
 _MARKER_TTL = 86400  # 24 hours
@@ -697,9 +741,18 @@ def check_command_security(command: str) -> dict:
     if not is_platform_supported():
         return {"action": "allow", "findings": [], "summary": ""}
 
-    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
+    if _tirith_circuit_is_open():
+        action = "allow" if fail_open else "block"
+        suffix = "fail-open" if fail_open else "fail-closed"
+        return {
+            "action": action,
+            "findings": [],
+            "summary": f"tirith disabled by circuit breaker ({suffix})",
+        }
+
+    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
 
     if tirith_path is None:
         _warn_once(
@@ -727,6 +780,7 @@ def check_command_security(command: str) -> dict:
         # install marked failed for the day).
         spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
         _warn_once(spawn_key, "tirith spawn failed: %s", exc)
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
@@ -736,6 +790,7 @@ def check_command_security(command: str) -> dict:
             "tirith timed out after %ds",
             timeout,
         )
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
@@ -744,13 +799,17 @@ def check_command_security(command: str) -> dict:
     exit_code = result.returncode
     if exit_code == 0:
         action = "allow"
+        _record_tirith_success()
     elif exit_code == 1:
         action = "block"
+        _record_tirith_success()
     elif exit_code == 2:
         action = "warn"
+        _record_tirith_success()
     else:
         # Unknown exit code — respect fail_open
         logger.warning("tirith returned unexpected exit code %d", exit_code)
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}

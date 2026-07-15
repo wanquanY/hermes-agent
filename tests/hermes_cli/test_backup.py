@@ -1497,6 +1497,28 @@ class TestQuickSnapshot:
         from hermes_cli.backup import restore_quick_snapshot
         assert restore_quick_snapshot("nonexistent", hermes_home=hermes_home) is False
 
+    def test_restore_rejects_snapshot_id_traversal(self, hermes_home, tmp_path):
+        from hermes_cli.backup import restore_quick_snapshot
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "manifest.json").write_text('{"files": {}}')
+        assert restore_quick_snapshot("../../outside", hermes_home=hermes_home) is False
+
+    def test_restore_manifest_traversal_is_atomic(self, hermes_home):
+        from hermes_cli.backup import _quick_snapshot_root, restore_quick_snapshot
+
+        snapshot = _quick_snapshot_root(hermes_home) / "malicious"
+        snapshot.mkdir(parents=True)
+        (snapshot / "safe.txt").write_text("replacement")
+        (snapshot / "manifest.json").write_text(
+            '{"files": {"safe.txt": 11, "../escape.txt": 5}}'
+        )
+        original = hermes_home / "safe.txt"
+        original.write_text("original")
+        assert restore_quick_snapshot("malicious", hermes_home=hermes_home) is False
+        assert original.read_text() == "original"
+
     def test_auto_prune(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot, list_quick_snapshots, _QUICK_DEFAULT_KEEP
         for i in range(_QUICK_DEFAULT_KEEP + 5):

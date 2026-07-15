@@ -101,6 +101,7 @@ def record_model_response_usage(
             provider=attribution.provider,
             base_url=attribution.base_url,
             api_key=getattr(agent, "api_key", ""),
+            allow_network_discovery=False,
         )
         if response_usage or usage.total_tokens
         else None

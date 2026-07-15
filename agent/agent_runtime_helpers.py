@@ -992,7 +992,10 @@ def dump_api_request_debug(
             dump_payload["error"] = error_info
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
+        from hermes_agent.domain.safe_identifiers import safe_filename_component
+
+        safe_session_id = safe_filename_component(agent.session_id)
+        dump_file = agent.logs_dir / f"request_dump_{safe_session_id}_{timestamp}.json"
         dump_file.write_text(
             json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",

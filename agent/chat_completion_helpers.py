@@ -1110,6 +1110,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_key=_fb_ctx_api_key, provider=agent.provider,
                 config_context_length=getattr(agent, "_config_context_length", None),
                 custom_providers=getattr(agent, "_custom_providers", None),
+                allow_network_discovery=False,
             )
             agent.context_compressor.update_model(
                 model=agent.model,

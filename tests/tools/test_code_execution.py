@@ -770,6 +770,16 @@ class TestEnvVarFiltering(unittest.TestCase):
         self.assertNotIn("MY_PASSWD", child_env)
         self.assertNotIn("AUTH_CREDENTIAL", child_env)
 
+    def test_abbreviated_secret_vars_excluded(self):
+        child_env = self._get_child_env({
+            "HERMES_LLM_CREDS": "secret",
+            "API_BEARER": "secret",
+            "MY_APIKEY": "secret",
+        })
+        self.assertNotIn("HERMES_LLM_CREDS", child_env)
+        self.assertNotIn("API_BEARER", child_env)
+        self.assertNotIn("MY_APIKEY", child_env)
+
     def test_path_included(self):
         child_env = self._get_child_env()
         self.assertIn("PATH", child_env)

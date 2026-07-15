@@ -8,11 +8,15 @@ of 4000+ models across 109+ providers.  Provides:
   (reasoning, tools, vision, PDF, audio), modalities, knowledge cutoff,
   open-weights flag, family grouping, deprecation status
 
-Data resolution order (like TypeScript OpenCode):
-  1. Bundled snapshot (ships with the package — offline-first)
+Data resolution order:
+  1. In-process cache
   2. Disk cache (~/.hermes/models_dev_cache.json)
-  3. Network fetch (https://models.dev/api.json)
-  4. Background refresh every 60 minutes
+  3. Network fetch (https://models.dev/api.json), only when the caller owns
+     catalog discovery
+
+Agent construction uses the cache-only mode. Interactive model setup and
+explicit catalog refresh own network discovery, so starting a turn never
+blocks on a third-party metadata service.
 
 Other modules should import the dataclasses and query functions from here
 rather than parsing the raw JSON themselves.
@@ -235,7 +239,11 @@ def _save_disk_cache(data: Dict[str, Any]) -> None:
         logger.debug("Failed to save models.dev disk cache: %s", e)
 
 
-def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
+def fetch_models_dev(
+    force_refresh: bool = False,
+    *,
+    allow_network: bool = True,
+) -> Dict[str, Any]:
     """Fetch models.dev registry. Cache hierarchy: in-mem → disk → network.
 
     Returns the full registry dict keyed by provider ID, or empty dict on failure.
@@ -249,6 +257,10 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
       3. Network fetch → on success, save to disk + in-mem and return.
       4. Network fails → fall back to ANY available disk cache (even stale)
          with a short 5 min in-mem grace period before retrying network.
+
+    When ``allow_network=False``, any in-memory or disk snapshot is returned
+    regardless of age and no HTTP request is made. This is the runtime-safe
+    path used while constructing agents.
 
     When ``force_refresh=True`` (used by ``hermes config refresh``, the
     \"refresh model catalog\" code path), stages 1 and 2 are skipped. The
@@ -286,6 +298,17 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
                 )
                 return _models_dev_cache
 
+    # Runtime consumers must be deterministic and must not turn agent
+    # construction into an implicit metadata request. A stale catalog is
+    # still more authoritative than a name-based fallback, so cache-only
+    # mode accepts any on-disk snapshot before returning empty.
+    if not allow_network:
+        if not _models_dev_cache:
+            _models_dev_cache = _load_disk_cache()
+            if _models_dev_cache:
+                _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+        return _models_dev_cache
+
     # Stage 3: network fetch.
     try:
         response = requests.get(MODELS_DEV_URL, timeout=15)
@@ -316,7 +339,12 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
     return _models_dev_cache
 
 
-def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
+def lookup_models_dev_context(
+    provider: str,
+    model: str,
+    *,
+    allow_network: bool = True,
+) -> Optional[int]:
     """Look up context_length for a provider+model combo in models.dev.
 
     Returns the context window in tokens, or None if not found.
@@ -326,7 +354,7 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
     if not mdev_provider_id:
         return None
 
-    data = fetch_models_dev()
+    data = fetch_models_dev(allow_network=allow_network)
     provider_data = data.get(mdev_provider_id)
     if not isinstance(provider_data, dict):
         return None

@@ -132,7 +132,6 @@ from agent.prompt_builder import (
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
-    fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
     parse_available_output_tokens_from_error,
@@ -212,7 +211,6 @@ _MAX_TOOL_WORKERS = 8
 # process, not once per AIAgent instantiation.  Without this, long-running
 # gateway processes leak one OS thread per incoming message and eventually
 # exhaust the system thread limit (RuntimeError: can't start new thread).
-_openrouter_prewarm_done = threading.Event()
 
 # =========================================================================
 # Large tool result handler — save oversized output to temp file
@@ -2403,7 +2401,10 @@ class AIAgent:
         # session-id changes land in the right file without any re-point
         # bookkeeping at the call sites.
         try:
-            log_file = self.logs_dir / f"session_{self.session_id}.json"
+            from hermes_agent.domain.safe_identifiers import safe_filename_component
+
+            safe_session_id = safe_filename_component(self.session_id)
+            log_file = self.logs_dir / f"session_{safe_session_id}.json"
         except Exception:
             return
 

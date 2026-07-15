@@ -518,6 +518,59 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _media_delivery_denied_paths() -> List[Path]:
+    """Return the absolute deny floor applied before any allow root."""
+    from hermes_constants import get_default_hermes_root
+
+    user_home = Path(os.path.expanduser("~"))
+    denied = [
+        Path("/etc"),
+        Path("/proc"),
+        Path("/sys"),
+        Path("/dev"),
+        user_home / ".ssh",
+        user_home / ".aws",
+        user_home / ".gnupg",
+        user_home / ".kube",
+        user_home / ".docker",
+        user_home / ".azure",
+        user_home / ".config" / "gh",
+        user_home / ".netrc",
+        user_home / ".pgpass",
+        user_home / ".npmrc",
+        user_home / ".pypirc",
+    ]
+    credential_files = (
+        ".env",
+        "auth.json",
+        "auth.lock",
+        "credentials",
+        "config.yaml",
+        ".anthropic_oauth.json",
+        "google_token.json",
+        "google_oauth_pending.json",
+        Path("auth") / "google_oauth.json",
+        "webhook_subscriptions.json",
+        Path("cache") / "bws_cache.json",
+    )
+    credential_dirs = ("pairing", "mcp-tokens")
+    for root in (Path(get_hermes_home()), Path(get_default_hermes_root())):
+        denied.extend(root / relative for relative in credential_files)
+        denied.extend(root / relative for relative in credential_dirs)
+    return denied
+
+
+def _path_under_media_deny_floor(path: Path) -> bool:
+    for denied in _media_delivery_denied_paths():
+        try:
+            canonical = denied.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path == canonical or _path_is_within(path, canonical):
+            return True
+    return False
+
+
 def validate_media_delivery_path(path: str) -> Optional[str]:
     """Return a safe absolute file path for native media delivery, else None.
 
@@ -546,6 +599,9 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
         return None
 
     if not resolved.is_file():
+        return None
+
+    if _path_under_media_deny_floor(resolved):
         return None
 
     for root in _media_delivery_allowed_roots():

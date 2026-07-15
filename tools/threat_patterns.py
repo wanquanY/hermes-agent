@@ -42,6 +42,7 @@ of "ignore all instructions").  This mirrors the fix applied to
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import List, Optional, Tuple
 
 # Each entry: (regex, pattern_id, scope)
@@ -92,7 +93,9 @@ _PATTERNS: List[Tuple[str, str, str]] = [
 
     # ── Known C2 / red-team framework names (near-zero false positive
     #    outside security research; warn-only by default) ─────────────
-    (r'\b(?:praxis|cobalt\s*strike|sliver|havoc|mythic|metasploit|brainworm)\b', "known_c2_framework", "context"),
+    # Keep this list to distinctive offensive-security brands. Common words
+    # such as "praxis" produce unacceptable AGENTS.md/SOUL.md false positives.
+    (r'\b(?:cobalt\s*strike|sliver|havoc|mythic|metasploit|brainworm)\b', "known_c2_framework", "context"),
     (r'\bc2\s+(?:server|channel|infrastructure|beacon)\b', "c2_explicit", "context"),
     (r'\bcommand\s+and\s+control\b', "c2_explicit_long", "context"),
 
@@ -213,12 +216,16 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     for ch in invisible_hits:
         findings.append(f"invisible_unicode_U+{ord(ch):04X}")
 
+    # Match compatibility homographs against their ASCII-equivalent form.
+    # Invisible characters were intentionally checked on raw content first.
+    normalized_content = unicodedata.normalize("NFKC", content)
+
     # Threat patterns
     patterns = _COMPILED.get(scope)
     if patterns is None:
         raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
     for compiled, pid in patterns:
-        if compiled.search(content):
+        if compiled.search(normalized_content):
             findings.append(pid)
 
     return findings

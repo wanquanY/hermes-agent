@@ -3315,6 +3315,23 @@ class TestSessionIdHeader:
             assert call_kwargs["session_id"] == "my-session-123"
 
     @pytest.mark.asyncio
+    async def test_traversal_session_id_header_is_rejected_before_agent(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                for unsafe in ("../../etc/passwd", "/absolute", "..\\windows", "tenant/id"):
+                    response = await cli.post(
+                        "/v1/chat/completions",
+                        headers={
+                            "X-Hermes-Session-Id": unsafe,
+                            "Authorization": "Bearer sk-secret",
+                        },
+                        json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Hi"}]},
+                    )
+                    assert response.status == 400
+                mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_provided_session_id_loads_history_from_db(self, auth_adapter):
         """When X-Hermes-Session-Id is provided, history comes from storage not request body."""
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}

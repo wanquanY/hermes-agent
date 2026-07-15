@@ -10,16 +10,34 @@ from types import SimpleNamespace
 from hermes_cli import web_server
 
 
-def test_empty_websocket_peer_is_rejected_in_loopback_mode(monkeypatch):
-    monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+@pytest.fixture(autouse=True)
+def _restore_dashboard_binding_state():
+    """Keep process-global ASGI state from leaking across security tests."""
+    missing = object()
+    tracked = ("auth_required", "bound_host", "bound_port")
+    state_values = web_server.app.state._state
+    before = {
+        name: state_values.get(name, missing)
+        for name in tracked
+    }
+    yield
+    for name, value in before.items():
+        if value is missing:
+            state_values.pop(name, None)
+        else:
+            state_values[name] = value
+
+
+def test_empty_websocket_peer_is_rejected_in_loopback_mode():
+    web_server.app.state.auth_required = False
     assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is False
     assert web_server._ws_client_is_allowed(
         SimpleNamespace(client=SimpleNamespace(host=""))
     ) is False
 
 
-def test_empty_websocket_peer_is_allowed_after_auth_gate(monkeypatch):
-    monkeypatch.setattr(web_server.app.state, "auth_required", True, raising=False)
+def test_empty_websocket_peer_is_allowed_after_auth_gate():
+    web_server.app.state.auth_required = True
     assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is True
 
 

@@ -72,6 +72,10 @@ except ImportError:  # pragma: no cover – yaml is optional at import time
 logger = logging.getLogger(__name__)
 
 
+class PluginToolOverrideError(PermissionError):
+    """A plugin requested privileged tool replacement without authorization."""
+
+
 # ---------------------------------------------------------------------------
 # Plugin developer debug logging
 # ---------------------------------------------------------------------------
@@ -241,6 +245,7 @@ class PluginManifest:
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
+    capabilities: frozenset[str] = field(default_factory=frozenset)
     source: str = ""        # "user", "project", or "entrypoint"
     path: Optional[str] = None
     # Plugin kind — see plugins.py module docstring for semantics.
@@ -336,7 +341,7 @@ class PluginContext:
         """
         from tools.registry import registry
 
-        registry.register(
+        registered = registry.register(
             name=name,
             toolset=toolset,
             schema=schema,
@@ -348,11 +353,27 @@ class PluginContext:
             emoji=emoji,
             override=override,
         )
+        if not registered:
+            return
         self._manager._plugin_tool_names.add(name)
         logger.debug(
             "Plugin %s registered tool: %s%s",
             self.manifest.name, name, " (override)" if override else "",
         )
+
+    def _tool_override_allowed(self) -> bool:
+        if "tool_override" not in self.manifest.capabilities:
+            return False
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+        except Exception:
+            return False
+        plugin_id = self.manifest.key or self.manifest.name
+        entries = (config.get("plugins") or {}).get("entries") or {}
+        entry = entries.get(plugin_id) or {}
+        return entry.get("allow_tool_override") is True
 
     # -- message injection --------------------------------------------------
 
@@ -1111,6 +1132,11 @@ class PluginManager:
                 "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s",
                 key, name, kind, source, plugin_dir,
             )
+            raw_capabilities = data.get("capabilities", [])
+            if not isinstance(raw_capabilities, list) or not all(
+                isinstance(capability, str) for capability in raw_capabilities
+            ):
+                raise ValueError("plugin capabilities must be a list of strings")
             return PluginManifest(
                 name=name,
                 version=str(data.get("version", "")),
@@ -1119,6 +1145,7 @@ class PluginManager:
                 requires_env=data.get("requires_env", []),
                 provides_tools=data.get("provides_tools", []),
                 provides_hooks=data.get("provides_hooks", []),
+                capabilities=frozenset(raw_capabilities),
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
@@ -1171,6 +1198,22 @@ class PluginManager:
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
             manifest.key or manifest.name, manifest.source, manifest.kind, manifest.path,
         )
+
+        plugin_id = manifest.key or manifest.name
+        if manifest.source in {"user", "project", "bundled"}:
+            slug = plugin_id.replace("/", "__").replace("-", "_")
+            module_namespace = f"{_NS_PARENT}.{slug}"
+        else:
+            module_namespace = str(manifest.path or "").partition(":")[0].strip()
+        if module_namespace:
+            from tools.registry import registry as _registry
+
+            _registry.register_plugin_override_policy(
+                module_namespace,
+                plugin_id=plugin_id,
+                capability_declared="tool_override" in manifest.capabilities,
+                operator_opt_in=PluginContext(manifest, self)._tool_override_allowed(),
+            )
 
         try:
             if manifest.source in {"user", "project", "bundled"}:

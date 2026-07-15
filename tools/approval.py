@@ -10,18 +10,21 @@ This module is the single source of truth for the dangerous command system:
 
 import contextvars
 import fnmatch
-import functools
 import logging
 import os
 import re
 import sys
 import threading
 import time
-import unicodedata
 import uuid
 from typing import Optional
 from hermes_cli.config import cfg_get
 
+from tools.command_safety import (
+    COMMAND_START_MARKER,
+    command_detection_variants,
+    normalize_command_for_detection,
+)
 from tools.interrupt import is_interrupted
 from utils import env_var_enabled, is_truthy_value
 
@@ -241,6 +244,7 @@ _USER_SENSITIVE_WRITE_TARGET = (
 )
 _PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_PROJECT_ENV_PATH}|{_PROJECT_CONFIG_PATH})'
 _COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
+_WRITE_TARGET_BOUNDARY = r'(?=[\s;&|<>#"\']|$)'
 
 # =========================================================================
 # Hardline (unconditional) blocklist
@@ -275,28 +279,34 @@ _COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
 # after subshell openers ( `$(` or backtick ), optionally consuming
 # leading wrapper commands (sudo, env VAR=VAL, exec, nohup, setsid).
 _CMDPOS = (
-    r'(?:^|[;&|\n`]|\$\()'         # start position
-    r'\s*'                          # optional whitespace
-    r'(?:sudo\s+(?:-[^\s]+\s+)*)?'  # optional sudo with flags
-    r'(?:env\s+(?:\w+=\S*\s+)*)?'   # optional env with VAR=VAL pairs
-    r'(?:(?:exec|nohup|setsid|time)\s+)*'  # optional wrapper commands
-    r'\s*'
+    re.escape(COMMAND_START_MARKER)
+    + r'\s*'                          # optional whitespace
+    + r'(?:sudo\s+(?:-[^\s]+\s+)*)?'  # optional sudo with flags
+    + r'(?:env\s+(?:\w+=\S*\s+)*)?'   # optional env with VAR=VAL pairs
+    + r'(?:(?:exec|nohup|setsid|time)\s+)*'  # optional wrapper commands
+    + r'\s*'
+)
+
+_RM_RECURSIVE_PREFIX = (
+    _CMDPOS
+    + r'rm\s+(?=(?:(?:-[^\s]+|--recursive)\s+)*(?:-[^\s]*[rR][^\s]*|--recursive)(?:\s|$))'
+    + r'(?:(?:-[^\s]+|--recursive)\s+)*'
 )
 
 HARDLINE_PATTERNS = [
     # rm recursive targeting the root filesystem or protected roots
-    (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
-    (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)', "recursive delete of system directory"),
-    (r'\brm\s+(-[^\s]*\s+)*(~|\$HOME)(/?|/\*)?(\s|$)', "recursive delete of home directory"),
+    (_RM_RECURSIVE_PREFIX + r'["\']?/[/.]*\**["\']?(?=\s|$|[;&|)}])', "recursive delete of root filesystem"),
+    (_RM_RECURSIVE_PREFIX + r'["\']?/(?:home|root|etc|usr|var|bin|sbin|boot|lib)(?:/\*)?["\']?(?=\s|$|[;&|)}])', "recursive delete of system directory"),
+    (_RM_RECURSIVE_PREFIX + r'["\']?(?:~|\$HOME|\$\{HOME\})(?:/?|/\*)?["\']?(?=\s|$|[;&|)}])', "recursive delete of home directory"),
     # Filesystem format
-    (r'\bmkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
+    (_CMDPOS + r'mkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
     # Raw block device overwrites (dd + redirection)
-    (r'\bdd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*', "dd to raw block device"),
+    (_CMDPOS + r'dd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*', "dd to raw block device"),
     (r'>\s*/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b', "redirect to raw block device"),
     # Fork bomb (classic shell form)
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Kill every process on the system
-    (r'\bkill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
+    (_CMDPOS + r'kill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
     # System shutdown / reboot — anchor to command position (start of line,
     # after a command separator, or after sudo/env wrappers) so we don't
     # false-positive on "echo reboot" or "grep 'shutdown' logs".
@@ -348,7 +358,8 @@ def _check_sudo_stdin_guard(command: str) -> tuple:
     """
     if "SUDO_PASSWORD" in os.environ:
         return (False, None)
-    normalized = _normalize_command_for_detection(command).lower()
+    _, normalized = command_detection_variants(command)
+    normalized = normalized.lower()
     if _SUDO_STDIN_RE.search(normalized):
         return (True, "sudo password guessing via stdin (sudo -S)")
     return (False, None)
@@ -360,7 +371,8 @@ def detect_hardline_command(command: str) -> tuple:
     Returns:
         (is_hardline, description) or (False, None)
     """
-    normalized = _normalize_command_for_detection(command).lower()
+    _, normalized = command_detection_variants(command)
+    normalized = normalized.lower()
     for pattern_re, description in HARDLINE_PATTERNS_COMPILED:
         if pattern_re.search(normalized):
             return (True, description)
@@ -436,8 +448,8 @@ DANGEROUS_PATTERNS = [
     (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
-    (rf'\btee\b.*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via tee"),
-    (rf'>>?\s*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config via redirection"),
+    (rf'\btee\b.*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via tee"),
+    (rf'>>?\s*["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via redirection"),
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
     # find -exec rm / -execdir rm — the -execdir variant (same semantics,
     # runs in the directory of each match) was previously missed. Claude
@@ -490,13 +502,16 @@ DANGEROUS_PATTERNS = [
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
     (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
+    (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
     # shared history. Not captured by rm/chmod/etc patterns.
-    (r'\bgit\s+reset\s+--hard\b', "git reset --hard (destroys uncommitted changes)"),
+    (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
     (r'\bgit\s+push\b.*--force\b', "git force push (rewrites remote history)"),
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
+    (r'\bgit\s+branch\b[^;|&\n]*(?:-d\b|--d(?:e(?:l(?:e(?:t(?:e)?)?)?)?)?\b)[^;|&\n]*(?:-f\b|--f(?:o(?:r(?:c(?:e)?)?)?)?\b)', "git branch force delete"),
+    (r'\bgit\s+branch\b[^;|&\n]*(?:-f\b|--f(?:o(?:r(?:c(?:e)?)?)?)?\b)[^;|&\n]*(?:-d\b|--d(?:e(?:l(?:e(?:t(?:e)?)?)?)?)?\b)', "git branch force delete"),
     # Script execution after chmod +x — catches the two-step pattern where
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
@@ -514,7 +529,7 @@ DANGEROUS_PATTERNS = [
     # are gated below. Lazy `[^;|&\n]*?` allows flag arguments (e.g.
     # `sudo -u root -S whoami`) without spanning command separators. See
     # #17873 category 4.
-    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--stdin\b|-a\b|--askpass\b)',
+    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st(?:d(?:i(?:n)?)?)?\b|-a\b|--a(?:s(?:k(?:p(?:a(?:s(?:s)?)?)?)?)?)?\b)',
      "sudo with privilege flag (stdin/askpass/shell/list)"),
     # Combined short-flag form: -nS, -ns, -sa, -las — sudo flags packed
     # into a single -X token. Catches the same threat class.
@@ -564,86 +579,7 @@ def _normalize_command_for_detection(command: str) -> str:
     null bytes, and normalizes Unicode fullwidth characters so that
     obfuscation techniques cannot bypass the pattern-based detection.
     """
-    from tools.ansi_strip import strip_ansi
-
-    # Strip all ANSI escape sequences (CSI, OSC, DCS, 8-bit C1, etc.)
-    command = strip_ansi(command)
-    # Strip null bytes
-    command = command.replace('\x00', '')
-    # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
-    command = unicodedata.normalize('NFKC', command)
-    # Fold absolute home / active-profile-home prefixes into their canonical
-    # ~/ and ~/.hermes/ forms before stripping shell backslash escapes. On
-    # Windows, backslashes are path separators and would otherwise be dissolved.
-    command = _rewrite_resolved_hermes_home(command)
-    command = _rewrite_resolved_user_home(command)
-    # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
-    command = re.sub(r'\\([^\n])', r'\1', command)
-    # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
-    command = re.sub(r"''|\"\"", '', command)
-    return command
-
-
-# Shell metacharacters, quotes, and whitespace that terminate a filesystem
-# path token on a command line. Used to bound the path tail we normalize.
-_PATH_TOKEN_STOP = r"""\s'"`;|&<>()"""
-_PATH_TAIL = r"(?P<tail>(?:[/\\][^/\\" + _PATH_TOKEN_STOP + r"]*)+)"
-
-
-@functools.lru_cache(maxsize=64)
-def _home_prefix_fold_regex(path: str):
-    """Compile a regex matching *path* used as an absolute directory prefix."""
-    if not path:
-        return None
-    components = [c for c in re.split(r"[/\\]+", path) if c]
-    if len(components) < 2:
-        return None
-    body = r"[/\\]+".join(re.escape(c) for c in components)
-    return re.compile(r"[/\\]*" + body + _PATH_TAIL)
-
-
-def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
-    """Fold resolved home prefixes in *command* to *replacement*."""
-    seen: set[str] = set()
-    for path in sorted((p for p in paths if p), key=len, reverse=True):
-        if path in seen:
-            continue
-        seen.add(path)
-        pattern = _home_prefix_fold_regex(path)
-        if pattern is not None:
-            command = pattern.sub(
-                lambda m: replacement + m.group("tail").replace("\\", "/"),
-                command,
-            )
-    return command
-
-
-def _rewrite_resolved_user_home(command: str) -> str:
-    """Rewrite the current user's absolute home prefix to ``~/``."""
-    try:
-        home = os.path.expanduser("~")
-        candidates = [
-            home,
-            os.path.realpath(home),
-            os.environ.get("HOME", ""),
-        ]
-    except Exception:
-        return command
-    return _fold_home_prefixes(command, candidates, "~")
-
-
-def _rewrite_resolved_hermes_home(command: str) -> str:
-    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``."""
-    try:
-        from hermes_constants import get_hermes_home
-        home = get_hermes_home().expanduser()
-        candidates = [
-            str(home),
-            str(home.resolve(strict=False)),
-        ]
-    except Exception:
-        return command
-    return _fold_home_prefixes(command, candidates, "~/.hermes")
+    return normalize_command_for_detection(command)
 
 
 def detect_dangerous_command(command: str) -> tuple:
@@ -652,11 +588,12 @@ def detect_dangerous_command(command: str) -> tuple:
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
-    command_lower = _normalize_command_for_detection(command).lower()
-    for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
-        if pattern_re.search(command_lower):
-            pattern_key = description
-            return (True, pattern_key, description)
+    normalized, command_positions = command_detection_variants(command)
+    for candidate in (normalized.lower(), command_positions.lower()):
+        for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
+            if pattern_re.search(candidate):
+                pattern_key = description
+                return (True, pattern_key, description)
     return (False, None, None)
 
 

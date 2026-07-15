@@ -211,7 +211,17 @@ def _is_blocked_device_path(path: str) -> bool:
     ):
         return True
     if normalized.startswith("/proc/") and normalized.endswith(
-        ("/environ", "/cmdline", "/maps")
+        (
+            "/environ",
+            "/cmdline",
+            "/maps",
+            "/smaps",
+            "/smaps_rollup",
+            "/numa_maps",
+            "/mem",
+            "/auxv",
+            "/pagemap",
+        )
     ):
         return True
     return False
@@ -669,7 +679,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Hermes internal path guard ────────────────────────────────
         # Prevent prompt injection via catalog or hub metadata files.
-        block_error = get_read_block_error(path)
+        block_error = get_read_block_error(str(_resolved))
         if block_error:
             return json.dumps({"error": block_error})
 
@@ -1042,6 +1052,27 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         return tool_error(str(e))
 
 
+def _extract_v4a_patch_paths(patch: str) -> tuple[list[str], str | None]:
+    """Extract every filesystem endpoint accepted by the V4A parser."""
+    import re as _re
+
+    paths: list[str] = []
+    for match in _re.finditer(
+        r'^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE
+    ):
+        paths.append(match.group(1).strip())
+    for match in _re.finditer(r'^\*\*\*\s*Move\s+File:\s*(.+)$', patch, _re.MULTILINE):
+        move = match.group(1).strip()
+        if " -> " not in move:
+            return [], "Invalid Move File header: expected 'source -> destination'"
+        source, destination = move.split(" -> ", 1)
+        paths.extend((source.strip(), destination.strip()))
+    for endpoint in paths:
+        if ".." in Path(endpoint).parts:
+            return [], f"Refusing patch path traversal: {endpoint}"
+    return paths, None
+
+
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default") -> str:
@@ -1051,9 +1082,10 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     if path:
         _paths_to_check.append(path)
     if mode == "patch" and patch:
-        import re as _re
-        for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
-            _paths_to_check.append(_m.group(1).strip())
+        extracted, extraction_error = _extract_v4a_patch_paths(patch)
+        if extraction_error:
+            return tool_error(extraction_error)
+        _paths_to_check.extend(extracted)
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:

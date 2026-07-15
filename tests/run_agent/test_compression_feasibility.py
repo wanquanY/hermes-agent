@@ -194,6 +194,7 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
         config_context_length=1_000_000,
         provider="openrouter",
         custom_providers=[],
+        allow_network_discovery=False,
     )
 
 
@@ -218,6 +219,7 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
         config_context_length=None,
         provider="openrouter",
         custom_providers=[],
+        allow_network_discovery=False,
     )
 
 
@@ -287,6 +289,7 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         config_context_length=1_000_000,
         provider="",
         custom_providers=[],
+        allow_network_discovery=False,
     )
 
 

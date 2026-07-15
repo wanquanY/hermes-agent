@@ -584,8 +584,19 @@ def resolve_billing_route(
             provider_name = inferred_provider
             model = bare_model
 
-    if provider_name == "openai-codex":
-        return BillingRoute(provider="openai-codex", model=model, base_url=base_url or "", billing_mode="subscription_included")
+    if provider_name in {
+        "openai-codex",
+        "copilot",
+        "copilot-acp",
+        "github-copilot",
+        "xai-oauth",
+    }:
+        return BillingRoute(
+            provider=provider_name,
+            model=model,
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
     if provider_name == "openrouter" or base_url_host_matches(base_url or "", "openrouter.ai"):
         return BillingRoute(provider="openrouter", model=model, base_url=base_url or "", billing_mode="official_models_api")
     if provider_name == "nous" or base_url_host_matches(base_url or "", "inference-api.nousresearch.com"):
@@ -634,9 +645,18 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     return None
 
 
-def _openrouter_pricing_entry(route: BillingRoute) -> Optional[PricingEntry]:
+def _openrouter_pricing_entry(
+    route: BillingRoute,
+    *,
+    allow_network_discovery: bool,
+) -> Optional[PricingEntry]:
+    metadata = (
+        fetch_model_metadata()
+        if allow_network_discovery
+        else fetch_model_metadata(allow_network=False)
+    )
     return _pricing_entry_from_metadata(
-        fetch_model_metadata(),
+        metadata,
         route.model,
         source_url="https://openrouter.ai/docs/api/api-reference/models/get-models",
         pricing_version="openrouter-models-api",
@@ -692,6 +712,7 @@ def get_pricing_entry(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    allow_network_discovery: bool = True,
 ) -> Optional[PricingEntry]:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
@@ -704,10 +725,22 @@ def get_pricing_entry(
             pricing_version="included-route",
         )
     if route.provider == "openrouter":
-        return _openrouter_pricing_entry(route)
+        return _openrouter_pricing_entry(
+            route,
+            allow_network_discovery=allow_network_discovery,
+        )
     if route.base_url:
+        metadata = (
+            fetch_endpoint_model_metadata(route.base_url, api_key=api_key or "")
+            if allow_network_discovery
+            else fetch_endpoint_model_metadata(
+                route.base_url,
+                api_key=api_key or "",
+                allow_network=False,
+            )
+        )
         entry = _pricing_entry_from_metadata(
-            fetch_endpoint_model_metadata(route.base_url, api_key=api_key or ""),
+            metadata,
             route.model,
             source_url=f"{route.base_url.rstrip('/')}/models",
             pricing_version="openai-compatible-models-api",
@@ -806,6 +839,7 @@ def estimate_usage_cost(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    allow_network_discovery: bool = True,
 ) -> CostResult:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
@@ -817,7 +851,13 @@ def estimate_usage_cost(
             pricing_version="included-route",
         )
 
-    entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
+    entry = get_pricing_entry(
+        model_name,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        allow_network_discovery=allow_network_discovery,
+    )
     if not entry:
         return CostResult(amount_usd=None, status="unknown", source="none", label="n/a")
 

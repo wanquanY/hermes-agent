@@ -741,8 +741,11 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                     ),
                     status=403,
                 )
-            # Sanitize: reject control characters that could enable header injection.
-            if re.search(r'[\r\n\x00]', provided_session_id):
+            try:
+                from hermes_agent.domain.safe_identifiers import validate_external_session_id
+
+                provided_session_id = validate_external_session_id(provided_session_id)
+            except ValueError:
                 return web.json_response(
                     {"error": {"message": "Invalid session ID", "type": "invalid_request_error"}},
                     status=400,

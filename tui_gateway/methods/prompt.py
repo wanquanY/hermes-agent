@@ -1378,6 +1378,7 @@ def _run_prompt_submit(
                     config_context_length=getattr(
                         agent, "_config_context_length", None
                     ),
+                    allow_network_discovery=False,
                 )
                 ctx = preprocess_context_references(
                     prompt,

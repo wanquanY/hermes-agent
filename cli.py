@@ -9609,7 +9609,9 @@ class HermesCLI:
         from hermes_cli.debug import run_debug_share
         from types import SimpleNamespace
 
-        args = SimpleNamespace(lines=200, expire=7, local=False)
+        # Typing /debug is itself the consent action; input() would hang in
+        # prompt_toolkit's event loop.
+        args = SimpleNamespace(lines=200, expire=7, local=False, yes=True)
         run_debug_share(args)
 
     def _handle_update_command(self) -> bool:
@@ -11309,7 +11311,10 @@ class HermesCLI:
                 from agent.model_metadata import get_model_context_length
                 _ctx_len = get_model_context_length(
                     self.model, base_url=self.base_url or "", api_key=self.api_key or "",
-                    config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None)
+                    config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
+                    provider=getattr(self.agent, "provider", "") if self.agent else "",
+                    allow_network_discovery=False,
+                )
                 _ctx_result = preprocess_context_references(
                     message, cwd=os.getcwd(), context_length=_ctx_len)
                 if _ctx_result.expanded or _ctx_result.blocked:

@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_agent.domain.safe_identifiers import safe_filename_component
 from hermes_agent.repositories.base import RepositoryConnection
 from hermes_agent.repositories.message_repo import MessageRepo, MessageRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepo, SessionRepoImpl
@@ -70,14 +71,15 @@ class SessionDeletionService:
 def _remove_session_files(sessions_dir: Path | None, session_id: str) -> None:
     if sessions_dir is None:
         return
+    safe_session_id = safe_filename_component(session_id)
     for suffix in (".json", ".jsonl"):
-        path = sessions_dir / f"{session_id}{suffix}"
+        path = sessions_dir / f"{safe_session_id}{suffix}"
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
             logger.debug("failed to remove session file %s: %s", path, exc)
     try:
-        for path in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
+        for path in sessions_dir.glob(f"request_dump_{safe_session_id}_*.json"):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:

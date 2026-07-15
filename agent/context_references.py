@@ -366,6 +366,20 @@ def _ensure_reference_path_allowed(path: Path) -> None:
             continue
         raise ValueError("path is a sensitive credential or internal Hermes path and cannot be attached")
 
+    try:
+        from agent.file_safety import get_read_block_error
+
+        if get_read_block_error(str(path)) is not None:
+            raise ValueError(
+                "path is a sensitive credential or internal Hermes path and cannot be attached"
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            "path could not be verified against the credential deny-list and cannot be attached"
+        ) from exc
+
 
 def _strip_trailing_punctuation(value: str) -> str:
     stripped = value.rstrip(TRAILING_PUNCTUATION)

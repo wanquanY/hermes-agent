@@ -66,3 +66,21 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 2 等待最终统
 
 机器门禁完成时间：2026-07-16。Hermes 28,855 passed、0 failed；Doxie
 Gateway contract 与 desktop `test:gates` 退出码 0。阶段 3 等待最终统一验收。
+
+## 阶段 4
+
+- [x] 阶段 4 的 command/path/prompt/plugin/surface 条目及阶段 0 相邻决策均已复核。
+- [x] shell mutation 共用 canonical variants 与 command-position owner，hardline 不能被 yolo 绕过。
+- [x] session/API identity 与 filesystem artifact name 分离，所有路径在 I/O 前执行 deny floor。
+- [x] patch Move、snapshot restore、media、`@file` 与 `/proc` 路径有 traversal/symlink 回归。
+- [x] LSP、cron 与 threat scanner 共用 NFKC/invisible Unicode 事实源且不误报 Praxis。
+- [x] plugin override 同时要求 manifest capability、operator opt-in 和 handler module ownership。
+- [x] Dashboard/MCP/API key 0day 路径在同一进程组合执行通过，测试不依赖全局状态泄漏。
+- [x] debug share 在采集前 consent，Tirith 连续故障 breaker 保持原 fail policy。
+- [x] Agent runtime、compression 与 usage 只读本地 metadata，普通 turn 无隐式 catalog 网络。
+- [x] Hermes 最终全量复跑、静态/分层门禁与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。阶段聚合 1,642 passed、3 skipped；Hermes
+28,931 passed、0 failed；Doxie Gateway contract 与 desktop `test:gates` 退出码 0。
+阶段 4 等待最终统一验收。

@@ -227,6 +227,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
             # are invoked for the correct client, not inherited from the main model.
             provider=(_aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")),
             custom_providers=agent._custom_providers,
+            allow_network_discovery=False,
         )
 
         # Hard floor: the auxiliary compression model must have at least

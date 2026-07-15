@@ -620,6 +620,16 @@ class TestSessionJsonSnapshotOptIn:
         # the session JSON opt-in.
         assert hasattr(agent, "logs_dir")
 
+    def test_traversal_session_id_snapshot_stays_inside_logs_dir(self, agent, tmp_path):
+        agent._session_json_enabled = True
+        agent.logs_dir = tmp_path
+        agent.session_id = "../../outside/tenant"
+        agent._save_session_log([{"role": "user", "content": "hello"}])
+
+        snapshots = list(tmp_path.glob("session_*.json"))
+        assert len(snapshots) == 1
+        assert snapshots[0].resolve().parent == tmp_path.resolve()
+
 
 class TestGetMessagesUpToLastAssistant:
     def test_empty_list(self, agent):

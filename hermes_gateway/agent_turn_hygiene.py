@@ -163,6 +163,7 @@ class GatewayAgentTurnHygieneService:
                     api_key=_hyg_api_key or "",
                     config_context_length=_hyg_config_context_length,
                     provider=_hyg_provider or "",
+                    allow_network_discovery=False,
                 )
                 _compress_token_threshold = int(
                     _hyg_context_length * _hyg_threshold_pct
