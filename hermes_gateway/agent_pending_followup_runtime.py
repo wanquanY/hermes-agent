@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from channels.platforms.base_models import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.interrupt_control import is_control_interrupt_message
@@ -87,8 +88,9 @@ class AgentPendingFollowupRuntime:
             next_source = getattr(pending_event, "source", None) or context.source
             if (
                 goal_command_for(self._runner).is_goal_continuation_event(pending_event)
-                and not goal_command_for(self._runner).goal_still_active_for_session(
-                    context.session_id
+                and not await run_sqlite_io(
+                    goal_command_for(self._runner).goal_still_active_for_session,
+                    context.session_id,
                 )
             ):
                 logger.info(

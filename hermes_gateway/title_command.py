@@ -6,6 +6,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +19,21 @@ class GatewayTitleCommandService:
         """Set or show the current session title."""
 
         source = event.source
-        session_entry = self._runner.session_store.get_or_create_session(source)
+        session_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
         session_id = session_entry.session_id
 
         session_db = getattr(self._runner, "_session_db", None)
         if not session_db:
             return self._runner._format_session_db_unavailable()
 
-        existing_title = session_db.sessions.get_title(session_id)
+        existing_title = await run_sqlite_io(session_db.sessions.get_title, session_id)
         if existing_title is None:
             try:
-                session_db.sessions.create(
+                await run_sqlite_io(
+                    session_db.sessions.create,
                     session_id=session_id,
                     source=source.platform.value if source.platform else "unknown",
                     user_id=source.user_id,
@@ -45,13 +50,17 @@ class GatewayTitleCommandService:
             if not sanitized:
                 return t("gateway.title.empty_after_clean")
             try:
-                if session_db.sessions.set_title(session_id, sanitized):
+                if await run_sqlite_io(
+                    session_db.sessions.set_title,
+                    session_id,
+                    sanitized,
+                ):
                     return t("gateway.title.set_to", title=sanitized)
                 return t("gateway.title.not_found")
             except ValueError as e:
                 return t("gateway.shared.warn_passthrough", error=e)
 
-        title = session_db.sessions.get_title(session_id)
+        title = await run_sqlite_io(session_db.sessions.get_title, session_id)
         if title:
             return t("gateway.title.current_with_title", session_id=session_id, title=title)
         return t("gateway.title.current_no_title", session_id=session_id)

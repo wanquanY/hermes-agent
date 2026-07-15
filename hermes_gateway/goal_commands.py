@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 logger = logging.getLogger(__name__)
@@ -128,15 +129,18 @@ class GatewayGoalCommandService:
         lower = args.lower()
 
         runner = self._runner
-        mgr, session_entry = self.get_goal_manager_for_event(event)
+        mgr, session_entry = await run_sqlite_io(
+            self.get_goal_manager_for_event,
+            event,
+        )
         if mgr is None:
             return t("gateway.goal.unavailable")
 
         if not args or lower == "status":
-            return mgr.status_line()
+            return await run_sqlite_io(mgr.status_line)
 
         if lower == "pause":
-            state = mgr.pause(reason="user-paused")
+            state = await run_sqlite_io(mgr.pause, reason="user-paused")
             if state is None:
                 return t("gateway.goal.no_goal_set")
             try:
@@ -149,14 +153,14 @@ class GatewayGoalCommandService:
             return t("gateway.goal.paused", goal=state.goal)
 
         if lower == "resume":
-            state = mgr.resume()
+            state = await run_sqlite_io(mgr.resume)
             if state is None:
                 return t("gateway.goal.no_resume")
             return t("gateway.goal.resumed", goal=state.goal)
 
         if lower in {"clear", "stop", "done"}:
-            had = mgr.has_goal()
-            mgr.clear()
+            had = await run_sqlite_io(mgr.has_goal)
+            await run_sqlite_io(mgr.clear)
             try:
                 adapter = runner.adapters.get(event.source.platform) if event.source else None
                 _quick_key = runner._session_key_for_source(event.source) if event.source else None
@@ -168,7 +172,7 @@ class GatewayGoalCommandService:
 
         # Otherwise — treat the remaining text as the new goal.
         try:
-            state = mgr.set(args)
+            state = await run_sqlite_io(mgr.set, args)
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
@@ -199,15 +203,21 @@ class GatewayGoalCommandService:
         to invoke while the agent is running.
         """
         args = (event.get_command_args() or "").strip()
-        mgr, _session_entry = self.get_goal_manager_for_event(event)
+        mgr, _session_entry = await run_sqlite_io(
+            self.get_goal_manager_for_event,
+            event,
+        )
         if mgr is None:
             return t("gateway.goal.unavailable")
-        if not mgr.has_goal():
+        if not await run_sqlite_io(mgr.has_goal):
             return "No active goal. Set one with /goal <text>."
 
         # No args → list current subgoals.
         if not args:
-            return f"{mgr.status_line()}\n{mgr.render_subgoals()}"
+            status, subgoals = await run_sqlite_io(
+                lambda: (mgr.status_line(), mgr.render_subgoals()),
+            )
+            return f"{status}\n{subgoals}"
 
         tokens = args.split(None, 1)
         verb = tokens[0].lower()
@@ -221,25 +231,29 @@ class GatewayGoalCommandService:
             except ValueError:
                 return "/subgoal remove: <n> must be an integer (1-based index)."
             try:
-                removed = mgr.remove_subgoal(idx)
+                removed = await run_sqlite_io(mgr.remove_subgoal, idx)
             except (IndexError, RuntimeError) as exc:
                 return f"/subgoal remove: {exc}"
             return f"✓ Removed subgoal {idx}: {removed}"
 
         if verb == "clear":
             try:
-                prev = mgr.clear_subgoals()
+                prev = await run_sqlite_io(mgr.clear_subgoals)
             except RuntimeError as exc:
                 return f"/subgoal clear: {exc}"
             if prev:
                 return f"✓ Cleared {prev} subgoal{'s' if prev != 1 else ''}."
             return "No subgoals to clear."
 
-        try:
+        def _add_subgoal() -> tuple[str, int]:
             text = mgr.add_subgoal(args)
+            index = len(mgr.state.subgoals) if mgr.state else 0
+            return text, index
+
+        try:
+            text, idx = await run_sqlite_io(_add_subgoal)
         except (ValueError, RuntimeError) as exc:
             return f"/subgoal: {exc}"
-        idx = len(mgr.state.subgoals) if mgr.state else 0
         return f"✓ Added subgoal {idx}: {text}"
 
     async def send_goal_status_notice(self, source: Any, message: str) -> None:
@@ -323,24 +337,30 @@ class GatewayGoalCommandService:
         user message that arrives simultaneously is handled by the same
         queue and takes priority naturally.
         """
-        try:
-            from hermes_cli.goals import GoalManager
-        except Exception as exc:
-            logger.debug("goal continuation: goals module unavailable: %s", exc)
-            return
-
         sid = getattr(session_entry, "session_id", None) or ""
         if not sid:
             return
 
         runner = self._runner
-        max_turns = self.goal_max_turns_from_config()
 
-        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
-        if not mgr.is_active():
+        def _evaluate_goal() -> dict[str, Any] | None:
+            try:
+                from hermes_cli.goals import GoalManager
+            except Exception as exc:
+                logger.debug("goal continuation: goals module unavailable: %s", exc)
+                return None
+            max_turns = self.goal_max_turns_from_config()
+            manager = GoalManager(session_id=sid, default_max_turns=max_turns)
+            if not manager.is_active():
+                return None
+            return manager.evaluate_after_turn(
+                final_response or "",
+                user_initiated=True,
+            )
+
+        decision = await run_sqlite_io(_evaluate_goal)
+        if decision is None:
             return
-
-        decision = mgr.evaluate_after_turn(final_response or "", user_initiated=True)
         msg = decision.get("message") or ""
 
         # Defer the status line until after the adapter has delivered the

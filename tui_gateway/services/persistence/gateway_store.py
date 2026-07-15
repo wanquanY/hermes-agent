@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
+from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 
 DEFAULT_ARTIFACT_RETENTION_DAYS = 30
 DEFAULT_ARTIFACT_MAX_PER_SESSION = 500
@@ -91,12 +92,11 @@ class GatewayStateStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=1.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        if self._create_if_missing:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute("PRAGMA foreign_keys=ON")
+        configure_sqlite_connection(
+            conn,
+            db_label=f"gateway state.db ({self.db_path})",
+            enable_wal=self._create_if_missing,
+        )
         return conn
 
     def _init_schema(self) -> None:

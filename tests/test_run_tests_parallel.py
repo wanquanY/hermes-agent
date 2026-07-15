@@ -185,3 +185,63 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
             f"diag={diag!r} test_pid={test_pid} test_pgid={test_pgid}; "
             f"runner output:\n{proc.stdout}"
         )
+
+
+@pytest.mark.live_system_guard_bypass
+def test_parallel_files_receive_private_basetemps(tmp_path: Path) -> None:
+    """Parallel pytest subprocesses must never prune each other's tmp_path."""
+
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "basetemp-probes"
+    handoff_dir = tmp_path / "basetemp-handoffs"
+    probe_dir.mkdir()
+    handoff_dir.mkdir()
+
+    for index in range(6):
+        handoff = handoff_dir / f"probe-{index}.txt"
+        source = textwrap.dedent(
+            f"""
+            import time
+            from pathlib import Path
+
+            HANDOFF = Path({str(handoff)!r})
+
+            def test_private_basetemp(tmp_path):
+                HANDOFF.write_text(str(tmp_path.parent), encoding="utf-8")
+                time.sleep(0.2)
+                assert tmp_path.exists()
+            """
+        ).strip()
+        (probe_dir / f"test_basetemp_{index}.py").write_text(
+            source + "\n",
+            encoding="utf-8",
+        )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "6",
+            "--file-timeout",
+            "30",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    basetemps = [
+        Path((handoff_dir / f"probe-{index}.txt").read_text(encoding="utf-8"))
+        for index in range(6)
+    ]
+    assert len(set(basetemps)) == 6
+    assert all(path.name.startswith("file-") for path in basetemps)
+    assert len({path.parent for path in basetemps}) == 1
+    assert "hermes" not in basetemps[0].parent.name.lower()

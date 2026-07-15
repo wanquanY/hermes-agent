@@ -37,6 +37,7 @@ from tui_gateway.run_worker import (
     encode_incoming,
 )
 from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_agent.orchestration.worker_db_proxy import serialize_db_value
 
 _log = logging.getLogger(__name__)
@@ -334,7 +335,6 @@ class WorkerSupervisor:
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._python = python_executable or sys.executable
         self._stdio_limit_bytes = _normalize_worker_stdio_limit_bytes(stdio_limit_bytes)
-        self._db_rpc_locks: dict[str, asyncio.Lock] = {}
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -783,22 +783,25 @@ class WorkerSupervisor:
             )
         try:
             args, kwargs = _decode_db_rpc_params(frame.params)
-            db = _db_for_worker_rpc(frame, args, kwargs)
-            if db is None:
-                raise RuntimeError("state.db unavailable")
-            target: Any = db
-            for path_part in db_method_name.split("."):
-                if not path_part or path_part.startswith("_"):
-                    target = None
-                    break
-                target = getattr(target, path_part, None)
-                if target is None:
-                    break
-            if not callable(target):
-                raise AttributeError(f"worker database proxy has no method {db_method_name!r}")
-            lock_key = _db_rpc_lock_key(frame, args, kwargs)
-            async with self._db_rpc_lock_for(lock_key):
-                result = await asyncio.to_thread(target, *args, **kwargs)
+            def _invoke_db_method() -> Any:
+                db = _db_for_worker_rpc(frame, args, kwargs)
+                if db is None:
+                    raise RuntimeError("state.db unavailable")
+                target: Any = db
+                for path_part in db_method_name.split("."):
+                    if not path_part or path_part.startswith("_"):
+                        target = None
+                        break
+                    target = getattr(target, path_part, None)
+                    if target is None:
+                        break
+                if not callable(target):
+                    raise AttributeError(
+                        f"worker database proxy has no method {db_method_name!r}"
+                    )
+                return target(*args, **kwargs)
+
+            result = await run_sqlite_io(_invoke_db_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(
@@ -807,14 +810,6 @@ class WorkerSupervisor:
                 str(exc) or repr(exc),
                 code=-32000,
             )
-
-    def _db_rpc_lock_for(self, key: str) -> asyncio.Lock:
-        normalized = str(key or "").strip() or "__control__"
-        lock = self._db_rpc_locks.get(normalized)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._db_rpc_locks[normalized] = lock
-        return lock
 
     async def _execute_worker_jsonrpc(
         self,
@@ -918,7 +913,7 @@ class WorkerSupervisor:
                                 "[worker-supervisor] failed to reset transport after gateway RPC"
                             )
 
-            result = await asyncio.to_thread(_invoke_gateway_method)
+            result = await run_sqlite_io(_invoke_gateway_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(
@@ -1099,17 +1094,6 @@ def _conversation_session_id_from_rpc(
     } and args:
         return str(args[0] or "").strip()
     return ""
-
-
-def _db_rpc_lock_key(
-    frame: DBRpcRequestFrame,
-    args: list[Any],
-    kwargs: dict[str, Any],
-) -> str:
-    stable = _conversation_session_id_from_rpc(frame, args, kwargs)
-    if stable:
-        return f"session:{stable}"
-    return "__control__"
 
 
 def _db_rpc_error(

@@ -161,17 +161,20 @@ async def test_second_message_during_sentinel_queued_not_duplicate():
     session_key = build_session_key(event1.source)
 
     barrier = asyncio.Event()
+    entered_agent_setup = asyncio.Event()
 
     async def slow_inner(self_inner, ev, src, qk, generation):
         # Simulate slow setup — wait until test tells us to proceed
+        entered_agent_setup.set()
         await barrier.wait()
         return "ok"
 
     with patch.object(GatewayRunner, "_handle_message_with_agent", slow_inner):
         # Start first message (will block at barrier)
         task1 = asyncio.create_task(runner._handle_message(event1))
-        # Yield so task1 enters slow_inner and sentinel is set
-        await asyncio.sleep(0)
+        # The async ingress/storage boundary may need more than one loop turn.
+        # Wait on the behavior under test instead of scheduler timing.
+        await asyncio.wait_for(entered_agent_setup.wait(), timeout=1)
 
         # Verify sentinel is set
         assert runner._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL
@@ -380,14 +383,16 @@ async def test_stop_during_sentinel_force_cleans_session():
     session_key = build_session_key(event1.source)
 
     barrier = asyncio.Event()
+    entered_agent_setup = asyncio.Event()
 
     async def slow_inner(self_inner, ev, src, qk, generation):
+        entered_agent_setup.set()
         await barrier.wait()
         return "ok"
 
     with patch.object(GatewayRunner, "_handle_message_with_agent", slow_inner):
         task1 = asyncio.create_task(runner._handle_message(event1))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(entered_agent_setup.wait(), timeout=1)
 
         # Sentinel should be set
         assert runner._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL

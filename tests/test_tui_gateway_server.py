@@ -4131,6 +4131,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert resp.get("result"), f"got error: {resp.get('error')}"
     sid = resp["result"]["session_id"]
+    orphan_session = server._sessions[sid]
     assert build_entered.wait(timeout=1.0), "deferred build did not start"
 
     # Wait until the (deferred) build thread has actually entered
@@ -4156,14 +4157,9 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     # and let it finish — it should detect the orphan and clean up the
     # worker it just allocated + unregister the notify.
     release_build.set()
-
-    # Give the build thread a moment to run through its finally.
-    for _ in range(100):
-        if closed_workers:
-            break
-        import time
-
-        time.sleep(0.02)
+    assert orphan_session["agent_ready"].wait(timeout=2.0), (
+        "orphan build thread did not complete cleanup"
+    )
 
     assert (
         len(closed_workers) == 1

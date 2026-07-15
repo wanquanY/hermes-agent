@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -80,6 +81,7 @@ class _FakeDB:
         self.active = 0
         self.max_active = 0
         self.active_lock = threading.Lock()
+        self.owner_threads: set[int] = set()
 
     def explode(self):
         raise RuntimeError("boom")
@@ -88,6 +90,7 @@ class _FakeDB:
         with self.active_lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
+            self.owner_threads.add(threading.get_ident())
             self.entered.append(content or "")
             result = len(self.entered)
         time.sleep(0.01)
@@ -334,7 +337,7 @@ async def test_concurrent_worker_calls_serialize(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_worker_db_rpc_locks_are_sharded_by_stable_session(
+async def test_worker_db_rpc_uses_one_owner_across_stable_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = _FakeDB()
@@ -366,7 +369,8 @@ async def test_worker_db_rpc_locks_are_sharded_by_stable_session(
 
     assert all(reply.error is None for reply in replies)
     assert sorted(reply.result for reply in replies) == [1, 2, 3, 4, 5]
-    assert db.max_active > 1
+    assert db.max_active == 1
+    assert len(db.owner_threads) == 1
 
 
 def test_proxy_timeout_handled() -> None:
@@ -451,4 +455,10 @@ def test_benchmark_proxy_append_message_100_calls(tmp_path: Path) -> None:
     for index in range(100):
         db.messages.append("bench", "user", f"msg {index}")
     elapsed = time.perf_counter() - started
-    assert elapsed < 0.2
+    # Phase 1 deliberately uses synchronous=FULL on macOS. These are 100
+    # separate durable commits, so each one may issue an F_FULLFSYNC-backed
+    # barrier; retaining the pre-durability 200 ms limit would reward unsafe
+    # policy downgrades. Keep the original ceiling elsewhere and enforce a
+    # bounded 10 ms/commit budget for the macOS durability path.
+    threshold = 1.0 if sys.platform == "darwin" else 0.2
+    assert elapsed < threshold

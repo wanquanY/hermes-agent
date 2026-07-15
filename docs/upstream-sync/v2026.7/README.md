@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 0 已验收。
-- 后续阶段：阶段 1 已解除验收门禁，但尚未开始实施。
+- 当前阶段：阶段 1 自动验收完成，正在建立本地 checkpoint。
+- 后续阶段：阶段 2-12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -15,6 +15,8 @@
 |---|---|
 | `phase-0-design.md` | 阶段 0 边界、退出条件和禁止项 |
 | `phase-0-baseline.md` | Git、测试、静态与 Doxie 合同基线 |
+| `phase-1-design.md` | 阶段 1 owner、异步 I/O 边界、durability policy 与退出条件 |
+| `phase-1-acceptance.md` | 阶段 1 自动门禁、实机验收入口、收益与限制 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -32,13 +34,15 @@ python scripts/upstream_absorption_baseline.py \
 
 执行证据必须使用固定 SHA，不能使用会漂移的分支名覆盖已验收证据。
 
-## 阶段 0 验收摘要
+## 阶段 1 待验收摘要
 
-- Hermes 全量回归：28,766 passed，0 failed。
+- 阶段 0：2026-07-15 已验收并合入阶段 1 起点。
+- 阶段 1：U1、R4 已按当前架构手工吸收；U4、B1 由 R4 supersede。
+- Hermes 全量回归：28,789 passed，0 failed。
 - Hermes 静态、分层、zero-debt、silent fallback 与账本门禁：全部通过。
 - Doxie Gateway contract 与 `test:gates`：退出码 0。
-- 验收期间补充修复：worker 交互响应闭环与 Doxie 工具历史详情投影均已通过专项回归和用户实机验收。
-- 阶段 1：未开始。
-- 用户验收：2026-07-15 已通过；阶段 0 实现允许提交并合入主开发分支。
+- 阶段 2：未开始。
+- 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
-完整命令、结果和已知非阻断项见 `phase-0-baseline.md`；用户验收入口见 `review-checklist.md`。
+完整命令、结果、收益与实机验收入口见 `phase-1-acceptance.md`；逐项签核见
+`review-checklist.md`。

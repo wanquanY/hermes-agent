@@ -164,6 +164,9 @@ def main(argv: list[str] | None = None) -> int:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
+
+        configure_sqlite_connection(conn, db_label=f"stdio daemon ({db_path})")
         summary = run_daemon(conn, in_stream=sys.stdin, out_stream=sys.stdout)
     finally:
         conn.close()

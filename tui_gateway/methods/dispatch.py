@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.run_worker import RunStartFrame, dovie_product_context_from_params
 
@@ -213,11 +214,12 @@ async def dispatch_agent_async(
     files = _files(params.get("files"))
 
     if db is None:
-        db = _get_db()
+        db = await run_sqlite_io(_get_db)
     if db is None:
         raise RuntimeError("Hermes state db unavailable")
 
-    _create_dispatch_activity(
+    await run_sqlite_io(
+        _create_dispatch_activity,
         db,
         activity_id=activity_id,
         conversation_id=parent_conversation_id,
@@ -228,11 +230,12 @@ async def dispatch_agent_async(
     )
 
     try:
-        profile = db.profiles.get_agent_profile(target_profile_id) or {}
+        profile = await run_sqlite_io(db.profiles.get_agent_profile, target_profile_id) or {}
     except Exception:
         profile = {}
     if not profile:
-        db.activities.update_status(
+        await run_sqlite_io(
+            db.activities.update_status,
             activity_id,
             "failed",
             result_summary="profile not found",
@@ -267,7 +270,8 @@ async def dispatch_agent_async(
         lease = await pool.get_or_spawn(conversation_id, target_profile_context)
     except Exception as exc:
         message = str(exc) or type(exc).__name__
-        db.activities.update_status(
+        await run_sqlite_io(
+            db.activities.update_status,
             activity_id,
             "failed",
             result_summary=message,
@@ -281,7 +285,12 @@ async def dispatch_agent_async(
         }
 
     started_at = time_fn()
-    db.activities.update_status(activity_id, "running", started_at=started_at)
+    await run_sqlite_io(
+        db.activities.update_status,
+        activity_id,
+        "running",
+        started_at=started_at,
+    )
 
     if router is not None and callable(getattr(router, "record_run_start", None)):
         router.record_run_start(
@@ -346,7 +355,8 @@ async def dispatch_agent_async(
         if callable(getattr(pool, "forget_run", None)):
             await pool.forget_run(run_id)
         message = send_error or "worker stdin write failed"
-        db.activities.update_status(
+        await run_sqlite_io(
+            db.activities.update_status,
             activity_id,
             "failed",
             result_summary=message,
@@ -409,11 +419,12 @@ async def dispatch_team_async(
     files = _files(params.get("files"))
 
     if db is None:
-        db = _get_db()
+        db = await run_sqlite_io(_get_db)
     if db is None:
         raise RuntimeError("Hermes state db unavailable")
 
-    _create_dispatch_activity(
+    await run_sqlite_io(
+        _create_dispatch_activity,
         db,
         activity_id=activity_id,
         conversation_id=parent_conversation_id,
@@ -423,8 +434,9 @@ async def dispatch_team_async(
         prompt_summary=_team_prompt_summary(params),
     )
 
-    def _fail(message: str) -> dict[str, Any]:
-        db.activities.update_status(
+    async def _fail(message: str) -> dict[str, Any]:
+        await run_sqlite_io(
+            db.activities.update_status,
             activity_id,
             "failed",
             result_summary=message,
@@ -438,14 +450,14 @@ async def dispatch_team_async(
         }
 
     if not target_team_id:
-        return _fail("target_team_id required")
+        return await _fail("target_team_id required")
     if not mission_objective.strip():
-        return _fail("mission_objective required")
+        return await _fail("mission_objective required")
 
     if team_mission_create is None:
         team_mission_create = _team_mission_create_method()
     if not callable(team_mission_create):
-        return _fail("team_mission.create unavailable")
+        return await _fail("team_mission.create unavailable")
 
     create_params: dict[str, Any] = {
         "mission_id": mission_id,
@@ -464,22 +476,35 @@ async def dispatch_team_async(
             "source": "team_dispatch",
         },
     }
-    create_params.update(_workspace_payload_from_parent(params, parent_conversation_id))
+    create_params.update(
+        await run_sqlite_io(
+            _workspace_payload_from_parent,
+            params,
+            parent_conversation_id,
+        )
+    )
 
     try:
-        create_response = team_mission_create(f"dispatch-team-{activity_id}", create_params)
+        create_response = await run_sqlite_io(
+            team_mission_create,
+            f"dispatch-team-{activity_id}",
+            create_params,
+        )
     except Exception as exc:
-        return _fail(str(exc) or type(exc).__name__)
+        return await _fail(str(exc) or type(exc).__name__)
 
     if isinstance(create_response, dict) and create_response.get("error"):
-        return _fail(_jsonrpc_error_message(create_response, fallback="team mission create failed"))
+        return await _fail(
+            _jsonrpc_error_message(create_response, fallback="team mission create failed")
+        )
 
     result = _team_mission_result(create_response)
     created_mission_id = _text(result.get("mission_id") or mission_id)
     if not created_mission_id:
-        return _fail("team mission create did not return mission_id")
+        return await _fail("team mission create did not return mission_id")
 
-    db.activities.update_status(
+    await run_sqlite_io(
+        db.activities.update_status,
         activity_id,
         "running",
         target_mission_id=created_mission_id,

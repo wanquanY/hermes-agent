@@ -8,6 +8,7 @@ import os
 import time
 
 from hermes_constants import get_hermes_home
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.bootstrap import restart_notification_pending as _restart_notification_pending_for_home
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.config import Platform
@@ -256,7 +257,9 @@ async def start_gateway_runner(runner) -> bool:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
     else:
         try:
-            suspended = self.session_store.suspend_recently_active()
+            suspended = await run_sqlite_io(
+                self.session_store.suspend_recently_active,
+            )
             if suspended:
                 logger.info("Marked %d in-flight session(s) as resumable from previous run", suspended)
         except Exception as e:
@@ -267,7 +270,7 @@ async def start_gateway_runner(runner) -> bool:
     # history keeps causing the agent to hang).  Auto-suspend it so the
     # user gets a clean slate on the next message.
     try:
-        stuck = self._suspend_stuck_loop_sessions()
+        stuck = await run_sqlite_io(self._suspend_stuck_loop_sessions)
         if stuck:
             logger.warning("Auto-suspended %d stuck-loop session(s)", stuck)
     except Exception as e:
@@ -522,7 +525,7 @@ async def start_gateway_runner(runner) -> bool:
     # previous gateway restart/shutdown.  The resume_pending flag is cleared
     # by the normal successful-turn path, so a failed auto-resume remains
     # visible for manual recovery on the next user message.
-    self._schedule_resume_pending_sessions()
+    await self._schedule_resume_pending_sessions_async()
 
     # Drain any recovered process watchers (from crash recovery checkpoint)
     try:

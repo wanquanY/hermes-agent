@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.freshness import auto_continue_freshness_window
@@ -57,24 +58,28 @@ class GatewaySessionRecoveryRuntimeMixin:
 
         suspended = 0
         stuck_keys = [k for k, v in counts.items() if v >= self._STUCK_LOOP_THRESHOLD]
+        snapshot = None
+        try:
+            self.session_store._ensure_loaded()
+            with self.session_store._lock:
+                for session_key in stuck_keys:
+                    entry = self.session_store._entries.get(session_key)
+                    if entry and not entry.suspended:
+                        entry.suspended = True
+                        suspended += 1
+                        logger.warning(
+                            "Auto-suspended stuck session %s (active across %d "
+                            "consecutive restarts — likely a stuck loop)",
+                            session_key, counts[session_key],
+                        )
+                if suspended:
+                    snapshot = self.session_store._snapshot_index_locked()
+        except Exception:
+            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
-        for session_key in stuck_keys:
+        if snapshot is not None:
             try:
-                entry = self.session_store._entries.get(session_key)
-                if entry and not entry.suspended:
-                    entry.suspended = True
-                    suspended += 1
-                    logger.warning(
-                        "Auto-suspended stuck session %s (active across %d "
-                        "consecutive restarts — likely a stuck loop)",
-                        session_key, counts[session_key],
-                    )
-            except Exception:
-                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
-
-        if suspended:
-            try:
-                self.session_store._save()
+                self.session_store._write_index_snapshot(*snapshot)
             except Exception:
                 logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
@@ -103,11 +108,20 @@ class GatewaySessionRecoveryRuntimeMixin:
 
     def _schedule_resume_pending_sessions(self) -> int:
         """Auto-continue fresh restart-interrupted sessions after startup."""
-        window = auto_continue_freshness_window()
+        candidates = self._load_resume_pending_candidates()
+        return self._schedule_resume_pending_candidates(candidates)
+
+    async def _schedule_resume_pending_sessions_async(self) -> int:
+        """Async startup boundary that keeps SessionStore I/O off the event loop."""
+        candidates = await run_sqlite_io(self._load_resume_pending_candidates)
+        return self._schedule_resume_pending_candidates(candidates)
+
+    def _load_resume_pending_candidates(self) -> list:
+        """Snapshot resumable entries while owning the synchronous store thread."""
         try:
+            self.session_store._ensure_loaded()
             with self.session_store._lock:
-                self.session_store._ensure_loaded_locked()
-                candidates = [
+                return [
                     entry for entry in self.session_store._entries.values()
                     if entry.resume_pending
                     and not entry.suspended
@@ -116,8 +130,11 @@ class GatewaySessionRecoveryRuntimeMixin:
                 ]
         except Exception as exc:
             logger.warning("Failed to enumerate resume-pending sessions: %s", exc)
-            return 0
+            return []
 
+    def _schedule_resume_pending_candidates(self, candidates: list) -> int:
+        """Create loop-owned continuation tasks from a store-owned snapshot."""
+        window = auto_continue_freshness_window()
         now = datetime.now()
         scheduled = 0
         for entry in candidates:

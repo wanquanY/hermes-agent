@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.busy_message_runtime import busy_message_for
@@ -73,7 +74,10 @@ class GatewayMessageRuntime:
             if not final_text.strip():
                 return
             try:
-                session_entry = runner.session_store.get_or_create_session(source)
+                session_entry = await run_sqlite_io(
+                    runner.session_store.get_or_create_session,
+                    source,
+                )
             except Exception:
                 session_entry = None
             if session_entry is None:

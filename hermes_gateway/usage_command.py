@@ -7,6 +7,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,14 @@ class GatewayUsageCommandService:
         session_db = getattr(self._runner, "_session_db", None)
         if not provider and session_db is not None:
             try:
-                entry_for_billing = self._runner.session_store.get_or_create_session(source)
-                persisted = session_db.sessions.get(entry_for_billing.session_id) or {}
+                entry_for_billing = await run_sqlite_io(
+                    self._runner.session_store.get_or_create_session,
+                    source,
+                )
+                persisted = await run_sqlite_io(
+                    session_db.sessions.get,
+                    entry_for_billing.session_id,
+                ) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
@@ -130,8 +137,14 @@ class GatewayUsageCommandService:
 
             return "\n".join(lines)
 
-        session_entry = self._runner.session_store.get_or_create_session(source)
-        history = self._runner.session_store.load_transcript(session_entry.session_id)
+        session_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
+        history = await run_sqlite_io(
+            self._runner.session_store.load_transcript,
+            session_entry.session_id,
+        )
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
             msgs = [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]

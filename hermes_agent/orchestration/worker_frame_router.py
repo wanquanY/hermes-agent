@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any, Optional, Protocol
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
+
 from tui_gateway.run_worker import (
     ActivityEventFrame,
     EventFrame,
@@ -492,20 +494,30 @@ class WorkerFrameRouter:
         params.setdefault("conversation_id", conversation)
         self._capture_last_message_event(params)
         run_context = self._run_context_for_event(params)
-        if self._publish_interaction_frame(params, scope_key, conversation, run_context):
-            self._project_clarify_approval_state(params)
+        if await run_sqlite_io(
+            self._publish_interaction_frame,
+            params,
+            scope_key,
+            conversation,
+            run_context,
+        ):
+            await run_sqlite_io(self._project_clarify_approval_state, params)
             return
         try:
             if run_context is None:
-                self._publish_event(params)
+                await run_sqlite_io(self._publish_event, params)
             else:
-                self._publish_event(params, run_context=run_context)
+                await run_sqlite_io(
+                    self._publish_event,
+                    params,
+                    run_context=run_context,
+                )
         except Exception:
             _log.exception(
                 "[worker-router] publish_event failed scope=%s type=%s",
                 scope_key, params.get("type"),
             )
-        self._project_clarify_approval_state(params)
+        await run_sqlite_io(self._project_clarify_approval_state, params)
 
     def _publish_interaction_frame(
         self,
@@ -732,7 +744,8 @@ class WorkerFrameRouter:
                         ).strip()
                     except Exception:
                         terminal_activity_id = ""
-            self._publish_run_terminal(
+            await run_sqlite_io(
+                self._publish_run_terminal,
                 conversation_session_id=stored,
                 run_id=frame.run_id,
                 turn_id=turn_id,
@@ -949,16 +962,20 @@ class WorkerFrameRouter:
                 )
             from tui_gateway import server as _server
 
-            db = _server._get_db()
+            db = await run_sqlite_io(_server._get_db)
             if db is None:
                 return
-            activity = db.activities.get(activity_id)
+            activity = await run_sqlite_io(db.activities.get, activity_id)
             if not activity:
                 return
             status = _activity_status(frame.status)
             last_message = _last_message_from_event(info.last_message_event if info else None)
             if not last_message:
-                last_message = _last_message_for_activity(db, conversation_session_id)
+                last_message = await run_sqlite_io(
+                    _last_message_for_activity,
+                    db,
+                    conversation_session_id,
+                )
             result_summary = _result_summary(last_message, frame.message)
             result_json = {
                 "last_message": last_message,
@@ -967,26 +984,29 @@ class WorkerFrameRouter:
             }
             updated_ok = False
             if status == "completed":
-                updated_ok = db.activities.mark_completed(
+                updated_ok = await run_sqlite_io(
+                    db.activities.mark_completed,
                     activity_id,
                     result_summary=result_summary,
                     result_json=result_json,
                 )
             elif status == "failed":
                 error_message = result_summary or frame.message or "worker failed"
-                updated_ok = db.activities.mark_failed(
+                updated_ok = await run_sqlite_io(
+                    db.activities.mark_failed,
                     activity_id,
                     error_message=error_message,
                     result_json=result_json,
                 )
             elif status == "cancelled":
                 cancel_summary = result_summary or frame.message or "cancelled"
-                updated_ok = db.activities.mark_cancelled(
+                updated_ok = await run_sqlite_io(
+                    db.activities.mark_cancelled,
                     activity_id,
                     result_summary=cancel_summary,
                     result_json=result_json,
                 )
-            updated = db.activities.get(activity_id) or activity
+            updated = await run_sqlite_io(db.activities.get, activity_id) or activity
             persisted_status = str(updated.get("status") or status)
             event_result_summary = result_summary if updated_ok else str(updated.get("result_summary") or "")
             event_result_json = result_json if updated_ok else {}
@@ -998,9 +1018,13 @@ class WorkerFrameRouter:
                 result_json=event_result_json,
             )
             try:
-                self._publish_event(_activity_ws_frame(event), persist=False)
+                await run_sqlite_io(
+                    self._publish_event,
+                    _activity_ws_frame(event),
+                    persist=False,
+                )
             except TypeError:
-                self._publish_event(_activity_ws_frame(event))
+                await run_sqlite_io(self._publish_event, _activity_ws_frame(event))
             if parent_scope_key:
                 await self._sender.send(
                     parent_scope_key,

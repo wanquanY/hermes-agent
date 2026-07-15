@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Union
@@ -10,11 +11,14 @@ from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from channels.platforms.base_models import EphemeralReply
 from hermes_agent.repositories.session_repo import sanitize_session_title
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 logger = logging.getLogger(__name__)
+
+_RESET_CLEANUP_TIMEOUT_S = 30.0
 
 
 def _gateway_home() -> Path:
@@ -177,14 +181,29 @@ class GatewayResetCommandMixin:
         # Close tool resources on the old agent (terminal sandboxes, browser
         # daemons, background processes) before evicting from cache.
         # Guard with getattr because test fixtures may skip __init__.
-        _cache_lock = getattr(self, "_agent_cache_lock", None)
-        if _cache_lock is not None:
-            with _cache_lock:
-                _cached = self._agent_cache.get(session_key)
-                _old_agent = _cached[0] if isinstance(_cached, tuple) else _cached if _cached else None
-            if _old_agent is not None:
-                self._cleanup_agent_resources(_old_agent)
-        agent_cache_for(self).evict_cached_agent(session_key)
+        _old_agent = agent_cache_for(self).pop_cached_agent(session_key)
+        if _old_agent is not None:
+            try:
+                await asyncio.wait_for(
+                    self._run_in_executor_with_context(
+                        self._cleanup_agent_resources,
+                        _old_agent,
+                    ),
+                    timeout=_RESET_CLEANUP_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Agent resource cleanup for session %s exceeded %.0fs during "
+                    "/new reset; proceeding while cleanup finishes off-loop",
+                    session_key,
+                    _RESET_CLEANUP_TIMEOUT_S,
+                )
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Agent resource cleanup for session %s failed during /new reset: %s",
+                    session_key,
+                    cleanup_exc,
+                )
 
         # Discard any /queue overflow for this session — /new is a
         # conversation-boundary operation, queued follow-ups from the
@@ -206,7 +225,7 @@ class GatewayResetCommandMixin:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Reset the session
-        new_entry = self.session_store.reset_session(session_key)
+        new_entry = await run_sqlite_io(self.session_store.reset_session, session_key)
 
         # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
@@ -222,10 +241,18 @@ class GatewayResetCommandMixin:
 
         # Fire plugin on_session_finalize hook (session boundary)
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
             _old_sid = old_entry.session_id if old_entry else None
-            _invoke_hook("on_session_finalize", session_id=_old_sid,
-                         platform=source.platform.value if source.platform else "")
+
+            def _invoke_finalize_hook() -> None:
+                from hermes_cli.plugins import invoke_hook
+
+                invoke_hook(
+                    "on_session_finalize",
+                    session_id=_old_sid,
+                    platform=source.platform.value if source.platform else "",
+                )
+
+            await self._run_in_executor_with_context(_invoke_finalize_hook)
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
@@ -255,7 +282,11 @@ class GatewayResetCommandMixin:
             header = session_navigation_for(self).telegram_topic_new_header(source) or t("gateway.reset.header_default")
         else:
             # No existing session, just create one
-            new_entry = self.session_store.get_or_create_session(source, force_new=True)
+            new_entry = await run_sqlite_io(
+                self.session_store.get_or_create_session,
+                source,
+                force_new=True,
+            )
             from hermes_gateway.session_navigation_commands import session_navigation_for
 
             header = session_navigation_for(self).telegram_topic_new_header(source) or t("gateway.reset.header_new")
@@ -271,7 +302,11 @@ class GatewayResetCommandMixin:
                 _title_note = t("gateway.reset.title_rejected", error=str(e))
             if sanitized:
                 try:
-                    self._session_db.sessions.set_title(new_entry.session_id, sanitized)
+                    await run_sqlite_io(
+                        self._session_db.sessions.set_title,
+                        new_entry.session_id,
+                        sanitized,
+                    )
                     header = t("gateway.reset.header_titled", title=sanitized)
                 except ValueError as e:
                     _title_note = t("gateway.reset.title_error_untitled", error=str(e))
@@ -289,18 +324,36 @@ class GatewayResetCommandMixin:
         # top of _handle_message_with_agent would switch right back.
         from hermes_gateway.session_navigation_commands import session_navigation_for
 
-        if session_navigation_for(self).is_telegram_topic_lane(source) and new_entry is not None:
+        if (
+            new_entry is not None
+            and await run_sqlite_io(
+                session_navigation_for(self).is_telegram_topic_lane,
+                source,
+            )
+        ):
             try:
-                session_navigation_for(self).record_telegram_topic_binding(source, new_entry)
+                await run_sqlite_io(
+                    session_navigation_for(self).record_telegram_topic_binding,
+                    source,
+                    new_entry,
+                )
             except Exception:
                 logger.debug("Failed to rebind Telegram topic after /new", exc_info=True)
 
         # Fire plugin on_session_reset hook (new session guaranteed to exist)
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
             _new_sid = new_entry.session_id if new_entry else None
-            _invoke_hook("on_session_reset", session_id=_new_sid,
-                         platform=source.platform.value if source.platform else "")
+
+            def _invoke_reset_hook() -> None:
+                from hermes_cli.plugins import invoke_hook
+
+                invoke_hook(
+                    "on_session_reset",
+                    session_id=_new_sid,
+                    platform=source.platform.value if source.platform else "",
+                )
+
+            await self._run_in_executor_with_context(_invoke_reset_hook)
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 

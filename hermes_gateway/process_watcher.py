@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from channels.platforms.base_models import MessageEvent, MessageType
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.config import Platform
 from hermes_gateway.config_model import _BUILTIN_PLATFORM_VALUES
 from hermes_gateway.gateway_runtime_config import runtime_config_for
@@ -88,7 +89,7 @@ class GatewayProcessWatcherService:
     async def inject_watch_notification(self, synth_text: str, evt: dict) -> None:
         """Deliver a watch-pattern notification as a status message."""
         runner = self._runner
-        source = self.build_process_event_source(evt)
+        source = await run_sqlite_io(self.build_process_event_source, evt)
         if not source:
             logger.warning(
                 "Dropping watch notification with no routing metadata for process %s",
@@ -230,7 +231,8 @@ class GatewayProcessWatcherService:
                         f"Command: {session.command}\n"
                         f"Output:\n{output}]"
                     )
-                    source = self.build_process_event_source(
+                    source = await run_sqlite_io(
+                        self.build_process_event_source,
                         {
                             "session_id": session_id,
                             "session_key": session_key,
@@ -239,7 +241,7 @@ class GatewayProcessWatcherService:
                             "thread_id": thread_id,
                             "user_id": user_id,
                             "user_name": user_name,
-                        }
+                        },
                     )
                     if not source:
                         logger.warning(

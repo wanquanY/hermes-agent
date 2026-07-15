@@ -62,7 +62,8 @@ class TestSuspendRecentlyActive:
         # Backdate the session's updated_at beyond the cutoff
         with store._lock:
             entry.updated_at = datetime.now() - timedelta(seconds=300)
-            store._save()
+            snapshot = store._snapshot_index_locked()
+        store._write_index_snapshot(*snapshot)
 
         count = store.suspend_recently_active(max_age_seconds=120)
         assert count == 0

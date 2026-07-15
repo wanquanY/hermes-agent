@@ -2039,7 +2039,13 @@ def test_connect_falls_back_to_delete_on_locking_protocol(kanban_home, caplog):
 
     class _WalBlockingConnection(_sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):  # type: ignore[override]
-            if "journal_mode=wal" in sql.lower().replace(" ", ""):
+            normalized = sql.lower().replace(" ", "")
+            if normalized == "pragmajournal_mode":
+                # The fixture has already initialized this database in WAL.
+                # Make the policy exercise its activation path so this test
+                # continues to cover a filesystem that rejects WAL setup.
+                return super().execute("SELECT 'delete'")
+            if "journal_mode=wal" in normalized:
                 raise _sqlite3.OperationalError("locking protocol")
             return super().execute(sql, *args, **kwargs)
 

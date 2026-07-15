@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
+
 logger = logging.getLogger(__name__)
+
+_CLEANUP_TIMEOUT_S = 30.0
 
 
 class GatewayAgentTurnHygieneService:
@@ -266,11 +270,16 @@ class GatewayAgentTurnHygieneService:
                                     # and searchable via session_search.
                                     _hyg_new_sid = _hyg_agent.session_id
                                     if _hyg_new_sid != session_entry.session_id:
-                                        session_entry.session_id = _hyg_new_sid
-                                        runner.session_store._save()
+                                        await run_sqlite_io(
+                                            runner.session_store.update_entry_session_id,
+                                            session_entry.session_key,
+                                            _hyg_new_sid,
+                                        )
 
-                                    runner.session_store.rewrite_transcript(
-                                        session_entry.session_id, _compressed
+                                    await run_sqlite_io(
+                                        runner.session_store.rewrite_transcript,
+                                        session_entry.session_id,
+                                        _compressed,
                                     )
                                     # Reset stored token count — transcript was rewritten
                                     session_entry.last_prompt_tokens = 0
@@ -352,7 +361,20 @@ class GatewayAgentTurnHygieneService:
                                     # rebuilds its system prompt from current
                                     # SOUL.md, memory, and skills.
                                     agent_cache_for(runner).evict_cached_agent(session_key)
-                                    runner._cleanup_agent_resources(_hyg_agent)
+                                    try:
+                                        await asyncio.wait_for(
+                                            runner._run_in_executor_with_context(
+                                                runner._cleanup_agent_resources,
+                                                _hyg_agent,
+                                            ),
+                                            timeout=_CLEANUP_TIMEOUT_S,
+                                        )
+                                    except asyncio.TimeoutError:
+                                        logger.warning(
+                                            "Timed out cleaning up hygiene agent after %.0fs; "
+                                            "cleanup continues in its worker thread",
+                                            _CLEANUP_TIMEOUT_S,
+                                        )
 
                     except Exception as e:
                         logger.warning(

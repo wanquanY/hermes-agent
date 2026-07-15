@@ -31,7 +31,7 @@ from hermes_agent.storage.fts_schema import ensure_message_fts
 from hermes_agent.composition.migration_operations import reconcile_declared_columns
 from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION, MigrationRunner
 from hermes_agent.storage.session_store_health import set_last_init_error
-from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
 from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
@@ -88,9 +88,7 @@ def connect_session_repository_db(db_path: Path | str | None = None) -> sqlite3.
 
 
 def _configure_connection(conn: sqlite3.Connection, *, db_label: str) -> None:
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    apply_wal_with_fallback(conn, db_label=db_label)
+    configure_sqlite_connection(conn, db_label=db_label)
 
 
 def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:

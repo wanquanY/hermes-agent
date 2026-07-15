@@ -6,6 +6,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent, MessageType
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,14 @@ class GatewayConversationEditingCommandService:
         """Replay the last user message after removing its old response."""
 
         source = event.source
-        session_entry = self._runner.session_store.get_or_create_session(source)
-        history = self._runner.session_store.load_transcript(session_entry.session_id)
+        session_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
+        history = await run_sqlite_io(
+            self._runner.session_store.load_transcript,
+            session_entry.session_id,
+        )
 
         last_user_msg = None
         last_user_idx = None
@@ -32,7 +39,11 @@ class GatewayConversationEditingCommandService:
         if not last_user_msg:
             return t("gateway.retry.no_previous")
 
-        self._runner.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        await run_sqlite_io(
+            self._runner.session_store.rewrite_transcript,
+            session_entry.session_id,
+            history[:last_user_idx],
+        )
         session_entry.last_prompt_tokens = 0
 
         retry_event = MessageEvent(
@@ -48,8 +59,14 @@ class GatewayConversationEditingCommandService:
         """Remove the last user/assistant exchange from the transcript."""
 
         source = event.source
-        session_entry = self._runner.session_store.get_or_create_session(source)
-        history = self._runner.session_store.load_transcript(session_entry.session_id)
+        session_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
+        history = await run_sqlite_io(
+            self._runner.session_store.load_transcript,
+            session_entry.session_id,
+        )
 
         last_user_idx = None
         for idx in range(len(history) - 1, -1, -1):
@@ -62,7 +79,11 @@ class GatewayConversationEditingCommandService:
 
         removed_msg = history[last_user_idx].get("content", "")
         removed_count = len(history) - last_user_idx
-        self._runner.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        await run_sqlite_io(
+            self._runner.session_store.rewrite_transcript,
+            session_entry.session_id,
+            history[:last_user_idx],
+        )
         session_entry.last_prompt_tokens = 0
 
         preview = removed_msg[:40] + "..." if len(removed_msg) > 40 else removed_msg

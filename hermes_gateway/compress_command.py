@@ -7,6 +7,7 @@ import logging
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
@@ -18,8 +19,14 @@ class GatewayCompressCommandMixin:
         """Manually compress the current conversation transcript."""
 
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_entry = await run_sqlite_io(
+            self.session_store.get_or_create_session,
+            source,
+        )
+        history = await run_sqlite_io(
+            self.session_store.load_transcript,
+            session_entry.session_id,
+        )
 
         if not history or len(history) < 4:
             return t("gateway.compress.not_enough")
@@ -81,12 +88,21 @@ class GatewayCompressCommandMixin:
 
                 new_session_id = tmp_agent.session_id
                 if new_session_id != session_entry.session_id:
-                    session_entry.session_id = new_session_id
-                    self.session_store._save()
+                    await run_sqlite_io(
+                        self.session_store.update_entry_session_id,
+                        session_entry.session_key,
+                        new_session_id,
+                    )
 
-                self.session_store.rewrite_transcript(new_session_id, compressed)
-                self.session_store.update_session(
-                    session_entry.session_key, last_prompt_tokens=0
+                await run_sqlite_io(
+                    self.session_store.rewrite_transcript,
+                    new_session_id,
+                    compressed,
+                )
+                await run_sqlite_io(
+                    self.session_store.update_session,
+                    session_entry.session_key,
+                    last_prompt_tokens=0,
                 )
                 new_tokens = estimate_request_tokens_rough(
                     compressed, system_prompt=sys_prompt, tools=tools

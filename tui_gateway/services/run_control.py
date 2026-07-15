@@ -31,6 +31,7 @@ from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_ki
 from tui_gateway.services import team_mission_activity_events as _team_activity_events
 from tui_gateway.services import runtime_streams as _runtime_streams
 from tui_gateway.services import runtime_event_protocol as _runtime_event_protocol
+from tui_gateway.services.subscription_poll_lifecycle import SubscriptionPollLifecycle
 from tui_gateway.services.run_control_events import (
     delta_event_for_subscription as _delta_event_for_subscription,
     event_run_id as _event_run_id,
@@ -178,11 +179,13 @@ _last_seq_by_session: dict[str, int] = defaultdict(int)
 _participant_id_by_resolution_key: dict[tuple[str, str, str, str, str], str] = {}
 _team_mission_binding_by_run: dict[str, dict[str, Any]] = {}
 _subscription_poller_thread: threading.Thread | None = None
+_subscription_poll_lifecycle = SubscriptionPollLifecycle()
 _team_mission_ready_scheduler: Any = None
 
 
 def _reset_for_tests() -> None:
     with _lock:
+        subscription_ids = set(_subscriptions_by_id)
         _events_by_session.clear()
         _subscribers_by_session.clear()
         _subscriptions_by_id.clear()
@@ -194,6 +197,7 @@ def _reset_for_tests() -> None:
         _last_seq_by_session.clear()
         _participant_id_by_resolution_key.clear()
         _team_mission_binding_by_run.clear()
+    _subscription_poll_lifecycle.wait(subscription_ids)
     _runtime_streams.reset_for_tests()
     _runtime_event_protocol.reset_for_tests()
 
@@ -1163,117 +1167,134 @@ def _start_subscription_poller_locked() -> None:
 def _poll_subscription_events() -> None:
     while True:
         time.sleep(_POLL_INTERVAL_SECONDS)
-        with _lock:
-            subscriptions = [
-                dict(subscription)
-                for subscription in _subscriptions_by_id.values()
-                if subscription.get("transport") is not None
-            ]
-        if not subscriptions:
+        _poll_subscription_events_once()
+
+
+def _poll_subscription_events_once() -> None:
+    """Poll one registry snapshot while protecting borrowed DB handles."""
+
+    with _lock:
+        subscriptions = [
+            dict(subscription)
+            for subscription in _subscriptions_by_id.values()
+            if subscription.get("transport") is not None
+        ]
+        _subscription_poll_lifecycle.start(
+            str(subscription.get("id") or "") for subscription in subscriptions
+        )
+    for subscription in subscriptions:
+        subscription_id = str(subscription.get("id") or "")
+        try:
+            _poll_one_subscription(subscription)
+        finally:
+            _subscription_poll_lifecycle.finish(subscription_id)
+
+
+def _poll_one_subscription(subscription: dict[str, Any]) -> None:
+    """Poll one accepted subscription without holding the registry lock."""
+
+    db = subscription.get("db")
+    if db is None:
+        return
+    subscription_kind = str(subscription.get("kind") or "session")
+    stable = str(subscription.get("conversation_session_id") or "").strip()
+    activity_id = str(subscription.get("activity_id") or "").strip()
+    transport = subscription.get("transport")
+    if transport is None:
+        return
+    if subscription_kind == "activity" and not activity_id:
+        return
+    if subscription_kind != "activity" and not stable:
+        return
+    try:
+        last_seq = _subscription_after_seq(subscription)
+        active_only = bool(subscription.get("active_only"))
+        runtime_scope_key = str(subscription.get("runtime_scope_key") or "").strip()
+        active_run_ids = set(subscription.get("active_run_ids") or set())
+        if active_only:
+            active_run_ids.update(_active_run_ids_for_session(stable, db=db))
+        if subscription_kind == "activity":
+            events = _team_activity_events.list_activity_events(
+                db,
+                activity_id,
+                after_seq=last_seq,
+                limit=_MAX_EVENTS_PER_SESSION,
+                event_activity_id=_event_activity_id,
+            )
+        else:
+            events = list_runtime_events(
+                db,
+                stable,
+                after_seq=last_seq,
+                active_only=False,
+                runtime_scope_key=runtime_scope_key,
+                limit=_MAX_EVENTS_PER_SESSION,
+            )
+    except Exception:
+        logger.debug("failed to poll run event log", exc_info=True)
+        return
+    events = [event for event in events if isinstance(event, dict)]
+    if subscription_kind != "activity":
+        events = [
+            event for event in events if not _is_team_mission_runtime_event(event)
+        ]
+        events = _filter_events_for_subscription(
+            events,
+            active_only=active_only,
+            active_run_ids=active_run_ids,
+            runtime_scope_key=runtime_scope_key,
+            run_id=str(subscription.get("run_id") or ""),
+        )
+    if not events:
+        return
+    delivered_seq = last_seq
+    for event in events:
+        seq = int(event.get("seq") or 0)
+        if seq <= delivered_seq:
             continue
-        for subscription in subscriptions:
-            db = subscription.get("db")
-            if db is None:
-                continue
-            subscription_kind = str(subscription.get("kind") or "session")
-            stable = str(subscription.get("conversation_session_id") or "").strip()
-            activity_id = str(subscription.get("activity_id") or "").strip()
-            transport = subscription.get("transport")
-            if transport is None:
-                continue
-            if subscription_kind == "activity" and not activity_id:
-                continue
-            if subscription_kind != "activity" and not stable:
-                continue
-            last_seq = _subscription_after_seq(subscription)
-            active_only = bool(subscription.get("active_only"))
-            runtime_scope_key = str(subscription.get("runtime_scope_key") or "").strip()
-            active_run_ids = set(subscription.get("active_run_ids") or set())
-            if active_only:
-                active_run_ids.update(_active_run_ids_for_session(stable, db=db))
-            try:
-                if subscription_kind == "activity":
-                    events = _team_activity_events.list_activity_events(
-                        db,
-                        activity_id,
-                        after_seq=last_seq,
-                        limit=_MAX_EVENTS_PER_SESSION,
-                        event_activity_id=_event_activity_id,
-                    )
-                else:
-                    events = list_runtime_events(
-                        db,
-                        stable,
-                        after_seq=last_seq,
-                        active_only=False,
-                        runtime_scope_key=runtime_scope_key,
-                        limit=_MAX_EVENTS_PER_SESSION,
-                    )
-            except Exception:
-                logger.debug("failed to poll run event log", exc_info=True)
-                continue
-            events = [event for event in events if isinstance(event, dict)]
-            if subscription_kind != "activity":
-                events = [
-                    event
-                    for event in events
-                    if not _is_team_mission_runtime_event(event)
-                ]
-                events = _filter_events_for_subscription(
-                    events,
-                    active_only=active_only,
-                    active_run_ids=active_run_ids,
-                    runtime_scope_key=runtime_scope_key,
-                    run_id=str(subscription.get("run_id") or ""),
+        event_type = str(event.get("type") or "")
+        if event_type in _STREAM_TRACE_EVENT_TYPES:
+            _trace_stream_route(
+                "subscription-poll-delivery",
+                event_type=event_type,
+                subscription_id=str(subscription.get("id") or ""),
+                subscription_kind=subscription_kind,
+                conversation_session_id=stable,
+                mission_id="",
+                activity_id=activity_id,
+                run_id=_event_run_id(event),
+                turn_id=_event_turn_id(event),
+                runtime_scope_key=_event_runtime_scope_key(event),
+                seq=seq,
+                previous_delivered_seq=delivered_seq,
+                transport=_transport_debug_id(transport),
+                **_stream_trace_summary(event),
+            )
+        if not _deliver_subscription_event(
+            str(subscription.get("id") or ""),
+            transport,
+            event,
+        ):
+            break
+        delivered_seq = seq
+    with _lock:
+        current = _subscriptions_by_id.get(str(subscription.get("id") or ""))
+        if current is not None:
+            cursor_field = (
+                "activity_event_last_seq"
+                if (
+                    subscription_kind == "activity"
+                    and _team_activity_events.uses_event_log(activity_id, db=db)
                 )
-            if not events:
-                continue
-            delivered_seq = last_seq
-            for event in events:
-                seq = int(event.get("seq") or 0)
-                if seq <= delivered_seq:
-                    continue
-                event_type = str(event.get("type") or "")
-                if event_type in _STREAM_TRACE_EVENT_TYPES:
-                    _trace_stream_route(
-                        "subscription-poll-delivery",
-                        event_type=event_type,
-                        subscription_id=str(subscription.get("id") or ""),
-                        subscription_kind=subscription_kind,
-                        conversation_session_id=stable,
-                        mission_id="",
-                        activity_id=activity_id,
-                        run_id=_event_run_id(event),
-                        turn_id=_event_turn_id(event),
-                        runtime_scope_key=_event_runtime_scope_key(event),
-                        seq=seq,
-                        previous_delivered_seq=delivered_seq,
-                        transport=_transport_debug_id(transport),
-                        **_stream_trace_summary(event),
-                    )
-                if not _deliver_subscription_event(
-                    str(subscription.get("id") or ""),
-                    transport,
-                    event,
-                ):
-                    break
-                delivered_seq = seq
-            with _lock:
-                current = _subscriptions_by_id.get(str(subscription.get("id") or ""))
-                if current is not None:
-                    cursor_field = (
-                        "activity_event_last_seq"
-                        if (
-                            subscription_kind == "activity"
-                            and _team_activity_events.uses_event_log(activity_id, db=db)
-                        )
-                        else "last_seq"
-                    )
-                    current[cursor_field] = max(int(current.get(cursor_field) or 0), delivered_seq)
-                    if active_only:
-                        current_active_run_ids = set(current.get("active_run_ids") or set())
-                        current_active_run_ids.update(active_run_ids)
-                        current["active_run_ids"] = current_active_run_ids
+                else "last_seq"
+            )
+            current[cursor_field] = max(
+                int(current.get(cursor_field) or 0), delivered_seq
+            )
+            if active_only:
+                current_active_run_ids = set(current.get("active_run_ids") or set())
+                current_active_run_ids.update(active_run_ids)
+                current["active_run_ids"] = current_active_run_ids
 
 
 def _ensure_run(
@@ -2965,7 +2986,8 @@ def unsubscribe_activity(subscription_id: str) -> int:
             removed=removed,
             remaining_activity_subscription_count=len(_subscription_ids_by_activity.get(activity_id, set())),
         )
-        return removed
+    _subscription_poll_lifecycle.wait({normalized_subscription_id})
+    return removed
 
 
 def unsubscribe_session(
@@ -2993,6 +3015,7 @@ def unsubscribe_session(
         removed = _remove_subscription_ids_locked(ids)
         if transport is not None and stable:
             _subscribers_by_session.get(stable, set()).discard(transport)
+    _subscription_poll_lifecycle.wait(ids)
     return removed
 
 
@@ -3000,14 +3023,16 @@ def detach_transport(transport: Transport | None) -> None:
     if transport is None:
         return
     with _lock:
+        subscription_ids = set(_subscription_ids_by_transport.get(transport, set()))
         subscriptions = [
             dict(_subscriptions_by_id[subscription_id])
             for subscription_id in _subscription_ids_by_transport.get(transport, set())
             if subscription_id in _subscriptions_by_id
         ]
-        unsubscribe_session(transport=transport)
+        _remove_subscription_ids_locked(subscription_ids)
         for subscribers in _subscribers_by_session.values():
             subscribers.discard(transport)
+    _subscription_poll_lifecycle.wait(subscription_ids)
     checkpoint_batches: list[tuple[Any, list[_runtime_streams.PendingCheckpoint]]] = []
     for subscription in subscriptions:
         db = subscription.get("db")

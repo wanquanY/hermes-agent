@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.config import Platform
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.session_key import parse_session_key
@@ -59,7 +60,10 @@ class GatewayShutdownRuntimeMixin:
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
-            source = self._shutdown_notification_source(session_key)
+            source = await run_sqlite_io(
+                self._shutdown_notification_source,
+                session_key,
+            )
             if source is not None:
                 platform_str = source.platform.value
                 chat_id = str(source.chat_id)
