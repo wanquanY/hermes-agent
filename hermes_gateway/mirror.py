@@ -154,7 +154,7 @@ def _append_to_message_store(session_id: str, message: dict) -> None:
     """Append a message through the shared CLI session store."""
     store = None
     try:
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         store = open_cli_session_store()
         store.messages.append(

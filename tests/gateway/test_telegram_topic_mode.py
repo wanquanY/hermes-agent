@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from hermes_gateway.voice_runtime import voice_runtime_for
 from channels.platforms.base import MessageEvent

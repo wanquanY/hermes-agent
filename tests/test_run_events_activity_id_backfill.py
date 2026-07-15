@@ -21,7 +21,7 @@ from hermes_agent.domain.run_event_activity_backfill import (
     activity_id_from_event_json,
     activity_id_from_session_id,
 )
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 @pytest.fixture

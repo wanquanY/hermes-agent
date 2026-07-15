@@ -429,7 +429,7 @@ class SessionManager:
         if self._db_instance is not None:
             return self._db_instance
         try:
-            from hermes_agent.storage.cli_session_store import open_cli_session_store
+            from hermes_agent.composition.cli_session_store import open_cli_session_store
 
             hermes_home = get_hermes_home()
             self._db_instance = open_cli_session_store(hermes_home / "state.db")

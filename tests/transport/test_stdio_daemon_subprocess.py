@@ -21,6 +21,10 @@ from pathlib import Path
 
 import pytest
 
+from hermes_agent.composition.session_repository_db import (
+    ensure_session_repository_schema,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -139,6 +143,7 @@ CREATE TABLE team_mission_nodes (
 def _prep_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA_MIN)
+    ensure_session_repository_schema(conn)
     conn.commit()
     conn.close()
 

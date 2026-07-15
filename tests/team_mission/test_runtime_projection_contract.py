@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services.team_mission_activity_events import (
     transport_event_for_subscription,
 )

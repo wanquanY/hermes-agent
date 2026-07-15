@@ -166,7 +166,7 @@ def test_profile_runtime_session_exists_is_scoped_to_hermes_runtime_roots(tmp_pa
 
 
 def test_team_mission_workspace_rebase_paths_updates_hermes_state(tmp_path: Path) -> None:
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     from tui_gateway.services.runtime_state import rebase_team_mission_workspace_paths
 
     db = open_cli_session_store(tmp_path / "state.db")

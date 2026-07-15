@@ -85,10 +85,18 @@ def _get_mcp_servers(config: Optional[dict] = None) -> Dict[str, dict]:
 
 
 def _save_mcp_server(name: str, server_config: dict):
-    """Add or update a server entry in config.yaml."""
+    """Add or update a server entry in config.yaml, failing closed on abuse."""
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    warnings = validate_mcp_server_entry(name, server_config)
+    if warnings:
+        for warning in warnings:
+            _error(warning)
+        return False
     config = load_config()
     config.setdefault("mcp_servers", {})[name] = server_config
     save_config(config)
+    return True
 
 
 def _remove_mcp_server(name: str) -> bool:
@@ -172,6 +180,12 @@ def _probe_single_server(
     Returns list of ``(tool_name, description)`` tuples.
     Raises on connection failure.
     """
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    warnings = validate_mcp_server_entry(name, config)
+    if warnings:
+        raise ValueError("; ".join(warnings))
+
     from tools.mcp_tool import (
         _ensure_mcp_loop,
         _run_on_mcp_loop,
@@ -282,6 +296,15 @@ def cmd_mcp_add(args):
             server_config["args"] = cmd_args
         if explicit_env:
             server_config["env"] = explicit_env
+
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    security_warnings = validate_mcp_server_entry(name, server_config)
+    if security_warnings:
+        for warning in security_warnings:
+            _error(warning)
+        _error(f"MCP server '{name}' was NOT saved.")
+        return
 
 
     # ── Authentication ────────────────────────────────────────────────

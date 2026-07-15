@@ -2,7 +2,7 @@
 from hermes_gateway.session import SessionStore
 from hermes_gateway.config import GatewayConfig
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
 
 def test_load_transcript_returns_db_messages_when_no_jsonl(tmp_path):

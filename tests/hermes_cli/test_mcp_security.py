@@ -227,11 +227,9 @@ def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch)
 
     with mcp_tool._lock:
         saved_servers = dict(mcp_tool._servers)
-        saved_connecting = set(mcp_tool._server_connecting)
-        saved_errors = dict(mcp_tool._server_connect_errors)
+        saved_parallel_safe = set(mcp_tool._parallel_safe_servers)
         mcp_tool._servers.clear()
-        mcp_tool._server_connecting.clear()
-        mcp_tool._server_connect_errors.clear()
+        mcp_tool._parallel_safe_servers.clear()
 
     try:
         mcp_tool.register_mcp_servers({
@@ -242,10 +240,8 @@ def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch)
         with mcp_tool._lock:
             mcp_tool._servers.clear()
             mcp_tool._servers.update(saved_servers)
-            mcp_tool._server_connecting.clear()
-            mcp_tool._server_connecting.update(saved_connecting)
-            mcp_tool._server_connect_errors.clear()
-            mcp_tool._server_connect_errors.update(saved_errors)
+            mcp_tool._parallel_safe_servers.clear()
+            mcp_tool._parallel_safe_servers.update(saved_parallel_safe)
 
     assert connected == ["clean"]
 

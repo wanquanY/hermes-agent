@@ -7,6 +7,9 @@ import sqlite3
 import time
 
 from hermes_agent.domain.event_ledger import AppendResult, EventLedger
+from hermes_agent.composition.session_repository_db import (
+    ensure_session_repository_schema,
+)
 
 
 PROPERTY_ROUNDS = 24
@@ -36,8 +39,16 @@ def _make_conn() -> sqlite3.Connection:
         );
         """
     )
+    ensure_session_repository_schema(conn)
     conn.commit()
     return conn
+
+
+def _ensure_session(conn: sqlite3.Connection, session_id: str) -> None:
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, updated_at) VALUES (?, 'test', 0, 0)",
+        (session_id,),
+    )
 
 
 _EVENT_TYPES = (
@@ -59,6 +70,7 @@ def test_property_list_returns_seq_ordered_events():
         conn = _make_conn()
         ledger = EventLedger(conn)
         session_id = f"s-{round_idx}"
+        _ensure_session(conn, session_id)
         n_events = rng.randint(1, 30)
         for i in range(n_events):
             ledger.append(
@@ -82,6 +94,7 @@ def test_property_preassigned_seq_is_idempotent():
         conn = _make_conn()
         ledger = EventLedger(conn)
         session_id = f"s-{round_idx}"
+        _ensure_session(conn, session_id)
         seq_targets = list(range(1, rng.randint(3, 12) + 1))
         # Ensure seq_counter row exists.
         conn.execute(
@@ -119,6 +132,7 @@ def test_property_internal_events_are_filtered_by_default():
         conn = _make_conn()
         ledger = EventLedger(conn)
         session_id = f"s-{round_idx}"
+        _ensure_session(conn, session_id)
         internal_count = 0
         visible_count = 0
         for _ in range(rng.randint(5, 25)):

@@ -61,7 +61,7 @@ def _seed(db, sid, title, n=8):
 class TestInPlaceCompaction:
     def test_in_place_keeps_same_session_id(self):
         """In-place mode: id unchanged, no child row, no rename, history kept."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,7 +100,7 @@ class TestInPlaceCompaction:
 
     def test_in_place_alternation_preserved(self):
         """The compacted list must not introduce consecutive same-role messages."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +119,7 @@ class TestInPlaceCompaction:
 class TestRotationStillDefault:
     def test_rotation_when_flag_off(self):
         """Regression guard: flag off => legacy rotation is unchanged."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:

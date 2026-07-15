@@ -351,9 +351,14 @@ def test_end_to_end_with_real_context_no_credentials_leak(monkeypatch):
     cfg = _cfg(model={"provider": "openrouter"})
     with patch("hermes_cli.config.load_config", return_value=cfg):
         ctx = load_picker_context()
-    payload = build_models_payload(
-        ctx, include_unconfigured=True, picker_hints=True,
-    )
+    # Keep the real provider-authentication and payload assembly path, but
+    # replace remote model discovery: the canary credentials intentionally
+    # make providers look authenticated and must never trigger live HTTP in
+    # a credential-redaction test.
+    with patch("hermes_cli.models.cached_provider_model_ids", return_value=[]):
+        payload = build_models_payload(
+            ctx, include_unconfigured=True, picker_hints=True,
+        )
     import json as _json
 
     assert canary not in _json.dumps(payload)

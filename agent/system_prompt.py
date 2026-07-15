@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
@@ -76,6 +77,29 @@ def _patched_run_agent_attr(name: str, fallback: Any) -> Any:
     if run_agent_module is None:
         return fallback
     return getattr(run_agent_module, name, fallback)
+
+
+def _resolve_context_cwd(agent: Any) -> Optional[Path]:
+    """Resolve the session workspace once for all prompt consumers.
+
+    Coding posture detection and context-file discovery must see the same
+    directory. Keeping the precedence here prevents one prompt tier from using
+    the gateway session cwd while another silently falls back to the process
+    cwd.
+    """
+    try:
+        from channels.session_context import get_session_env
+
+        session_cwd = get_session_env("TERMINAL_CWD", "").strip()
+    except Exception:
+        session_cwd = ""
+    raw_cwd = (
+        session_cwd
+        or str(getattr(agent, "session_cwd", "") or "").strip()
+        or os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
+        or os.getenv("TERMINAL_CWD", "").strip()
+    )
+    return Path(raw_cwd).expanduser() if raw_cwd else None
 
 
 def _resolve_platform_hint(agent: Any, platform_key: str, default_hint: str) -> str:
@@ -1121,7 +1145,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             stable_parts.extend(
                 coding_system_blocks(
                     platform=agent.platform,
-                    cwd=resolve_context_cwd(),
+                    cwd=_resolve_context_cwd(agent),
                     model=agent.model,
                 )
             )
@@ -1214,19 +1238,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # mode).  The gateway process runs from the hermes-agent install
         # dir, so os.getcwd() would pick up the repo's AGENTS.md and
         # other dev files — inflating token usage by ~10k for no benefit.
-        try:
-            from channels.session_context import get_session_env
-
-            _context_cwd = get_session_env("TERMINAL_CWD", "").strip() or None
-        except Exception:
-            _context_cwd = None
-        _context_cwd = (
-            _context_cwd
-            or getattr(agent, "session_cwd", "")
-            or os.getenv("DOVIE_WORKSPACE_ROOT")
-            or os.getenv("TERMINAL_CWD")
-            or None
-        )
+        _context_cwd = _resolve_context_cwd(agent)
         _log_dovie_system_prompt_stage(
             agent,
             "context-files-start",

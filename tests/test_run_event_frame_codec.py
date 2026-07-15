@@ -5,7 +5,7 @@ import time
 
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import assistant_conversation_message_id_for
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.domain.run_event_codec import decode_run_event_row
 
 

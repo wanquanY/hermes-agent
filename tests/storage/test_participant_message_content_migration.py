@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_migration_removes_legacy_identity_from_canonical_message_content(

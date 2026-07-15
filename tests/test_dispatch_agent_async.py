@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 import tools.dispatch_agent_async as dispatch_tool
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tools.registry import registry
 from tui_gateway.methods.dispatch import dispatch_agent_async
 from tui_gateway.run_worker import DBRpcRequestFrame, RunStartFrame

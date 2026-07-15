@@ -40,16 +40,17 @@ from hermes_agent.transport import (
     TransportRouter,
 )
 from hermes_agent.transport.envelope import FrameKind
-
-
 def _full_stack():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript(
+    _legacy_schema_contract = (
         """
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            model_config TEXT,
             title TEXT,
             display_title TEXT,
             display_title_source TEXT,
@@ -59,7 +60,8 @@ def _full_stack():
             started_at REAL NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL DEFAULT 0,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            transient INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE session_index (
             session_id TEXT PRIMARY KEY,
@@ -69,6 +71,7 @@ def _full_stack():
             title TEXT NOT NULL DEFAULT '',
             preview TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
+            transient INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT '',
             conversation_kind TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'idle',
@@ -112,6 +115,7 @@ def _full_stack():
             seq INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             turn_id TEXT,
+            activity_id TEXT,
             timestamp REAL NOT NULL,
             payload_json TEXT,
             event_json TEXT NOT NULL,
@@ -221,6 +225,11 @@ def _full_stack():
         );
         """
     )
+    # This integration fixture intentionally exercises the isolated v3
+    # repository contract. Its Team Mission tables are not the production
+    # runtime schema family, so bootstrapping both into one database would
+    # create same-name tables with incompatible columns.
+    conn.executescript(_legacy_schema_contract)
     conn.commit()
 
     session_repo = SessionRepoImpl(conn)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def _ids(result):

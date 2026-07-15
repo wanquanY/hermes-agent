@@ -33,14 +33,24 @@ def _production_python_files() -> list[Path]:
 
 
 def _contains_direct_interaction_write(source: str) -> bool:
+    # The ownership contract only targets the enum name and canonical internal
+    # event prefix. Avoid constructing ASTs for the overwhelming majority of
+    # production files that cannot possibly match; this gate runs alongside
+    # the entire repository suite and must stay deterministic under load.
+    if (
+        "InternalRunEventType" not in source
+        and "_internal.interaction." not in source
+    ):
+        return False
     tree = ast.parse(source)
+    nodes = tuple(ast.walk(tree))
     if any(
         (isinstance(node, ast.Name) and node.id == "InternalRunEventType")
         or (isinstance(node, ast.Attribute) and node.attr == "InternalRunEventType")
-        for node in ast.walk(tree)
+        for node in nodes
     ):
         return True
-    for node in ast.walk(tree):
+    for node in nodes:
         if not isinstance(node, ast.Call):
             continue
         function_name = ""

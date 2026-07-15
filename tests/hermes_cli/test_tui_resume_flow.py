@@ -705,9 +705,9 @@ def test_oneshot_wires_session_store_for_recall(monkeypatch):
     monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
     monkeypatch.setitem(
         sys.modules,
-        "hermes_agent.storage.cli_session_store",
+        "hermes_agent.composition.cli_session_store",
         mod(
-            "hermes_agent.storage.cli_session_store",
+            "hermes_agent.composition.cli_session_store",
             open_cli_session_store=lambda: sentinel_store,
         ),
     )

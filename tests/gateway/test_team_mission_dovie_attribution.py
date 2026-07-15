@@ -10,7 +10,7 @@ import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers
 from channels.session_context import clear_session_vars, set_session_vars
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 from tui_gateway.run_worker import RunStartFrame, dovie_product_context_from_frame

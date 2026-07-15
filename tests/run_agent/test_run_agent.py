@@ -53,8 +53,6 @@ def test_is_destructive_command_treats_install_as_mutating():
 
 
 def test_session_recall_uses_read_model_owner_without_legacy_fallback(agent, monkeypatch):
-    from hermes_agent.read_models.session_recall import SessionRecallReadModel
-
     sentinel = object()
 
     def open_default(*_args, **_kwargs):
@@ -63,7 +61,10 @@ def test_session_recall_uses_read_model_owner_without_legacy_fallback(agent, mon
     def fail_session_db(*_args, **_kwargs):
         raise AssertionError("AIAgent recall must not construct SessionDB")
 
-    monkeypatch.setattr(SessionRecallReadModel, "open_default", open_default)
+    monkeypatch.setattr(
+        "hermes_agent.composition.session_recall_factory.open_default_session_recall",
+        open_default,
+    )
     monkeypatch.setattr(run_agent, "SessionDB", fail_session_db, raising=False)
     agent._session_db = None
     agent._session_recall_read_model = None
@@ -745,6 +746,7 @@ class TestInit:
                 api_key="test-key-1234567890",
                 model="anthropic/claude-sonnet-4-20250514",
                 base_url="http://localhost:8080/v1",
+                model_context_window=256_000,
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -5777,7 +5779,8 @@ class TestMemoryNudgeCounterPersistence:
         with patch("run_agent.get_tool_definitions", return_value=[]):
             a = AIAgent(
                 model="test", api_key="test-key", base_url="http://localhost:1234/v1",
-                provider="openrouter", skip_context_files=True, skip_memory=True,
+                provider="openrouter", model_context_window=256_000,
+                skip_context_files=True, skip_memory=True,
             )
         assert hasattr(a, "_turns_since_memory")
         assert hasattr(a, "_iters_since_skill")

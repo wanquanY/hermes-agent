@@ -93,7 +93,7 @@ from agent.markdown_tables import (
     realign_markdown_tables,
 )
 from hermes_agent.repositories.session_repo import sanitize_session_title
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_agent.storage.session_availability import format_session_store_unavailable
 # NOTE: `from agent.account_usage import ...` is deliberately NOT at module
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
@@ -3725,8 +3725,9 @@ class HermesCLI:
     def _current_reasoning_callback(self):
         """Return the active reasoning display callback for the current mode."""
         callbacks = []
-        if self._kanban_runtime_event_sink is not None:
-            callbacks.append(self._kanban_runtime_event_sink.on_reasoning_delta)
+        runtime_event_sink = getattr(self, "_kanban_runtime_event_sink", None)
+        if runtime_event_sink is not None:
+            callbacks.append(runtime_event_sink.on_reasoning_delta)
         if self.show_reasoning and self.streaming_enabled:
             callbacks.append(self._stream_reasoning_delta)
         elif self.verbose and not self.show_reasoning:
@@ -3735,16 +3736,18 @@ class HermesCLI:
 
     def _current_stream_delta_callback(self):
         callbacks = []
-        if self._kanban_runtime_event_sink is not None:
-            callbacks.append(self._kanban_runtime_event_sink.on_message_delta)
+        runtime_event_sink = getattr(self, "_kanban_runtime_event_sink", None)
+        if runtime_event_sink is not None:
+            callbacks.append(runtime_event_sink.on_message_delta)
         if self.streaming_enabled:
             callbacks.append(self._stream_delta)
         return self._combine_single_arg_callbacks(callbacks)
 
     def _current_tool_gen_callback(self):
         callbacks = []
-        if self._kanban_runtime_event_sink is not None:
-            callbacks.append(self._kanban_runtime_event_sink.on_tool_generating)
+        runtime_event_sink = getattr(self, "_kanban_runtime_event_sink", None)
+        if runtime_event_sink is not None:
+            callbacks.append(runtime_event_sink.on_tool_generating)
         if self.streaming_enabled:
             callbacks.append(self._on_tool_gen_start)
         return self._combine_single_arg_callbacks(callbacks)

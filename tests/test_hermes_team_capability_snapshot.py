@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _source_packet(description: str = "A balanced engineering team") -> dict:

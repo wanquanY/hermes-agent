@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hermes_agent.domain.team_mission_audit_log import TeamMissionAuditLog
+from hermes_agent.application.team_mission_audit_log import TeamMissionAuditLog
 
 
 def _make_conn() -> sqlite3.Connection:

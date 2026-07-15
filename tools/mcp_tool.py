@@ -1903,6 +1903,100 @@ class MCPServerTask:
             else []
         )
 
+    _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
+
+    async def _preflight_content_type(
+        self,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        ssl_verify: bool = True,
+        client_cert=None,
+        timeout: float = 5.0,
+    ) -> None:
+        """Fail fast only when a successful endpoint is unambiguously non-MCP.
+
+        HEAD/GET can expose a web landing page for otherwise valid POST-only
+        Streamable HTTP servers, so a non-MCP response is confirmed with a
+        lightweight JSON-RPC ``initialize`` request before rejection. Network,
+        auth, and server failures remain owned by the real MCP handshake.
+        """
+        try:
+            import httpx as _httpx
+        except ImportError:
+            return
+
+        client_kwargs: dict = {
+            "verify": ssl_verify,
+            "follow_redirects": True,
+            "timeout": _httpx.Timeout(timeout),
+        }
+        if client_cert is not None:
+            client_kwargs["cert"] = client_cert
+
+        probe_headers = dict(headers or {})
+        try:
+            async with _httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.head(url, headers=probe_headers)
+                if response.status_code in (405, 501):
+                    response = await client.get(url, headers=probe_headers)
+
+                content_type = (
+                    response.headers.get("content-type", "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+                if (
+                    200 <= response.status_code < 300
+                    and content_type
+                    and content_type not in self._MCP_CONTENT_TYPES
+                ):
+                    post_response = await client.post(
+                        url,
+                        headers={
+                            **probe_headers,
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream",
+                        },
+                        content=(
+                            '{"jsonrpc":"2.0","id":"_probe",'
+                            '"method":"initialize","params":{'
+                            '"protocolVersion":"2025-03-26","capabilities":{},'
+                            '"clientInfo":{"name":"hermes-probe","version":"0.1"}}}'
+                        ),
+                    )
+                    post_content_type = (
+                        post_response.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
+                    )
+                    if (
+                        200 <= post_response.status_code < 300
+                        and post_content_type in self._MCP_CONTENT_TYPES
+                    ):
+                        response = post_response
+        except _httpx.HTTPError:
+            return
+
+        if not (200 <= response.status_code < 300):
+            return
+        content_type = (
+            response.headers.get("content-type", "")
+            .split(";", 1)[0]
+            .strip()
+            .lower()
+        )
+        if not content_type or content_type in self._MCP_CONTENT_TYPES:
+            return
+        raise NonMcpEndpointError(
+            f"MCP server '{self.name}' at {url} returned Content-Type "
+            f"'{content_type}', not an MCP response (expected one of: "
+            f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
+            "points at a web page rather than a Streamable HTTP / SSE endpoint."
+        )
+
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
 
@@ -2695,6 +2789,21 @@ def _interrupted_call_result() -> str:
 # Config loading
 # ---------------------------------------------------------------------------
 
+def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
+    """Fail closed before any configured MCP command reaches a spawn path."""
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    safe: Dict[str, dict] = {}
+    for name, config in servers.items():
+        warnings = validate_mcp_server_entry(name, config)
+        if warnings:
+            for warning in warnings:
+                logger.error("Rejected suspicious MCP configuration: %s", warning)
+            continue
+        safe[name] = config
+    return safe
+
+
 def _interpolate_env_vars(value):
     """Recursively resolve ``${VAR}`` placeholders from ``os.environ``."""
     if isinstance(value, str):
@@ -2731,7 +2840,11 @@ def _load_mcp_config() -> Dict[str, dict]:
             load_hermes_dotenv()
         except Exception:
             pass
-        return {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+        safe_servers = _filter_suspicious_mcp_servers(servers)
+        return {
+            name: _interpolate_env_vars(cfg)
+            for name, cfg in safe_servers.items()
+        }
     except Exception as exc:
         logger.debug("Failed to load MCP config: %s", exc)
         return {}
@@ -3684,6 +3797,7 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         logger.debug("MCP SDK not available -- skipping explicit MCP registration")
         return []
 
+    servers = _filter_suspicious_mcp_servers(servers)
     if not servers:
         logger.debug("No explicit MCP servers provided")
         return []
@@ -4108,12 +4222,16 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
         memory_manager = getattr(agent, "_memory_manager", None)
         get_mem_schemas = getattr(memory_manager, "get_all_tool_schemas", None) if memory_manager else None
         if callable(get_mem_schemas):
-            # Honor the same enablement gate inject_memory_provider_tools uses.
-            from agent.memory_manager import memory_provider_tools_enabled
-            if "memory" in name_set or memory_provider_tools_enabled(getattr(agent, "enabled_toolsets", None)):
-                for schema in get_mem_schemas():
-                    if isinstance(schema, dict):
-                        _add(schema)
+            enabled_name_filter = getattr(agent, "_enabled_tool_names_filter", None)
+            for schema in get_mem_schemas():
+                if not isinstance(schema, dict):
+                    continue
+                schema_name = schema.get("name", "")
+                if enabled_name_filter is not None and (
+                    not schema_name or schema_name not in enabled_name_filter
+                ):
+                    continue
+                _add(schema)
     except Exception:
         logger.debug("Memory-provider tool re-injection skipped", exc_info=True)
 

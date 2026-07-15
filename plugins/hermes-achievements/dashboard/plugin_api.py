@@ -585,7 +585,7 @@ def scan_sessions(
     at the end.
     """
     try:
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
     except Exception as exc:
         return {"sessions": [], "aggregate": {}, "error": f"Could not import session store: {exc}", "scan_meta": {"mode": "failed", "sessions_total": 0, "sessions_rescanned": 0, "sessions_reused": 0}}
 

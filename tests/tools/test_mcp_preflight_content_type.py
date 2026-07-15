@@ -10,6 +10,7 @@ class _FakeAsyncClient:
     instances: list["_FakeAsyncClient"] = []
     head_result = None
     get_result = None
+    post_result = None
     head_exc: Exception | None = None
 
     def __init__(self, **kwargs):
@@ -33,6 +34,10 @@ class _FakeAsyncClient:
         self.requests.append(("GET", url, dict(headers or {})))
         return self.__class__.get_result
 
+    async def post(self, url, headers=None, content=None):
+        self.requests.append(("POST", url, dict(headers or {})))
+        return self.__class__.post_result
+
 
 def _response(status: int, content_type: str | None):
     headers = {}
@@ -41,15 +46,17 @@ def _response(status: int, content_type: str | None):
     return SimpleNamespace(status_code=status, headers=headers)
 
 
-def _install_fake_client(monkeypatch, *, head, get=None, head_exc=None):
+def _install_fake_client(monkeypatch, *, head, get=None, post=None, head_exc=None):
     head_value = head
     get_value = get
+    post_value = post
     head_exc_value = head_exc
 
     class Client(_FakeAsyncClient):
         instances = []
         head_result = head_value
         get_result = get_value
+        post_result = post_value
         head_exc = head_exc_value
 
     monkeypatch.setattr(httpx, "AsyncClient", Client)
@@ -63,6 +70,7 @@ async def test_preflight_rejects_successful_non_mcp_content_type(monkeypatch):
     client_cls = _install_fake_client(
         monkeypatch,
         head=_response(200, "text/html; charset=utf-8"),
+        post=_response(200, "text/html; charset=utf-8"),
     )
     server = MCPServerTask("web-root")
 
@@ -77,9 +85,7 @@ async def test_preflight_rejects_successful_non_mcp_content_type(monkeypatch):
     client = client_cls.instances[0]
     assert client.kwargs["verify"] is False
     assert client.kwargs["follow_redirects"] is True
-    assert client.requests == [
-        ("HEAD", "https://example.test/", {"authorization": "Bearer test"}),
-    ]
+    assert [method for method, *_ in client.requests] == ["HEAD", "POST"]
 
 
 @pytest.mark.asyncio
@@ -102,6 +108,7 @@ async def test_preflight_get_fallback_rejects_non_mcp_response(monkeypatch):
         monkeypatch,
         head=_response(405, "text/html"),
         get=_response(200, "text/plain"),
+        post=_response(200, "text/plain"),
     )
     server = MCPServerTask("plain")
 
@@ -111,7 +118,22 @@ async def test_preflight_get_fallback_rejects_non_mcp_response(monkeypatch):
     assert [method for method, *_ in client_cls.instances[0].requests] == [
         "HEAD",
         "GET",
+        "POST",
     ]
+
+
+@pytest.mark.asyncio
+async def test_preflight_allows_post_only_mcp_endpoint(monkeypatch):
+    from tools.mcp_tool import MCPServerTask
+
+    _install_fake_client(
+        monkeypatch,
+        head=_response(200, "text/html"),
+        post=_response(200, "application/json"),
+    )
+    await MCPServerTask("post-only")._preflight_content_type(
+        "https://example.test/mcp"
+    )
 
 
 @pytest.mark.asyncio

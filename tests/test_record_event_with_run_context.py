@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.run_worker import EventFrame
 from tui_gateway.services.run_control import record_event
@@ -43,13 +43,13 @@ def _db(tmp_path: Path) -> CliSessionStore:
 
 def _frame(*, conversation_session_id: str = "memberchat:Y", participant_id: str = "") -> dict[str, Any]:
     frame: dict[str, Any] = {
-        "type": "message.delta",
+        "type": "message.complete",
         "session_id": conversation_session_id,
         "conversation_session_id": conversation_session_id,
         "run_id": "run-1",
         "turn_id": "turn-1",
         "seq": 1,
-        "payload": {"delta": "hi", "mode": "append"},
+        "payload": {"text": "hi"},
     }
     if participant_id:
         frame["participant_id"] = participant_id

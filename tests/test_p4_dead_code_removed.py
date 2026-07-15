@@ -4,8 +4,8 @@ import inspect
 import logging
 from pathlib import Path
 
-from hermes_agent.domain.session_index_service import SessionIndexService
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.application.session_index_service import SessionIndexService
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

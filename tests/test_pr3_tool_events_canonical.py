@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_agent.read_models.tool_events import list_tool_events_as_canonical
 from tui_gateway import server
 

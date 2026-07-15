@@ -7623,6 +7623,7 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
 
             print()
             unavailable_models: list = []
+            unavailable_message = ""
             if model_ids:
                 pricing = get_pricing_for_provider("nous")
                 free_tier = check_nous_free_tier()

@@ -11,7 +11,7 @@ from agent.activity_event_bus import (
     set_default_activity_event_bus,
 )
 from agent.conversation_loop import _drain_activity_events_for_api
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.run_worker import (
     ActivityEventFrame,
     EventFrame,
@@ -38,8 +38,9 @@ class _NoopResponder(WorkerInteractiveResponder):
 class _FakeSessionDB:
     def __init__(self) -> None:
         self.read_ids: list[str] = []
+        self.activities = self
 
-    def mark_activity_read(self, activity_id: str) -> bool:
+    def mark_read(self, activity_id: str) -> bool:
         self.read_ids.append(activity_id)
         return True
 
@@ -271,7 +272,7 @@ def test_agent_runner_parses_run_context_without_recursing(tmp_path: Path) -> No
     context = RunContext(
         conversation_session_id="conv-parent",
         participant_id="leader:conv-parent",
-        activity_id="chat",
+        activity_id="chat:completion-event",
         activity_kind="chat",
         execution_scope_key="leader-scope",
         control_home=str(tmp_path),

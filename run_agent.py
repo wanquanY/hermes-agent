@@ -510,7 +510,11 @@ class AIAgent:
             if self._session_db is not None:
                 cached = SessionRecallReadModel.from_session_db(self._session_db)
             else:
-                cached = SessionRecallReadModel.open_default()
+                from hermes_agent.composition.session_recall_factory import (
+                    open_default_session_recall,
+                )
+
+                cached = open_default_session_recall()
             self._session_recall_read_model = cached
             return cached
         except Exception as exc:
@@ -532,8 +536,8 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
-                session_kind=self._session_kind,
-                conversation_kind=self._conversation_kind,
+                session_kind=getattr(self, "_session_kind", "hermes_session"),
+                conversation_kind=getattr(self, "_conversation_kind", "direct"),
             )
             self._session_db_created = True
         except Exception as e:
@@ -1295,7 +1299,11 @@ class AIAgent:
         persisted_messages = self._messages_for_persistence(messages)
         self._session_messages = persisted_messages
         self._save_session_log(persisted_messages)
-        self._flush_messages_to_session_db(persisted_messages, conversation_history)
+        self._flush_messages_to_session_db(
+            persisted_messages,
+            conversation_history,
+            source_buffer_id=id(messages),
+        )
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1727,7 +1735,13 @@ class AIAgent:
         except Exception:
             pass
 
-    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _flush_messages_to_session_db(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        source_buffer_id: int | None = None,
+    ):
         """Persist any un-flushed messages to the SQLite session store.
 
         The in-memory cursor is scoped to the current message buffer/run/turn.
@@ -1762,7 +1776,7 @@ class AIAgent:
                 )
             active_run_id = str(getattr(self, "_hermes_active_run_id", "") or "").strip()
             active_turn_id = str(getattr(self, "_hermes_active_turn_id", "") or "").strip()
-            messages_buffer_id = id(messages)
+            messages_buffer_id = source_buffer_id or id(messages)
             last_flushed_idx = int(getattr(self, "_last_flushed_db_idx", 0) or 0)
             last_flushed_buffer_id = getattr(self, "_last_flushed_db_buffer_id", None)
             last_flushed_visible_session_id = str(
@@ -2858,11 +2872,17 @@ class AIAgent:
         try:
             self._memory_manager.sync_all(
                 original_user_message, final_response,
-                session_id=self.memory_session_id or self.session_id or "",
+                session_id=(
+                    getattr(self, "memory_session_id", "")
+                    or getattr(self, "session_id", "")
+                ),
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
-                session_id=self.memory_session_id or self.session_id or "",
+                session_id=(
+                    getattr(self, "memory_session_id", "")
+                    or getattr(self, "session_id", "")
+                ),
             )
         except Exception:
             pass
@@ -4334,10 +4354,18 @@ class AIAgent:
         )
         return summary
 
-    def _try_shrink_image_parts_in_messages(self, api_messages: list) -> bool:
+    def _try_shrink_image_parts_in_messages(
+        self,
+        api_messages: list,
+        *,
+        max_dimension: int = 8000,
+    ) -> bool:
         """Forwarder — see ``agent.conversation_compression.try_shrink_image_parts_in_messages``."""
         from agent.conversation_compression import try_shrink_image_parts_in_messages
-        return try_shrink_image_parts_in_messages(api_messages)
+        return try_shrink_image_parts_in_messages(
+            api_messages,
+            max_dimension=max_dimension,
+        )
 
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
@@ -4482,7 +4510,8 @@ class AIAgent:
             "google/gemini-2",
             "google/gemma-4",
             "qwen/qwen3",
-            "tencent/hy3-preview",
+            "tencent/hy3",
+            "tencent/hy3-preview",  # legacy alias
             "xiaomi/",
         )
         return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
@@ -4799,6 +4828,7 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            background=function_args.get("background"),
             parent_agent=self,
             delegate_call_id=delegate_call_id,
         )

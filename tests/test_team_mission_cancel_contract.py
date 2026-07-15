@@ -6,8 +6,10 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
-from hermes_team_mission.gateway.runtime_methods import _resolve_cancel_mission_id
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_team_mission.gateway.runtime_lifecycle_methods import (
+    _resolve_cancel_mission_id,
+)
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 

@@ -5,7 +5,7 @@ import zlib
 import pytest
 
 from hermes_agent.read_models.session_index import SessionIndexQuery, SessionIndexReadModel
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_cli_session_store_persists_and_replays_messages(tmp_path):
@@ -144,6 +144,15 @@ def test_cli_session_store_meta_and_delete(tmp_path):
     assert json.loads(store.sessions.get("s1")["model_config"] or "{}") == {}
     assert store.maintenance.delete_session("s1") is True
     assert store.sessions.get("s1") is None
+
+
+def test_cli_session_store_db_path_remains_available_after_close(tmp_path):
+    db_path = tmp_path / "state.db"
+    store = open_cli_session_store(db_path)
+
+    store.close()
+
+    assert store.db_path == db_path
 
 
 def test_cli_session_store_exports_counts_and_prunes_cli_sessions(tmp_path):

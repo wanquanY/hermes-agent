@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_agent.storage import session_store_health
 from hermes_agent.storage.session_store_health import (
     format_session_db_unavailable,
@@ -244,7 +244,7 @@ class TestGetLastInitError:
             )
 
         with patch(
-            "hermes_agent.storage.session_repository_db.sqlite3.connect",
+            "hermes_agent.composition.session_repository_db.sqlite3.connect",
             side_effect=gated_connect,
         ):
             with pytest.raises(sqlite3.OperationalError):
@@ -305,7 +305,7 @@ class TestSessionStoreUsesWalFallback:
             return real_connect(str(target), factory=factory, **kwargs)
 
         with patch(
-            "hermes_agent.storage.session_repository_db.sqlite3.connect",
+            "hermes_agent.composition.session_repository_db.sqlite3.connect",
             side_effect=gated_connect,
         ):
             db = open_cli_session_store(target)

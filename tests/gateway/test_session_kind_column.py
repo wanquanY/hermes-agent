@@ -4,7 +4,7 @@ import importlib
 import sqlite3
 from pathlib import Path
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 
 
@@ -12,7 +12,6 @@ def _setup_gateway_db(monkeypatch, tmp_path: Path) -> CliSessionStore:
     session_methods = importlib.import_module("tui_gateway.methods.session")
     db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
-    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
     return db
 
 
@@ -176,7 +175,6 @@ def test_gateway_session_index_list_uses_session_index_service(
             self.session_index = source.session_index
 
     monkeypatch.setattr(session_methods, "_get_db", lambda: _ReadOnlyGatewayDB(db))
-    monkeypatch.setattr(session_methods, "_SESSION_INDEX_RECONCILED", False)
 
     response = server._methods["session.index.list"](1, {})
 

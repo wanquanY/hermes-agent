@@ -29,11 +29,26 @@ class TestBrowserSecretExfil:
         assert parsed["success"] is False
 
     def test_allows_normal_url(self):
-        """Normal URLs pass the secret check (may fail for other reasons)."""
+        """Normal URLs pass the secret check without starting a real browser."""
         from tools.browser_tool import browser_navigate
-        result = browser_navigate("https://github.com/NousResearch/hermes-agent")
+
+        with patch(
+            "tools.browser_tool._run_browser_command",
+            return_value={
+                "success": True,
+                "data": {
+                    "title": "Hermes Agent",
+                    "url": "https://github.com/NousResearch/hermes-agent",
+                },
+            },
+        ), patch(
+            "tools.browser_tool._get_session_info",
+            return_value={"_first_nav": False},
+        ), patch("tools.browser_tool._is_local_backend", return_value=True):
+            result = browser_navigate("https://github.com/NousResearch/hermes-agent")
+
         parsed = json.loads(result)
-        # Should NOT be blocked by secret detection
+        assert parsed["success"] is True
         assert "API key or token" not in parsed.get("error", "")
 
     def test_normalizes_non_ascii_url_before_navigation(self):

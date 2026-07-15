@@ -7,7 +7,7 @@ from hermes_agent.domain.context_compaction import (
     ContextScope,
     merge_actor_summaries,
 )
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _db(tmp_path: Path):

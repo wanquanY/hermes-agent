@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from hermes_agent.domain.message_service import MessageService
-from hermes_agent.domain.session_service import SessionService
+from hermes_agent.application.message_service import MessageService
+from hermes_agent.application.session_service import SessionService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepoImpl
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 

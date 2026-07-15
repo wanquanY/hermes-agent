@@ -10,8 +10,8 @@ import pytest
 from hermes_agent.domain import seq_allocator
 from hermes_agent.domain.exceptions import SeqAllocatorBusy
 from hermes_agent.domain.seq_allocator import allocate_only
-from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control
 
 

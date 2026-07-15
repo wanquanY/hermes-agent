@@ -148,8 +148,15 @@ class TestAdapterCapabilityFlag:
 
 class TestTerminalNotifyGate:
     @pytest.fixture(autouse=True)
-    def _clean_watchers(self):
+    def _clean_watchers(self, monkeypatch):
         from tools.process_registry import process_registry
+
+        # This class owns async-delivery routing.  The optional Tirith binary
+        # lifecycle is orthogonal and must not initiate a network install.
+        monkeypatch.setattr(
+            "tools.tirith_security.check_command_security",
+            lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        )
 
         process_registry.pending_watchers = []
         yield

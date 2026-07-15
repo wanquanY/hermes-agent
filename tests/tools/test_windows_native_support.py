@@ -188,7 +188,7 @@ class TestTerminatePidRoutingOnWindows:
     """
 
     def test_force_uses_taskkill_on_windows(self, monkeypatch):
-        from gateway import status
+        from channels import runtime_status as status
 
         captured = {}
 
@@ -211,7 +211,7 @@ class TestTerminatePidRoutingOnWindows:
         assert "/F" in captured["args"]
 
     def test_force_taskkill_failure_raises_oserror(self, monkeypatch):
-        from gateway import status
+        from channels import runtime_status as status
 
         def fake_run(args, **kwargs):
             result = MagicMock()
@@ -232,7 +232,7 @@ class TestTerminatePidRoutingOnWindows:
         and uses ``os.kill`` directly — so platform doesn't actually matter
         for the signal choice.  Verifies the getattr fallback works.
         """
-        from gateway import status
+        from channels import runtime_status as status
 
         captured = {}
 
@@ -248,7 +248,7 @@ class TestTerminatePidRoutingOnWindows:
 
     def test_taskkill_not_found_falls_back_to_os_kill(self, monkeypatch):
         """On Windows without taskkill (WinPE, containers), fall back gracefully."""
-        from gateway import status
+        from channels import runtime_status as status
 
         captured = {}
 
@@ -376,7 +376,7 @@ class TestPidExistsOSErrorWidening:
 
     def test_oserror_gone_pid_returns_false(self, monkeypatch):
         """Simulate Windows' OSError(WinError 87) for a gone PID via the POSIX fallback."""
-        from gateway import status
+        from channels import runtime_status as status
 
         # Force the psutil-first branch to miss so we exercise the fallback.
         monkeypatch.setitem(
@@ -393,7 +393,7 @@ class TestPidExistsOSErrorWidening:
 
     def test_permission_error_returns_true(self, monkeypatch):
         """POSIX fallback: PermissionError means alive (owned by another user)."""
-        from gateway import status
+        from channels import runtime_status as status
 
         monkeypatch.setitem(
             __import__("sys").modules, "psutil",
@@ -493,11 +493,11 @@ class TestWebServerPtyBridgeGuard:
 
 
 class TestEntryPointsConfigureStdio:
-    """cli.py, hermes_cli/main.py, hermes_gateway/runner.py must call configure_windows_stdio."""
+    """The two concrete CLI process entry points must configure Windows stdio."""
 
     @pytest.mark.parametrize(
         "relpath",
-        ["cli.py", "hermes_cli/main.py", "hermes_gateway/runner.py"],
+        ["cli.py", "hermes_cli/main.py"],
     )
     def test_entry_point_calls_configure_stdio(self, relpath):
         root = Path(__file__).resolve().parents[2]
@@ -706,7 +706,7 @@ class TestNpmBareSpawnsResolved:
         [
             "hermes_cli/tools_config.py",
             "hermes_cli/doctor.py",
-            "gateway/platforms/whatsapp.py",
+            "channels/platforms/whatsapp.py",
             "tools/browser_tool.py",
         ],
     )
@@ -866,8 +866,8 @@ class TestGatewayDetachedWatcherWindowsFlags:
 
     def test_gateway_run_update_has_windows_branch(self):
         root = Path(__file__).resolve().parents[2]
-        source = (root / "gateway" / "run.py").read_text(encoding="utf-8")
-        # Both the /restart and /update paths must have sys.platform=='win32' branches.
+        source = (root / "hermes_gateway" / "update_lifecycle.py").read_text(encoding="utf-8")
+        # The current update lifecycle owner must have a native Windows branch.
         assert 'if sys.platform == "win32":' in source
         # Windows branch uses windows_detach_popen_kwargs
         assert "windows_detach_popen_kwargs" in source

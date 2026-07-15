@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_tool_call_only_assistant_message_does_not_require_content(tmp_path):

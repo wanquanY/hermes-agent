@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from hermes_agent.domain.message_service import MessageService
+from hermes_agent.application.message_service import MessageService
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_team_mission.domain.transcript_visibility import (
     TeamMissionTranscriptVisibilityPolicy,
 )

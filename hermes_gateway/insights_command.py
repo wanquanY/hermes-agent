@@ -8,7 +8,7 @@ import re
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 logger = logging.getLogger(__name__)
 _UNICODE_DASH_RE = re.compile(r"[\u2012\u2013\u2014\u2015](days|source)")

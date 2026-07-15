@@ -3899,6 +3899,29 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
 
     # Check config version
     current_ver, latest_ver = check_config_version()
+
+    # Security migrations are posture checks, not one-shot version steps.
+    # Re-run them on every migration invocation so a hand-edited or
+    # pre-planted MCP entry cannot bypass the guard with a forged/newer
+    # ``_config_version`` value.
+    raw_config = read_raw_config()
+    raw_mcp_servers = raw_config.get("mcp_servers")
+    if isinstance(raw_mcp_servers, dict):
+        from hermes_cli.mcp_security import validate_mcp_server_entry
+
+        suspicious_changed = False
+        for server_name, server_config in raw_mcp_servers.items():
+            warnings = validate_mcp_server_entry(server_name, server_config)
+            if not warnings or not isinstance(server_config, dict):
+                continue
+            if server_config.get("enabled") is not False:
+                server_config["enabled"] = False
+                suspicious_changed = True
+            warning = f"Disabled suspicious MCP server '{server_name}'"
+            if warning not in results["warnings"]:
+                results["warnings"].append(warning)
+        if suspicious_changed:
+            save_config(raw_config)
     
     # ── Version 3 → 4: migrate tool progress from .env to config.yaml ──
     if current_ver < 4:

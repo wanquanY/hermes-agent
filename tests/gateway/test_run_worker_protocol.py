@@ -97,6 +97,7 @@ def test_decode_interactive_response_each_kind() -> None:
                     "kind": kind,
                     "request_id": f"req-{kind}",
                     "answer": {"k": "v"},
+                    "conversation_session_id": "conversation-1",
                 }
             )
         )
@@ -104,6 +105,7 @@ def test_decode_interactive_response_each_kind() -> None:
         assert frame.kind == kind
         assert frame.request_id == f"req-{kind}"
         assert frame.answer == {"k": "v"}
+        assert frame.conversation_session_id == "conversation-1"
 
 
 def test_decode_interactive_response_rejects_unknown_kind() -> None:
@@ -213,7 +215,12 @@ def test_encode_non_ascii_payload_compact() -> None:
             prompt="hi", params={"model": "claude-opus"},
         ),
         RunCancelFrame(run_id="r2"),
-        InteractiveResponseFrame(kind="clarify", request_id="req-1", answer="yes"),
+        InteractiveResponseFrame(
+            kind="clarify",
+            request_id="req-1",
+            answer="yes",
+            conversation_session_id="s1",
+        ),
         InteractiveResponseFrame(kind="approval", request_id="req-2", answer={"choice": "deny"}),
         ShutdownFrame(),
     ],
@@ -521,6 +528,96 @@ async def test_handler_routes_interactive_response_and_warns_on_miss() -> None:
     assert len(responder.calls) == 1
     logs = [f for f in sink.decoded() if f.get("op") == "log"]
     assert any("no pending clarify" in f["text"] for f in logs)
+    assert [f for f in sink.decoded() if f.get("op") == "event"] == []
+
+
+@pytest.mark.asyncio
+async def test_handler_emits_resolved_event_only_after_worker_unblocks() -> None:
+    responder = _RecordingResponder(resolved=True)
+    handler = _build_default_handler(_RecordingBackend(), responder, set())
+    sink = _Sink()
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps(
+                    {
+                        "op": "interactive.response",
+                        "kind": "clarify",
+                        "request_id": "req-1",
+                        "answer": "yes",
+                        "conversation_session_id": "conversation-1",
+                    }
+                ),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=sink.write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    assert responder.calls == [
+        InteractiveResponseFrame(
+            kind="clarify",
+            request_id="req-1",
+            answer="yes",
+            conversation_session_id="conversation-1",
+        )
+    ]
+    events = [frame for frame in sink.decoded() if frame.get("op") == "event"]
+    assert events == [
+        {
+            "op": "event",
+            "params": {
+                "type": "clarify.resolved",
+                "conversation_session_id": "conversation-1",
+                "payload": {
+                    "request_id": "req-1",
+                    "choice": "yes",
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handler_never_emits_secret_answer_in_resolved_event() -> None:
+    responder = _RecordingResponder(resolved=True)
+    handler = _build_default_handler(_RecordingBackend(), responder, set())
+    sink = _Sink()
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps(
+                    {
+                        "op": "interactive.response",
+                        "kind": "secret",
+                        "request_id": "secret-1",
+                        "answer": "do-not-persist",
+                        "conversation_session_id": "conversation-1",
+                    }
+                ),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=sink.write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    events = [frame for frame in sink.decoded() if frame.get("op") == "event"]
+    assert events == [
+        {
+            "op": "event",
+            "params": {
+                "type": "secret.resolved",
+                "conversation_session_id": "conversation-1",
+                "payload": {"request_id": "secret-1"},
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

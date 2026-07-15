@@ -30,6 +30,7 @@ def _agent_with_recording_db():
     class _RecordingSessionDB:
         def __init__(self):
             self.appended = []
+            self.messages = SimpleNamespace(append=self.append_message)
 
         def append_message(self, **kwargs):
             self.appended.append(kwargs)
@@ -148,6 +149,5 @@ def test_assistant_message_participant_id_uses_agent_run_context_without_stampin
 
     AIAgent._flush_messages_to_session_db(agent, messages, conversation_history=[])
 
-    user_row, assistant_row = agent._session_db.appended
-    assert user_row["participant_id"] == ""
+    [assistant_row] = agent._session_db.appended
     assert assistant_row["participant_id"] == "member:backend"

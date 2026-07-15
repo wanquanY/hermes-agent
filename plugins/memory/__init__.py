@@ -25,6 +25,7 @@ import importlib
 import importlib.util
 import logging
 import sys
+import types
 from pathlib import Path
 from typing import List, Optional, Tuple
 from hermes_cli.config import cfg_get
@@ -32,6 +33,41 @@ from hermes_cli.config import cfg_get
 logger = logging.getLogger(__name__)
 
 _MEMORY_PLUGINS_DIR = Path(__file__).parent
+_USER_MEMORY_NAMESPACE = "_hermes_user_memory"
+
+
+def _ensure_user_memory_namespace(
+    provider_dir: Path,
+    *,
+    provider_shell: bool = False,
+) -> None:
+    """Install import packages required by user-provider relative imports.
+
+    User providers are loaded under a synthetic namespace so they cannot
+    collide with bundled plugins. Python still requires that namespace (and,
+    for standalone ``cli.py`` loading, the provider package) to exist with a
+    real ``__path__`` before resolving ``from . import ...``.
+    """
+    root = provider_dir.parent
+    namespace = sys.modules.get(_USER_MEMORY_NAMESPACE)
+    if namespace is None:
+        namespace = types.ModuleType(_USER_MEMORY_NAMESPACE)
+        namespace.__package__ = _USER_MEMORY_NAMESPACE
+        namespace.__path__ = [str(root)]  # type: ignore[attr-defined]
+        sys.modules[_USER_MEMORY_NAMESPACE] = namespace
+    elif str(root) not in getattr(namespace, "__path__", []):
+        namespace.__path__.append(str(root))  # type: ignore[attr-defined]
+
+    if not provider_shell:
+        return
+    module_name = f"{_USER_MEMORY_NAMESPACE}.{provider_dir.name}"
+    if module_name in sys.modules:
+        return
+    shell = types.ModuleType(module_name)
+    shell.__package__ = module_name
+    shell.__path__ = [str(provider_dir)]  # type: ignore[attr-defined]
+    shell.__hermes_namespace_shell__ = True
+    sys.modules[module_name] = shell
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +235,14 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
     if not init_file.exists():
         return None
 
-    # Check if already loaded
-    if module_name in sys.modules:
+    if not _is_bundled:
+        _ensure_user_memory_namespace(provider_dir)
+
+    # Check if already loaded. A namespace shell created by CLI discovery is
+    # not the provider implementation and must be replaced by executing
+    # __init__.py below.
+    existing = sys.modules.get(module_name)
+    if existing is not None and not getattr(existing, "__hermes_namespace_shell__", False):
         mod = sys.modules[module_name]
     else:
         # Handle relative imports within the plugin
@@ -357,6 +399,8 @@ def discover_plugin_cli_commands() -> List[dict]:
     _is_bundled = _MEMORY_PLUGINS_DIR in plugin_dir.parents or plugin_dir.parent == _MEMORY_PLUGINS_DIR
     module_name = f"plugins.memory.{active_provider}.cli" if _is_bundled else f"_hermes_user_memory.{active_provider}.cli"
     try:
+        if not _is_bundled:
+            _ensure_user_memory_namespace(plugin_dir, provider_shell=True)
         # Import the CLI module (lightweight — no SDK needed)
         if module_name in sys.modules:
             cli_mod = sys.modules[module_name]

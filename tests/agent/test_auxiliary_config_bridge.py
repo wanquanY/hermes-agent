@@ -195,11 +195,15 @@ class TestAuxiliaryConfigBridge:
 
 
 class TestGatewayBridgeCodeParity:
-    """Verify the hermes_gateway/runner.py config bridge contains the auxiliary section."""
+    """Verify the gateway config bridge contains the auxiliary section."""
 
     def test_gateway_has_auxiliary_bridge(self):
         """The gateway config bridge must include auxiliary.* bridging."""
-        gateway_path = Path(__file__).parent.parent.parent / "gateway" / "run.py"
+        gateway_path = (
+            Path(__file__).parent.parent.parent
+            / "hermes_gateway"
+            / "config_env_bridge.py"
+        )
         # Pin encoding to UTF-8: source files in this repo are UTF-8, but
         # Path.read_text() defaults to the system locale — which is cp1252
         # on most Western Windows installs and crashes as soon as the file
@@ -217,7 +221,11 @@ class TestGatewayBridgeCodeParity:
 
     def test_gateway_no_compression_env_bridge(self):
         """Gateway should NOT bridge compression config to env vars (config-only)."""
-        gateway_path = Path(__file__).parent.parent.parent / "gateway" / "run.py"
+        gateway_path = (
+            Path(__file__).parent.parent.parent
+            / "hermes_gateway"
+            / "config_env_bridge.py"
+        )
         # See note in test_gateway_has_auxiliary_bridge — pin UTF-8 so the
         # test runs on Windows where the default locale is cp1252.
         content = gateway_path.read_text(encoding="utf-8")

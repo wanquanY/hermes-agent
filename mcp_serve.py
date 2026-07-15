@@ -71,7 +71,7 @@ def _get_sessions_dir() -> Path:
 def _get_message_history_store():
     """Get the storage-backed reader for message transcripts."""
     try:
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         return open_cli_session_store()
     except Exception as e:

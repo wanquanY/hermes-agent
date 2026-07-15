@@ -459,8 +459,53 @@ async def test_respond_routes_to_correct_worker() -> None:
     assert frame.kind == "clarify"
     assert frame.request_id == "req-1"
     assert frame.answer == "yes"
+    assert frame.conversation_session_id == "sess-1"
     # entry consumed → second respond fails
     assert await router.respond("req-1", "yes") is False
+
+
+@pytest.mark.asyncio
+async def test_worker_resolution_event_persists_and_publishes_resolved_lifecycle() -> None:
+    persisted: list[tuple[str, str, str, str, Any]] = []
+
+    def persist(event_type: str, entry: Any) -> None:
+        persisted.append(
+            (event_type, entry.request_id, entry.kind, entry.session_key, entry.choice)
+        )
+
+    router, _sup, events, _ = _make_router(persist_interaction_event=persist)
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(
+            params={
+                "type": "clarify.request",
+                "conversation_session_id": "sess-1",
+                "payload": {"request_id": "req-1", "anchor_seq": 12},
+            }
+        ),
+    )
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(
+            params={
+                "type": "clarify.resolved",
+                "conversation_session_id": "sess-1",
+                "payload": {"request_id": "req-1", "choice": "yes"},
+            }
+        ),
+    )
+
+    assert persisted == [
+        ("interaction.requested", "req-1", "clarify", "sess-1", None),
+        ("interaction.resolved", "req-1", "clarify", "sess-1", "yes"),
+    ]
+    assert [event["type"] for event in events] == [
+        "interaction.requested",
+        "interaction.resolved",
+    ]
+    assert events[-1]["payload"]["status"] == "resolved"
 
 
 @pytest.mark.asyncio

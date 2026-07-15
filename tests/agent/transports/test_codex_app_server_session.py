@@ -7,6 +7,8 @@ deadline timeouts. These tests pin all of that without spawning real codex.
 
 from __future__ import annotations
 
+import itertools
+
 import time
 from unittest.mock import patch
 from typing import Any, Optional
@@ -473,7 +475,10 @@ class TestRunTurn:
     def test_deadline_uses_monotonic_clock(self):
         client = FakeClient()
         s = make_session(client)
-        monotonic_values = iter([1000.0, 999.0, 999.0, 1001.0])
+        monotonic_values = itertools.chain(
+            [1000.0, 999.0, 999.0, 1001.0],
+            itertools.count(1002.0),
+        )
         with patch.object(
             session_mod.time,
             "monotonic",
@@ -822,7 +827,10 @@ class TestSessionRetirement:
             threadId="t", turnId="tu1",
         )
         s = make_session(client)
-        monotonic_values = iter([1000.0, 999.0, 999.0, 999.0, 1000.2])
+        monotonic_values = itertools.chain(
+            [1000.0, 999.0, 999.0, 999.0, 1000.2],
+            itertools.count(1001.2),
+        )
         with patch.object(
             session_mod.time,
             "monotonic",

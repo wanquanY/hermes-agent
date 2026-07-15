@@ -43,6 +43,28 @@ VALID_ASPECT_RATIOS: Tuple[str, ...] = ("landscape", "square", "portrait")
 DEFAULT_ASPECT_RATIO = "landscape"
 
 
+def normalize_reference_images(value: Any) -> Optional[List[str]]:
+    """Normalize a provider's reference-image input to non-empty URL strings.
+
+    Plugin providers receive input from both JSON tool calls and direct Python
+    integrations, so tolerate a single string while rejecting unrelated scalar
+    or mapping values.  Returning ``None`` keeps the text-to-image path distinct
+    from an explicitly supplied image-edit request.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return None
+    normalized = [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ]
+    return normalized or None
+
+
 # ---------------------------------------------------------------------------
 # ABC
 # ---------------------------------------------------------------------------

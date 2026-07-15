@@ -175,7 +175,7 @@ class TestAgentCloseMethod:
 
             agent.close()
 
-            agent._session_db.end_session.assert_called_once_with(
+            agent._session_db.sessions.end.assert_called_once_with(
                 "test-close-session-row", "agent_close"
             )
 
@@ -195,7 +195,7 @@ class TestAgentCloseMethod:
 
             agent.close()
 
-            agent._session_db.end_session.assert_not_called()
+            agent._session_db.sessions.end.assert_not_called()
 
     def test_close_session_end_noops_without_session_db(self):
         """close() is a no-op for session finalization when no DB is wired in."""

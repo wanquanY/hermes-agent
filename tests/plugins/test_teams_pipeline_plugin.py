@@ -110,7 +110,7 @@ def test_build_pipeline_runtime_reuses_existing_teams_adapter_surface(monkeypatc
     runtime = runtime_module.build_pipeline_runtime(gateway)
 
     assert isinstance(runtime.teams_sender, FakeWriter)
-    assert runtime.teams_sender.platform_config is hermes_gateway.config.platforms[Platform("teams")]
+    assert runtime.teams_sender.platform_config is gateway.config.platforms[Platform("teams")]
 
 
 @pytest.mark.anyio

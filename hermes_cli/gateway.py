@@ -1586,6 +1586,7 @@ _LEGACY_UNIT_EXECSTART_MARKERS: tuple[str, ...] = (
     "hermes_cli.main gateway",
     "hermes_cli/main.py gateway",
     "gateway/run.py",
+    "hermes_gateway/runner.py",
     " hermes gateway ",
     "/hermes gateway ",
 )

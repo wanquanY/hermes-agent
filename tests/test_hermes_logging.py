@@ -497,14 +497,18 @@ class TestComponentFilter:
     """Unit tests for _ComponentFilter."""
 
     def test_passes_matching_prefix(self):
-        f = hermes_logging._ComponentFilter(("gateway",))
+        f = hermes_logging._ComponentFilter(
+            hermes_logging.COMPONENT_PREFIXES["gateway"]
+        )
         record = logging.LogRecord(
             "gateway.run", logging.INFO, "", 0, "msg", (), None
         )
         assert f.filter(record) is True
 
     def test_passes_nested_matching_prefix(self):
-        f = hermes_logging._ComponentFilter(("gateway",))
+        f = hermes_logging._ComponentFilter(
+            hermes_logging.COMPONENT_PREFIXES["gateway"]
+        )
         record = logging.LogRecord(
             "channels.platforms.telegram", logging.INFO, "", 0, "msg", (), None
         )
@@ -541,7 +545,12 @@ class TestComponentPrefixes:
         # The gateway component captures both core gateway logs and the
         # hermes_plugins facility (plugin-installed gateway adapters log
         # under that prefix).
-        assert ("gateway", "hermes_plugins") == hermes_logging.COMPONENT_PREFIXES["gateway"]
+        assert (
+            "gateway",
+            "hermes_gateway",
+            "channels",
+            "hermes_plugins",
+        ) == hermes_logging.COMPONENT_PREFIXES["gateway"]
 
     def test_agent_prefix(self):
         prefixes = hermes_logging.COMPONENT_PREFIXES["agent"]

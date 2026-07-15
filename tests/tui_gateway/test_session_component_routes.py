@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import time
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway import server
 
 session_methods = importlib.import_module("tui_gateway.methods.session")
@@ -42,13 +42,10 @@ def test_session_list_route_reads_through_session_component(tmp_path, monkeypatc
 
 def test_session_index_route_reads_through_index_component(tmp_path, monkeypatch):
     db = open_cli_session_store(tmp_path / "state.db")
-    previous_reconciled = session_methods._SESSION_INDEX_RECONCILED
     try:
         db.sessions.create("indexed-session", "tui")
         db.messages.append("indexed-session", "user", "hello")
         _install_db(monkeypatch, db)
-        session_methods._SESSION_INDEX_RECONCILED = False
-
         response = server.handle_request(
             {
                 "id": "index",
@@ -57,7 +54,6 @@ def test_session_index_route_reads_through_index_component(tmp_path, monkeypatch
             }
         )
     finally:
-        session_methods._SESSION_INDEX_RECONCILED = previous_reconciled
         db.close()
 
     assert "error" not in response, response

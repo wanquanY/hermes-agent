@@ -4,7 +4,7 @@ Five aggregate roots. Each ``Repo`` protocol is the sole gateway into its
 owned tables. Concrete implementations land in Phase D2-D5 (spec §12); this
 package exposes only the typed interface.
 
-Cross-repository joins are forbidden — L2 domain services compose repositories.
+Cross-repository joins are forbidden — application services compose repositories.
 """
 
 from __future__ import annotations

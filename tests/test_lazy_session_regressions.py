@@ -23,7 +23,7 @@ import pytest
 
 def _make_session_db(tmp_path):
     """Create a real SessionDB for integration-style tests."""
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     db_path = tmp_path / "test_state.db"
     return open_cli_session_store(db_path=db_path)
 

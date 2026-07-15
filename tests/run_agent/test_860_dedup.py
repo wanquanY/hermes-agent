@@ -57,7 +57,7 @@ class TestFlushDeduplication:
 
     def test_flush_writes_only_new_messages(self):
         """First flush writes all new messages, second flush writes none."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -87,7 +87,7 @@ class TestFlushDeduplication:
 
     def test_flush_writes_incrementally(self):
         """Messages added between flushes are written exactly once."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -117,7 +117,7 @@ class TestFlushDeduplication:
     def test_turn_start_persist_then_final_flush_keeps_one_ordered_turn(self):
         """Early user persistence and final turn flush share one DB transcript."""
         from agent.turn_message_buffer import TurnMessageBuffer
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -154,7 +154,7 @@ class TestFlushDeduplication:
     def test_prompt_submit_user_prepersist_is_idempotent_with_agent_flush(self):
         """Gateway-owned user persistence must not duplicate agent turn flush."""
         from agent.turn_message_buffer import TurnMessageBuffer
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -206,7 +206,7 @@ class TestFlushDeduplication:
 
     def test_team_conversation_flush_uses_active_run_identity(self):
         """Team worker flush must not inherit run ids from projected history."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -277,7 +277,7 @@ class TestFlushDeduplication:
 
     def test_team_conversation_flush_does_not_use_history_len_when_history_is_not_prefix(self):
         """Team worker messages may be current-turn-only, not history + new turn."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -375,7 +375,7 @@ class TestFlushDeduplication:
 
     def test_team_mission_start_flush_persists_main_transcript_tools(self):
         """Leader mission-start messages are main conversation history."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -441,7 +441,7 @@ class TestFlushDeduplication:
 
     def test_team_mission_node_flush_does_not_persist_node_rows_to_visible_transcript(self):
         """Mission node execution belongs to the task graph, not the main conversation."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -510,7 +510,7 @@ class TestFlushDeduplication:
 
     def test_team_dispatch_flush_persists_main_transcript_tools(self):
         """Team dispatch leader/tool messages are main conversation history."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -576,7 +576,7 @@ class TestFlushDeduplication:
 
     def test_team_dispatch_second_run_does_not_reuse_stale_memory_flush_cursor(self):
         """A rebuilt leader history must not let the previous run's cursor skip rows."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
         from tui_gateway.services.run_control import record_event
 
         def install_dispatch_context(agent, *, run_id: str, turn_id: str) -> None:
@@ -759,7 +759,7 @@ class TestFlushDeduplication:
     def test_turn_message_buffer_boundary_keeps_history_out_when_history_arg_is_lost(self):
         """Loaded history is never reclassified as current output by DB flush."""
         from agent.turn_message_buffer import TurnMessageBuffer
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -865,7 +865,7 @@ class TestFlushDeduplication:
 
     def test_team_projected_summary_is_not_reflushed_by_generic_writer(self):
         """Stable team projection rows are owned by their upsert writer."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -933,7 +933,7 @@ class TestFlushDeduplication:
 
     def test_persist_session_multiple_calls_no_duplication(self):
         """Multiple _persist_session calls don't duplicate DB entries."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -958,7 +958,7 @@ class TestFlushDeduplication:
 
     def test_flush_reset_after_compression(self):
         """After compression creates a new session, flush index resets."""
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
@@ -1007,7 +1007,7 @@ class TestAppendToTranscriptSkipDb:
         from hermes_gateway.config import GatewayConfig
         from hermes_gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-        from hermes_agent.storage.session_repository_db import connect_session_repository_db
+        from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
         conn = connect_session_repository_db(tmp_path / "test_skip.db")
         session_repo = SessionRepoImpl(conn)
@@ -1037,7 +1037,7 @@ class TestAppendToTranscriptSkipDb:
         from hermes_gateway.config import GatewayConfig
         from hermes_gateway.session import SessionStore
         from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-        from hermes_agent.storage.session_repository_db import connect_session_repository_db
+        from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
         conn = connect_session_repository_db(tmp_path / "test_both.db")
         session_repo = SessionRepoImpl(conn)

@@ -23,7 +23,7 @@ def session_db(tmp_path):
     """Create a real SessionDB for testing."""
     os.environ["HERMES_HOME"] = str(tmp_path / ".hermes")
     os.makedirs(tmp_path / ".hermes", exist_ok=True)
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
     db = open_cli_session_store(tmp_path / ".hermes" / "test_sessions.db")
     yield db
     db.close()

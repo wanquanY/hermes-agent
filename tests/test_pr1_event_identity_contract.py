@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control as rc
 
 
@@ -373,16 +373,17 @@ class TestTransientMarking:
         assert params.get("transient") is True
 
     def test_transient_not_set_when_persists(self, tmp_path):
-        # With a real DB + persist=True, will_persist is True → no transient.
+        # Durable boundary events persist; streaming deltas are intentionally
+        # transient even when persist=True.
         db = open_cli_session_store(tmp_path / "state.db")
         db.sessions.create("sess-T", source="test", transient=False)
         params = {
-            "type": "message.delta",
+            "type": "message.complete",
             "conversation_session_id": "sess-T",
             "run_id": "run-T",
             "turn_id": "turn-T",
             "seq": 1,
-            "payload": {"delta": "x"},
+            "payload": {"text": "x"},
         }
         rc.record_event(params, db=db, persist=True)
         assert "transient" not in params

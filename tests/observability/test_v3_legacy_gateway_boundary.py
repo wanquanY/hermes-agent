@@ -93,14 +93,9 @@ def test_legacy_gateway_never_imports_v3_hermes_agent():
         )
 
 
-def test_legacy_gateway_folder_still_present():
-    """Sentinel — this test *encodes* the fact that Phase J retirement
-    has not been executed. When user later says "OK retire it" and it's
-    done, this assertion flips to ``not LEGACY_GATEWAY.exists()`` and
-    Phase J is closed.
-    """
-    assert LEGACY_GATEWAY.exists() and LEGACY_GATEWAY.is_dir(), (
-        "legacy gateway/ has been unexpectedly retired — if this was "
-        "intentional, flip the assertion; otherwise investigate the "
-        "missing folder"
+def test_legacy_gateway_folder_is_retired():
+    """The completed Phase J retirement must not regress via a shadow owner."""
+    assert not LEGACY_GATEWAY.exists(), (
+        "legacy gateway/ was restored after Phase J retirement; move the "
+        "implementation to its current owner instead of adding a compatibility shim"
     )

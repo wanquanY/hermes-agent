@@ -70,7 +70,7 @@ DIAGNOSTICS_DOCUMENT_WAIT = 5.0
 DIAGNOSTICS_FULL_WAIT = 10.0
 DIAGNOSTICS_REQUEST_TIMEOUT = 3.0
 PUSH_DEBOUNCE = 0.15
-SHUTDOWN_GRACE = 1.0  # seconds between SIGTERM and SIGKILL
+SHUTDOWN_GRACE = 1.0  # seconds for graceful exit and each forced-stop step
 
 # Retry policy for transient ContentModified errors.
 MAX_CONTENT_MODIFIED_RETRIES = 3
@@ -427,6 +427,17 @@ class LSPClient:
         self._proc = None
         if proc is None:
             return
+        if proc.returncode is None:
+            # ``shutdown`` + ``exit`` is the LSP-defined graceful path.  Give
+            # the child a real opportunity to consume ``exit`` and publish
+            # its return code before escalating to signals.  Terminating
+            # immediately races a normally exiting child and can signal a
+            # stale/reused PID on fast servers.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=SHUTDOWN_GRACE)
+                return
+            except asyncio.TimeoutError:
+                pass
         if proc.returncode is None:
             try:
                 proc.terminate()

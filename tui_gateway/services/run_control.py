@@ -3023,22 +3023,21 @@ def detach_transport(transport: Transport | None) -> None:
             )
         if pending:
             checkpoint_batches.append((db, pending))
-    def persist_disconnect_checkpoints() -> None:
-        seen_keys: set[tuple[str, ...]] = set()
-        for db, pending in checkpoint_batches:
-            unique_pending = [entry for entry in pending if entry.key not in seen_keys]
-            seen_keys.update(entry.key for entry in unique_pending)
-            try:
-                _persist_checkpoint_entries(unique_pending, db=db)
-            except Exception:
-                logger.warning("failed to persist stream checkpoint on transport detach", exc_info=True)
-
-    if checkpoint_batches:
-        threading.Thread(
-            target=persist_disconnect_checkpoints,
-            name="hermes-stream-disconnect-checkpoint",
-            daemon=True,
-        ).start()
+    # Detach is the ownership boundary for the subscription's DB handle.
+    # Complete the small, bounded checkpoint write before returning so callers
+    # can safely close that handle without racing a daemon thread or losing the
+    # final partial stream snapshot.
+    seen_keys: set[tuple[str, ...]] = set()
+    for db, pending in checkpoint_batches:
+        unique_pending = [entry for entry in pending if entry.key not in seen_keys]
+        seen_keys.update(entry.key for entry in unique_pending)
+        try:
+            _persist_checkpoint_entries(unique_pending, db=db)
+        except Exception:
+            logger.warning(
+                "failed to persist stream checkpoint on transport detach",
+                exc_info=True,
+            )
 
 
 def get_run(run_id: str, db: Any = None) -> dict[str, Any] | None:

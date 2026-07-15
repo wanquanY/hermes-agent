@@ -25,11 +25,11 @@ _TEAM_MISSION_EVENTS_SQL_RE = re.compile(
 )
 
 _OWNERS = {
-    "hermes_agent/domain/team_mission_audit_log.py",
+    "hermes_agent/application/team_mission_audit_log.py",
 }
 
 _MIGRATION_OR_SCHEMA_ROOTS = {
-    "hermes_agent/storage/migrations",
+    "hermes_agent/composition/migrations",
 }
 
 _SCHEMA_MAINTENANCE_FILES = {

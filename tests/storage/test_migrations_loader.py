@@ -5,9 +5,9 @@ import textwrap
 
 import pytest
 
-from hermes_agent.storage.migrations import MigrationLoadError
-from hermes_agent.storage.migrations import MigrationRunner
-from hermes_agent.storage.migrations import load_migrations
+from hermes_agent.composition.migrations import MigrationLoadError
+from hermes_agent.composition.migrations import MigrationRunner
+from hermes_agent.composition.migrations import load_migrations
 
 
 def _write_migration(tmp_path, name: str, body: str) -> None:

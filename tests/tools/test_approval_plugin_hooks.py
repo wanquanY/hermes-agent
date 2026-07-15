@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 import tools.approval as approval_module
+import tools.tirith_security as tirith_security
 from tools.approval import (
     check_all_command_guards,
     register_gateway_notify,
@@ -37,6 +38,14 @@ def isolated_session(monkeypatch, tmp_path):
     _saved_session = {k: v.copy() for k, v in _am._session_approved.items()}
     _am._permanent_approved.clear()
     _am._session_approved.clear()
+    # These tests exercise approval hook sequencing, not the optional Tirith
+    # binary lifecycle. Keep them hermetic so a missing binary cannot trigger
+    # an installer download during the full parallel suite.
+    monkeypatch.setattr(
+        tirith_security,
+        "check_command_security",
+        lambda _command: {"action": "allow", "findings": [], "summary": ""},
+    )
     try:
         yield session_key
     finally:
@@ -151,5 +160,3 @@ class TestGatewayPathFiresHooks:
     gateway notify callback is registered. The agent thread blocks on the
     approval event until resolve_gateway_approval() is called from another
     thread."""
-
-

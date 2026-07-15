@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_conversation_message_identity import AssistantMessageIdentity
 from hermes_conversation_message_identity import (
     assistant_conversation_message_id_for,

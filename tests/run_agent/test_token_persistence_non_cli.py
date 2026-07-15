@@ -73,7 +73,7 @@ def test_session_search_lazily_opens_db_when_entrypoint_did_not_pass_one(monkeyp
     captured = {}
 
     monkeypatch.setattr(
-        "hermes_agent.read_models.session_recall.SessionRecallReadModel.open_default",
+        "hermes_agent.composition.session_recall_factory.open_default_session_recall",
         lambda: sentinel_db,
     )
 
@@ -101,7 +101,7 @@ def test_session_search_does_not_open_db_when_session_persistence_disabled(monke
         raise AssertionError("transient agents must not open the default recall DB")
 
     monkeypatch.setattr(
-        "hermes_agent.read_models.session_recall.SessionRecallReadModel.open_default",
+        "hermes_agent.composition.session_recall_factory.open_default_session_recall",
         unexpected_open,
     )
     monkeypatch.setattr(

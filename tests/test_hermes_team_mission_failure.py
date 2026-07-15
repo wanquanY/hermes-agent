@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def _bound_node_db(tmp_path: Path, *, output_contract: dict | None = None) -> CliSessionStore:

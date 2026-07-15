@@ -67,6 +67,7 @@ def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="ht
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
+        model_context_window=256_000,
     )
     if model:
         kwargs["model"] = model
@@ -146,7 +147,9 @@ class TestBuildApiKwargsOpenRouter:
         assert "codex_reasoning_items" not in assistant_msg
         assert tool_call["id"] == "call_123"
         assert tool_call["function"]["name"] == "terminal"
-        assert tool_call["extra_content"] == {"thought_signature": "opaque"}
+        # Thought signatures are target-specific; this is a non-Gemini model,
+        # so strict Chat Completions providers must not receive extra_content.
+        assert "extra_content" not in tool_call
         assert "call_id" not in tool_call
         assert "response_item_id" not in tool_call
 

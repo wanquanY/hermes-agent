@@ -50,6 +50,43 @@ EXCLUDED_SKILL_DIRS = frozenset(
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
 
+# Parsed config shared by every lightweight skill helper. The key includes the
+# file mtime so edits are visible without a process restart while repeated
+# prompt/discovery lookups pay for YAML parsing only once.
+_RAW_CONFIG_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+
+def _raw_config_cache_clear() -> None:
+    """Test/runtime hook for profile switches that replace config.yaml."""
+    _RAW_CONFIG_CACHE.clear()
+
+
+def _load_raw_skill_config() -> Dict[str, Any]:
+    config_path = get_config_path()
+    try:
+        stat = config_path.stat()
+    except OSError:
+        return {}
+    cache_key = (str(config_path.resolve()), stat.st_mtime_ns)
+    cached = _RAW_CONFIG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read skill config %s: %s", config_path, exc)
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    # A process uses one active config path; discard older revisions so the
+    # cache remains bounded during config editors that save repeatedly.
+    for key in tuple(_RAW_CONFIG_CACHE):
+        if key[0] == cache_key[0] and key != cache_key:
+            _RAW_CONFIG_CACHE.pop(key, None)
+    _RAW_CONFIG_CACHE[cache_key] = parsed
+    return parsed
+
+
 def is_excluded_skill_path(path) -> bool:
     """True if *path* should be skipped by active skill scanners.
 
@@ -219,16 +256,7 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     Reads the config file directly (no CLI config imports) to stay
     lightweight.
     """
-    config_path = get_config_path()
-    if not config_path.exists():
-        return set()
-    try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.debug("Could not read skill config %s: %s", config_path, e)
-        return set()
-    if not isinstance(parsed, dict):
-        return set()
+    parsed = _load_raw_skill_config()
 
     skills_cfg = parsed.get("skills")
     if not isinstance(skills_cfg, dict):
@@ -303,12 +331,7 @@ def get_external_skills_dirs() -> List[Path]:
             # Return a copy so callers can't mutate the cached list.
             return list(cached)
 
-    try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(parsed, dict):
-        return []
+    parsed = _load_raw_skill_config()
 
     skills_cfg = parsed.get("skills")
     if not isinstance(skills_cfg, dict):
@@ -519,15 +542,7 @@ def resolve_skill_config_values(
     current values (or the declared default if the key isn't set).
     Path values are expanded via ``os.path.expanduser``.
     """
-    config_path = get_config_path()
-    config: Dict[str, Any] = {}
-    if config_path.exists():
-        try:
-            parsed = yaml_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                config = parsed
-        except Exception:
-            pass
+    config = _load_raw_skill_config()
 
     resolved: Dict[str, Any] = {}
     for var in config_vars:

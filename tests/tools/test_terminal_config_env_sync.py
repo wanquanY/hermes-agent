@@ -5,7 +5,7 @@ terminal_tool._get_env_config() reads ALL terminal settings from os.environ
 at startup, by THREE separate code paths:
 
   1. cli.py            -> ``env_mappings`` dict (CLI / TUI startup)
-  2. hermes_gateway/runner.py    -> ``_terminal_env_map`` dict (gateway / messaging
+  2. hermes_gateway/config_env_bridge.py -> ``_terminal_env_map`` dict (gateway / messaging
                           platforms)
   3. hermes_cli/config.py:save_config_value
                        -> ``_config_to_env_sync`` dict (one-shot when the
@@ -78,11 +78,10 @@ def _cli_env_map_keys() -> set[str]:
 
 
 def _gateway_env_map_keys() -> set[str]:
-    """terminal config keys bridged by hermes_gateway/runner.py at module load."""
-    # hermes_gateway/runner.py builds the dict at module top-level (not inside a
-    # function), so inspect the whole module source.
-    import hermes_gateway.runner as gr
-    source = inspect.getsource(gr)
+    """terminal config keys bridged by the gateway config bridge."""
+    from hermes_gateway import config_env_bridge
+
+    source = inspect.getsource(config_env_bridge.bridge_gateway_config_env)
     return _extract_dict_keys(source, "_terminal_env_map")
 
 
@@ -98,7 +97,7 @@ def _save_config_env_sync_keys() -> set[str]:
 
 
 # Keys present in cli.py env_mappings but intentionally absent from
-# hermes_gateway/runner.py or set_config_value.  Each entry must be justified.
+# the gateway config bridge or set_config_value.  Each entry must be justified.
 _CLI_ONLY_OK = frozenset({
     # `env_type` is a legacy YAML key alias for `backend` that cli.py
     # accepts for backwards-compat with older cli-config.yaml.  The
@@ -143,13 +142,13 @@ def test_cli_and_gateway_env_maps_agree():
     missing_in_cli = gw_keys - cli_keys
 
     assert not missing_in_gateway, (
-        f"Keys in cli.py env_mappings but missing from hermes_gateway/runner.py "
+        f"Keys in cli.py env_mappings but missing from gateway config bridge "
         f"_terminal_env_map: {sorted(missing_in_gateway)}.  Add them to "
         f"both maps (same bug class as docker_run_as_host_user shipping "
         f"wired in cli but not gateway in April 2026)."
     )
     assert not missing_in_cli, (
-        f"Keys in hermes_gateway/runner.py _terminal_env_map but missing from cli.py "
+        f"Keys in gateway config bridge _terminal_env_map but missing from cli.py "
         f"env_mappings: {sorted(missing_in_cli)}.  Add them to both maps."
     )
 
@@ -188,7 +187,7 @@ def test_docker_run_as_host_user_is_bridged_everywhere():
     """Explicit pin for the bug we just fixed.
 
     docker_run_as_host_user was added to terminal_tool._get_env_config and
-    DockerEnvironment but NOT to cli.py's env_mappings or hermes_gateway/runner.py's
+    DockerEnvironment but NOT to cli.py's env_mappings or the gateway config bridge's
     _terminal_env_map, so ``terminal.docker_run_as_host_user: true`` in
     config.yaml had no effect at runtime.  This guard makes the regression
     impossible to reintroduce silently.
@@ -201,7 +200,7 @@ def test_docker_run_as_host_user_is_bridged_everywhere():
 
 def test_docker_mount_cwd_to_workspace_is_bridged_everywhere():
     """Same regression class — docker_mount_cwd_to_workspace was missing from
-    hermes_gateway/runner.py's _terminal_env_map until the docker_run_as_host_user
+    the gateway config bridge's _terminal_env_map until the docker_run_as_host_user
     audit caught it.
     """
     assert "docker_mount_cwd_to_workspace" in _cli_env_map_keys()

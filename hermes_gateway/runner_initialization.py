@@ -121,7 +121,7 @@ def _initialize_session_db(runner) -> None:
     runner._session_db = None
     runner._session_db_error: Optional[str] = None
     try:
-        from hermes_agent.storage.cli_session_store import open_cli_session_store
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         runner._session_db = open_cli_session_store()
     except Exception as exc:

@@ -81,7 +81,7 @@ MAX_CLASS_METHODS = 80
 # hermes_gateway/runner.py's new home.
 _BLESSED_TREES = ("hermes_agent", "channels", "hermes_gateway")
 
-_EXCLUDE_PREFIXES = ("hermes_agent/storage/migrations/",)
+_EXCLUDE_PREFIXES = ("hermes_agent/composition/migrations/",)
 
 
 def test_retired_state_mixin_forwarding_package_has_no_source_modules() -> None:

@@ -12,11 +12,9 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from hermes_agent.repositories.message_content_codec import decode_message_content
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 logger = logging.getLogger(__name__)
@@ -41,10 +39,6 @@ class SessionRecallReadModel:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._lock = lock_for_connection(conn)
-
-    @classmethod
-    def open_default(cls, db_path: Path | str | None = None) -> "SessionRecallReadModel":
-        return cls(connect_session_repository_db(db_path))
 
     @classmethod
     def from_session_db(cls, session_db: Any) -> "SessionRecallReadModel | None":

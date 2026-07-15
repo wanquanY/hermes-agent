@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 @pytest.fixture

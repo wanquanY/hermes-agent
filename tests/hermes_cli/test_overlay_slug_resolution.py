@@ -16,6 +16,21 @@ import pytest
 from hermes_cli.model_switch import list_authenticated_providers
 
 
+@pytest.fixture(autouse=True)
+def _isolate_remote_model_discovery(monkeypatch):
+    """Keep slug-resolution tests independent from live provider catalogs."""
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    with patch.dict(os.environ, {}, clear=True):
+        monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+        monkeypatch.setattr("hermes_cli.auth._load_auth_store", lambda: {})
+        monkeypatch.setattr(
+            "hermes_cli.models.cached_provider_model_ids",
+            lambda provider: list(_PROVIDER_MODELS.get(provider, [])),
+        )
+        yield
+
+
 # -- Copilot slug resolution (env var path) ----------------------------------
 
 @patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "fake-ghu"}, clear=False)

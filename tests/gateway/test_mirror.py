@@ -253,7 +253,7 @@ class TestAppendToMessageStore:
         mock_store = MagicMock()
 
         with patch(
-            "hermes_agent.storage.cli_session_store.open_cli_session_store",
+            "hermes_agent.composition.cli_session_store.open_cli_session_store",
             return_value=mock_store,
         ):
             _append_to_message_store("sess_1", {"role": "assistant", "content": "hello"})
@@ -268,7 +268,7 @@ class TestAppendToMessageStore:
         mock_store.append_message.side_effect = Exception("store error")
 
         with patch(
-            "hermes_agent.storage.cli_session_store.open_cli_session_store",
+            "hermes_agent.composition.cli_session_store.open_cli_session_store",
             return_value=mock_store,
         ):
             _append_to_message_store("sess_1", {"role": "assistant", "content": "hello"})

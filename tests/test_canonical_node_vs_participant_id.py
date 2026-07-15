@@ -4,7 +4,7 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.identities import canonical_node_id
 from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
 from hermes_team_mission.domain.runtime_identity import node_participant_id

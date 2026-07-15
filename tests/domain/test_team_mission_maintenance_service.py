@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services.runtime_state import rebase_team_mission_workspace_paths
 
 

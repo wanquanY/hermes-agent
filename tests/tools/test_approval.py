@@ -163,23 +163,28 @@ class TestSessionKeyContext:
         finally:
             approval_module.reset_current_session_key(token)
 
-    def test_gateway_runner_binds_session_key_to_context_before_agent_run(self):
-        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
-        module = ast.parse(run_py.read_text(encoding="utf-8"))
+    def test_gateway_interaction_lifecycle_binds_and_resets_session_context(self):
+        callbacks_py = (
+            Path(__file__).resolve().parents[2]
+            / "hermes_gateway"
+            / "agent_interaction_callbacks.py"
+        )
+        module = ast.parse(callbacks_py.read_text(encoding="utf-8"))
+        lifecycle = {
+            node.name: node
+            for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"activate_approval", "deactivate_approval"}
+        }
 
-        run_sync = None
-        for node in ast.walk(module):
-            if isinstance(node, ast.FunctionDef) and node.name == "run_sync":
-                run_sync = node
-                break
+        assert set(lifecycle) == {"activate_approval", "deactivate_approval"}
 
-        assert run_sync is not None, "hermes_gateway.runner.run_sync not found"
-
-        called_names = set()
-        for node in ast.walk(run_sync):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                called_names.add(node.func.id)
-
+        called_names = {
+            node.func.id
+            for function in lifecycle.values()
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
         assert "set_current_session_key" in called_names
         assert "reset_current_session_key" in called_names
 
@@ -1549,6 +1554,15 @@ class TestApprovalTimeoutIsNotConsent:
     def setup_method(self):
         """Reset module state and force tight gateway_timeout for fast tests."""
         from tools import approval as mod
+
+        # These tests own timeout/deny semantics, not Tirith installation.
+        # A missing optional binary must not turn an approval unit test into
+        # an external network download.
+        self._tirith_patch = mock_patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "allow", "findings": [], "summary": ""},
+        )
+        self._tirith_patch.start()
         mod._gateway_queues.clear()
         mod._gateway_notify_cbs.clear()
         mod._session_approved.clear()
@@ -1572,6 +1586,7 @@ class TestApprovalTimeoutIsNotConsent:
 
     def teardown_method(self):
         from tools import approval as mod
+        self._tirith_patch.stop()
         mod._gateway_queues.clear()
         mod._gateway_notify_cbs.clear()
         for k, v in self._saved_env.items():

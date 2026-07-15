@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from hermes_agent.storage.cli_session_store import open_cli_session_store
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def test_update_source_projects_session_and_index(tmp_path):

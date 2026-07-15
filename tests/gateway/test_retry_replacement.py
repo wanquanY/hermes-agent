@@ -10,7 +10,7 @@ from channels.platforms.base import MessageEvent, MessageType
 from hermes_gateway.runner import GatewayRunner
 from hermes_gateway.session import SessionStore
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
-from hermes_agent.storage.session_repository_db import connect_session_repository_db
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
 
 def _session_store_with_storage(tmp_path):

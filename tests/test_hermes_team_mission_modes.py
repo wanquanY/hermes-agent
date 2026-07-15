@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.modes import (
     MODE_AUTONOMOUS_MISSION,
     MODE_DISCUSSION,

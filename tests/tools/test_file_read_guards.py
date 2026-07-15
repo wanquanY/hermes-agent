@@ -76,9 +76,9 @@ class TestDevicePathBlocking(unittest.TestCase):
         self.assertTrue(_is_blocked_device("/proc/self/fd/0"))
         self.assertTrue(_is_blocked_device("/proc/12345/fd/2"))
 
-    def test_proc_fd_other_not_blocked(self):
+    def test_proc_process_metadata_is_blocked(self):
         self.assertFalse(_is_blocked_device("/proc/self/fd/3"))
-        self.assertFalse(_is_blocked_device("/proc/self/maps"))
+        self.assertTrue(_is_blocked_device("/proc/self/maps"))
 
     def test_normpath_alias_to_blocked_device_is_blocked(self):
         self.assertTrue(_is_blocked_device("/dev/../dev/zero"))
@@ -273,7 +273,7 @@ class TestFileDedup(unittest.TestCase):
         ))
 
         self.assertIn("error", result)
-        self.assertIn("internal read_file status text", result["error"])
+        self.assertIn("internal read_file display text", result["error"])
         fake.write_file.assert_not_called()
 
     @patch("tools.file_tools._get_file_ops")
@@ -297,7 +297,7 @@ class TestFileDedup(unittest.TestCase):
         ))
 
         self.assertIn("error", result)
-        self.assertIn("internal read_file status text", result["error"])
+        self.assertIn("internal read_file display text", result["error"])
         fake.write_file.assert_not_called()
 
     @patch("tools.file_tools._get_file_ops")

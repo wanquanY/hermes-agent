@@ -48,6 +48,7 @@ _tool_loop = None          # persistent loop for the main (CLI) thread
 _tool_loop_lock = threading.Lock()
 _worker_thread_local = threading.local()  # per-worker-thread persistent loops
 _ASYNC_TOOL_INTERRUPT_POLL_SECONDS = 0.1
+_ASYNC_TOOL_TIMEOUT_SECONDS = 300.0
 
 
 def _get_tool_loop():
@@ -191,7 +192,7 @@ def _run_async(coro):
                             except RuntimeError:
                                 pass
                         raise InterruptedError("Async tool interrupted")
-                    if time.monotonic() - started_at < 300:
+                    if time.monotonic() - started_at < _ASYNC_TOOL_TIMEOUT_SECONDS:
                         continue
                     raise
         except concurrent.futures.TimeoutError:

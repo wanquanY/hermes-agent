@@ -53,7 +53,7 @@ def capture(server):
 
 
 def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     db = open_cli_session_store(tmp_path / "resume-state.db")
     for session_id, title in rows:
@@ -420,9 +420,10 @@ def test_block_and_respond(capture):
     server, _ = capture
     result = [None]
 
-    threading.Thread(
+    worker = threading.Thread(
         target=lambda: result.__setitem__(0, server._block("test.prompt", "s1", {"q": "?"}, timeout=5)),
-    ).start()
+    )
+    worker.start()
 
     for _ in range(100):
         if server._pending:
@@ -435,7 +436,8 @@ def test_block_and_respond(capture):
     _, ev = server._pending[rid]
     ev.set()
 
-    threading.Event().wait(0.1)
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "blocking prompt did not resume after response"
     assert result[0] == "my_answer"
 
 
@@ -855,7 +857,7 @@ def test_session_create_control_plane_only_persists_through_session_repo(
 ):
     import importlib
 
-    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
 
     importlib.reload(importlib.import_module("tui_gateway.methods.session"))
 

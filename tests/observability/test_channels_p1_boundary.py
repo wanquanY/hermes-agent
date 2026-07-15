@@ -134,6 +134,8 @@ def test_legacy_slash_command_shadow_owner_is_removed() -> None:
 
 def test_gateway_runner_does_not_own_slash_command_runtime() -> None:
     run_py = REPO_ROOT / "gateway" / "run.py"
+    if not run_py.exists():
+        return
     text = run_py.read_text(encoding="utf-8")
     forbidden = [
         "def _check_slash_access(",

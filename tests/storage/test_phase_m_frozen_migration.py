@@ -19,7 +19,7 @@ def _load_module():
     path = (
         Path(__file__).resolve().parents[1].parent
         / "hermes_agent"
-        / "storage"
+        / "composition"
         / "migrations"
         / "0047_drop_runtime_source_seq.py"
     )

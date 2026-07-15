@@ -231,6 +231,7 @@ _COMBINED_REVIEW_PROMPT = (
 def summarize_background_review_actions(
     review_messages: List[Dict],
     prior_snapshot: List[Dict],
+    notification_mode: str = "on",
 ) -> List[str]:
     """Build the human-facing action summary for a background review pass.
 
@@ -243,6 +244,11 @@ def summarize_background_review_actions(
     Matching is by ``tool_call_id`` when available, with a content-equality
     fallback for tool messages that lack one.
     """
+    mode = str(notification_mode or "on").strip().lower()
+    if mode == "off":
+        return []
+    verbose = mode == "verbose"
+
     existing_tool_call_ids = set()
     existing_tool_contents = set()
     for prior in prior_snapshot or []:
@@ -310,86 +316,81 @@ def summarize_background_review_actions(
             continue
         if not isinstance(data, dict) or not data.get("success"):
             continue
-        message = data.get("message", "")
-        target = data.get("target", "")
-        if "created" in message.lower():
-            actions.append(message)
-        elif "updated" in message.lower():
-            actions.append(message)
-        elif "added" in message.lower() or (target and "add" in message.lower()):
-            label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-            actions.append(f"{label} updated")
-        elif "Entry added" in message:
-            label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-            actions.append(f"{label} updated")
-        elif "removed" in message.lower() or "replaced" in message.lower():
-            label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-        else:
+        detail = call_details.get(tcid, {})
+        if tcid in all_tool_call_ids and tcid not in call_details:
+            continue
+        message = str(data.get("message") or "")
+        message_lower = message.lower()
+        is_skill = detail.get("tool") == "skill_manage"
+        target = str(data.get("target") or detail.get("target") or "memory")
+        label = (
+            "Memory"
+            if target == "memory"
+            else "User profile"
+            if target == "user"
+            else target
+        )
+        recognized = is_skill or any(
+            token in message_lower
+            for token in ("created", "updated", "added", "removed", "replaced", "applied", "patched")
+        )
+        if not recognized:
             continue
 
-        if verbose:
-            action = detail.get("action", "")
-            content = detail.get("content", "")
-            old_text = detail.get("old_text", "")
-            skill_name = detail.get("name", "")
-            operations = detail.get("operations") or []
-            max_preview = 120
-            if is_skill:
-                change = data.get("_change", {})
-                old_string = change.get("old", "") or detail.get("old_string", "")
-                new_string = change.get("new", "") or detail.get("new_string", "")
-                description = change.get("description", "")
-                if action == "patch" and (old_string or new_string):
-                    old_preview = old_string[:80].replace("\n", " ") + (
-                        "…" if len(old_string) > 80 else ""
-                    )
-                    new_preview = new_string[:80].replace("\n", " ") + (
-                        "…" if len(new_string) > 80 else ""
-                    )
-                    actions.append(
-                        f"📝 Skill '{skill_name}' patched: "
-                        f"\"{old_preview}\" → \"{new_preview}\""
-                    )
-                elif action == "create" and description:
-                    actions.append(f"📝 Skill '{skill_name}' created: {description}")
-                elif action == "edit" and description:
-                    actions.append(f"📝 Skill '{skill_name}' rewritten: {description}")
-                else:
-                    actions.append(f"📝 {message}" if message else f"Skill {action}")
-            elif operations:
-                for op in operations:
-                    op = op or {}
-                    op_act = op.get("action", "")
-                    op_content = (op.get("content") or "")
-                    op_old = (op.get("old_text") or "")
-                    if op_act == "add" and op_content:
-                        preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
-                        actions.append(f"{label} ➕ {preview}")
-                    elif op_act == "replace" and op_content:
-                        preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
-                        actions.append(f"{label} ✏️ {preview}")
-                    elif op_act == "remove" and op_old:
-                        preview = op_old[:60] + ("…" if len(op_old) > 60 else "")
-                        actions.append(f"{label} ➖ {preview}")
-            elif action == "add" and content:
-                preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
-                actions.append(f"{label} ➕ {preview}")
-            elif action == "replace" and content:
-                preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
-                actions.append(f"{label} ✏️ {preview}")
-            elif action == "remove" and old_text:
-                preview = old_text[:60] + ("…" if len(old_text) > 60 else "")
-                actions.append(f"{label} ➖ {preview}")
+        if not verbose:
+            if "created" in message_lower or "updated" in message_lower:
+                actions.append(message)
             else:
                 actions.append(f"{label} updated")
-        elif (
-            "added" in message_lower
-            or "replaced" in message_lower
-            or "removed" in message_lower
-            or "applied" in message_lower
-            or (target and "add" in message.lower())
-            or "Entry added" in message
-        ):
+            continue
+
+        action = str(detail.get("action") or "")
+        content = str(detail.get("content") or "")
+        old_text = str(detail.get("old_text") or "")
+        skill_name = str(detail.get("name") or "")
+        operations = detail.get("operations") or []
+        max_preview = 120
+        if is_skill:
+            change = data.get("_change") if isinstance(data.get("_change"), dict) else {}
+            old_string = str(change.get("old") or detail.get("old_string") or "")
+            new_string = str(change.get("new") or detail.get("new_string") or "")
+            description = str(change.get("description") or "")
+            if action == "patch" and (old_string or new_string):
+                old_preview = old_string[:80].replace("\n", " ") + ("…" if len(old_string) > 80 else "")
+                new_preview = new_string[:80].replace("\n", " ") + ("…" if len(new_string) > 80 else "")
+                actions.append(
+                    f"📝 Skill '{skill_name}' patched: \"{old_preview}\" → \"{new_preview}\""
+                )
+            elif action in {"create", "edit"} and description:
+                verb = "created" if action == "create" else "rewritten"
+                actions.append(f"📝 Skill '{skill_name}' {verb}: {description}")
+            else:
+                actions.append(f"📝 {message}" if message else f"Skill {action}")
+            continue
+
+        verbose_actions: List[str] = []
+        for operation in operations:
+            operation = operation if isinstance(operation, dict) else {}
+            op_action = str(operation.get("action") or "")
+            op_content = str(operation.get("content") or "")
+            op_old = str(operation.get("old_text") or "")
+            if op_action in {"add", "replace"} and op_content:
+                preview = op_content[:max_preview] + ("…" if len(op_content) > max_preview else "")
+                icon = "➕" if op_action == "add" else "✏️"
+                verbose_actions.append(f"{label} {icon} {preview}")
+            elif op_action == "remove" and op_old:
+                preview = op_old[:60] + ("…" if len(op_old) > 60 else "")
+                verbose_actions.append(f"{label} ➖ {preview}")
+        if verbose_actions:
+            actions.extend(verbose_actions)
+        elif action in {"add", "replace"} and content:
+            preview = content[:max_preview] + ("…" if len(content) > max_preview else "")
+            icon = "➕" if action == "add" else "✏️"
+            actions.append(f"{label} {icon} {preview}")
+        elif action == "remove" and old_text:
+            preview = old_text[:60] + ("…" if len(old_text) > 60 else "")
+            actions.append(f"{label} ➖ {preview}")
+        else:
             actions.append(f"{label} updated")
     return actions
 
@@ -613,11 +614,11 @@ def _run_review_in_thread(
                 review_agent.shutdown_memory_provider()
             except Exception:
                 pass
+            review_messages = list(getattr(review_agent, "_session_messages", []))
             try:
                 review_agent.close()
             except Exception:
                 pass
-            review_messages = list(getattr(review_agent, "_session_messages", []))
             review_agent = None
 
         # Scan the review agent's messages for successful tool actions
@@ -629,6 +630,7 @@ def _run_review_in_thread(
         actions = summarize_background_review_actions(
             review_messages,
             messages_snapshot,
+            notification_mode=getattr(agent, "_memory_notifications", "on"),
         )
 
         if actions:
