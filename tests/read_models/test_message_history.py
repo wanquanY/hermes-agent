@@ -95,6 +95,22 @@ def test_page_returns_storage_cursors_and_message_projection():
     assert page["pageInfo"]["totalCount"] == 2
 
 
+def test_tool_effect_disposition_projects_from_canonical_metadata():
+    conn = _conn()
+    conn.execute("INSERT INTO sessions (id) VALUES ('s1')")
+    _insert(
+        conn,
+        "s1",
+        "tool",
+        "outcome unavailable",
+        timestamp=1.0,
+        metadata={"_hermes_tool_effect_disposition": "unknown"},
+    )
+
+    messages = MessageHistoryReadModel(conn).all_as_conversation("s1")
+    assert messages[0]["effect_disposition"] == "unknown"
+
+
 def test_page_expands_selected_assistant_to_turn_user_boundary():
     conn = _conn()
     conn.execute("INSERT INTO sessions (id) VALUES ('s1')")

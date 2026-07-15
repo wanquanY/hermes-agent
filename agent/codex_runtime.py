@@ -779,29 +779,32 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     Even when Codex omits usage for a turn, Hermes should still count that turn
     as one API call for session/status accounting.
     """
-    agent.session_api_calls += 1
     usage_model = resolve_codex_app_server_usage_model(agent, turn)
     _align_codex_usage_model(agent, usage_model)
 
+    from agent.model_usage_recorder import (
+        ModelUsageAttribution,
+        record_model_response_usage,
+    )
+    from agent.usage_pricing import CanonicalUsage
+
+    attribution = ModelUsageAttribution(
+        purpose="codex.primary",
+        model=usage_model,
+        provider=agent.provider,
+        base_url=agent.base_url,
+        api_mode="codex_app_server",
+        primary=True,
+    )
+
     usage = getattr(turn, "token_usage_last", None)
     if not isinstance(usage, dict) or not usage:
-        if agent._session_db and agent.session_id:
-            try:
-                if not agent._session_db_created:
-                    agent._ensure_db_session()
-                agent._session_db.sessions.update_token_counts(
-                    agent.session_id,
-                    model=usage_model or None,
-                    api_call_count=1,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Codex app-server api-call persistence failed (session=%s): %s",
-                    agent.session_id, exc,
-                )
+        record_model_response_usage(
+            agent,
+            None,
+            attribution=attribution,
+        )
         return {"model": usage_model} if usage_model else {}
-
-    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
     input_tokens = _coerce_usage_int(usage.get("inputTokens"))
     cache_read_tokens = _coerce_usage_int(usage.get("cachedInputTokens"))
@@ -820,84 +823,35 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = reported_total or canonical_usage.total_tokens
-    usage_dict = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "input_tokens": canonical_usage.input_tokens,
-        "output_tokens": canonical_usage.output_tokens,
-        "cache_read_tokens": canonical_usage.cache_read_tokens,
-        "cache_write_tokens": canonical_usage.cache_write_tokens,
-        "reasoning_tokens": canonical_usage.reasoning_tokens,
-    }
+    usage_record = record_model_response_usage(
+        agent,
+        usage,
+        attribution=attribution,
+        canonical_usage=canonical_usage,
+        reported_total_tokens=total_tokens,
+        update_context=True,
+    )
+    usage_dict = usage_record.usage_dict
 
     compressor = getattr(agent, "context_compressor", None)
     if compressor is not None:
-        try:
-            compressor.update_from_response(usage_dict)
-            context_window = getattr(turn, "model_context_window", None)
-            if isinstance(context_window, int) and context_window > 0:
-                compressor.context_length = context_window
-        except Exception:
-            logger.debug("codex app-server usage update failed", exc_info=True)
+        context_window = getattr(turn, "model_context_window", None)
+        if isinstance(context_window, int) and context_window > 0:
+            compressor.context_length = context_window
 
-    agent.session_prompt_tokens += prompt_tokens
-    agent.session_completion_tokens += completion_tokens
-    agent.session_total_tokens += total_tokens
-    agent.session_input_tokens += canonical_usage.input_tokens
-    agent.session_output_tokens += canonical_usage.output_tokens
-    agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
-    agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
-    agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
-
-    cost_result = estimate_usage_cost(
-        usage_model,
-        canonical_usage,
-        provider=agent.provider,
-        base_url=agent.base_url,
-        api_key=getattr(agent, "api_key", ""),
-    )
-    if cost_result.amount_usd is not None:
-        agent.session_estimated_cost_usd += float(cost_result.amount_usd)
-    agent.session_cost_status = cost_result.status
-    agent.session_cost_source = cost_result.source
-
-    if agent._session_db and agent.session_id:
-        try:
-            if not agent._session_db_created:
-                agent._ensure_db_session()
-            agent._session_db.sessions.update_token_counts(
-                agent.session_id,
-                input_tokens=canonical_usage.input_tokens,
-                output_tokens=canonical_usage.output_tokens,
-                cache_read_tokens=canonical_usage.cache_read_tokens,
-                cache_write_tokens=canonical_usage.cache_write_tokens,
-                reasoning_tokens=canonical_usage.reasoning_tokens,
-                estimated_cost_usd=float(cost_result.amount_usd)
-                if cost_result.amount_usd is not None else None,
-                cost_status=cost_result.status,
-                cost_source=cost_result.source,
-                billing_provider=agent.provider,
-                billing_base_url=agent.base_url,
-                billing_mode="subscription_included"
-                if cost_result.status == "included" else None,
-                model=usage_model or None,
-                api_call_count=1,
-            )
-        except Exception as exc:
-            logger.debug(
-                "Codex app-server token persistence failed (session=%s, tokens=%d): %s",
-                agent.session_id, total_tokens, exc,
-            )
+    cost_result = usage_record.cost
 
     return {
         **usage_dict,
         "model": usage_model,
         "last_prompt_tokens": prompt_tokens,
-        "estimated_cost_usd": float(cost_result.amount_usd)
-        if cost_result.amount_usd is not None else None,
-        "cost_status": cost_result.status,
-        "cost_source": cost_result.source,
+        "estimated_cost_usd": (
+            float(cost_result.amount_usd)
+            if cost_result is not None and cost_result.amount_usd is not None
+            else None
+        ),
+        "cost_status": cost_result.status if cost_result is not None else "unknown",
+        "cost_source": cost_result.source if cost_result is not None else "none",
     }
 
 

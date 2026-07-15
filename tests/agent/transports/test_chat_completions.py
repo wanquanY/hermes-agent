@@ -66,6 +66,29 @@ class TestChatCompletionsBasic:
         # Original list untouched (deepcopy-on-demand)
         assert msgs[2]["tool_name"] == "execute_code"
 
+    def test_convert_messages_strips_effect_and_output_risk(self, transport):
+        messages = [
+            {
+                "role": "tool",
+                "name": "web_extract",
+                "tool_call_id": "call-1",
+                "content": "result",
+                "effect_disposition": "unknown",
+                "_tool_output_risk": {
+                    "risk": "high",
+                    "findings": ["prompt_injection"],
+                    "redacted": False,
+                },
+            }
+        ]
+
+        converted = transport.convert_messages(messages)
+
+        assert "effect_disposition" not in converted[0]
+        assert "_tool_output_risk" not in converted[0]
+        assert converted[0]["content"] == "result"
+        assert messages[0]["effect_disposition"] == "unknown"
+
     def test_convert_messages_strips_internal_scaffolding_markers(self, transport):
         """Hermes-internal ``_``-prefixed markers must never reach the wire.
 

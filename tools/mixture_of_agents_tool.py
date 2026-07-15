@@ -50,7 +50,7 @@ import logging
 import os
 import asyncio
 import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Callable, List, Optional
 from tools.openrouter_client import get_async_client as _get_openrouter_client, check_api_key as check_openrouter_api_key
 from agent.auxiliary_client import extract_content_or_reasoning
 from tools.debug_helpers import DebugSession
@@ -107,7 +107,8 @@ async def _run_reference_model_safe(
     user_prompt: str,
     temperature: float = REFERENCE_TEMPERATURE,
     max_tokens: int = 32000,
-    max_retries: int = 6
+    max_retries: int = 6,
+    usage_recorder: Optional[Callable[[Any, str, str], None]] = None,
 ) -> tuple[str, str, bool]:
     """
     Run a single reference model with retry logic and graceful failure handling.
@@ -145,6 +146,8 @@ async def _run_reference_model_safe(
                 api_params["temperature"] = temperature
             
             response = await _get_openrouter_client().chat.completions.create(**api_params)
+            if usage_recorder is not None:
+                usage_recorder(getattr(response, "usage", None), "moa.reference", model)
             
             content = extract_content_or_reasoning(response)
             if not content:
@@ -182,7 +185,10 @@ async def _run_aggregator_model(
     system_prompt: str,
     user_prompt: str,
     temperature: float = AGGREGATOR_TEMPERATURE,
-    max_tokens: int = None
+    max_tokens: int = None,
+    *,
+    model: str = AGGREGATOR_MODEL,
+    usage_recorder: Optional[Callable[[Any, str, str], None]] = None,
 ) -> str:
     """
     Run the aggregator model to synthesize the final response.
@@ -196,11 +202,11 @@ async def _run_aggregator_model(
     Returns:
         str: Synthesized final response
     """
-    logger.info("Running aggregator model: %s", AGGREGATOR_MODEL)
+    logger.info("Running aggregator model: %s", model)
 
     # Build parameters for the API call
     api_params = {
-        "model": AGGREGATOR_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -216,10 +222,12 @@ async def _run_aggregator_model(
 
     # GPT models (especially gpt-4o-mini) don't support custom temperature values
     # Only include temperature for non-GPT models
-    if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
+    if not model.lower().startswith('gpt-'):
         api_params["temperature"] = temperature
 
     response = await _get_openrouter_client().chat.completions.create(**api_params)
+    if usage_recorder is not None:
+        usage_recorder(getattr(response, "usage", None), "moa.aggregator", model)
 
     content = extract_content_or_reasoning(response)
 
@@ -227,6 +235,8 @@ async def _run_aggregator_model(
     if not content:
         logger.warning("Aggregator returned empty content, retrying once")
         response = await _get_openrouter_client().chat.completions.create(**api_params)
+        if usage_recorder is not None:
+            usage_recorder(getattr(response, "usage", None), "moa.aggregator", model)
         content = extract_content_or_reasoning(response)
 
     logger.info("Aggregation complete (%s characters)", len(content))
@@ -236,7 +246,8 @@ async def _run_aggregator_model(
 async def mixture_of_agents_tool(
     user_prompt: str,
     reference_models: Optional[List[str]] = None,
-    aggregator_model: Optional[str] = None
+    aggregator_model: Optional[str] = None,
+    parent_agent: Any = None,
 ) -> str:
     """
     Process a complex query using the Mixture-of-Agents methodology.
@@ -306,13 +317,39 @@ async def mixture_of_agents_tool(
         # Use provided models or defaults
         ref_models = reference_models or REFERENCE_MODELS
         agg_model = aggregator_model or AGGREGATOR_MODEL
+
+        usage_recorder = None
+        if parent_agent is not None:
+            from agent.model_usage_recorder import (
+                ModelUsageAttribution,
+                record_model_response_usage,
+            )
+
+            def usage_recorder(response_usage: Any, purpose: str, model: str) -> None:
+                record_model_response_usage(
+                    parent_agent,
+                    response_usage,
+                    attribution=ModelUsageAttribution(
+                        purpose=purpose,
+                        model=model,
+                        provider="openrouter",
+                        base_url="https://openrouter.ai/api/v1",
+                        api_mode="chat_completions",
+                        primary=False,
+                    ),
+                )
         
         logger.info("Using %s reference models in 2-layer MoA architecture", len(ref_models))
         
         # Layer 1: Generate diverse responses from reference models (with failure handling)
         logger.info("Layer 1: Generating reference responses...")
         model_results = await asyncio.gather(*[
-            _run_reference_model_safe(model, user_prompt, REFERENCE_TEMPERATURE)
+            _run_reference_model_safe(
+                model,
+                user_prompt,
+                REFERENCE_TEMPERATURE,
+                usage_recorder=usage_recorder,
+            )
             for model in ref_models
         ])
         
@@ -352,7 +389,9 @@ async def mixture_of_agents_tool(
         final_response = await _run_aggregator_model(
             aggregator_system_prompt,
             user_prompt,
-            AGGREGATOR_TEMPERATURE
+            AGGREGATOR_TEMPERATURE,
+            model=agg_model,
+            usage_recorder=usage_recorder,
         )
         
         # Calculate processing time
@@ -534,7 +573,10 @@ registry.register(
     name="mixture_of_agents",
     toolset="moa",
     schema=MOA_SCHEMA,
-    handler=lambda args, **kw: mixture_of_agents_tool(user_prompt=args.get("user_prompt", "")),
+    handler=lambda args, **kw: mixture_of_agents_tool(
+        user_prompt=args.get("user_prompt", ""),
+        parent_agent=kw.get("parent_agent"),
+    ),
     check_fn=check_moa_requirements,
     requires_env=["OPENROUTER_API_KEY"],
     is_async=True,

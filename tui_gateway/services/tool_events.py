@@ -425,6 +425,24 @@ class GatewayToolEventBridge:
         if event_type == "tool.started" and name:
             self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
             return
+        if event_type == "tool.output_risk" and name:
+            metadata = kwargs.get("risk_metadata")
+            if not isinstance(metadata, dict):
+                return
+            self._emit(
+                "tool.output_risk",
+                sid,
+                {
+                    "tool_id": str(kwargs.get("tool_call_id") or ""),
+                    "name": str(name),
+                    "risk": str(metadata.get("risk") or "low"),
+                    "findings": [
+                        str(item) for item in metadata.get("findings", [])
+                    ],
+                    "redacted": bool(metadata.get("redacted", False)),
+                },
+            )
+            return
         if event_type == "reasoning.available" and preview:
             payload: dict[str, object] = {"text": str(preview)}
             if self._session_verbose(sid):

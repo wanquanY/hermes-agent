@@ -47,6 +47,46 @@ class TestRegisterAndDispatch:
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
 
+    def test_dispatch_preserves_supported_multimodal_result(self):
+        reg = ToolRegistry()
+        multimodal = {
+            "_multimodal": True,
+            "content": [{"type": "text", "text": "captured"}],
+            "text_summary": "captured",
+        }
+        reg.register(
+            name="capture",
+            toolset="computer_use",
+            schema=_make_schema("capture"),
+            handler=lambda args, **kw: multimodal,
+        )
+
+        assert reg.dispatch("capture", {}) is multimodal
+
+    def test_dispatch_rejects_unsupported_handler_results(self):
+        for invalid in ({"ok": True}, b"bytes", None, 42):
+            reg = ToolRegistry()
+            reg.register(
+                name="bad_result",
+                toolset="core",
+                schema=_make_schema("bad_result"),
+                handler=lambda args, _invalid=invalid, **kw: _invalid,
+            )
+
+            raw = reg.dispatch("bad_result", {})
+            result = json.loads(raw)
+
+            assert isinstance(raw, str)
+            assert result == {
+                "error": (
+                    "Tool handler returned unsupported result type: "
+                    f"{type(invalid).__name__}"
+                ),
+                "error_type": "tool_result_contract",
+                "tool": "bad_result",
+                "result_type": type(invalid).__name__,
+            }
+
 
 class TestGetDefinitions:
     def test_returns_openai_format(self):

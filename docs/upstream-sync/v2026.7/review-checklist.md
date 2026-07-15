@@ -33,5 +33,20 @@
 - [ ] 当前 owner 符合 Hermes 架构，没有把责任写回已删除 monolith。
 - [ ] 本阶段收益由行为测试证明，不以代码存在或 grep 命中代替。
 - [ ] 全量回归与 Doxie 合同通过。
-- [ ] 文档状态为“实施完成，待验收”，且下一阶段没有偷跑。
+- [ ] 文档状态为“实施完成，待统一验收”；只有本阶段机器门禁通过后才进入下一阶段。
 - [ ] 用户明确批准本阶段。
+
+## 阶段 2
+
+- [x] R1、M1、U2、D1 的当前 owner、上游参考与架构决策已经记录。
+- [x] registry result 和 model-emitted arguments 都有 fail-closed producer contract。
+- [x] 并发工具批次有 wall-clock deadline，已完成结果保持原始顺序。
+- [x] effect disposition 可持久化、可 replay，且不会进入 provider wire format。
+- [x] 风险事件只投影 finding ID 和状态，不复制原始工具输出。
+- [x] 普通对话、Codex 与 MoA 共用一个 model usage recorder。
+- [x] 4 个 reference 和 1 个 aggregator 产生 5 条真实归属 usage。
+- [x] Hermes 最终全量复跑与 Doxie 门禁完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 28,815 passed、0 failed；Doxie
+Gateway contract 与 desktop `test:gates` 退出码 0。阶段 2 等待最终统一验收。

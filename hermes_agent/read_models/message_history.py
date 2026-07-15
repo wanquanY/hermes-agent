@@ -14,6 +14,7 @@ from typing import Any
 
 from agent.memory_manager import sanitize_context
 from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_agent.domain.tool_effect import tool_effect_from_metadata
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
@@ -367,7 +368,11 @@ def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[st
         if row["codex_message_items"]:
             message["codex_message_items"] = _json_or(row["codex_message_items"], None)
     if row["metadata_json"]:
-        message["metadata"] = _json_or(row["metadata_json"], None)
+        metadata = _json_or(row["metadata_json"], None)
+        message["metadata"] = metadata
+        effect_disposition = tool_effect_from_metadata(metadata)
+        if effect_disposition:
+            message["effect_disposition"] = effect_disposition
     return message
 
 

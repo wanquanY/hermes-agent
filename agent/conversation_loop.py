@@ -67,7 +67,10 @@ from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.system_prompt_cache import system_prompt_cache_scope_key
 from agent.trajectory import has_incomplete_scratchpad
-from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.model_usage_recorder import (
+    ModelUsageAttribution,
+    record_model_response_usage,
+)
 from hermes_constants import (
     FINISH_REASON_STREAM_ERROR,
     display_hermes_home as _dhh_fn,
@@ -2124,20 +2127,24 @@ def run_conversation(
                 
                 # Track actual token usage from response for context management
                 if hasattr(response, 'usage') and response.usage:
-                    canonical_usage = normalize_usage(
+                    usage_record = record_model_response_usage(
+                        agent,
                         response.usage,
-                        provider=agent.provider,
-                        api_mode=agent.api_mode,
+                        attribution=ModelUsageAttribution(
+                            purpose="conversation.primary",
+                            model=agent.model,
+                            provider=agent.provider,
+                            base_url=agent.base_url,
+                            api_mode=agent.api_mode,
+                            primary=True,
+                        ),
+                        update_context=True,
                     )
+                    canonical_usage = usage_record.usage
                     prompt_tokens = canonical_usage.prompt_tokens
                     completion_tokens = canonical_usage.output_tokens
-                    total_tokens = canonical_usage.total_tokens
-                    usage_dict = {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens,
-                    }
-                    agent.context_compressor.update_from_response(usage_dict)
+                    total_tokens = usage_record.reported_total_tokens
+                    usage_dict = usage_record.usage_dict
 
                     # Cache discovered context length after successful call.
                     # Only persist limits confirmed by the provider (parsed
@@ -2150,16 +2157,6 @@ def run_conversation(
                         agent.context_compressor._context_probed = False
                         agent.context_compressor._context_probe_persistable = False
 
-                    agent.session_prompt_tokens += prompt_tokens
-                    agent.session_completion_tokens += completion_tokens
-                    agent.session_total_tokens += total_tokens
-                    agent.session_api_calls += 1
-                    agent.session_input_tokens += canonical_usage.input_tokens
-                    agent.session_output_tokens += canonical_usage.output_tokens
-                    agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
-                    agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
-                    agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
-
                     # Log API call details for debugging/observability
                     _cache_pct = ""
                     if canonical_usage.cache_read_tokens and prompt_tokens:
@@ -2171,62 +2168,6 @@ def run_conversation(
                         api_duration, _cache_pct,
                     )
 
-                    cost_result = estimate_usage_cost(
-                        agent.model,
-                        canonical_usage,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_key=getattr(agent, "api_key", ""),
-                    )
-                    if cost_result.amount_usd is not None:
-                        agent.session_estimated_cost_usd += float(cost_result.amount_usd)
-                    agent.session_cost_status = cost_result.status
-                    agent.session_cost_source = cost_result.source
-
-                    # Persist token counts to session DB for /insights.
-                    # Do this for every platform with a session_id so non-CLI
-                    # sessions (gateway, cron, delegated runs) cannot lose
-                    # token/accounting data if a higher-level persistence path
-                    # is skipped or fails. Gateway/session-store writes use
-                    # absolute totals, so they safely overwrite these per-call
-                    # deltas instead of double-counting them.
-                    if agent._session_db and agent.session_id:
-                        try:
-                            # Ensure the session row exists before attempting UPDATE.
-                            # Under concurrent load (cron/kanban), the initial
-                            # _ensure_db_session() may have failed due to SQLite
-                            # locking.  Retry here so per-call token deltas are
-                            # not silently lost (UPDATE on a non-existent row
-                            # affects 0 rows without error).
-                            if not agent._session_db_created:
-                                agent._ensure_db_session()
-                            agent._session_db.sessions.update_token_counts(
-                                agent.session_id,
-                                input_tokens=canonical_usage.input_tokens,
-                                output_tokens=canonical_usage.output_tokens,
-                                cache_read_tokens=canonical_usage.cache_read_tokens,
-                                cache_write_tokens=canonical_usage.cache_write_tokens,
-                                reasoning_tokens=canonical_usage.reasoning_tokens,
-                                estimated_cost_usd=float(cost_result.amount_usd)
-                                if cost_result.amount_usd is not None else None,
-                                cost_status=cost_result.status,
-                                cost_source=cost_result.source,
-                                billing_provider=agent.provider,
-                                billing_base_url=agent.base_url,
-                                billing_mode="subscription_included"
-                                if cost_result.status == "included" else None,
-                                model=agent.model,
-                                api_call_count=1,
-                            )
-                        except Exception as e:
-                            # Log token persistence failures so they're
-                            # visible in agent.log — silent loss here is
-                            # the root cause of undercounted analytics.
-                            logger.debug(
-                                "Token persistence failed (session=%s, tokens=%d): %s",
-                                agent.session_id, total_tokens, e,
-                            )
-                    
                     if agent.verbose_logging:
                         logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
                     

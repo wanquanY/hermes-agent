@@ -59,6 +59,38 @@ def test_tool_complete_emits_deleted_artifact_event(monkeypatch):
     assert events[0]["payload"]["origin"]["operation"] == "deleted"
 
 
+def test_tool_output_risk_event_never_contains_raw_result():
+    events = []
+    bridge = _bridge(events)
+
+    bridge.on_tool_progress(
+        "sid",
+        "tool.output_risk",
+        "web_extract",
+        tool_call_id="tool-risk",
+        risk_metadata={
+            "risk": "high",
+            "findings": ["prompt_injection"],
+            "redacted": False,
+        },
+    )
+
+    assert events == [
+        {
+            "type": "tool.output_risk",
+            "session_id": "sid",
+            "payload": {
+                "tool_id": "tool-risk",
+                "name": "web_extract",
+                "risk": "high",
+                "findings": ["prompt_injection"],
+                "redacted": False,
+            },
+        }
+    ]
+    assert "result" not in events[0]["payload"]
+
+
 def test_agent_profile_test_uses_dedicated_stream_events():
     events = []
     bridge = _bridge(events)

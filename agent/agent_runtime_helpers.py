@@ -1646,12 +1646,27 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 for tc in msg.get("tool_calls") or []:
                     cid = _ra().AIAgent._get_tool_call_id_static(tc)
                     if cid in missing_results:
-                        patched.append({
-                            "role": "tool",
-                            "name": _ra().AIAgent._get_tool_call_name_static(tc),
-                            "content": "[Result unavailable — see context summary above]",
-                            "tool_call_id": cid,
-                        })
+                        from agent.tool_dispatch_helpers import make_tool_result_message
+                        from agent.tool_result_classification import tool_may_have_side_effect
+
+                        name = _ra().AIAgent._get_tool_call_name_static(tc)
+                        disposition = (
+                            "unknown" if tool_may_have_side_effect(name) else "none"
+                        )
+                        content = (
+                            "[Result unavailable — this tool may have executed; "
+                            "inspect current state before retrying]"
+                            if disposition == "unknown"
+                            else "[Result unavailable — read-only tool had no effect]"
+                        )
+                        patched.append(
+                            make_tool_result_message(
+                                name,
+                                content,
+                                cid,
+                                effect_disposition=disposition,
+                            )
+                        )
         messages = patched
         _ra().logger.debug(
             "Pre-call sanitizer: added %d stub tool result(s)",

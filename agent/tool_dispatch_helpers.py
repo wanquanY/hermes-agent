@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
 )
+from tools.threat_patterns import scan_for_threats
 
 logger = logging.getLogger(__name__)
 
@@ -317,16 +318,82 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
-def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:
+def make_tool_result_message(
+    name: str,
+    content: Any,
+    tool_call_id: str,
+    *,
+    effect_disposition: str | None = None,
+) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
     ``tool_name`` field (written to the session DB messages table)."""
-    return {
+    if effect_disposition not in {None, "none", "unknown"}:
+        raise ValueError(
+            "effect_disposition must be one of: none, unknown, or None"
+        )
+    message = {
         "role": "tool",
         "name": name,
         "tool_name": name,
         "content": content,
         "tool_call_id": tool_call_id,
+    }
+    if effect_disposition is not None:
+        message["effect_disposition"] = effect_disposition
+    try:
+        risk_metadata = _tool_output_risk_metadata(name, content)
+    except Exception as exc:
+        logger.debug("Tool output risk scan failed for %s: %s", name, exc)
+    else:
+        if risk_metadata is not None:
+            message["_tool_output_risk"] = risk_metadata
+    return message
+
+
+_UNTRUSTED_TOOL_NAMES = frozenset({"web_extract", "web_search"})
+_UNTRUSTED_TOOL_PREFIXES = ("browser_", "mcp_")
+
+
+def _is_untrusted_tool(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return name in _UNTRUSTED_TOOL_NAMES or any(
+        name.startswith(prefix) for prefix in _UNTRUSTED_TOOL_PREFIXES
+    )
+
+
+def _tool_output_risk_metadata(
+    name: str,
+    content: Any,
+) -> Optional[Dict[str, Any]]:
+    """Classify external text without retaining it in advisory metadata."""
+    if not _is_untrusted_tool(name):
+        return None
+    if isinstance(content, str):
+        text_parts = [content]
+    elif isinstance(content, list):
+        text_parts = [
+            item["text"]
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        ]
+        if not text_parts:
+            return None
+    else:
+        return None
+
+    findings: List[str] = []
+    for text in text_parts:
+        for finding in scan_for_threats(text, scope="context"):
+            if finding not in findings:
+                findings.append(finding)
+    return {
+        "risk": "high" if findings else "low",
+        "findings": findings,
+        "redacted": False,
     }
 
 
@@ -346,5 +413,6 @@ __all__ = [
     "_extract_file_mutation_targets",
     "_extract_error_preview",
     "_trajectory_normalize_msg",
+    "_tool_output_risk_metadata",
     "make_tool_result_message",
 ]
