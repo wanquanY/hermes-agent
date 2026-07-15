@@ -4,10 +4,11 @@ import os
 
 import pytest
 
-import gateway.run as gateway_run
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+import hermes_gateway.runner as gateway_run
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
+from hermes_gateway.yolo_command import yolo_command_for
 from tools.approval import disable_session_yolo, is_session_yolo_enabled
 
 
@@ -48,14 +49,14 @@ async def test_yolo_command_toggles_only_current_session(monkeypatch):
     session_a = runner._session_key_for_source(event_a.source)
     session_b = runner._session_key_for_source(_make_event("chat-b").source)
 
-    result_on = await runner._handle_yolo_command(event_a)
+    result_on = await yolo_command_for(runner).handle_yolo_command(event_a)
 
     assert "ON" in result_on
     assert is_session_yolo_enabled(session_a) is True
     assert is_session_yolo_enabled(session_b) is False
     assert os.environ.get("HERMES_YOLO_MODE") is None
 
-    result_off = await runner._handle_yolo_command(event_a)
+    result_off = await yolo_command_for(runner).handle_yolo_command(event_a)
 
     assert "OFF" in result_off
     assert is_session_yolo_enabled(session_a) is False

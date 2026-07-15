@@ -37,7 +37,7 @@ class TestCronJobCleanup:
     def test_keyboard_interrupt_in_end_session_does_not_skip_close(self):
         """If end_session raises KeyboardInterrupt, close() must still run."""
         mock_db = MagicMock()
-        mock_db.end_session.side_effect = KeyboardInterrupt
+        mock_db.sessions.end.side_effect = KeyboardInterrupt
 
         from cron import scheduler
 
@@ -49,7 +49,7 @@ class TestCronJobCleanup:
             "model": "test/model",
         }
 
-        with patch("hermes_state.SessionDB", return_value=mock_db), \
+        with patch("cron.scheduler.open_cli_session_store", return_value=mock_db), \
              patch.object(scheduler, "_build_job_prompt", return_value="hello"), \
              patch.object(scheduler, "_resolve_origin", return_value=None), \
              patch.object(scheduler, "_resolve_delivery_target", return_value=None), \
@@ -59,7 +59,7 @@ class TestCronJobCleanup:
             MockAgent.return_value.run_conversation.side_effect = RuntimeError("boom")
             scheduler.run_job(job)
 
-        mock_db.end_session.assert_called_once()
+        mock_db.sessions.end.assert_called_once()
         mock_db.close.assert_called_once()
 
     def test_keyboard_interrupt_in_close_does_not_propagate(self):
@@ -77,7 +77,7 @@ class TestCronJobCleanup:
             "model": "test/model",
         }
 
-        with patch("hermes_state.SessionDB", return_value=mock_db), \
+        with patch("cron.scheduler.open_cli_session_store", return_value=mock_db), \
              patch.object(scheduler, "_build_job_prompt", return_value="hello"), \
              patch.object(scheduler, "_resolve_origin", return_value=None), \
              patch.object(scheduler, "_resolve_delivery_target", return_value=None), \
@@ -87,5 +87,5 @@ class TestCronJobCleanup:
             # Must not raise
             scheduler.run_job(job)
 
-        mock_db.end_session.assert_called_once()
+        mock_db.sessions.end.assert_called_once()
         mock_db.close.assert_called_once()

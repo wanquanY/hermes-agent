@@ -755,7 +755,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
         if name.startswith("hermes-"):
             platform_name = name[len("hermes-"):]
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 if platform_registry.is_registered(platform_name):
                     plugin_tools = set(_HERMES_CORE_TOOLS)
                     try:

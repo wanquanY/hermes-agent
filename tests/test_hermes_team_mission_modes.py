@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.modes import (
     MODE_AUTONOMOUS_MISSION,
     MODE_DISCUSSION,
@@ -250,7 +250,7 @@ def test_manual_graph_rejects_edges_that_reference_missing_nodes():
 
 
 def test_session_db_initializes_team_mission_through_mode_strategy(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     graph = db.initialize_team_mission_from_strategy(
         mission_id="mission-1",
@@ -270,7 +270,7 @@ def test_session_db_initializes_team_mission_through_mode_strategy(tmp_path: Pat
 
 
 def test_session_db_stores_dovie_member_runtime_profiles_for_team_mission(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     graph = db.initialize_team_mission_from_strategy(
         mission_id="mission-dovie",

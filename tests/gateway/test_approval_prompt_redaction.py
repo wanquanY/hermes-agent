@@ -1,6 +1,6 @@
 """Regression tests for approval prompt credential redaction."""
 
-from gateway.run import _redact_approval_command
+from hermes_gateway.runner import _redact_approval_command
 
 _FAKE_GHP = "ghp_" + "X" * 36
 _FAKE_OPENAI = "sk-proj-" + "X" * 40

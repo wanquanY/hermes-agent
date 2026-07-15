@@ -5,9 +5,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_navigation_commands import session_navigation_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 from tools import approval as approval_mod
 from tools import slash_confirm as slash_confirm_mod
 from tools.approval import (
@@ -66,7 +68,7 @@ def _make_entry(session_id: str, source: SessionSource | None = None) -> Session
 
 
 def _make_resume_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -93,7 +95,7 @@ def _make_resume_runner():
 
 
 def _make_branch_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -140,7 +142,7 @@ async def test_resume_clears_session_scoped_approval_and_yolo_state():
     runner._update_prompt_pending[session_key] = True
     runner._update_prompt_pending[other_key] = True
 
-    result = await runner._handle_resume_command(_make_event("/resume Resumed Work"))
+    result = await session_navigation_for(runner).handle_resume_command(_make_event("/resume Resumed Work"))
 
     assert "Resumed session" in result
     assert is_approved(session_key, "recursive delete") is False
@@ -173,7 +175,7 @@ async def test_branch_clears_session_scoped_approval_and_yolo_state():
     runner._update_prompt_pending[session_key] = True
     runner._update_prompt_pending[other_key] = True
 
-    result = await runner._handle_branch_command(_make_event("/branch"))
+    result = await session_navigation_for(runner).handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
     assert is_approved(session_key, "recursive delete") is False
@@ -205,10 +207,10 @@ async def test_branch_preserves_persisted_assistant_metadata():
         },
     ]
 
-    result = await runner._handle_branch_command(_make_event("/branch"))
+    result = await session_navigation_for(runner).handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
-    append_calls = runner._session_db.append_message.call_args_list
+    append_calls = runner._session_db.messages.append.call_args_list
     assert len(append_calls) == 2
     assistant_kwargs = append_calls[1].kwargs
     assert assistant_kwargs["role"] == "assistant"
@@ -226,7 +228,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     Also exercises the /new reset path indirectly: /new calls this helper,
     so if the helper is scoped correctly, /new's clearing is correct too.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._pending_approvals = {}
@@ -261,7 +263,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     slash_confirm_mod.register(session_key, "confirm-target", "reload-mcp", _target_handler)
     slash_confirm_mod.register(other_key, "confirm-other", "reload-mcp", _other_handler)
 
-    runner._clear_session_boundary_security_state(session_key)
+    session_runtime_state_for(runner).clear_session_boundary_security_state(session_key)
 
     # Target session cleared
     assert is_approved(session_key, "recursive delete") is False
@@ -279,7 +281,7 @@ def test_clear_session_boundary_security_state_is_scoped():
     assert slash_confirm_mod.get_pending(other_key) is not None
 
     # Empty session_key is a no-op
-    runner._clear_session_boundary_security_state("")
+    session_runtime_state_for(runner).clear_session_boundary_security_state("")
     assert is_approved(other_key, "recursive delete") is True
     assert other_key in runner._update_prompt_pending
     assert other_key in runner._pending_skills_reload_notes
@@ -288,7 +290,7 @@ def test_clear_session_boundary_security_state_is_scoped():
 
 def test_clear_session_boundary_security_state_wakes_blocked_approvals():
     """Boundary cleanup must cancel blocked approval waiters immediately."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._pending_approvals = {}
@@ -303,7 +305,7 @@ def test_clear_session_boundary_security_state_wakes_blocked_approvals():
     approval_mod._gateway_queues[session_key] = [target_entry]
     approval_mod._gateway_queues[other_key] = [other_entry]
 
-    runner._clear_session_boundary_security_state(session_key)
+    session_runtime_state_for(runner).clear_session_boundary_security_state(session_key)
 
     assert target_entry.event.is_set()
     assert target_entry.result == "deny"

@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _make_source() -> SessionSource:
@@ -37,7 +37,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(

@@ -21,7 +21,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent.conversation_loop import _restore_or_build_system_prompt
+from agent.conversation_loop import (
+    _restore_or_build_system_prompt,
+    _system_prompt_execution_scope_key,
+)
 
 
 def _make_agent(session_db=None, prebuilt_prompt: str = "BUILT_PROMPT"):
@@ -30,11 +33,21 @@ def _make_agent(session_db=None, prebuilt_prompt: str = "BUILT_PROMPT"):
     agent._cached_system_prompt = None
     agent.session_id = "test-session-id"
     agent.model = "test-model"
+    agent.provider = "test-provider"
+    agent.valid_tool_names = set()
+    agent._tool_use_enforcement = "auto"
     agent.platform = "cli"
     agent._session_db = session_db
     agent.run_context = None
     agent._run_context = None
     agent._build_system_prompt = MagicMock(return_value=prebuilt_prompt)
+    if session_db is not None:
+        # Production SessionDB exposes ordinary prompt persistence through the
+        # ``sessions`` component; retain the older assertions as call probes.
+        session_db.sessions.get.side_effect = session_db.get_session
+        session_db.sessions.update_system_prompt.side_effect = (
+            session_db.update_system_prompt
+        )
     return agent
 
 
@@ -243,6 +256,41 @@ class TestPromptStabilityInvariant:
 
 
 class TestExecutionScopedPromptReuse:
+    def test_scoped_prompt_cache_key_changes_with_prompt_tool_surface(self):
+        agent = _make_agent()
+        agent.run_context = SimpleNamespace(
+            conversation_session_id=agent.session_id,
+            execution_scope_key="member-chat:test-session-id:frontend",
+        )
+
+        without_tools = _system_prompt_execution_scope_key(agent)
+        agent.valid_tool_names = {"team_mission_status"}
+        with_tools = _system_prompt_execution_scope_key(agent)
+
+        assert without_tools.startswith(
+            "member-chat:test-session-id:frontend:prompt-v1:"
+        )
+        assert with_tools.startswith(
+            "member-chat:test-session-id:frontend:prompt-v1:"
+        )
+        assert with_tools != without_tools
+
+    def test_scoped_prompt_cache_key_changes_with_profile_version(self):
+        agent = _make_agent()
+        agent.run_context = SimpleNamespace(
+            conversation_session_id=agent.session_id,
+            execution_scope_key="team:test-session-id:leader-conversation",
+            profile_id="leader-profile",
+            profile_version_id="version-1",
+            execution_home="/tmp/leader-profile",
+        )
+
+        version_one = _system_prompt_execution_scope_key(agent)
+        agent.run_context.profile_version_id = "version-2"
+        version_two = _system_prompt_execution_scope_key(agent)
+
+        assert version_one != version_two
+
     def test_scoped_run_reuses_scoped_prompt_not_transcript_prompt(self):
         db = MagicMock()
         db.get_scoped_system_prompt.return_value = "FRONTEND_SCOPED_PROMPT"
@@ -251,13 +299,14 @@ class TestExecutionScopedPromptReuse:
             conversation_session_id=agent.session_id,
             execution_scope_key="member-chat:test-session-id:frontend",
         )
+        prompt_scope_key = _system_prompt_execution_scope_key(agent)
 
         _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
 
         assert agent._cached_system_prompt == "FRONTEND_SCOPED_PROMPT"
         db.get_scoped_system_prompt.assert_called_once_with(
             agent.session_id,
-            "member-chat:test-session-id:frontend",
+            prompt_scope_key,
         )
         db.get_session.assert_not_called()
         agent._build_system_prompt.assert_not_called()
@@ -271,6 +320,7 @@ class TestExecutionScopedPromptReuse:
             conversation_session_id=agent.session_id,
             execution_scope_key="member-chat:test-session-id:frontend",
         )
+        prompt_scope_key = _system_prompt_execution_scope_key(agent)
 
         _restore_or_build_system_prompt(agent, None, [{"role": "user", "content": "hi"}])
 
@@ -278,7 +328,7 @@ class TestExecutionScopedPromptReuse:
         agent._build_system_prompt.assert_called_once_with(None)
         db.update_scoped_system_prompt.assert_called_once_with(
             agent.session_id,
-            "member-chat:test-session-id:frontend",
+            prompt_scope_key,
             "BUILT_PROMPT",
         )
         db.update_system_prompt.assert_not_called()

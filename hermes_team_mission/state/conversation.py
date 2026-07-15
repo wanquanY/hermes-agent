@@ -5,11 +5,14 @@ import sqlite3
 import time
 from typing import Any, Dict
 
+from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.repositories.message_content_codec import decode_message_content
+from hermes_agent.repositories.message_repo import MessageRepoImpl
+from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_team_mission.domain.utils import text as _text
 
 _PLACEHOLDER_TEAM_CONVERSATION_TITLES = {"", "Team Mission", "团队会话"}
 _ACTIVE_RUN_STATUS_SQL = "'cancelling','finalizing','queued','running','starting','waiting_approval'"
-_EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS = 300.0
 
 
 def is_placeholder_team_mission_conversation_title(title: Any) -> bool:
@@ -27,8 +30,8 @@ def team_mission_conversation_history_sql(table_name: str = "team_mission_conver
     return (
         f"(EXISTS (SELECT 1 FROM conversation_missions cm WHERE cm.conversation_id = {table_name}.conversation_id AND cm.status = 'active' LIMIT 1) "
         f"OR EXISTS (SELECT 1 FROM team_missions tm WHERE tm.conversation_id = {table_name}.conversation_id LIMIT 1) "
-        f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.stable_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) "
-        f"OR EXISTS (SELECT 1 FROM runs hist_r WHERE hist_r.session_id = {table_name}.stable_session_id AND hist_r.status IN ({_ACTIVE_RUN_STATUS_SQL}) LIMIT 1))"
+        f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.conversation_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) "
+        f"OR EXISTS (SELECT 1 FROM runs hist_r WHERE hist_r.session_id = {table_name}.conversation_session_id AND hist_r.status IN ({_ACTIVE_RUN_STATUS_SQL}) LIMIT 1))"
     )
 
 
@@ -97,10 +100,10 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
     # 比 sessions 行活得久 —— 团队会话删除曾清了正式表却漏清索引,导致侧栏一直显示
     # 一个删不掉的「幽灵会话」,点开还报 "did not return canonical conversation id"。
     # 所以无条件按 session_id 清索引,即使 sessions 表里已经没有对应行。
-    conn.execute(
-        f"DELETE FROM session_index WHERE session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
+    session_repo = SessionRepoImpl(conn)
+    message_repo = MessageRepoImpl(conn)
+    for session_id in ordered_ids:
+        session_repo.delete_index(session_id)
     existing_ids = {
         _text(row["id"])
         for row in conn.execute(
@@ -111,34 +114,10 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
     }
     if not existing_ids:
         return []
-    conn.execute(
-        f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
-    conn.execute(
-        f"UPDATE session_lineage SET parent_session_id = NULL WHERE parent_session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
-    conn.execute(
-        f"""
-        DELETE FROM session_branch_requests
-        WHERE source_session_id IN ({placeholders})
-           OR result_session_id IN ({placeholders})
-        """,
-        tuple(ordered_ids + ordered_ids),
-    )
-    conn.execute(
-        f"DELETE FROM session_lineage WHERE session_id IN ({placeholders})",
-        tuple(ordered_ids),
-    )
-    conn.execute(
-        f"""
-        DELETE FROM run_events
-        WHERE session_id IN ({placeholders})
-           OR runtime_session_id IN ({placeholders})
-        """,
-        tuple(ordered_ids + ordered_ids),
-    )
+    for session_id in ordered_ids:
+        session_repo.orphan_child_references(session_id)
+        session_repo.delete_branch_references(session_id)
+    EventLedger(conn).delete_sessions(ordered_ids)
     conn.execute(
         f"DELETE FROM run_event_archives WHERE session_id IN ({placeholders})",
         tuple(ordered_ids),
@@ -147,18 +126,18 @@ def _delete_session_rows(conn: sqlite3.Connection, session_ids: list[str]) -> li
         f"""
         DELETE FROM runs
         WHERE session_id IN ({placeholders})
-           OR runtime_session_id IN ({placeholders})
+           OR execution_session_id IN ({placeholders})
         """,
         tuple(ordered_ids + ordered_ids),
     )
-    conn.execute("DELETE FROM messages WHERE session_id IN ({})".format(placeholders), tuple(ordered_ids))
-    conn.execute("DELETE FROM sessions WHERE id IN ({})".format(placeholders), tuple(ordered_ids))
+    for session_id in ordered_ids:
+        message_repo.delete_by_session(session_id)
+        session_repo.delete_row(session_id)
     return [session_id for session_id in ordered_ids if session_id in existing_ids]
 
 
 def _message_title(db: Any, content: Any) -> str:
-    decoder = getattr(db, "_decode_content", None)
-    decoded = decoder(content) if callable(decoder) else content
+    decoded = decode_message_content(content)
     if isinstance(decoded, list):
         parts: list[str] = []
         for item in decoded:
@@ -175,7 +154,7 @@ def _message_title(db: Any, content: Any) -> str:
     if not text:
         return ""
     try:
-        return db.sanitize_title(text[:100]) or ""
+        return db.sessions.sanitize_title(text[:100]) or ""
     except Exception:
         return ""
 
@@ -237,18 +216,18 @@ def team_mission_conversation_message_page(
     limit: int = 100,
 ) -> Dict[str, Any]:
     conversation = conversation if isinstance(conversation, dict) else {}
-    stable_session_id = _text(
-        conversation.get("stable_session_id")
-        or conversation.get("stableSessionId")
+    conversation_session_id = _text(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
     )
-    if not stable_session_id:
+    if not conversation_session_id:
         return {
             "messages": [],
             "pageInfo": _message_page_info({}),
         }
     try:
-        page = db.get_messages_page_as_conversation(
-            stable_session_id,
+        page = db.messages.page_as_conversation(
+            conversation_session_id,
             direction="tail",
             limit=limit,
             include_ancestors=False,
@@ -287,18 +266,18 @@ def normalize_team_mission_conversation_session(
     )
     if not team_context:
         return {}
-    stable_session_id = session_id
+    conversation_session_id = session_id
     conversation_id = _text(
         team_context.get("conversation_id")
         or team_context.get("conversationId")
-        or stable_session_id
+        or conversation_session_id
     )
     if not conversation_id:
         return {}
-    existing_session = db.get_session(stable_session_id) or {}
+    existing_session = db.sessions.get(conversation_session_id) or {}
     conversation = db.ensure_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=stable_session_id,
+        conversation_session_id=conversation_session_id,
         mission_id=_text(team_context.get("mission_id") or team_context.get("missionId")),
         team_id=_text(team_context.get("team_id") or team_context.get("teamId")),
         title=_text(title or existing_session.get("title") or team_context.get("title")),
@@ -307,14 +286,12 @@ def normalize_team_mission_conversation_session(
         metadata={
             **team_context,
             "conversation_id": conversation_id,
-            "conversation_session_id": stable_session_id,
-            "stableTeamSessionId": stable_session_id,
+            "conversation_session_id": conversation_session_id,
+            "conversationTeamSessionId": conversation_session_id,
         },
     )
 
-    updater = getattr(db, "update_session_source", None)
-    if callable(updater):
-        updater(stable_session_id, "team_mission")
+    db.sessions.update_source(conversation_session_id, "team_mission")
     return conversation
 
 
@@ -358,18 +335,18 @@ def repair_placeholder_team_mission_conversation_titles(db: Any, *, limit: int =
         rows = db._conn.execute(
             """
             SELECT c.conversation_id AS conversation_id,
-                   c.stable_session_id AS stable_session_id,
+                   c.conversation_session_id AS conversation_session_id,
                    c.metadata_json AS metadata_json,
                    m.content AS content
             FROM team_mission_conversations c
-            INNER JOIN messages m ON m.session_id = c.stable_session_id
+            INNER JOIN messages m ON m.session_id = c.conversation_session_id
             WHERE COALESCE(c.title, '') IN ('', 'Team Mission', '团队会话')
               AND m.active = 1
               AND m.role = 'user'
               AND m.id = (
                   SELECT first_m.id
                   FROM messages first_m
-                  WHERE first_m.session_id = c.stable_session_id
+                  WHERE first_m.session_id = c.conversation_session_id
                     AND first_m.active = 1
                     AND first_m.role = 'user'
                   ORDER BY first_m.timestamp ASC, first_m.id ASC
@@ -398,14 +375,14 @@ def repair_placeholder_team_mission_conversation_titles(db: Any, *, limit: int =
             title,
             json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             conversation_id,
-            _text(_row_value(row, "stable_session_id", "")),
+            _text(_row_value(row, "conversation_session_id", "")),
         ))
     if not updates:
         return 0
 
     def _do(conn: sqlite3.Connection) -> int:
         repaired = 0
-        for title, metadata_json, conversation_id, _stable_session_id in updates:
+        for title, metadata_json, conversation_id, _conversation_session_id in updates:
             cursor = conn.execute(
                 """
                 UPDATE team_mission_conversations
@@ -421,103 +398,6 @@ def repair_placeholder_team_mission_conversation_titles(db: Any, *, limit: int =
     return db._execute_write(_do) or 0
 
 
-def prune_empty_team_mission_conversations(
-    db: Any,
-    *,
-    limit: int = 5000,
-    min_age_seconds: float = _EMPTY_TEAM_CONVERSATION_PRUNE_GRACE_SECONDS,
-) -> int:
-    bounded_limit = max(1, min(int(limit or 5000), 10000))
-    cutoff = time.time() - max(0.0, float(min_age_seconds or 0.0))
-    with db._lock:
-        rows = db._conn.execute(
-            """
-            SELECT c.conversation_id AS conversation_id,
-                   c.stable_session_id AS stable_session_id
-            FROM team_mission_conversations c
-            WHERE COALESCE(c.updated_at, c.created_at, 0) <= ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM conversation_missions cm
-                  WHERE cm.conversation_id = c.conversation_id
-                    AND cm.status = 'active'
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM team_missions tm
-                  WHERE tm.conversation_id = c.conversation_id
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM messages m
-                  WHERE m.session_id = c.stable_session_id
-                    AND m.active = 1
-                  LIMIT 1
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM runs r
-                  WHERE r.session_id = c.stable_session_id
-                    AND r.status IN ('cancelling','finalizing','queued','running','starting','waiting_approval')
-                  LIMIT 1
-              )
-            ORDER BY c.updated_at DESC, c.conversation_id ASC
-            LIMIT ?
-            """,
-            (cutoff, bounded_limit),
-        ).fetchall()
-    conversation_ids = [
-        _text(_row_value(row, "conversation_id", ""))
-        for row in rows
-        if _text(_row_value(row, "conversation_id", ""))
-    ]
-    if not conversation_ids:
-        return 0
-    stable_session_ids = [
-        _text(_row_value(row, "stable_session_id", ""))
-        for row in rows
-        if _text(_row_value(row, "stable_session_id", ""))
-    ]
-
-    def _do(conn: sqlite3.Connection) -> int:
-        placeholders = ",".join("?" for _ in conversation_ids)
-        conn.execute(
-            f"DELETE FROM team_mission_conversations WHERE conversation_id IN ({placeholders})",
-            tuple(conversation_ids),
-        )
-        conn.execute(
-            f"DELETE FROM session_index WHERE conversation_id IN ({placeholders})",
-            tuple(conversation_ids),
-        )
-        if stable_session_ids:
-            session_placeholders = ",".join("?" for _ in stable_session_ids)
-            conn.execute(
-                f"DELETE FROM session_index WHERE session_id IN ({session_placeholders})",
-                tuple(stable_session_ids),
-            )
-            conn.execute(
-                f"""
-                DELETE FROM sessions
-                WHERE id IN ({session_placeholders})
-                  AND source = 'team_mission'
-                  AND COALESCE(message_count, 0) = 0
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM messages m
-                      WHERE m.session_id = sessions.id
-                        AND m.active = 1
-                      LIMIT 1
-                  )
-                """,
-                tuple(stable_session_ids),
-            )
-        return len(conversation_ids)
-
-    return db._execute_write(_do) or 0
-
-
 def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Dict[str, Any]:
     identifier = _text(identifier)
     title = _text(title)
@@ -527,12 +407,12 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
     conversation_id = _text(conversation.get("conversation_id"))
     if not conversation_id:
         return {}
-    stable_session_id = _text(conversation.get("stable_session_id"))
-    cleaned_title = db.sanitize_title(title)
+    conversation_session_id = _text(conversation.get("conversation_session_id"))
+    cleaned_title = db.sessions.sanitize_title(title)
     if not cleaned_title:
         return {}
-    if stable_session_id and not db.get_session(stable_session_id):
-        db.create_session(stable_session_id, source="team_mission", transient=False)
+    if conversation_session_id and not db.sessions.get(conversation_session_id):
+        db.sessions.create(conversation_session_id, source="team_mission", transient=False)
 
     updated_at = time.time()
 
@@ -551,7 +431,7 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
             """,
             (cleaned_title, json.dumps(metadata, ensure_ascii=False, sort_keys=True), updated_at, conversation_id),
         )
-        return db._team_mission_conversation_from_row(conn.execute(
+        return db.team_mission_rows.conversation_from_row(conn.execute(
             "SELECT * FROM team_mission_conversations WHERE conversation_id = ?",
             (conversation_id,),
         ).fetchone()) or {}
@@ -560,7 +440,7 @@ def rename_team_mission_conversation(db: Any, identifier: str, title: str) -> Di
     return {
         "conversation": renamed,
         "conversation_id": conversation_id,
-        "stable_session_id": stable_session_id,
+        "conversation_session_id": conversation_session_id,
         "title": cleaned_title,
     }
 
@@ -571,7 +451,7 @@ def _delete_orphan_team_conversation_index(db: Any, identifier: str) -> Dict[str
     当 team_mission_conversations / team_missions / sessions 都已删除,但
     session_index 行还在时,resolve_team_mission_conversation 找不到正式会话,
     删除流程会整体放弃 → 这个会话在侧栏删不掉、还报错。这里按 identifier
-    (可能是 conversation_id 或 stable_session_id)直接清掉残留索引行,以及
+    (可能是 conversation_id 或 conversation_session_id)直接清掉残留索引行,以及
     万一还在的 session 残行。
     """
     identifier = _text(identifier)
@@ -602,7 +482,7 @@ def _delete_orphan_team_conversation_index(db: Any, identifier: str) -> Dict[str
     return {
         "deleted": True,
         "conversation_id": identifier if identifier.startswith("team-conversation") else "",
-        "stable_session_id": "",
+        "conversation_session_id": "",
         "mission_ids": [],
         "run_session_ids": [],
         "deleted_session_ids": cleaned,
@@ -620,7 +500,7 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
     if not conversation_id:
         # 正式会话已不存在,但去规范化索引可能仍残留 → 清掉幽灵,别直接放弃。
         return _delete_orphan_team_conversation_index(db, identifier)
-    stable_session_id = _text((conversation or {}).get("stable_session_id"))
+    conversation_session_id = _text((conversation or {}).get("conversation_session_id"))
     with db._lock:
         mission_ids = [
             _text(row["mission_id"])
@@ -638,7 +518,7 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
             placeholders = ",".join("?" for _ in mission_ids)
             binding_rows = db._conn.execute(
                 f"""
-                SELECT DISTINCT session_id, runtime_session_id
+                SELECT DISTINCT session_id, execution_session_id
                 FROM team_mission_run_bindings
                 WHERE mission_id IN ({placeholders})
                 """,
@@ -648,37 +528,18 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
             binding_rows = []
     run_session_ids: list[str] = []
     for row in binding_rows:
-        for key in ("session_id", "runtime_session_id"):
+        for key in ("session_id", "execution_session_id"):
             value = _text(_row_value(row, key, ""))
             if value and value not in run_session_ids:
                 run_session_ids.append(value)
     session_ids_to_delete = [
-        session_id for session_id in [stable_session_id, *run_session_ids] if session_id
+        session_id for session_id in [conversation_session_id, *run_session_ids] if session_id
     ]
 
     def _do(conn: sqlite3.Connection) -> list[str]:
         if mission_ids:
             placeholders = ",".join("?" for _ in mission_ids)
-            memory_ids = [
-                _text(row["id"])
-                for row in conn.execute(
-                    f"SELECT id FROM team_mission_memory_items WHERE mission_id IN ({placeholders})",
-                    tuple(mission_ids),
-                ).fetchall()
-                if _text(row["id"])
-            ]
-            if memory_ids:
-                memory_placeholders = ",".join("?" for _ in memory_ids)
-                conn.execute(
-                    f"""
-                    DELETE FROM team_mission_memory_edges
-                    WHERE from_memory_id IN ({memory_placeholders})
-                       OR to_memory_id IN ({memory_placeholders})
-                    """,
-                    tuple(memory_ids + memory_ids),
-                )
             for table in (
-                "team_mission_memory_items",
                 "team_mission_artifacts",
                 "team_mission_run_bindings",
                 "team_mission_edges",
@@ -696,7 +557,7 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
     return {
         "deleted": True,
         "conversation_id": conversation_id,
-        "stable_session_id": stable_session_id,
+        "conversation_session_id": conversation_session_id,
         "mission_ids": mission_ids,
         "run_session_ids": run_session_ids,
         "deleted_session_ids": deleted_session_ids,

@@ -1,18 +1,18 @@
 import json
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_path: Path):
-    from hermes_state import SCHEMA_VERSION
+    from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
 
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     try:
         db.upsert_team_mission_conversation(
             conversation_id="conversation-legacy",
-            stable_session_id="team-session-legacy",
+            conversation_session_id="team-session-legacy",
             team_id="team-1",
             active_mission_id="mission-legacy",
             title="Legacy Mission",
@@ -62,7 +62,7 @@ def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_pat
     finally:
         db.close()
 
-    migrated = SessionDB(db_path)
+    migrated = open_cli_session_store(db_path)
     try:
         row = migrated._conn.execute(  # noqa: SLF001 - migration contract assertion.
             """
@@ -84,14 +84,14 @@ def test_schema_migration_compacts_legacy_conversation_status_event_json(tmp_pat
         assert "final_deliverables" not in projection
         assert len(row["event_json"]) < len(legacy_event_json) // 3
         version = migrated._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]  # noqa: SLF001
-        assert version == SCHEMA_VERSION
+        assert version == CURRENT_SCHEMA_VERSION
     finally:
         migrated.close()
 
 
 def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     try:
         db.upsert_team_mission(
             mission_id="mission-done",
@@ -105,17 +105,17 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-done",
-            stable_session_id="team-session-done",
+            conversation_session_id="team-session-done",
             team_id="team-1",
             active_mission_id="mission-done",
             title="Done Mission",
         )
-        db.upsert_run(
+        db.runs.upsert(
             run_id="leader-run-done",
             session_id="team-session-done",
             status="completed",
         )
-        db.upsert_session_index(
+        db.session_index.upsert(
             session_id="team-session-done",
             session_kind="team_mission",
             conversation_kind="team",
@@ -124,7 +124,7 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
             running=True,
             status="running",
             active_run_id="leader-run-done",
-            active_runtime_session_id="runtime-done",
+            active_execution_session_id="runtime-done",
             started_at=1.0,
             updated_at=2.0,
         )
@@ -138,15 +138,46 @@ def test_startup_maintenance_repairs_terminal_team_session_stale_running(tmp_pat
     finally:
         db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
     try:
         healed = reopened._conn.execute(  # noqa: SLF001 - startup maintenance contract.
-            "SELECT running, status, active_run_id, active_runtime_session_id FROM session_index WHERE session_id = ?",
+            "SELECT running, status, active_run_id, active_execution_session_id FROM session_index WHERE session_id = ?",
             ("team-session-done",),
         ).fetchone()
         assert int(healed["running"]) == 0
         assert healed["status"] == "idle"
         assert healed["active_run_id"] == ""
-        assert healed["active_runtime_session_id"] == ""
+        assert healed["active_execution_session_id"] == ""
+    finally:
+        reopened.close()
+
+
+def test_startup_maintenance_preserves_valid_empty_team_conversation(tmp_path: Path):
+    db_path = tmp_path / "state.db"
+    db = open_cli_session_store(db_path)
+    try:
+        db.upsert_team_mission_conversation(
+            conversation_id="conversation-empty",
+            conversation_session_id="team-session-empty",
+            team_id="team-1",
+            title="Prepared Conversation",
+        )
+        db._conn.execute(  # noqa: SLF001 - simulate an old but valid prepared row.
+            """
+            UPDATE team_mission_conversations
+               SET created_at = 1, updated_at = 1
+             WHERE conversation_id = ?
+            """,
+            ("conversation-empty",),
+        )
+        db._conn.commit()  # noqa: SLF001
+    finally:
+        db.close()
+
+    reopened = open_cli_session_store(db_path)
+    try:
+        conversation = reopened.get_team_mission_conversation("conversation-empty")
+        assert conversation is not None
+        assert conversation["conversation_session_id"] == "team-session-empty"
     finally:
         reopened.close()

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 def _run_auxiliary_bridge(config_dict, monkeypatch):
     """Simulate the auxiliary config → env var bridging logic shared by CLI and gateway.
 
-    This mirrors the code in cli.py load_cli_config() and gateway/run.py.
+    This mirrors the code in cli.py load_cli_config() and hermes_gateway/runner.py.
     Both use the same pattern; we test it once here.
     """
     # Clear env vars
@@ -195,7 +195,7 @@ class TestAuxiliaryConfigBridge:
 
 
 class TestGatewayBridgeCodeParity:
-    """Verify the gateway/run.py config bridge contains the auxiliary section."""
+    """Verify the hermes_gateway/runner.py config bridge contains the auxiliary section."""
 
     def test_gateway_has_auxiliary_bridge(self):
         """The gateway config bridge must include auxiliary.* bridging."""

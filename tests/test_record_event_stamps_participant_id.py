@@ -5,14 +5,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SCHEMA_VERSION, SessionDB
+from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from tui_gateway.services import run_control
 
 
-def _db(tmp_path: Path, session_id: str = "conv-1") -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id, source="team_mission", transient=False)
+def _db(tmp_path: Path, session_id: str = "conv-1") -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id, source="team_mission", transient=False)
     return db
 
 
@@ -38,7 +39,7 @@ def _event(run_id: str = "run-1", **extra: Any) -> dict[str, Any]:
     return {
         "type": "message.complete",
         "session_id": "conv-1",
-        "stored_session_id": "conv-1",
+        "conversation_session_id": "conv-1",
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": 1,
@@ -57,7 +58,7 @@ def test_run_events_schema_has_participant_id_column(tmp_path: Path):
         assert columns["participant_id"]["type"] == "TEXT"
         assert columns["participant_id"]["notnull"] == 1
         version = db._conn.execute("SELECT version FROM schema_version").fetchone()["version"]  # noqa: SLF001
-        assert version == SCHEMA_VERSION
+        assert version == CURRENT_SCHEMA_VERSION
     finally:
         db.close()
 
@@ -65,7 +66,7 @@ def test_run_events_schema_has_participant_id_column(tmp_path: Path):
 def test_append_run_event_writes_participant_id(tmp_path: Path):
     db = _db(tmp_path)
     try:
-        db.append_run_event("conv-1", _event(), participant_id="member:alice")
+        db.runs.append_event("conv-1", _event(), participant_id="member:alice")
 
         row = db._conn.execute(  # noqa: SLF001
             "SELECT participant_id, event_json FROM run_events WHERE session_id = ?",
@@ -73,7 +74,7 @@ def test_append_run_event_writes_participant_id(tmp_path: Path):
         ).fetchone()
         assert row["participant_id"] == "member:alice"
         assert json.loads(row["event_json"])["participant_id"] == "member:alice"
-        assert db.list_run_events("conv-1")[0]["payload"]["participant_id"] == "member:alice"
+        assert db.runs.list_events("conv-1")[0]["payload"]["participant_id"] == "member:alice"
     finally:
         db.close()
 
@@ -83,7 +84,7 @@ def test_record_event_extracts_participant_id_from_run_context(tmp_path: Path):
     try:
         run_control.record_event(_event(), db=db, run_context=_context(participant_id="member:alice"))
 
-        stored = db.list_run_events("conv-1", run_id="run-1")[0]
+        stored = db.runs.list_events("conv-1", run_id="run-1")[0]
         assert stored["participant_id"] == "member:alice"
         assert stored["participantId"] == "member:alice"
         assert stored["payload"]["participant_id"] == "member:alice"
@@ -103,7 +104,7 @@ def test_record_event_falls_back_to_scope_member_id_for_member_chat(tmp_path: Pa
             db=db,
         )
 
-        stored = db.list_run_events("conv-1", run_id="run-member")[0]
+        stored = db.runs.list_events("conv-1", run_id="run-member")[0]
         assert stored["participant_id"] == "member:member-bob"
         assert stored["payload"]["participant_id"] == "member:member-bob"
     finally:
@@ -155,19 +156,19 @@ def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: P
 
     db = _db(tmp_path, "team-session-1")
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="member reply",
             participant_id="member:renderer",
             metadata={"run_id": "run-render", "turn_id": "turn-render"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 **_event("run-render"),
                 "session_id": "team-session-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "turn_id": "turn-render",
             },
             participant_id="member:renderer",
@@ -183,7 +184,7 @@ def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: P
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-1",
-                        "stable_session_id": "team-session-1",
+                        "conversation_session_id": "team-session-1",
                     },
                     "mission": {},
                     "team": {},
@@ -213,18 +214,18 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
 
     db = _db(tmp_path, "team-session-legacy")
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-legacy",
             role="assistant",
             content="legacy reply",
             metadata={"run_id": "run-legacy", "turn_id": "turn-legacy"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-legacy",
             {
                 **_event("run-legacy"),
                 "session_id": "team-session-legacy",
-                "stored_session_id": "team-session-legacy",
+                "conversation_session_id": "team-session-legacy",
                 "turn_id": "turn-legacy",
             },
         )
@@ -239,7 +240,7 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-legacy",
-                        "stable_session_id": "team-session-legacy",
+                        "conversation_session_id": "team-session-legacy",
                     },
                     "mission": {},
                     "team": {},

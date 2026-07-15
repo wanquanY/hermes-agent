@@ -14,8 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.platforms.base import MessageType
+from hermes_gateway.config import PlatformConfig
+from channels.platforms.base import MessageType
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,8 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-import gateway.platforms.discord as discord_platform  # noqa: E402
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+import channels.platforms.discord as discord_platform  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ class FakeThread:
 def _redirect_cache(tmp_path, monkeypatch):
     """Point document cache to tmp_path so tests never write to ~/.hermes."""
     monkeypatch.setattr(
-        "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
+        "channels.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
 
 
@@ -371,7 +371,7 @@ class TestIncomingDocumentHandling:
     async def test_image_attachment_unaffected(self, adapter):
         """Image attachments should still go through the image path, not the document path."""
         with patch(
-            "gateway.platforms.discord.cache_image_from_url",
+            "channels.platforms.discord.cache_image_from_url",
             new_callable=AsyncMock,
             return_value="/tmp/cached_image.png",
         ):
@@ -391,7 +391,7 @@ class TestAllowAnyAttachment:
 
     With the flag off (default), unknown file types are dropped. With it on,
     they get cached and surfaced to the agent as DOCUMENT events with
-    application/octet-stream MIME so gateway/run.py emits a path-pointing
+    application/octet-stream MIME so hermes_gateway/runner.py emits a path-pointing
     context note.
     """
 

@@ -9,6 +9,7 @@ SUBAGENT_SNAPSHOT_EVENT_TYPES = (
     "subagent.start",
     "subagent.tool",
     "subagent.progress",
+    "subagent.output_delta",
     "subagent.reasoning_delta",
     "subagent.thinking",
     "subagent.complete",
@@ -92,7 +93,7 @@ def compact_subagent_detail_events(events: list[dict[str, Any]]) -> list[dict[st
 def build_subagent_run_snapshots(
     events: list[dict[str, Any]],
     *,
-    stored_session_id: str = "",
+    conversation_session_id: str = "",
 ) -> list[dict[str, Any]]:
     runs: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -107,7 +108,7 @@ def build_subagent_run_snapshots(
             continue
         snapshot = runs.get(subagent_id)
         if snapshot is None:
-            snapshot = _new_snapshot(event, payload, subagent_id, stored_session_id)
+            snapshot = _new_snapshot(event, payload, subagent_id, conversation_session_id)
             runs[subagent_id] = snapshot
         _apply_snapshot_event(snapshot, event, payload)
     return sorted(
@@ -124,11 +125,11 @@ def _new_snapshot(
     event: dict[str, Any],
     payload: dict[str, Any],
     subagent_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
 ) -> dict[str, Any]:
     session_id = str(
-        stored_session_id
-        or event.get("stored_session_id")
+        conversation_session_id
+        or event.get("conversation_session_id")
         or event.get("session_id")
         or ""
     ).strip()
@@ -136,7 +137,7 @@ def _new_snapshot(
         "id": subagent_id,
         "subagent_id": subagent_id,
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "runtime_scope_key": str(
             event.get("runtime_scope_key")
             or event.get("runtimeScopeKey")
@@ -191,6 +192,8 @@ def _new_snapshot(
             payload.get("icon"),
         ),
         "summary": "",
+        "output_snapshot": {"text": "", "last_seq": 0},
+        "reasoning_snapshot": {"text": "", "last_seq": 0},
         "metrics": {
             "duration_ms": 0,
             "tokens": 0,
@@ -223,6 +226,11 @@ def _apply_snapshot_event(
         snapshot["updated_at"] = max(_float(snapshot.get("updated_at"), 0.0), at)
 
     _merge_identity(snapshot, payload)
+
+    if event_type == "subagent.output_delta":
+        _apply_text_snapshot(snapshot, "output_snapshot", payload, seq)
+    elif event_type == "subagent.reasoning_delta":
+        _apply_text_snapshot(snapshot, "reasoning_snapshot", payload, seq)
 
     if event_type == "subagent.spawn_requested":
         if snapshot.get("status") not in _TERMINAL_STATUSES:
@@ -300,6 +308,31 @@ def _merge_identity(snapshot: dict[str, Any], payload: dict[str, Any]) -> None:
     toolsets = _text_list(payload.get("toolsets") or payload.get("tool_sets") or payload.get("tools"))
     if toolsets:
         snapshot["toolsets"] = toolsets
+
+
+def _apply_text_snapshot(
+    snapshot: dict[str, Any],
+    field: str,
+    payload: dict[str, Any],
+    seq: int,
+) -> None:
+    state = snapshot.get(field) if isinstance(snapshot.get(field), dict) else {}
+    existing = str(state.get("text") or "")
+    incoming = str(
+        payload.get("snapshot")
+        or payload.get("delta")
+        or payload.get("text")
+        or payload.get("output")
+        or ""
+    )
+    if not incoming:
+        return
+    mode = str(payload.get("mode") or "append").strip().lower()
+    text = incoming if mode in {"snapshot", "replace", "cumulative"} else existing + incoming
+    snapshot[field] = {
+        "text": text,
+        "last_seq": max(_int(state.get("last_seq"), 0), seq),
+    }
 
 
 def _text(*values: Any) -> str:

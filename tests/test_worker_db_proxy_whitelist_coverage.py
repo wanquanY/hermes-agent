@@ -30,16 +30,22 @@ IGNORED_DB_METHOD_NAMES = {
 # Existing worker IPC surface kept intentionally even though no current worker
 # code path calls these methods through a statically visible DB handle.
 EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
-    "create_activity",
-    "get_activity_for_mission",
-    "get_session_index",
-    "get_unread_completion_count",
-    "list_active_mission_activities",
-    "list_activities",
+    "activities.create",
+    "activities.insert_command",
+    "complete_team_mission_plan",
+    "activities.get_for_mission",
+    "get_message_by_conversation_message_id",
+    "session_index.get",
+    "activities.unread_count",
+    "activities.list_active_missions",
+    "activities.list",
+    "list_team_mission_events",
+    "list_team_mission_run_events",
     "list_unread_completions",
-    "update_session_cwd",
+    "sessions.update_cwd",
     "update_session_meta",
     "update_session_model",
+    "upsert_projected_conversation_message",
     "upsert_session",
 }
 
@@ -82,6 +88,13 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         func = node.func
         if not isinstance(func, ast.Attribute):
             return
+        if isinstance(func.value, ast.Attribute) and _is_db_handle_expr(func.value.value):
+            component = func.value.attr
+            if _is_public_db_method_name(component) and not func.attr.startswith("_"):
+                self.call_sites.append(
+                    DBCallSite(f"{component}.{func.attr}", self.path, node.lineno)
+                )
+            return
         if not _is_db_handle_expr(func.value):
             return
         if _is_public_db_method_name(func.attr):
@@ -96,12 +109,17 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         name_arg = node.args[1]
         if not isinstance(name_arg, ast.Constant) or not isinstance(name_arg.value, str):
             return
+        # Component discovery is not a root DB method call. Calls on the
+        # returned component are scanned separately as
+        # `participants.<method>`.
+        if name_arg.value == "participants":
+            return
         if _is_public_db_method_name(name_arg.value):
             self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))
 
     def _record_run_control_db_method_helper_call(self, node: ast.Call) -> None:
         func = node.func
-        if not isinstance(func, ast.Name) or func.id != "_db_method":
+        if not isinstance(func, ast.Name) or func.id not in {"_db_method", "_run_method"}:
             return
         if len(node.args) < 2 or not _is_db_handle_expr(node.args[0]):
             return
@@ -109,7 +127,8 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         if not isinstance(name_arg, ast.Constant) or not isinstance(name_arg.value, str):
             return
         if _is_public_db_method_name(name_arg.value):
-            self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))
+            method = f"runs.{name_arg.value}" if func.id == "_run_method" else name_arg.value
+            self.call_sites.append(DBCallSite(method, self.path, node.lineno))
 
 
 def _python_files_to_scan() -> list[Path]:
@@ -136,7 +155,7 @@ def _scan_worker_side_db_calls() -> dict[str, list[DBCallSite]]:
 
 
 def _worker_db_proxy_whitelist() -> set[str]:
-    supervisor_path = REPO_ROOT / "tui_gateway/services/worker_supervisor.py"
+    supervisor_path = REPO_ROOT / "hermes_agent/orchestration/worker_supervisor.py"
     tree = ast.parse(supervisor_path.read_text(encoding="utf-8"), filename=str(supervisor_path))
     for node in tree.body:
         if not isinstance(node, ast.Assign):

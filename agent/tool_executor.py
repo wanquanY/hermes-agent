@@ -30,7 +30,6 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.tool_guardrails import ToolGuardrailDecision
-from agent.tool_handoff import record_tool_handoff
 from agent.tool_dispatch_helpers import (
     _is_destructive_command,
     _is_multimodal_tool_result,
@@ -78,26 +77,6 @@ def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
     return run_agent
-
-
-def _append_handoff_skip_messages(agent, tool_calls, messages: list) -> None:
-    """Return tool results for same-turn calls skipped after a runtime handoff."""
-    if not tool_calls:
-        return
-    agent._vprint(
-        f"{agent.log_prefix}Team Mission handoff: skipping {len(tool_calls)} remaining tool call(s)",
-        force=True,
-    )
-    for skipped_tc in tool_calls:
-        skipped_name = skipped_tc.function.name
-        messages.append(make_tool_result_message(
-            skipped_name,
-            (
-                "[Tool execution skipped - a Team Mission task was accepted "
-                "and the Leader must now reply with a brief startup confirmation]"
-            ),
-            skipped_tc.id,
-        ))
 
 
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -467,9 +446,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
-        if not blocked:
-            record_tool_handoff(agent, name, function_result)
-
         function_result = maybe_persist_tool_result(
             content=function_result,
             tool_name=name,
@@ -671,8 +647,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         elif function_name == "session_search":
             session_db = agent._get_session_db_for_recall()
             if not session_db:
-                from hermes_state import format_session_db_unavailable
-                function_result = json.dumps({"success": False, "error": format_session_db_unavailable()})
+                from hermes_agent.read_models.session_recall import unavailable_message
+                function_result = json.dumps({"success": False, "error": unavailable_message()})
             else:
                 from tools.session_search_tool import session_search as _session_search
                 function_result = _session_search(
@@ -906,10 +882,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
-        handoff_recorded = False
-        if not _execution_blocked:
-            handoff_recorded = record_tool_handoff(agent, function_name, function_result)
-
         function_result = maybe_persist_tool_result(
             content=function_result,
             tool_name=function_name,
@@ -945,10 +917,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 _fr_str = function_result if isinstance(function_result, str) else str(function_result)
                 response_preview = _fr_str[:agent.log_prefix_chars] + "..." if len(_fr_str) > agent.log_prefix_chars else _fr_str
                 print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
-
-        if handoff_recorded and i < len(assistant_message.tool_calls):
-            _append_handoff_skip_messages(agent, assistant_message.tool_calls[i:], messages)
-            break
 
         if agent._interrupt_requested and i < len(assistant_message.tool_calls):
             remaining = len(assistant_message.tool_calls) - i

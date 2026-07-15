@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+from hermes_gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
 # ── _clean_for_display unit tests ────────────────────────────────────────
@@ -137,7 +137,7 @@ class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.
 
     stream_consumer._send_or_edit always passes ``finalize=`` to
-    ``adapter.edit_message(...)`` (see gateway/stream_consumer.py).  An
+    ``adapter.edit_message(...)`` (see hermes_gateway/stream_consumer.py).  An
     adapter that overrides edit_message without accepting finalize raises
     TypeError the first time streaming hits a segment break or final edit.
     Guard the contract with an explicit signature check so it cannot
@@ -148,14 +148,14 @@ class TestEditMessageFinalizeSignature:
     @pytest.mark.parametrize(
         "module_path,class_name",
         [
-            ("gateway.platforms.telegram", "TelegramAdapter"),
-            ("gateway.platforms.discord", "DiscordAdapter"),
-            ("gateway.platforms.slack", "SlackAdapter"),
-            ("gateway.platforms.matrix", "MatrixAdapter"),
-            ("gateway.platforms.mattermost", "MattermostAdapter"),
-            ("gateway.platforms.feishu", "FeishuAdapter"),
-            ("gateway.platforms.whatsapp", "WhatsAppAdapter"),
-            ("gateway.platforms.dingtalk", "DingTalkAdapter"),
+            ("channels.platforms.telegram", "TelegramAdapter"),
+            ("channels.platforms.discord", "DiscordAdapter"),
+            ("channels.platforms.slack", "SlackAdapter"),
+            ("channels.platforms.matrix", "MatrixAdapter"),
+            ("channels.platforms.mattermost", "MattermostAdapter"),
+            ("channels.platforms.feishu", "FeishuAdapter"),
+            ("channels.platforms.whatsapp", "WhatsAppAdapter"),
+            ("channels.platforms.dingtalk", "DingTalkAdapter"),
         ],
     )
     def test_edit_message_accepts_finalize(self, module_path, class_name):
@@ -1070,7 +1070,7 @@ class TestInterimCommentaryMessages:
 class TestCancelledConsumerSetsFlags:
     """Cancellation must set final_response_sent when already_sent is True.
 
-    The 5-second stream_task timeout in gateway/run.py can cancel the
+    The 5-second stream_task timeout in hermes_gateway/runner.py can cancel the
     consumer while it's still processing.  If final_response_sent stays
     False, the gateway falls through to the normal send path and the
     user sees a duplicate message.
@@ -1699,7 +1699,7 @@ class TestUtf16OverflowDetection:
     def _make_telegram_like_adapter(self):
         """Construct a minimal BasePlatformAdapter subclass that overrides
         message_len_fn like Telegram does."""
-        from gateway.platforms.base import utf16_len, BasePlatformAdapter
+        from channels.platforms.base import utf16_len, BasePlatformAdapter
 
         TelegramLikeAdapter = type(
             "TelegramLikeAdapter",
@@ -1721,7 +1721,7 @@ class TestUtf16OverflowDetection:
     async def test_emoji_text_exceeding_utf16_limit_triggers_overflow_split(self):
         """A response that is under 4096 codepoints but over 4096 UTF-16
         units must trigger the overflow-split path."""
-        from gateway.platforms.base import utf16_len
+        from channels.platforms.base import utf16_len
 
         adapter = self._make_telegram_like_adapter()
         # Mock the send/edit methods we actually call

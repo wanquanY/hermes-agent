@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, merge_pending_message_event
-from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
+from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class _FakeAdapter:
@@ -58,7 +58,6 @@ def _make_runner():
     runner._restart_drain_timeout = 0.0
     runner._stop_task = None
     runner._exit_code = None
-    runner._update_runtime_status = MagicMock()
     runner._is_user_authorized = lambda _source: True
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
@@ -336,7 +335,7 @@ async def test_command_messages_do_not_leave_sentinel():
     [
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
-        ("/update", "_handle_update_command", "Update text"),
+        ("/update", "update_service", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
     ],
 )
@@ -353,7 +352,14 @@ async def test_active_session_bypass_commands_dispatch_without_interrupt(
     fake_agent = MagicMock()
     fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
     runner._running_agents[session_key] = fake_agent
-    setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
+    if handler_attr == "update_service":
+        from hermes_gateway.update_lifecycle import update_lifecycle_for
+
+        update_lifecycle_for(runner).handle_update_command = AsyncMock(
+            return_value=handler_result
+        )
+    else:
+        setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
 
     result = await runner._handle_message(event)
 
@@ -500,8 +506,8 @@ async def test_shutdown_skips_sentinel():
     runner._exit_reason = None
     runner._shutdown_all_gateway_honcho = lambda: None
 
-    with patch("gateway.status.remove_pid_file"), \
-         patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), \
+         patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     # Real agent should have been interrupted

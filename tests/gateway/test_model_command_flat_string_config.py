@@ -14,10 +14,11 @@ the proper ``model: {default: ..., provider: ...}`` form.
 import yaml
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.model_command import model_command_for
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner():
@@ -56,7 +57,7 @@ def _fake_switch_result():
 
 def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     """Write a config.yaml with the given ``model:`` value and stub the heavy bits."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -66,7 +67,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
         "hermes_cli.model_switch.switch_model",
@@ -87,7 +88,7 @@ async def test_model_global_persists_when_config_has_flat_string_model(tmp_path,
     """
     cfg_path = _setup_isolated_home(tmp_path, monkeypatch, "deepseek-v4-flash")
 
-    result = await _make_runner()._handle_model_command(
+    result = await model_command_for(_make_runner()).handle_model_command(
         _make_event("/model gpt-5.5 --global")
     )
 
@@ -110,14 +111,14 @@ async def test_model_global_persists_when_config_has_missing_model(tmp_path, mon
     """Companion case: ``model:`` key absent entirely. setdefault would have
     worked here, but the coercion branch also has to handle this cleanly.
     """
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     cfg_path = hermes_home / "config.yaml"
     cfg_path.write_text(yaml.safe_dump({"providers": {}}), encoding="utf-8")
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
         "hermes_cli.model_switch.switch_model",
@@ -126,7 +127,7 @@ async def test_model_global_persists_when_config_has_missing_model(tmp_path, mon
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: hermes_home)
 
-    result = await _make_runner()._handle_model_command(
+    result = await model_command_for(_make_runner()).handle_model_command(
         _make_event("/model gpt-5.5 --global")
     )
 
@@ -148,7 +149,7 @@ async def test_model_global_persists_when_config_has_proper_dict_model(tmp_path,
         {"default": "old-model", "provider": "openai-codex"},
     )
 
-    result = await _make_runner()._handle_model_command(
+    result = await model_command_for(_make_runner()).handle_model_command(
         _make_event("/model gpt-5.5 --global")
     )
 
@@ -171,7 +172,7 @@ async def test_model_no_flag_persists_by_default(tmp_path, monkeypatch):
         {"default": "old-model", "provider": "openai-codex"},
     )
 
-    result = await _make_runner()._handle_model_command(
+    result = await model_command_for(_make_runner()).handle_model_command(
         _make_event("/model gpt-5.5")
     )
 
@@ -190,7 +191,7 @@ async def test_model_session_flag_does_not_persist(tmp_path, monkeypatch):
         {"default": "old-model", "provider": "openai-codex"},
     )
 
-    result = await _make_runner()._handle_model_command(
+    result = await model_command_for(_make_runner()).handle_model_command(
         _make_event("/model gpt-5.5 --session")
     )
 

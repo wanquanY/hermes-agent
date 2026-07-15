@@ -6,13 +6,13 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway import runtime_methods
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import EventFrame
 from tui_gateway.services.run_control import record_event
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 CONVERSATION_ID = "conversation-1"
@@ -59,9 +59,9 @@ def _submit_leader(
     conversation_ensure_index_only: bool = False,
     request_activity_id: str = "",
     extra_params: dict[str, Any] | None = None,
-) -> tuple[SessionDB, dict[str, Any], dict[str, Any]]:
+) -> tuple[CliSessionStore, dict[str, Any], dict[str, Any]]:
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(runtime_methods, "_get_db", lambda: db)
@@ -73,8 +73,8 @@ def _submit_leader(
     monkeypatch.setattr(runtime_methods, "_proxy_run_submit_via_worker", fake_proxy_run_submit)
     if conversation_ensure_index_only:
         def fake_ensure_team_mission_conversation(**kwargs: Any) -> dict[str, Any]:
-            db.upsert_session_index(
-                session_id=kwargs["stable_session_id"],
+            db.session_index.upsert(
+                session_id=kwargs["conversation_session_id"],
                 source="team_mission",
                 session_kind="team_mission",
                 conversation_kind="team",
@@ -85,7 +85,7 @@ def _submit_leader(
             )
             return {
                 "conversation_id": kwargs["conversation_id"],
-                "stable_session_id": kwargs["stable_session_id"],
+                "conversation_session_id": kwargs["conversation_session_id"],
                 "title": kwargs.get("title") or "",
                 "team_id": kwargs.get("team_id") or "",
             }
@@ -146,7 +146,7 @@ def _submit_leader(
     return db, captured, response
 
 
-def _events_for_session(db: SessionDB, session_id: str) -> list[dict[str, Any]]:
+def _events_for_session(db: CliSessionStore, session_id: str) -> list[dict[str, Any]]:
     rows = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT seq, event_type, run_id, runtime_scope_key, payload_json, event_json "
         "FROM run_events WHERE session_id = ? ORDER BY seq",
@@ -190,7 +190,7 @@ def test_leader_team_dispatch_request_uses_team_dispatch_run_context(
     assert run_context.conversation_session_id == CONVERSATION_SESSION_ID
     assert run_context.activity_id == "act-team_dispatch-create"
     assert run_context.activity_kind == "team_dispatch"
-    messages = db.get_conversation_message_read_model(
+    messages = db.messages.all_as_conversation(
         CONVERSATION_SESSION_ID,
         include_storage_metadata=True,
     )
@@ -198,13 +198,13 @@ def test_leader_team_dispatch_request_uses_team_dispatch_run_context(
     assert messages[0]["metadata"]["transcript_activity_kind"] == "mission_start"
 
 
-def test_leader_spawn_stored_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_leader_spawn_conversation_session_id_is_conv_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _db, captured, response = _submit_leader(monkeypatch, tmp_path)
 
-    assert captured["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert captured["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert captured["session_id"] == CONVERSATION_SESSION_ID
-    assert not captured["stored_session_id"].startswith("memberchat:")
-    assert response["result"]["leader_turn"]["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert not captured["conversation_session_id"].startswith("memberchat:")
+    assert response["result"]["leader_turn"]["conversation_session_id"] == CONVERSATION_SESSION_ID
 
 
 def test_leader_submit_persists_visible_user_message_before_worker(
@@ -213,7 +213,7 @@ def test_leader_submit_persists_visible_user_message_before_worker(
 ):
     db, captured, _response = _submit_leader(monkeypatch, tmp_path)
 
-    messages = db.get_conversation_message_read_model(
+    messages = db.messages.all_as_conversation(
         CONVERSATION_SESSION_ID,
         include_storage_metadata=True,
     )
@@ -260,7 +260,7 @@ def test_leader_submit_persists_attachment_metadata_for_history(
         },
     )
 
-    messages = db.get_conversation_message_read_model(
+    messages = db.messages.all_as_conversation(
         CONVERSATION_SESSION_ID,
         include_storage_metadata=True,
     )
@@ -283,9 +283,9 @@ def test_leader_submit_materializes_canonical_session_when_index_exists_without_
         conversation_ensure_index_only=True,
     )
 
-    assert db.get_session_index(CONVERSATION_SESSION_ID)
-    assert db.get_session(CONVERSATION_SESSION_ID)
-    messages = db.get_conversation_message_read_model(
+    assert db.session_index.get(CONVERSATION_SESSION_ID)
+    assert db.sessions.get(CONVERSATION_SESSION_ID)
+    messages = db.messages.all_as_conversation(
         CONVERSATION_SESSION_ID,
         include_storage_metadata=True,
     )
@@ -311,7 +311,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
     router.record_run_start(
         scope_key=captured["runtime_scope_key"],
         run_id=captured["run_id"],
-        stored_session_id=captured["stored_session_id"],
+        conversation_session_id=captured["conversation_session_id"],
         turn_id=captured["turn_id"],
         run_context_json=captured["run_context_json"],
     )
@@ -322,7 +322,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
             params={
                 "type": "message.complete",
                 "session_id": "runtime-leader-conversation",
-                "stored_session_id": "runtime-leader-conversation",
+                "conversation_session_id": "runtime-leader-conversation",
                 "run_id": captured["run_id"],
                 "turn_id": captured["turn_id"],
                 "seq": 1,
@@ -334,7 +334,7 @@ async def test_leader_events_route_to_conv_via_run_context(monkeypatch: pytest.M
     conv_events = _events_for_session(db, CONVERSATION_SESSION_ID)
     assert [event["type"] for event in conv_events] == ["message.complete"]
     assert conv_events[0]["payload"]["text"] == "leader reply via worker router"
-    assert conv_events[0]["frame"]["stored_session_id"] == CONVERSATION_SESSION_ID
+    assert conv_events[0]["frame"]["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert conv_events[0]["payload"]["run_context"]["conversation_session_id"] == CONVERSATION_SESSION_ID
     assert _events_for_session(db, "runtime-leader-conversation") == []
 

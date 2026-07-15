@@ -9,7 +9,6 @@ derived from the same cross-process channel that renders the request cards.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -118,50 +117,12 @@ def _missions_for_session_key(db: Any, session_key: str) -> list[str]:
     """Resolve a session_key to mission_ids whose conversation includes it.
 
     Three matches considered:
-    1. session_key == team_mission_conversations.stable_session_id (leader session).
+    1. session_key == team_mission_conversations.conversation_session_id (leader session).
     2. session_key == team_mission_run_bindings.session_id (member node session).
-    3. session_key == team_mission_run_bindings.runtime_session_id (worker runtime).
+    3. session_key == team_mission_run_bindings.execution_session_id (worker runtime).
     """
-    found: list[str] = []
-    seen: set[str] = set()
     try:
-        conn = getattr(db, "_conn", None)
-        if conn is None:
-            return found
-        try:
-            lock = getattr(db, "_lock", threading.Lock())
-            lock_acquired = lock.acquire(timeout=2.0) if hasattr(lock, "acquire") else False
-        except Exception:
-            lock_acquired = False
-        try:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT tm.mission_id
-                  FROM team_missions tm
-                  JOIN team_mission_conversations tmc
-                    ON tmc.conversation_id = tm.conversation_id
-                 WHERE tmc.stable_session_id = ?
-                 UNION
-                SELECT DISTINCT mission_id
-                  FROM team_mission_run_bindings
-                 WHERE session_id = ?
-                    OR runtime_session_id = ?
-                    OR runtime_scope_key = ?
-                """,
-                (session_key, session_key, session_key, session_key),
-            ).fetchall()
-        finally:
-            if lock_acquired:
-                try:
-                    lock.release()
-                except Exception:
-                    pass
-        for row in rows or []:
-            mid = row[0] if not isinstance(row, dict) else row.get("mission_id")
-            mid = str(mid or "").strip()
-            if mid and mid not in seen:
-                seen.add(mid)
-                found.append(mid)
+        return db.team_missions.mission_ids_for_session_key(session_key)
     except Exception as exc:
         _log.debug("mission lookup failed for session_key=%s: %s", session_key, exc)
-    return found
+        return []

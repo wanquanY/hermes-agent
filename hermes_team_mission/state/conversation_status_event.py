@@ -74,7 +74,7 @@ def slim_team_mission_conversation_status_projection(
         else {},
     )
     conversation_id = _text(projection.get("conversation_id") or projection.get("conversationId"))
-    stable_session_id = _text(projection.get("stable_session_id") or projection.get("stableSessionId"))
+    conversation_session_id = _text(projection.get("conversation_session_id") or projection.get("conversationSessionId"))
     team_id = _text(projection.get("team_id") or projection.get("teamId"))
     workspace_id = _text(projection.get("workspace_id") or projection.get("workspaceId"))
     workspace_path = _text(projection.get("workspace_path") or projection.get("workspacePath"))
@@ -88,8 +88,8 @@ def slim_team_mission_conversation_status_projection(
     )
     active_run_id = _text(projection.get("active_run_id") or projection.get("activeRunId"))
     active_turn_id = _text(projection.get("active_turn_id") or projection.get("activeTurnId"))
-    active_runtime_session_id = _text(
-        projection.get("active_runtime_session_id") or projection.get("activeRuntimeSessionId"),
+    active_execution_session_id = _text(
+        projection.get("active_execution_session_id") or projection.get("activeExecutionSessionId"),
     )
     runtime_scope_key = _text(projection.get("runtime_scope_key") or projection.get("runtimeScopeKey"))
     run_started_at = _numeric_projection_value(projection.get("run_started_at") or projection.get("runStartedAt"))
@@ -112,8 +112,8 @@ def slim_team_mission_conversation_status_projection(
         "schemaVersion": 2,
         "conversation_id": conversation_id,
         "conversationId": conversation_id,
-        "stable_session_id": stable_session_id,
-        "stableSessionId": stable_session_id,
+        "conversation_session_id": conversation_session_id,
+        "conversationSessionId": conversation_session_id,
         "team_id": team_id,
         "teamId": team_id,
         "title": _text(projection.get("title")),
@@ -144,8 +144,8 @@ def slim_team_mission_conversation_status_projection(
         "activeRunId": active_run_id,
         "active_turn_id": active_turn_id,
         "activeTurnId": active_turn_id,
-        "active_runtime_session_id": active_runtime_session_id,
-        "activeRuntimeSessionId": active_runtime_session_id,
+        "active_execution_session_id": active_execution_session_id,
+        "activeExecutionSessionId": active_execution_session_id,
         "runtime_scope_key": runtime_scope_key,
         "runtimeScopeKey": runtime_scope_key,
         "run_started_at": run_started_at,
@@ -181,7 +181,7 @@ def slim_team_mission_conversation_status_payload(
     *,
     mission_id: str,
     conversation_id: str = "",
-    stable_session_id: str = "",
+    conversation_session_id: str = "",
     source_event_type: str = "",
     source_run_id: str = "",
     source_seq: int = 0,
@@ -194,7 +194,7 @@ def slim_team_mission_conversation_status_payload(
         mission_id=mission_id,
     )
     conversation_id = _text(conversation_id) or _text(slim.get("conversation_id"))
-    stable_session_id = _text(stable_session_id) or _text(slim.get("stable_session_id"))
+    conversation_session_id = _text(conversation_session_id) or _text(slim.get("conversation_session_id"))
     mission_id = _text(mission_id) or _text(slim.get("mission_id"))
     active_mission_id = _text(slim.get("active_mission_id")) or mission_id
     source_seq_value = _int_projection_value(source_seq)
@@ -204,8 +204,8 @@ def slim_team_mission_conversation_status_payload(
         "schemaVersion": 2,
         "conversation_id": conversation_id,
         "conversationId": conversation_id,
-        "stable_session_id": stable_session_id,
-        "stableSessionId": stable_session_id,
+        "conversation_session_id": conversation_session_id,
+        "conversationSessionId": conversation_session_id,
         "mission_id": mission_id,
         "missionId": mission_id,
         "active_mission_id": active_mission_id,
@@ -236,8 +236,8 @@ def slim_team_mission_conversation_status_payload(
         "activeNodeCount": slim.get("activeNodeCount") or 0,
         "active_run_id": slim.get("active_run_id") or "",
         "activeRunId": slim.get("activeRunId") or "",
-        "active_runtime_session_id": slim.get("active_runtime_session_id") or "",
-        "activeRuntimeSessionId": slim.get("activeRuntimeSessionId") or "",
+        "active_execution_session_id": slim.get("active_execution_session_id") or "",
+        "activeExecutionSessionId": slim.get("activeExecutionSessionId") or "",
         "runtime_scope_key": slim.get("runtime_scope_key") or "",
         "runtimeScopeKey": slim.get("runtimeScopeKey") or "",
         "leader_report_status": slim.get("leader_report_status") or "",
@@ -307,11 +307,11 @@ def compact_team_mission_conversation_status_event(
             or event.get("conversation_id")
             or event.get("conversationId"),
         ),
-        stable_session_id=_text(
-            payload.get("stable_session_id")
-            or payload.get("stableSessionId")
-            or event.get("stable_session_id")
-            or event.get("stableSessionId"),
+        conversation_session_id=_text(
+            payload.get("conversation_session_id")
+            or payload.get("conversationSessionId")
+            or event.get("conversation_session_id")
+            or event.get("conversationSessionId"),
         ),
         source_event_type=_text(payload.get("source_event_type") or payload.get("sourceEventType")),
         source_run_id=_text(payload.get("source_run_id") or payload.get("sourceRunId") or event.get("source_run_id")),

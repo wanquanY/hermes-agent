@@ -20,7 +20,7 @@ from tui_gateway.services.workspace import (
 _server = bind_server_globals(globals())
 
 
-def _stored_session_id(params: dict) -> str:
+def _conversation_session_id(params: dict) -> str:
     raw = str(params.get("session_id") or "").strip()
     if not raw:
         return ""
@@ -34,8 +34,8 @@ def _session_ids(params: dict) -> list[str]:
     values = [
         params.get("session_id"),
         params.get("sessionId"),
-        params.get("stored_session_id"),
-        params.get("storedSessionId"),
+        params.get("conversation_session_id"),
+        params.get("conversationSessionId"),
     ]
     raw_many = params.get("session_ids") or params.get("sessionIds") or []
     if isinstance(raw_many, list):
@@ -45,10 +45,10 @@ def _session_ids(params: dict) -> list[str]:
 
 @method("workspace.current")
 def _(rid, params: dict) -> dict:
-    stored_session_id = _stored_session_id(params)
-    if not stored_session_id:
+    conversation_session_id = _conversation_session_id(params)
+    if not conversation_session_id:
         return _err(rid, 4006, "session_id required")
-    workspace = workspace_for_session(stored_session_id)
+    workspace = workspace_for_session(conversation_session_id)
     if not workspace:
         return _ok(rid, {"workspace": None})
     return _ok(rid, {"workspace": workspace})
@@ -56,17 +56,17 @@ def _(rid, params: dict) -> dict:
 
 @method("workspace.session.current")
 def _(rid, params: dict) -> dict:
-    stored_session_id = _stored_session_id(params)
-    if not stored_session_id:
+    conversation_session_id = _conversation_session_id(params)
+    if not conversation_session_id:
         return _err(rid, 4006, "session_id required")
-    binding = session_workspace_binding(stored_session_id)
+    binding = session_workspace_binding(conversation_session_id)
     return _ok(rid, {"binding": binding, "workspace": (binding or {}).get("workspace")})
 
 
 @method("workspace.session.bind")
 def _(rid, params: dict) -> dict:
-    stored_session_id = _stored_session_id(params)
-    if not stored_session_id:
+    conversation_session_id = _conversation_session_id(params)
+    if not conversation_session_id:
         return _err(rid, 4006, "session_id required")
     raw_workspace = params.get("workspace")
     if not isinstance(raw_workspace, dict):
@@ -83,12 +83,12 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4004, str(exc))
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     bind_session_workspace(
-        session_id=stored_session_id,
+        session_id=conversation_session_id,
         cwd=cwd,
         workspace=workspace,
         metadata=metadata,
     )
-    binding = session_workspace_binding(stored_session_id)
+    binding = session_workspace_binding(conversation_session_id)
     return _ok(rid, {"binding": binding, "workspace": (binding or {}).get("workspace")})
 
 
@@ -116,14 +116,14 @@ def _(rid, params: dict) -> dict:
 @method("artifacts.list")
 def _(rid, params: dict) -> dict:
     limit = int(params.get("limit", 200) or 200)
-    stored_session_id = _stored_session_id(params)
+    conversation_session_id = _conversation_session_id(params)
     workspace_id = str(params.get("workspace_id") or "").strip() or None
-    if not stored_session_id and not workspace_id:
+    if not conversation_session_id and not workspace_id:
         session, _err_resp = _sess_nowait(params, rid)
         if session:
-            stored_session_id = str(session.get("session_key") or "")
+            conversation_session_id = str(session.get("session_key") or "")
     artifacts = list_artifacts(
-        session_id=stored_session_id or None,
+        session_id=conversation_session_id or None,
         workspace_id=workspace_id,
         limit=limit,
     )
@@ -132,8 +132,8 @@ def _(rid, params: dict) -> dict:
 
 @method("artifacts.register")
 def _(rid, params: dict) -> dict:
-    stored_session_id = _stored_session_id(params)
-    if not stored_session_id:
+    conversation_session_id = _conversation_session_id(params)
+    if not conversation_session_id:
         return _err(rid, 4006, "session_id required")
     raw_workspace = params.get("workspace")
     if not isinstance(raw_workspace, dict):
@@ -145,7 +145,7 @@ def _(rid, params: dict) -> dict:
         }
     try:
         artifact = register_artifact(
-            session_id=stored_session_id,
+            session_id=conversation_session_id,
             path=str(params.get("path") or params.get("filePath") or params.get("file_path") or ""),
             cwd=str(params.get("cwd") or raw_workspace.get("path") or ""),
             workspace=raw_workspace,
@@ -163,12 +163,12 @@ def _(rid, params: dict) -> dict:
 
 @method("artifacts.delete")
 def _(rid, params: dict) -> dict:
-    stored_session_id = _stored_session_id(params)
-    if not stored_session_id:
+    conversation_session_id = _conversation_session_id(params)
+    if not conversation_session_id:
         return _err(rid, 4006, "session_id required")
     try:
         result = delete_artifact(
-            session_id=stored_session_id,
+            session_id=conversation_session_id,
             artifact_id=str(params.get("artifact_id") or params.get("artifactId") or params.get("id") or ""),
             path=str(params.get("path") or params.get("filePath") or params.get("file_path") or ""),
             workspace_id=str(params.get("workspace_id") or params.get("workspaceId") or ""),
@@ -183,7 +183,7 @@ def _(rid, params: dict) -> dict:
 @method("artifacts.prune")
 def _(rid, params: dict) -> dict:
     result = prune_artifacts(
-        session_id=_stored_session_id(params),
+        session_id=_conversation_session_id(params),
         workspace_id=str(params.get("workspace_id") or params.get("workspaceId") or "").strip(),
         retention_days=int(params.get("retention_days") or params.get("retentionDays") or 30),
         max_artifacts_per_session=int(

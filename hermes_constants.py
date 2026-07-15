@@ -283,13 +283,22 @@ def get_subprocess_home() -> str | None:
     return None
 
 
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 
 
 def parse_reasoning_effort(effort: str) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
+    Valid levels: "none", "enabled", "minimal", "low", "medium", "high",
+    "xhigh", "max", "ultra".
     Returns None when the input is empty or unrecognized (caller uses default).
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
@@ -299,6 +308,8 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     effort = effort.strip().lower()
     if effort == "none":
         return {"enabled": False}
+    if effort == "enabled":
+        return {"enabled": True}
     if effort in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": effort}
     return None
@@ -468,6 +479,7 @@ def apply_ipv4_preference(force: bool = False) -> None:
 PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
 
 FINISH_REASON_LENGTH = "length"
+FINISH_REASON_STREAM_ERROR = "stream_error"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

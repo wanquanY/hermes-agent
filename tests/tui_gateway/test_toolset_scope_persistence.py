@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+import model_tools
+
 from tui_gateway.services import toolset_scope
 from tui_gateway.services.persistence.gateway_store import GatewayStateStore
 
@@ -55,6 +59,58 @@ def test_session_turn_exact_toolsets_are_not_persisted(monkeypatch):
     )
 
     assert persisted == []
+
+
+def test_refresh_agent_tool_filter_invalidates_prompt_when_tool_surface_changes(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        model_tools,
+        "get_tool_definitions",
+        lambda **_kwargs: [
+            {"type": "function", "function": {"name": "next_tool"}}
+        ],
+    )
+    agent = SimpleNamespace(
+        enabled_toolsets=["previous"],
+        disabled_toolsets=None,
+        tools=[{"type": "function", "function": {"name": "previous_tool"}}],
+        valid_tool_names={"previous_tool"},
+        quiet_mode=True,
+        _cached_system_prompt="PROMPT_WITH_PREVIOUS_TOOL_GUIDANCE",
+    )
+
+    toolset_scope.refresh_agent_tool_filter(agent, ["next"])
+
+    assert agent.valid_tool_names == {"next_tool"}
+    assert agent._cached_system_prompt is None
+
+
+def test_refresh_agent_tool_filter_preserves_prompt_when_effective_tools_do_not_change(
+    monkeypatch,
+):
+    tool_definition = {
+        "type": "function",
+        "function": {"name": "stable_tool"},
+    }
+    monkeypatch.setattr(
+        model_tools,
+        "get_tool_definitions",
+        lambda **_kwargs: [tool_definition],
+    )
+    agent = SimpleNamespace(
+        enabled_toolsets=["previous-alias"],
+        disabled_toolsets=None,
+        tools=[tool_definition],
+        valid_tool_names={"stable_tool"},
+        quiet_mode=True,
+        _cached_system_prompt="STILL_VALID_PROMPT",
+    )
+
+    toolset_scope.refresh_agent_tool_filter(agent, ["next-alias"])
+
+    assert agent.valid_tool_names == {"stable_tool"}
+    assert agent._cached_system_prompt == "STILL_VALID_PROMPT"
 
 
 def test_gateway_state_store_round_trips_session_toolset_overrides(tmp_path):

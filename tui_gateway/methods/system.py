@@ -82,30 +82,27 @@ def _(rid, params: dict) -> dict:
 
 @method("runtime.ensure")
 def _(rid, params: dict) -> dict:
-    """Phase 6 stub: kept for frontend compatibility.
+    """Reject paths that bypass the async worker-runtime dispatcher.
 
-    The legacy worker pre-warm path (spawning a sub-sidecar) is gone.
-    The new ``WorkerSupervisor`` spawns workers lazily on the first
-    ``run.submit`` for a scope, so ``runtime.ensure`` has no real work
-    to do — just acknowledge the scope and return ready=True. Frontend
-    runtime readiness machinery (``DesktopSessionRuntime`` etc.) still
-    calls this method on session attach as a liveness check."""
+    Production transports call ``worker_runtime.primary_dispatch`` before
+    this registry.  Returning a synthetic readiness result here would revive
+    the exact false-ready contract that caused first-turn cold starts.
+    """
     scope = _profile_runtime_scope_from_params(params or {})
-    return _ok(
+    response = _err(
         rid,
-        {
-            "status": "ready",
-            "ready": True,
-            **scope,
-        },
+        5024,
+        "runtime.ensure requires the async worker-runtime transport",
     )
+    response["error"]["data"] = {"status": "unavailable", "ready": False, **scope}
+    return response
 
 
 @method("runtime.status")
 def _(rid, params: dict) -> dict:
     """Return lightweight gateway runtime diagnostics without building an agent."""
     try:
-        from gateway.status import read_runtime_status
+        from channels.runtime_status import read_runtime_status
 
         state = read_runtime_status()
         if not isinstance(state, dict):
@@ -116,17 +113,17 @@ def _(rid, params: dict) -> dict:
     else:
         error = ""
     try:
-        from tui_gateway.services.worker_runtime import worker_supervisor
+        from hermes_agent.orchestration.worker_runtime import worker_supervisor
 
-        runtime_proxy = worker_supervisor().snapshot()
+        worker_supervisor_snapshot = worker_supervisor().snapshot()
     except Exception as exc:
-        runtime_proxy = {"error": str(exc)}
+        worker_supervisor_snapshot = {"error": str(exc)}
     return _ok(
         rid,
         {
             "status": str(state.get("gateway_state") or state.get("status") or "unknown"),
             "runtime": state,
-            "runtime_proxy": runtime_proxy,
+            "workerSupervisor": worker_supervisor_snapshot,
             "available": bool(state),
             **({"error": error} if error else {}),
         },
@@ -268,7 +265,7 @@ def _(rid, params: dict) -> dict:
 
 @method("storage.maintenance.run")
 def _(rid, params: dict) -> dict:
-    """Run storage maintenance now for the current SessionDB profile."""
+    """Run storage maintenance now for the current profile store."""
     try:
         from tui_gateway.services.storage_maintenance import (
             register_session_db_for_maintenance,
@@ -663,7 +660,10 @@ def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> 
     count = max(count, 1)
 
     try:
-        recents = db.list_recent_user_messages(session_key, limit=max(count, 10))
+        recents = db.messages.recent_user_messages(
+            session_key,
+            limit=max(count, 10),
+        )
     except Exception as exc:
         return _err(rid, 5008, f"{label}: failed to load history: {exc}")
     if not recents:
@@ -672,14 +672,14 @@ def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> 
     target_index = min(count - 1, len(recents) - 1)
     target_id = recents[target_index]["id"]
     try:
-        result = db.rewind_to_message(session_key, target_id)
+        result = db.messages.rewind(session_key, target_id)
     except ValueError as exc:
         return _err(rid, 4004, f"{label}: {exc}")
     except Exception as exc:
         return _err(rid, 5008, f"{label}: {exc}")
 
     try:
-        active_history = db.get_messages_as_conversation(
+        active_history = db.messages.all_as_conversation(
             session_key,
             include_ancestors=False,
         )

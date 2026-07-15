@@ -161,8 +161,7 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "If the user asks about configuring, setting up, or using Dovie itself, "
     "treat Dovie as the product identity. Use the available Dovie runtime, "
     "profile, config, tool, or documentation capabilities before answering "
-    "when they are available. Do not present internal implementation names as "
-    "the product identity."
+    "when they are available."
 )
 
 MEMORY_GUIDANCE = (
@@ -802,7 +801,7 @@ def build_environment_hints() -> str:
 
         host_lines.append(f"User home directory: {os.path.expanduser('~')}")
         try:
-            from gateway.session_context import get_session_env
+            from channels.session_context import get_session_env
 
             session_cwd = get_session_env("TERMINAL_CWD", "").strip()
         except Exception:
@@ -1116,7 +1115,7 @@ def build_skills_system_prompt(
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
     _platform_hint = (
         os.environ.get("HERMES_PLATFORM")
         or get_session_env("HERMES_SESSION_PLATFORM")

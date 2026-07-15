@@ -4,12 +4,12 @@ import importlib
 import sqlite3
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 def _workspace_payload(tmp_path: Path) -> dict[str, str]:
@@ -18,8 +18,8 @@ def _workspace_payload(tmp_path: Path) -> dict[str, str]:
     return {"workspace_id": "workspace-1", "workspace_path": str(workspace)}
 
 
-def _seed_team(db: SessionDB, tmp_path: Path) -> None:
-    db.upsert_agent_profile(
+def _seed_team(db: CliSessionStore, tmp_path: Path) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader",
@@ -33,13 +33,13 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
         current_version_id="version-leader",
         current_version_number=1,
     )
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-1",
         name="Team One",
         description="A test team.",
         lead_agent_profile_id="profile-leader",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id="profile-leader",
@@ -50,7 +50,7 @@ def _seed_team(db: SessionDB, tmp_path: Path) -> None:
     )
 
 
-def _create_mission_via_gateway(db: SessionDB, monkeypatch, tmp_path: Path, mission_id: str = "mission-1") -> dict:
+def _create_mission_via_gateway(db: CliSessionStore, monkeypatch, tmp_path: Path, mission_id: str = "mission-1") -> dict:
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
@@ -63,7 +63,7 @@ def _create_mission_via_gateway(db: SessionDB, monkeypatch, tmp_path: Path, miss
             "id": _rid,
             "result": {
                 "run_id": params.get("run_id") or "run-leader",
-                "stored_session_id": params.get("stored_session_id") or "",
+                "conversation_session_id": params.get("conversation_session_id") or "",
                 "runtime_scope_key": params.get("runtime_scope_key") or "",
                 "status": "running",
             },
@@ -89,7 +89,7 @@ def _create_mission_via_gateway(db: SessionDB, monkeypatch, tmp_path: Path, miss
 def test_activities_table_accepts_kind_mission(tmp_path: Path) -> None:
     db = _db(tmp_path)
 
-    row = db.create_activity(
+    row = db.activities.create(
         activity_id="mission:mission-1",
         conversation_id="team-session-1",
         kind="mission",
@@ -108,7 +108,7 @@ def test_team_mission_create_inserts_mission_activity_row(monkeypatch, tmp_path:
 
     _create_mission_via_gateway(db, monkeypatch, tmp_path)
 
-    activity = db.get_activity_for_mission("mission-1")
+    activity = db.activities.get_for_mission("mission-1")
     assert activity is not None
     assert activity["activity_id"] == "mission:mission-1"
     assert activity["conversation_id"] == "team-session-1"
@@ -130,18 +130,18 @@ def test_team_mission_cancel_marks_mission_activity_cancelled(monkeypatch, tmp_p
     )
 
     assert "error" not in response
-    activity = db.get_activity_for_mission("mission-1")
+    activity = db.activities.get_for_mission("mission-1")
     assert activity is not None
     assert activity["status"] == "cancelled"
     assert activity["completed_at"] is not None
-    assert db.list_active_mission_activities("team-session-1") == []
+    assert db.activities.list_active_missions("team-session-1") == []
 
 
 def test_team_mission_complete_marks_mission_activity_completed(tmp_path: Path) -> None:
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",
@@ -154,7 +154,7 @@ def test_team_mission_complete_marks_mission_activity_completed(tmp_path: Path) 
     )
 
     assert result is not None
-    activity = db.get_activity_for_mission("mission-1")
+    activity = db.activities.get_for_mission("mission-1")
     assert activity is not None
     assert activity["status"] == "completed"
     assert activity["completed_at"] is not None
@@ -162,13 +162,13 @@ def test_team_mission_complete_marks_mission_activity_completed(tmp_path: Path) 
 
 def test_list_active_mission_activities_excludes_terminal(tmp_path: Path) -> None:
     db = _db(tmp_path)
-    db.ensure_mission_activity(conversation_id="team-session-1", mission_id="mission-running")
-    db.ensure_mission_activity(conversation_id="team-session-1", mission_id="mission-completed")
-    completed = db.get_activity_for_mission("mission-completed")
+    db.activities.ensure_mission(conversation_id="team-session-1", mission_id="mission-running")
+    db.activities.ensure_mission(conversation_id="team-session-1", mission_id="mission-completed")
+    completed = db.activities.get_for_mission("mission-completed")
     assert completed is not None
-    db.mark_activity_completed(completed["activity_id"], result_summary="done", result_json={})
+    db.activities.mark_completed(completed["activity_id"], result_summary="done", result_json={})
 
-    rows = db.list_active_mission_activities("team-session-1")
+    rows = db.activities.list_active_missions("team-session-1")
 
     assert [row["target_mission_id"] for row in rows] == ["mission-running"]
 
@@ -177,24 +177,24 @@ def test_reconcile_mission_activities_one_shot_backfills_existing(tmp_path: Path
     db = _db(tmp_path)
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Legacy active mission",
         active_mission_id="mission-legacy",
     )
-    activity = db.get_activity_for_mission("mission-legacy")
+    activity = db.activities.get_for_mission("mission-legacy")
     if activity is not None:
         db._conn.execute("DELETE FROM activities WHERE activity_id = ?", (activity["activity_id"],))  # noqa: SLF001
     db._conn.execute(  # noqa: SLF001
         "DELETE FROM state_meta WHERE key = 'mission_activities_backfill_cr_p3_1'"
     )
 
-    result = db.reconcile_mission_activities_one_shot()
-    second = db.reconcile_mission_activities_one_shot()
+    result = db.activities.reconcile_missions_once()
+    second = db.activities.reconcile_missions_once()
 
     assert result == {"ran": True, "inserted": 1}
     assert second == {"ran": False, "inserted": 0}
-    activity = db.get_activity_for_mission("mission-legacy")
+    activity = db.activities.get_for_mission("mission-legacy")
     assert activity is not None
     assert activity["conversation_id"] == "team-session-1"
     assert activity["status"] == "running"
@@ -207,10 +207,10 @@ def test_render_snapshot_includes_missions_top_level_list(monkeypatch, tmp_path:
     importlib.import_module("tui_gateway.methods.session_history")
     team_mission = team_mission_gateway()
     db = _db(tmp_path)
-    db.create_session("team-session-1", source="team_mission")
+    db.sessions.create("team-session-1", source="team_mission")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team",
         active_mission_id="mission-1",
@@ -271,8 +271,8 @@ def test_existing_activities_table_migrates_kind_mission_check(tmp_path: Path) -
     finally:
         conn.close()
 
-    db = SessionDB(db_path)
-    row = db.create_activity(
+    db = open_cli_session_store(db_path)
+    row = db.activities.create(
         activity_id="mission:legacy",
         conversation_id="team-session-1",
         kind="mission",

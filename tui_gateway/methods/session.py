@@ -10,7 +10,9 @@ from dovie_extension.display_transcript import (
     sanitize_transcript_messages,
 )
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services import run_control
+from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
 from tui_gateway.services.workspace import (
     bind_session_workspace as _bind_session_workspace,
     normalize_session_cwd as _normalize_session_cwd,
@@ -102,6 +104,116 @@ def _requested_runtime_scope_key(params: dict | None = None) -> str:
     ).strip()
 
 
+def _profile_db_from_params(params: dict | None = None):
+    profile_context = _profile_context_for_params(params or {}) or {}
+    hermes_home = str(profile_context.get("hermes_home") or "").strip()
+    if not hermes_home:
+        return None
+    try:
+        active_home = _resolve_home_path(hermes_home, fallback=hermes_home)
+        default_home = _resolve_home_path(_hermes_home, fallback=_hermes_home)
+        result = _get_session_db_for_home(
+            active_home=active_home,
+            default_home=default_home,
+            default_db=_server._db,
+            default_error=_server._db_error,
+            db_by_home=_server._db_by_home,
+            db_error_by_home=_server._db_error_by_home,
+            logger=logger,
+            create_if_missing=_current_method.get("") not in _READ_ONLY_DB_METHODS,
+        )
+        if active_home == default_home:
+            _server._db = result.default_db
+            _server._db_error = result.default_error
+        return result.db
+    except Exception:
+        return None
+
+
+def _db_for_session_request(params: dict | None, conversation_session_id: str = ""):
+    stable = str(conversation_session_id or "").strip()
+    if stable and _is_control_plane_conversation_session_id(stable):
+        return _db_for_stable_session(stable)
+    return _profile_db_from_params(params) or _get_db()
+
+
+def _requested_runtime_executor(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("runtime_executor")
+        or params.get("runtimeExecutor")
+        or profile.get("runtime_executor")
+        or profile.get("runtimeExecutor")
+        or ""
+    ).strip()
+
+
+def _requested_codex_home(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("codex_home")
+        or params.get("codexHome")
+        or params.get("codexHomePath")
+        or profile.get("codex_home")
+        or profile.get("codexHome")
+        or profile.get("codexHomePath")
+        or ""
+    ).strip()
+
+
+def _requested_codex_extra_env(params: dict | None = None) -> dict:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    for candidate in (
+        params.get("codex_extra_env"),
+        params.get("codexExtraEnv"),
+        profile.get("codex_extra_env"),
+        profile.get("codexExtraEnv"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return {str(k): str(v) for k, v in candidate.items() if v is not None}
+    return {}
+
+
+def _requested_codex_account_mode(params: dict | None = None) -> str:
+    params = params or {}
+    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    return str(
+        params.get("codex_account_mode")
+        or params.get("codexAccountMode")
+        or profile.get("codex_account_mode")
+        or profile.get("codexAccountMode")
+        or ""
+    ).strip().lower()
+
+
+def _is_byo_codex_agent(agent) -> bool:
+    if agent is None:
+        return False
+    if str(getattr(agent, "api_mode", "") or "").strip() != "codex_app_server":
+        return False
+    try:
+        from agent.codex_runtime import normalize_codex_account_mode
+
+        account_mode = normalize_codex_account_mode(
+            getattr(agent, "codex_account_mode", ""),
+            extra_env=getattr(agent, "codex_extra_env", None),
+        )
+    except Exception:
+        return False
+    return account_mode == "byo"
+
+
 def _requested_agent_profile_id(params: dict | None = None) -> str:
     return str(
         (params or {}).get("agent_profile_id")
@@ -141,65 +253,34 @@ def _ensure_session_create_conversation_participants(
     scope = str(runtime_scope_key or "").strip()
     if not profile_id and scope.startswith("profile:"):
         profile_id = scope.split("profile:", 1)[1].strip()
-    ensure_user = getattr(db, "ensure_user_participant", None)
-    ensure_agent = getattr(db, "ensure_agent_participant", None)
-    if callable(ensure_user):
-        ensure_user(session_id, user_id="default")
-    if callable(ensure_agent):
-        ensure_agent(
-            session_id,
-            agent_profile_id=profile_id,
-            display_name=str(
-                params.get("agent_profile_name")
-                or params.get("agentProfileName")
-                or params.get("profile_name")
-                or params.get("profileName")
-                or ""
-            ).strip(),
-            avatar=str(
-                params.get("agent_profile_avatar")
-                or params.get("agentProfileAvatar")
-                or params.get("profile_avatar")
-                or params.get("profileAvatar")
-                or params.get("avatar")
-                or ""
-            ).strip(),
-        )
+    db.participants.ensure_user_participant(session_id, user_id="default")
+    db.participants.ensure_agent_participant(
+        session_id,
+        agent_profile_id=profile_id,
+        display_name=str(
+            params.get("agent_profile_name")
+            or params.get("agentProfileName")
+            or params.get("profile_name")
+            or params.get("profileName")
+            or ""
+        ).strip(),
+        avatar=str(
+            params.get("agent_profile_avatar")
+            or params.get("agentProfileAvatar")
+            or params.get("profile_avatar")
+            or params.get("profileAvatar")
+            or params.get("avatar")
+            or ""
+        ).strip(),
+    )
 
 
-def _project_session_index_on_create(
-    db, session_id: str, params: dict, runtime_scope_key: str, transient: bool
-) -> None:
-    """Persist the owning agent profile into the control-plane session_index at
-    create time. This is the keystone of the single-query sidebar read: the
-    session->profile association was previously known only client-side (forcing
-    the per-profile fan-out). Best-effort; never breaks session creation."""
-    upsert = getattr(db, "upsert_session_index", None)
-    if not callable(upsert):
-        return
-    # Group-chat member-chat worker sessions are data plane — the worker runs
-    # in its own session and its reply is relayed into the team conversation
-    # by hermes_state_member_chat. The worker session must NEVER appear as a
-    # sidebar row, even before reconcile_session_index has a chance to purge.
-    if str(session_id or "").startswith("memberchat:"):
-        return
+def _session_owner_profile_id(params: dict, runtime_scope_key: str) -> str:
     profile_id = _requested_agent_profile_id(params)
     scope = str(runtime_scope_key or "")
     if not profile_id and scope.startswith("profile:"):
         profile_id = scope.split("profile:", 1)[1].strip()
-    try:
-        upsert(
-            session_id=session_id,
-            owner_agent_profile_id=profile_id,
-            owner_profile_version_id=_requested_profile_version_id(params),
-            runtime_scope_key=scope,
-            source="tui",
-            transient=bool(transient),
-            session_kind="hermes_session",
-            conversation_kind="direct",
-        )
-    except Exception:
-        pass
+    return profile_id
 
 
 def _requested_tool_progress_mode(params: dict | None = None) -> str:
@@ -221,17 +302,17 @@ def _requested_tool_progress_mode(params: dict | None = None) -> str:
 
 def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> dict:
     session = session or {}
-    stable_session_id = str(session.get("session_key") or runtime_sid or "")
+    conversation_session_id = str(session.get("session_key") or runtime_sid or "")
     control_state = run_control.session_status(
-        stable_session_id,
+        conversation_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "running": running,
-        "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or stable_session_id),
-        "active_runtime_session_id": runtime_sid or "",
+        "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or conversation_session_id),
+        "active_execution_session_id": runtime_sid or "",
         "active_run_id": str(session.get("active_run_id") or control_state.get("active_run_id") or "") if running else "",
         "active_turn_id": str(session.get("active_turn_id") or control_state.get("active_turn_id") or "") if running else "",
         "run_started_at": (session.get("run_started_at") or control_state.get("run_started_at") or 0) if running else 0,
@@ -384,7 +465,7 @@ def _is_team_mission_internal_session_row(
 ) -> bool:
     session_ids = {
         str(row.get("id") or "").strip(),
-        str(row.get("stored_session_id") or row.get("storedSessionId") or "").strip(),
+        str(row.get("conversation_session_id") or row.get("conversationSessionId") or "").strip(),
         str(row.get("session_id") or row.get("sessionId") or "").strip(),
     }
     session_ids.discard("")
@@ -415,8 +496,8 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
     conversation = getter(session_id) if callable(getter) and session_id else {}
     if conversation:
         conversation_id = str(conversation.get("conversation_id") or "").strip()
-        stable_session_id = str(conversation.get("stable_session_id") or row.get("id") or "").strip()
-        if not conversation_id or not stable_session_id:
+        conversation_session_id = str(conversation.get("conversation_session_id") or row.get("id") or "").strip()
+        if not conversation_id or not conversation_session_id:
             return None
         updated_at = conversation.get("updated_at") or row.get("last_active") or row.get("started_at") or 0
         created_at = conversation.get("created_at") or row.get("started_at") or updated_at
@@ -429,9 +510,9 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
         )
         return {
             **row,
-            "id": stable_session_id,
-            "stored_session_id": stable_session_id,
-            "session_id": stable_session_id,
+            "id": conversation_session_id,
+            "conversation_session_id": conversation_session_id,
+            "session_id": conversation_session_id,
             "session_kind": "team_mission",
             "conversation_kind": "team",
             "source": "team_mission",
@@ -701,7 +782,7 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             "totalCount": 0,
         }
     if mode == "tail":
-        page = db.get_messages_page_as_conversation(
+        page = db.messages.page_as_conversation(
             session_id,
             direction="tail",
             limit=limit,
@@ -711,20 +792,12 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
             sanitize_transcript_messages(_history_to_messages(page.get("messages") or [])),
             _message_page_info(page.get("pageInfo")),
         )
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        display_history = history_reader(
-            session_id,
-            include_ancestors=True,
-            include_storage_metadata=True,
-        )
-    except TypeError:
-        display_history = db.get_messages_as_conversation(
-            session_id,
-            include_ancestors=True,
-        )
+    display_history = load_conversation_history(
+        db,
+        session_id,
+        include_ancestors=True,
+        include_storage_metadata=True,
+    )
     messages = sanitize_transcript_messages(_history_to_messages(display_history))
     page_info = {
         "prevCursor": "",
@@ -737,20 +810,12 @@ def _display_history_page(db, session_id: str, hydrate: str, limit: int) -> tupl
 
 
 def _display_history_conversation(db, session_id: str) -> list[dict]:
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        return history_reader(
-            session_id,
-            include_ancestors=True,
-            include_storage_metadata=True,
-        )
-    except TypeError:
-        return db.get_messages_as_conversation(
-            session_id,
-            include_ancestors=True,
-        )
+    return load_conversation_history(
+        db,
+        session_id,
+        include_ancestors=True,
+        include_storage_metadata=True,
+    )
 
 
 def _page_live_history(history: list[dict], hydrate: str, limit: int) -> tuple[list[dict], dict]:
@@ -830,11 +895,22 @@ def _(rid, params: dict) -> dict:
     # session["model_override"]) so the session starts on its own model without
     # a post-build /model switch. Never a global config write.
     create_model = str(params.get("model") or "").strip()
-    session_model_override = (
-        {"model": create_model, "provider": str(params.get("provider") or "").strip() or None}
-        if create_model
-        else None
-    )
+    create_provider = str(params.get("provider") or "").strip()
+    create_runtime_executor = _requested_runtime_executor(params)
+    create_codex_home = _requested_codex_home(params)
+    create_codex_extra_env = _requested_codex_extra_env(params)
+    create_codex_account_mode = _requested_codex_account_mode(params)
+    session_model_override = None
+    if create_model or create_provider or create_runtime_executor or create_codex_home or create_codex_extra_env or create_codex_account_mode:
+        session_model_override = {
+            "model": create_model,
+            "provider": create_provider or None,
+            "runtime_executor": create_runtime_executor or None,
+            "codex_home": create_codex_home or None,
+            "codex_extra_env": create_codex_extra_env or None,
+            "codex_account_mode": create_codex_account_mode or None,
+            "model_explicit": bool(create_model),
+        }
     create_reasoning_override = None
     if _effort := str(params.get("reasoning_effort") or "").strip():
         try:
@@ -860,7 +936,7 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as exc:
         return _err(rid, 5012, f"workspace bind failed: {exc}")
-    db = _get_db()
+    db = _db_for_session_request(params, key)
     if db is None and control_plane_only:
         return _db_unavailable_error(rid, code=5000)
     # Honor the desktop composer's per-session model pick for the projected row
@@ -870,9 +946,51 @@ def _(rid, params: dict) -> dict:
     # global model until the first turn's switch lands. Falls back to the
     # global model when the client made no pick.
     model = create_model or _resolve_model()
+    # Assemble the row's initial model_config so the runtime-worker subprocess
+    # — which only reads the DB, never the sidecar's in-memory session dict —
+    # can rebuild an agent with api_mode=codex_app_server. Without this the
+    # worker builds an openai-codex codex_responses agent and dies on the
+    # missing OAuth token check ("Provider 'openai-codex' is set in
+    # config.yaml but no API key was found").
+    codex_row_config: dict = {}
+    if session_model_override:
+        _re = str(session_model_override.get("runtime_executor") or "").strip()
+        _ch = str(session_model_override.get("codex_home") or "").strip()
+        _ce = session_model_override.get("codex_extra_env")
+        _cam = str(session_model_override.get("codex_account_mode") or "").strip()
+        _model_explicit = bool(session_model_override.get("model_explicit"))
+        _prov = str(session_model_override.get("provider") or "").strip()
+        if _re:
+            codex_row_config["runtime_executor"] = _re
+        if _ch:
+            codex_row_config["codex_home"] = _ch
+        if isinstance(_ce, dict) and _ce:
+            codex_row_config["codex_extra_env"] = {
+                str(k): str(v) for k, v in _ce.items() if v is not None
+            }
+        if _cam:
+            codex_row_config["codex_account_mode"] = _cam
+        if _re or _ch or _cam:
+            codex_row_config["model_explicit"] = _model_explicit
+        if _prov:
+            codex_row_config["provider"] = _prov
     if db is not None:
         try:
-            db.create_session(key, source="tui", model=model, transient=transient)
+            db.sessions.create(
+                key,
+                "tui",
+                model=model,
+                model_config=codex_row_config or None,
+                transient=transient,
+                runtime_scope_key=runtime_scope_key,
+                session_kind="hermes_session",
+                conversation_kind="direct",
+                owner_agent_profile_id=_session_owner_profile_id(
+                    params,
+                    runtime_scope_key,
+                ),
+                owner_profile_version_id=_requested_profile_version_id(params),
+            )
         except Exception as exc:
             return _err(rid, 5000, f"session create failed: {exc}")
         try:
@@ -888,14 +1006,12 @@ def _(rid, params: dict) -> dict:
                 key,
                 exc,
             )
-        _project_session_index_on_create(db, key, params, runtime_scope_key, transient)
-
     if control_plane_only:
         return _ok(
             rid,
             {
                 "session_id": key,
-                "stored_session_id": key,
+                "conversation_session_id": key,
                 "info": {
                     "model": model,
                     "tools": {},
@@ -976,7 +1092,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": sid,
-            "stored_session_id": key,
+            "conversation_session_id": key,
             "message_count": len(seed_history),
             "messages": _history_to_messages(seed_history),
             "info": {
@@ -1031,14 +1147,14 @@ def _(rid, params: dict) -> dict:
         cursor = _decode_page_cursor(params.get("cursor"))
         rows = [
             s
-            for s in db.list_sessions_rich(
+            for s in db.sessions.list(
                 source=None,
-                exclude_sources=list(deny),
+                exclude_sources=tuple(deny),
                 limit=limit + 1,
                 page_cursor=cursor,
                 order_by_last_active=True,
             )
-            if (s.get("source") or "").strip().lower() not in deny
+            if str(s.get("source") or "").strip().lower() not in deny
         ]
         has_more = len(rows) > limit
         page_rows = rows[:limit]
@@ -1128,7 +1244,7 @@ def _is_hidden_empty_index_draft(row: dict) -> bool:
     if (
         row.get("running")
         or str(row.get("active_run_id") or "").strip()
-        or str(row.get("active_runtime_session_id") or "").strip()
+        or str(row.get("active_execution_session_id") or "").strip()
     ):
         return False
     return True
@@ -1175,7 +1291,7 @@ def _session_index_list_item(row: dict) -> dict:
         "active_activity_count": row.get("active_activity_count") or 0,
         "unread_completion_count": row.get("unread_completion_count") or 0,
         "active_run_id": row.get("active_run_id") or "",
-        "active_runtime_session_id": row.get("active_runtime_session_id") or "",
+        "active_execution_session_id": row.get("active_execution_session_id") or "",
         "conversation_id": row.get("conversation_id") or "",
         "team_id": row.get("team_id") or "",
         "team_conversation_title": row.get("team_conversation_title") or "",
@@ -1364,25 +1480,6 @@ def _safe_json_decode(value):
         return None
 
 
-_SESSION_INDEX_RECONCILED = False
-
-
-def _ensure_session_index_reconciled(db) -> None:
-    """One-time backfill of the control-plane index from the source of truth
-    (sessions table) per gateway process, on first sidebar read. Idempotent and
-    preserves any live status already projected by write-time hooks."""
-    global _SESSION_INDEX_RECONCILED
-    if _SESSION_INDEX_RECONCILED:
-        return
-    reconcile = getattr(db, "reconcile_session_index", None)
-    if callable(reconcile):
-        try:
-            reconcile()
-        except Exception:
-            pass
-    _SESSION_INDEX_RECONCILED = True
-
-
 @method("session.index.list")
 def _(rid, params: dict) -> dict:
     """Single-query sidebar read from the control-plane session_index.
@@ -1393,11 +1490,7 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5006)
-    lister = getattr(db, "list_session_index", None)
-    if not callable(lister):
-        return _err(rid, 5006, "session_index unavailable")
     try:
-        _ensure_session_index_reconciled(db)
         limit = _bounded_page_limit(params.get("limit"), default=200, maximum=200)
         cursor = _decode_page_cursor(params.get("cursor"))
         include_transient = is_truthy_value(
@@ -1412,20 +1505,12 @@ def _(rid, params: dict) -> dict:
         ).strip().lower()
         if requested_conversation_kind not in {"direct", "team"}:
             requested_conversation_kind = ""
-        list_kwargs = {
-            "limit": limit,
-            "cursor": cursor or None,
-            "include_transient": include_transient,
-        }
-        if requested_conversation_kind:
-            list_kwargs["conversation_kind"] = requested_conversation_kind
-        try:
-            result = lister(**list_kwargs)
-        except TypeError:
-            if not requested_conversation_kind:
-                raise
-            list_kwargs.pop("conversation_kind", None)
-            result = lister(**list_kwargs)
+        result = db.session_index.list(
+            limit=limit,
+            cursor=cursor or None,
+            include_transient=include_transient,
+            conversation_kind=requested_conversation_kind or None,
+        )
         rows = [
             _session_index_row_with_active_mission_running(db, row)
             for row in (result.get("sessions") or [])
@@ -1489,7 +1574,12 @@ def _(rid, params: dict) -> dict:
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a
         # similar over-fetch strategy.
-        rows = db.list_sessions_rich(source=None, limit=200)
+        rows = db.sessions.list(
+            source=None,
+            exclude_sources=tuple(deny),
+            limit=200,
+            order_by_last_active=True,
+        )
         for row in rows:
             src = (row.get("source") or "").strip().lower()
             if src in deny:
@@ -1512,36 +1602,28 @@ def _(rid, params: dict) -> dict:
 
 def _participant_view_for_resume(
     *,
-    stored_session_id: str,
+    conversation_session_id: str,
     agent_context_mode: str,
     params: dict | None = None,
 ) -> str:
-    """Return the participant_id the resuming runtime should hydrate its
-    conversation history under.
-
-    - team-leader runtime over a team conversation session → ``"leader"``
-      (so leader sees its own assistant turns vs. other members' as
-      observed user-side speech)
-    - member-chat worker session → its ``member_id`` (member-chat sessions
-      also materialize this view at write-time via
-      sync_member_chat_conversation_view, so this lookup is mostly a
-      belt-and-braces for any re-hydration paths)
-    - all other sessions (plain chat, single-participant) → ``""`` and no
-      projection is applied
-
-    Caller passes the resolved agent_context_mode so we don't re-derive.
-    """
-    target = str(stored_session_id or "").strip()
+    """Return an explicit participant id supplied by the runtime contract."""
     mode = str(agent_context_mode or "").strip().lower()
-    if mode == "team_leader":
-        return "leader"
-    if target.startswith("memberchat:"):
-        # memberchat:<conv>:<member_id>
-        rest = target[len("memberchat:"):]
-        # split off conv prefix (which itself may contain ':' segments)
-        # — the member id is the last colon-delimited segment.
-        if ":" in rest:
-            return rest.rsplit(":", 1)[-1].strip()
+    params = params if isinstance(params, dict) else {}
+    explicit = str(
+        params.get("participant_id") or params.get("participantId") or ""
+    ).strip()
+    if explicit:
+        return explicit
+    if mode != "team_leader":
+        return ""
+    db = _db_for_stable_session(str(conversation_session_id or "").strip())
+    if db is not None:
+        participants = db.participants.list_conversation_participants(
+            str(conversation_session_id or "").strip()
+        )
+        for participant in participants:
+            if isinstance(participant, dict) and str(participant.get("role") or "") == "leader":
+                return str(participant.get("participant_id") or "").strip()
     return ""
 
 
@@ -1553,14 +1635,10 @@ def _(rid, params: dict) -> dict:
     db = _db_for_stable_session(target)
     if db is None:
         return _err(rid, 4007, "session not found")
-    found = db.get_session(target)
+    target, found = db.sessions.resolve_reference(target)
     if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
-    # Context compression ends the current SessionDB session and forks a
+        return _err(rid, 4007, "session not found")
+    # Context compression ends the current transcript session and forks a
     # continuation child that holds the post-compression turns (agent.session_id
     # rotates — see _sync_session_key_after_compress). Resuming the parent id
     # would reload the stale pre-compression transcript AND miss the live
@@ -1570,12 +1648,12 @@ def _(rid, params: dict) -> dict:
     # watch windows, which attach to the exact branch they were opened on.
     if found and not is_truthy_value(params.get("lazy", False)):
         try:
-            tip = db.resolve_resume_session_id(target)
+            tip = db.sessions.resolve_resume_id(target) or target
         except Exception:
             tip = target
         if tip and tip != target:
             target = tip
-            found = db.get_session(target) or found
+            found = db.sessions.get(target) or found
     existing_workspace = _stored_workspace(target)
     raw_cwd = params.get("cwd") or (existing_workspace or {}).get("cwd")
     workspace_params = params
@@ -1629,27 +1707,27 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:
-        db.reopen_session(target)
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        history = history_reader(target)
-        # P1 participant-view projection: when this runtime is hydrating a
-        # MULTI-PARTICIPANT conversation (the team leader reading a team
-        # conversation that also contains member-chat mirrored replies, or
-        # any other participant view), project the shared message log into
-        # first-person view so the LLM doesn't conflate other participants'
-        # assistant turns with its own. Single-participant chats pass
-        # `viewer=""` and the projection is a no-op.
+        db.sessions.reopen(target)
+        history = load_conversation_history(db, target)
+        # Participant-aware projection keeps only the viewing actor's own
+        # replies as assistant. Other participants become attributed user-role
+        # conversation context and legacy system rows are excluded.
         agent_context_mode = _agent_context_mode_from_params(params)
         viewer_participant_id = _participant_view_for_resume(
-            stored_session_id=target,
+            conversation_session_id=target,
             agent_context_mode=agent_context_mode,
             params=params,
         )
         if viewer_participant_id:
-            from hermes_state_member_chat import project_messages_for_viewer
-            history = project_messages_for_viewer(history, viewer_participant_id)
+            from hermes_agent.domain.participant_transcript_projector import (
+                project_participant_transcript,
+            )
+            participants = db.participants.list_conversation_participants(target)
+            history = project_participant_transcript(
+                history,
+                viewing_participant_id=viewer_participant_id,
+                participants=participants,
+            )
         display_history = _display_history_conversation(db, target)
         display_history_prefix = display_history[
             : max(0, len(display_history) - len(history))
@@ -1666,6 +1744,7 @@ def _(rid, params: dict) -> dict:
                     session_id=target,
                     cwd=cwd,
                     agent_context_mode=agent_context_mode,
+                    profile_context=profile_context,
                 )
             except TypeError as exc:
                 if "unexpected keyword argument" not in str(exc):
@@ -1801,10 +1880,10 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4023, "cannot delete an active session")
     sessions_dir = Path(get_hermes_home()) / "sessions"
     try:
-        deleted = db.delete_session(target, sessions_dir=sessions_dir)
+        deletion = db.sessions.delete(target, sessions_dir=sessions_dir)
     except Exception as e:
         return _err(rid, 5036, f"delete failed: {e}")
-    if not deleted:
+    if not deletion.session_deleted:
         # The sessions row is gone but session_index may still carry an
         # orphan — typical for a session whose creation flow failed mid-way
         # (e.g. a model-switch error terminates the run before any message
@@ -1815,28 +1894,9 @@ def _(rid, params: dict) -> dict:
         # orphan case fixed earlier. Sweep the index row too and report
         # success so the client treats it as deleted (it IS deleted — the
         # only state that survived was the index row).
-        index_removed = 0
-        if hasattr(db, "delete_session_index"):
-            try:
-                index_removed = int(db.delete_session_index(target) or 0)
-            except Exception:
-                logger.debug(
-                    "session.delete: session_index cleanup failed", exc_info=True
-                )
-        if index_removed > 0:
+        if deletion.index_deleted:
             return _ok(rid, {"deleted": target, "via": "session_index_cleanup"})
         return _err(rid, 4007, "session not found")
-    # Also sweep session_index whenever the sessions row was removed — the
-    # write path normally keeps them in sync, but a crashed projector / older
-    # row created before session_index existed would otherwise leave a stale
-    # index entry pointing at the now-missing session.
-    if hasattr(db, "delete_session_index"):
-        try:
-            db.delete_session_index(target)
-        except Exception:
-            logger.debug(
-                "session.delete: session_index post-sweep failed", exc_info=True
-            )
     return _ok(rid, {"deleted": target})
 
 
@@ -1846,8 +1906,8 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5007)
     requested = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or ""
     ).strip()
@@ -1862,12 +1922,7 @@ def _(rid, params: dict) -> dict:
 
     if not session:
         try:
-            stored_row = db.get_session(key)
-            if not stored_row:
-                by_title = db.get_session_by_title(key)
-                if by_title:
-                    key = str(by_title.get("id") or key)
-                    stored_row = by_title
+            key, stored_row = db.sessions.resolve_reference(key)
             if not stored_row:
                 return _err(rid, 4007, "session not found")
         except Exception as e:
@@ -1876,15 +1931,15 @@ def _(rid, params: dict) -> dict:
     if "title" not in params:
         fallback = (session or {}).get("pending_title") or ""
         try:
-            resolved_title = db.get_session_title(key) or ""
+            resolved_title = db.sessions.get_title(key) or ""
             if fallback:
-                if db.set_session_title(key, fallback):
+                if db.sessions.set_title(key, fallback):
                     if session:
                         session["pending_title"] = None
                     resolved_title = fallback
                 else:
-                    existing_row = db.get_session(key)
-                    existing_title = ((existing_row or {}).get("title") or "").strip()
+                    existing_row = db.sessions.get(key)
+                    existing_title = str((existing_row or {}).get("title") or "").strip()
                     if existing_title == fallback:
                         if session:
                             session["pending_title"] = None
@@ -1904,13 +1959,13 @@ def _(rid, params: dict) -> dict:
             },
         )
     try:
-        if db.set_session_title(key, title):
+        if db.sessions.set_title(key, title):
             if session:
                 session["pending_title"] = None
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
-        existing_row = db.get_session(key)
+        existing_row = db.sessions.get(key)
         if existing_row:
             if session:
                 session["pending_title"] = None
@@ -1948,29 +2003,31 @@ def _(rid, params: dict) -> dict:
         provider = getattr(agent, "provider", None) or "unknown"
         model = str(usage.get("model") or getattr(agent, "model", None) or "unknown")
 
+    model_usage_entry = {
+        "provider": provider,
+        "model": model,
+        "count": int(usage.get("calls") or 0),
+        "totals": {
+            "input": int(usage.get("input") or usage.get("prompt") or 0),
+            "output": int(usage.get("output") or usage.get("completion") or 0),
+            "cacheRead": int(usage.get("cache_read") or 0),
+            "cacheWrite": int(usage.get("cache_write") or 0),
+            "reasoning": int(usage.get("reasoning") or 0),
+            "image": int(usage.get("image") or 0),
+            "totalTokens": int(usage.get("total") or 0),
+            "totalCost": float(usage.get("cost_usd") or 0),
+        },
+    }
+    if _is_byo_codex_agent(agent):
+        model_usage_entry["byo"] = True
+
     structured = {
         "updatedAt": updated_at,
         "sessions": [
             {
                 "key": key,
                 "usage": {
-                    "modelUsage": [
-                        {
-                            "provider": provider,
-                            "model": model,
-                            "count": int(usage.get("calls") or 0),
-                            "totals": {
-                                "input": int(usage.get("input") or usage.get("prompt") or 0),
-                                "output": int(usage.get("output") or usage.get("completion") or 0),
-                                "cacheRead": int(usage.get("cache_read") or 0),
-                                "cacheWrite": int(usage.get("cache_write") or 0),
-                                "reasoning": int(usage.get("reasoning") or 0),
-                                "image": int(usage.get("image") or 0),
-                                "totalTokens": int(usage.get("total") or 0),
-                                "totalCost": float(usage.get("cost_usd") or 0),
-                            },
-                        }
-                    ]
+                    "modelUsage": [model_usage_entry]
                 },
             }
         ],
@@ -1986,25 +2043,27 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     from hermes_constants import display_hermes_home
 
-    requested = str(params.get("session_id") or params.get("stored_session_id") or "").strip()
+    requested = str(params.get("session_id") or params.get("conversation_session_id") or "").strip()
     if not requested:
         return _err(rid, 4006, "session_id required")
     runtime_sid, session = _resolve_runtime_session(requested)
     key = str((session or {}).get("session_key") or requested)
     agent = (session or {}).get("agent")
-    meta = {}
-    db = _get_db()
+    db = _db_for_session_request(params, key)
+    meta_title = ""
+    meta_started_at = 0.0
+    meta_updated_at = 0.0
+    stored = None
     if db and key:
         try:
-            meta = db.get_session(key) or {}
-            if not meta:
-                by_title = db.get_session_by_title(key)
-                if by_title:
-                    key = by_title["id"]
-                    meta = by_title
-        except Exception:
-            meta = {}
-    if db and not meta and session is None:
+            key, stored = db.sessions.resolve_reference(key)
+            if stored:
+                meta_title = str(stored.get("title") or "")
+                meta_started_at = float(stored.get("started_at") or 0)
+                meta_updated_at = float(stored.get("updated_at") or 0)
+        except Exception as exc:
+            return _err(rid, 5007, str(exc))
+    if db and not stored and session is None:
         return _err(rid, 4007, "session not found")
 
     def _dt(value, fallback: datetime | None = None) -> datetime:
@@ -2015,12 +2074,10 @@ def _(rid, params: dict) -> dict:
                 pass
         return fallback or datetime.now()
 
-    created = _dt(meta.get("started_at"))
+    created = _dt(meta_started_at)
     updated = created
-    for field in ("updated_at", "last_updated_at", "last_activity_at"):
-        if meta.get(field):
-            updated = _dt(meta.get(field), created)
-            break
+    if meta_updated_at:
+        updated = _dt(meta_updated_at, created)
 
     usage = _get_usage(agent) if agent is not None else {}
     provider = getattr(agent, "provider", None) or "unknown"
@@ -2031,7 +2088,7 @@ def _(rid, params: dict) -> dict:
         f"Session ID: {key}",
         f"Path: {display_hermes_home()}",
     ]
-    title = (meta.get("title") or "").strip()
+    title = (meta_title or "").strip()
     if title:
         lines.append(f"Title: {title}")
     lines.extend(
@@ -2048,7 +2105,7 @@ def _(rid, params: dict) -> dict:
         {
             "output": "\n".join(lines),
             "session_id": runtime_sid,
-            "stored_session_id": key,
+            "conversation_session_id": key,
             **_session_run_snapshot(runtime_sid, session or {"session_key": key}, db=db),
         },
     )
@@ -2249,6 +2306,6 @@ def _(rid, params: dict) -> dict:
         {
             "closed": True,
             "session_id": runtime_sid,
-            "stored_session_id": session.get("session_key") or sid,
+            "conversation_session_id": session.get("session_key") or sid,
         },
     )

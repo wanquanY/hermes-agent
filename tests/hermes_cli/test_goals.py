@@ -15,7 +15,7 @@ import pytest
 
 @pytest.fixture
 def hermes_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME so SessionDB.state_meta writes don't clobber the real one."""
+    """Isolated HERMES_HOME so goal state_meta writes don't clobber the real one."""
     from pathlib import Path
 
     home = tmp_path / ".hermes"
@@ -23,12 +23,12 @@ def hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    # Bust the goal-module's DB cache for each test so it re-resolves HERMES_HOME.
+    # Bust the goal-module's store cache for each test so it re-resolves HERMES_HOME.
     from hermes_cli import goals
 
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -605,7 +605,7 @@ class TestGoalManagerSubgoals:
         assert mgr.state.subgoals == []
 
     def test_subgoals_persist_across_reloads(self, hermes_home):
-        """Subgoals stored in SessionDB survive a fresh GoalManager."""
+        """Subgoals stored in shared session state survive a fresh GoalManager."""
         from hermes_cli.goals import GoalManager
         mgr = GoalManager(session_id="sub-persist")
         mgr.set("g")

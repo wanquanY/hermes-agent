@@ -6,11 +6,11 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from hermes_state import SessionDB
 from hermes_team_mission.context.worker_context import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission.runtime.profile_scope import compact_team_profile_snapshot
 from hermes_team_mission.runtime.profile_scope import gateway_call
 from hermes_team_mission.runtime.profile_scope import metadata as _metadata
+from hermes_team_mission.runtime.profile_scope import team_mission_control_db
 from hermes_team_mission.runtime.profile_scope import text as _text
 from hermes_team_mission.runtime.profile_scope import unwrap_response
 from tools.registry import registry, tool_error, tool_result
@@ -22,20 +22,16 @@ _LEADER_NODE_KINDS = {"root"}
 
 
 def _get_db(parent_agent=None):
-    db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
-    if db is not None:
-        return db
-    try:
-        from tui_gateway import server
-
-        return server._get_db()
-    except Exception:
-        return SessionDB()
+    if _active_run_id({}, parent_agent):
+        db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
+        if db is not None:
+            return db
+    return team_mission_control_db(parent_agent)
 
 
 def _session_context() -> dict[str, Any]:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:
@@ -66,7 +62,7 @@ def _leader_team_context() -> dict[str, Any] | str:
 def _active_mission_graph(db, team_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     mission_id = _text(team_context.get("mission_id") or team_context.get("missionId"))
     if mission_id:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         if graph:
             return mission_id, graph
     identifier = _text(
@@ -129,7 +125,7 @@ def _leader_run_context(args: dict[str, Any], parent_agent=None) -> tuple[Any, s
         return "Current run is not bound to a Team Mission node."
     mission_id = _text(binding.get("mission_id"))
     node_id = _text(binding.get("node_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return "Bound Team Mission was not found."
@@ -216,7 +212,11 @@ def _handle_leader_team_profile(args: dict[str, Any], parent_agent=None) -> str:
     team_context = ctx
     db = _get_db(parent_agent)
     mission_id, _graph = _active_mission_graph(db, team_context)
-    response = gateway_call("team_mission.team_profile.get", _leader_profile_params(team_context, mission_id))
+    response = gateway_call(
+        "team_mission.team_profile.get",
+        _leader_profile_params(team_context, mission_id),
+        db=db,
+    )
     result, error = unwrap_response(response)
     if error:
         return tool_error(error)
@@ -243,6 +243,7 @@ def _handle_leader_run_team_profile(args: dict[str, Any], parent_agent=None) -> 
     response = gateway_call(
         "team_mission.team_profile.get",
         _leader_run_profile_params(mission_id, mission, node),
+        db=_db,
     )
     result, error = unwrap_response(response)
     if error:

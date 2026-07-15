@@ -104,6 +104,9 @@ def test_agent_profile_test_uses_dedicated_stream_events():
         subagent_id="child-1",
         goal="hello",
         tool_count=0,
+        mode="append",
+        delta="\npartial answer",
+        offset=0,
     )
     bridge.on_tool_progress(
         "sid",
@@ -170,6 +173,9 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert "context" not in events[3]["payload"]
     assert "dispatch_message" not in events[3]["payload"]
     assert events[4]["payload"]["text"] == "\npartial answer"
+    assert events[4]["payload"]["mode"] == "append"
+    assert events[4]["payload"]["delta"] == "\npartial answer"
+    assert events[4]["payload"]["offset"] == 0
     assert events[4]["payload"]["tool_name"] == "test_agent_profile"
     assert events[5]["payload"]["text"] == "preparing draft runtime"
     assert events[6]["payload"]["tool_name"] == "terminal"
@@ -177,6 +183,46 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[6]["payload"]["arguments"] == {"command": "python test_agent_validation.py"}
     assert events[7]["payload"]["text"] == "thinking"
     assert events[9]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
+
+
+def test_interrupted_session_still_emits_subagent_terminal_fact():
+    events = []
+    sessions = {
+        "sid": {
+            "session_key": "stored",
+            "active_run_id": "run-1",
+            "active_turn_id": "turn-1",
+            "interrupted_run_id": "run-1",
+            "interrupted_turn_id": "turn-1",
+        }
+    }
+    bridge = GatewayToolEventBridge(
+        sessions=sessions,
+        emit=lambda event_type, sid, payload=None: events.append(
+            {"type": event_type, "session_id": sid, "payload": payload or {}}
+        ),
+        tool_progress_enabled=lambda _sid: True,
+        session_cwd=lambda _session: "/tmp",
+    )
+
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.reasoning_delta",
+        preview="late token",
+        subagent_id="sa-1",
+    )
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.complete",
+        preview="stopped",
+        subagent_id="sa-1",
+        status="interrupted",
+        summary="stopped",
+    )
+
+    assert [event["type"] for event in events] == ["subagent.complete"]
+    assert events[0]["payload"]["status"] == "interrupted"
+    assert events[0]["payload"]["subagent_id"] == "sa-1"
 
 
 def test_agent_profile_design_context_emits_structured_complete_when_tool_progress_disabled():
@@ -226,8 +272,9 @@ def test_team_mission_start_task_emits_structured_complete_when_tool_progress_di
                 "await_final_deliverable": True,
                 "hermes_control": {
                     "kind": "team_mission_started",
+                    "end_current_turn": True,
                     "skip_remaining_tool_calls": True,
-                    "require_followup_response": True,
+                    "require_followup_response": False,
                     "await_final_deliverable": True,
                 },
             }

@@ -98,7 +98,7 @@ def _run_context(args: Mapping[str, Any], parent_agent=None) -> tuple[Any, str, 
         return "Current run is not bound to a Team Mission node."
     mission_id = _text(binding.get("mission_id"))
     node_id = _text(binding.get("node_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return "Bound Team Mission was not found."

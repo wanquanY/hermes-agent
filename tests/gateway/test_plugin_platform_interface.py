@@ -36,7 +36,7 @@ _PLATFORM_NAMES = _discover_platform_plugins()
 @pytest.fixture
 def clean_registry():
     """Yield with a clean platform registry, restoring state afterwards."""
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
 
     original = dict(platform_registry._entries)
     platform_registry._entries.clear()
@@ -64,7 +64,7 @@ class _MockPluginContext:
         check_fn: Any,
         **kwargs: Any,
     ) -> None:
-        from gateway.platform_registry import platform_registry, PlatformEntry
+        from channels.platform_registry import platform_registry, PlatformEntry
 
         entry = PlatformEntry(
             name=name,
@@ -103,7 +103,7 @@ def test_plugin_registers_valid_platform_entry(platform_name: str, clean_registr
 
     assert platform_name in ctx.registered_names
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None, f"{platform_name} did not register an entry"
     assert entry.name == platform_name
@@ -119,7 +119,7 @@ def test_platform_entry_has_required_fields(platform_name: str, clean_registry):
     ctx = _MockPluginContext()
     module.register(ctx)
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None
 
@@ -145,7 +145,7 @@ def test_adapter_factory_produces_valid_adapter(platform_name: str, clean_regist
     ctx = _MockPluginContext()
     module.register(ctx)
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None
 
@@ -169,7 +169,7 @@ def test_adapter_factory_produces_valid_adapter(platform_name: str, clean_regist
 
     # Should be a BasePlatformAdapter subclass if importable
     try:
-        from gateway.platforms.base import BasePlatformAdapter
+        from channels.platforms.base import BasePlatformAdapter
         assert isinstance(adapter, BasePlatformAdapter)
     except Exception:
         pytest.skip("BasePlatformAdapter not available for isinstance check")
@@ -182,7 +182,7 @@ def test_check_fn_returns_bool(platform_name: str, clean_registry):
     ctx = _MockPluginContext()
     module.register(ctx)
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None
 
@@ -197,7 +197,7 @@ def test_validate_config_if_present(platform_name: str, clean_registry):
     ctx = _MockPluginContext()
     module.register(ctx)
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None
 
@@ -217,7 +217,7 @@ def test_is_connected_if_present(platform_name: str, clean_registry):
     ctx = _MockPluginContext()
     module.register(ctx)
 
-    from gateway.platform_registry import platform_registry
+    from channels.platform_registry import platform_registry
     entry = platform_registry.get(platform_name)
     assert entry is not None
 

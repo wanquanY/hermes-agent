@@ -141,6 +141,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # fuzzy-match collisions (e.g. "anthropic/claude-sonnet-4" is a
     # substring of "anthropic/claude-sonnet-4.6").
     # OpenRouter-prefixed models resolve via OpenRouter live API or models.dev.
+    "claude-fable-5": 1000000,
+    "claude-fable": 1000000,
     "claude-opus-4-8": 1000000,
     "claude-opus-4.8": 1000000,
     "claude-opus-4-7": 1000000,
@@ -153,10 +155,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude": 200000,
     # OpenAI — GPT-5 family (most have 400k; specific overrides first)
     # Source: https://developers.openai.com/api/docs/models
-    # GPT-5.5 (launched Apr 23 2026) is 1.05M on the direct OpenAI API and
-    # ChatGPT Codex OAuth caps it at 272K; both paths resolve via their own
+    # GPT-5.5/5.6 are 1.05M on the direct OpenAI API and ChatGPT Codex OAuth
+    # caps them at 272K; both paths resolve via their own
     # provider-aware branches (_resolve_codex_oauth_context_length + models.dev).
     # This hardcoded value is only reached when every probe misses.
+    "gpt-5.6-luna": 1050000,
+    "gpt-5.6-terra": 1050000,
+    "gpt-5.6-sol": 1050000,
     "gpt-5.5": 1050000,
     "gpt-5.4-nano": 400000,           # 400k (not 1.05M like full 5.4)
     "gpt-5.4-mini": 400000,           # 400k (not 1.05M like full 5.4)
@@ -207,7 +212,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     # https://platform.minimax.io/docs/api-reference/text-chat-openai
     "minimax-m3": 1000000,
     "minimax": 204800,
-    # GLM
+    # GLM-5.2 exposes a 1M window; older families use the generic fallback.
+    "glm-5.2": 1048576,
     "glm": 202752,
     # xAI Grok — xAI /v1/models does not return context_length metadata,
     # so these hardcoded fallbacks prevent Hermes from probing-down to
@@ -215,11 +221,14 @@ DEFAULT_CONTEXT_LENGTHS = {
     # via a custom provider. Values sourced from models.dev (2026-04).
     # Keys use substring matching (longest-first), so e.g. "grok-4.20"
     # matches "grok-4.20-0309-reasoning" / "-non-reasoning" / "-multi-agent-0309".
+    "grok-build-latest": 500000,  # alias of grok-4.5
     "grok-build": 256000,       # grok-build-0.1
     "grok-code-fast": 256000,   # grok-code-fast-1
     "grok-2-vision": 8192,      # grok-2-vision, -1212, -latest
+    "grok-4-1-fast": 2000000,   # grok-4-1-fast-(non-)reasoning
     "grok-4-fast": 2000000,     # grok-4-fast-(non-)reasoning, also matches -reasoning
     "grok-4.20": 2000000,       # grok-4.20-0309-(non-)reasoning, -multi-agent-0309
+    "grok-4.5": 500000,         # grok-4.5, grok-4.5-latest
     "grok-4.3": 1000000,        # grok-4.3, grok-4.3-latest — 1M context per docs.x.ai
     "grok-4": 256000,           # grok-4, grok-4-0709
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
@@ -231,6 +240,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
     # static fallback so cache and offline both agree (issue #22268).
     "hy3-preview": 262144,
+    "hy3": 262144,
     # Nemotron — NVIDIA's open-weights series (128K context across all sizes)
     "nemotron": 131072,
     # Arcee
@@ -271,6 +281,7 @@ _GROK_EFFORT_CAPABLE_PREFIXES = (
     "grok-3-mini",
     "grok-4.20-multi-agent",
     "grok-4.3",
+    "grok-4.5",
 )
 
 
@@ -1354,6 +1365,9 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
     "gpt-5.3-codex-spark": 128_000,
     "gpt-5.2-codex": 272_000,
     "gpt-5.4-mini": 272_000,
+    "gpt-5.6-sol": 272_000,
+    "gpt-5.6-terra": 272_000,
+    "gpt-5.6-luna": 272_000,
     "gpt-5.5": 272_000,
     "gpt-5.4": 272_000,
     "gpt-5.2": 272_000,

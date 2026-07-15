@@ -13,7 +13,6 @@ from hermes_team_mission.domain.utils import MEMORY_COMMITTED_STATUS as _MEMORY_
 from hermes_team_mission.domain.utils import stable_id as _stable_id
 from hermes_team_mission.domain.utils import text as _text
 from hermes_team_mission.runtime.failure import classify_team_mission_failure as _classify_team_mission_failure
-from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation as _mirror_team_mission_event
 from hermes_runtime_event_payloads import primary_deliverable_text
 from hermes_team_mission.state.conversation import delete_team_mission_conversation as _delete_team_mission_conversation
 from hermes_team_mission.state.conversation import is_placeholder_team_mission_conversation_title as _is_placeholder_team_mission_conversation_title
@@ -176,9 +175,18 @@ def _event_seq(event: Dict[str, Any] | None) -> int:
     return 0
 
 
-def _should_emit_conversation_status_projection(event: Dict[str, Any] | None) -> bool:
+def _should_emit_conversation_status_projection(
+    event: Dict[str, Any] | None,
+    *,
+    node: Dict[str, Any] | None = None,
+) -> bool:
     event_type = _text((event or {}).get("type"))
-    return event_type in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES
+    if event_type not in _TEAM_MISSION_CONVERSATION_STATUS_SOURCE_EVENT_TYPES:
+        return False
+    node_kind = _normalize_node_kind((node or {}).get("kind"), default="")
+    if node_kind == "synthesis":
+        return False
+    return True
 
 
 def _payload_text_value(payload: Dict[str, Any] | None) -> str:
@@ -250,15 +258,15 @@ def _conversation_id_from_metadata(metadata: Dict[str, Any] | None, fallback: st
     )
 
 
-def _stable_session_id_from_metadata(metadata: Dict[str, Any] | None, fallback: str = "") -> str:
+def _conversation_session_id_from_metadata(metadata: Dict[str, Any] | None, fallback: str = "") -> str:
     metadata = metadata if isinstance(metadata, dict) else {}
     return _text(
         metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
-        or metadata.get("stable_session_id")
-        or metadata.get("stableSessionId")
-        or metadata.get("stable_team_session_id")
-        or metadata.get("stableTeamSessionId")
+        or metadata.get("conversation_session_id")
+        or metadata.get("conversationSessionId")
+        or metadata.get("conversation_team_session_id")
+        or metadata.get("conversationTeamSessionId")
         or metadata.get("team_session_id")
         or metadata.get("teamSessionId")
         or fallback
@@ -326,127 +334,11 @@ def _conversation_graph_node_id(mission_id: str, node_id: str) -> str:
     return _canonical_node_id(mission_id, node_id)
 
 
-def node_to_participant_id(node: Dict[str, Any] | None) -> str:
-    """Return only an explicit participant stamp from node metadata.
-
-    CR-P3.3: graph identity only; for speaker use participant_id. This helper
-    deliberately never derives speaker identity from node_id/canonical_node_id.
-    """
-    if not isinstance(node, dict):
-        return ""
-    metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
-    return _text(
-        node.get("participant_id")
-        or node.get("participantId")
-        or metadata.get("participant_id")
-        or metadata.get("participantId")
-    )
-
-
-def _participant_id_from_runtime_event_context(
-    *,
-    mission: Dict[str, Any],
-    node: Dict[str, Any],
-    binding: Dict[str, Any],
-) -> str:
-    binding_metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
-    mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
-    run_context = binding_metadata.get("run_context") if isinstance(binding_metadata.get("run_context"), dict) else {}
-    if not run_context and _text(binding_metadata.get("run_context_json") or binding_metadata.get("runContextJson")):
-        try:
-            parsed = json.loads(_text(binding_metadata.get("run_context_json") or binding_metadata.get("runContextJson")))
-        except (TypeError, json.JSONDecodeError):
-            parsed = {}
-        run_context = parsed if isinstance(parsed, dict) else {}
-    return _text(
-        binding_metadata.get("participant_id")
-        or binding_metadata.get("participantId")
-        or run_context.get("participant_id")
-        or run_context.get("participantId")
-        or node_to_participant_id(node)
-        or mission_metadata.get("participant_id")
-        or mission_metadata.get("participantId")
-    )
-
-
 def _task_id_from_mission(mission: Dict[str, Any] | None) -> str:
     if not isinstance(mission, dict):
         return ""
     metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
     return _task_id_from_metadata(metadata) or _text(mission.get("mission_id"))
-
-
-def _team_mission_runtime_event_identity(
-    *,
-    mission: Dict[str, Any] | None,
-    node: Dict[str, Any] | None,
-    binding: Dict[str, Any] | None,
-) -> Dict[str, str]:
-    mission = mission if isinstance(mission, dict) else {}
-    node = node if isinstance(node, dict) else {}
-    binding = binding if isinstance(binding, dict) else {}
-    mission_id = _text(mission.get("mission_id") or binding.get("mission_id") or node.get("mission_id"))
-    mission_metadata = mission.get("metadata") if isinstance(mission.get("metadata"), dict) else {}
-    node_id = _text(node.get("node_id") or binding.get("node_id"))
-    # CR-P3.3: graph identity only; for speaker use participant_id.
-    canonical_id = _canonical_node_id(mission_id, node_id)
-    node_kind = _normalize_node_kind(node.get("kind"))
-    output_contract = node.get("output_contract") if isinstance(node.get("output_contract"), dict) else {}
-    output_contract_format = _text(output_contract.get("format"))
-    runtime_stable_session_id = _text(
-        binding.get("session_id")
-        or node.get("runtime_stable_session_id")
-        or node.get("stored_session_id")
-        or node.get("actual_stable_session_id")
-    )
-    runtime_session_id = _text(binding.get("runtime_session_id") or node.get("runtime_session_id"))
-    runtime_scope_key = _text(binding.get("runtime_scope_key") or node.get("runtime_scope_key"))
-    task_id = (
-        _task_id_from_node_and_binding(node, binding)
-        or _task_id_from_mission(mission)
-        or mission_id
-    )
-    conversation_id = _conversation_id_from_metadata(
-        mission_metadata,
-        _text(mission.get("conversation_id")),
-    )
-    stable_session_id = _stable_session_id_from_metadata(
-        mission_metadata,
-        _text(mission.get("leader_session_id") or mission.get("team_id") or mission_id),
-    )
-    participant_id = _participant_id_from_runtime_event_context(
-        mission=mission,
-        node=node,
-        binding=binding,
-    )
-    return {
-        "mission_id": mission_id,
-        "missionId": mission_id,
-        "conversation_id": conversation_id,
-        "conversationId": conversation_id,
-        "stable_session_id": stable_session_id,
-        "stableSessionId": stable_session_id,
-        "node_id": node_id,
-        "nodeId": node_id,
-        "canonical_node_id": canonical_id,
-        "canonicalNodeId": canonical_id,
-        "node_kind": node_kind,
-        "nodeKind": node_kind,
-        "participant_id": participant_id,
-        "participantId": participant_id,
-        "output_contract_format": output_contract_format,
-        "outputContractFormat": output_contract_format,
-        "runtime_stable_session_id": runtime_stable_session_id,
-        "runtimeStableSessionId": runtime_stable_session_id,
-        "runtime_session_id": runtime_session_id,
-        "runtimeSessionId": runtime_session_id,
-        "runtime_scope_key": runtime_scope_key,
-        "runtimeScopeKey": runtime_scope_key,
-        "task_id": task_id,
-        "taskId": task_id,
-        "task_frame_id": f"mission-frame:{mission_id}" if mission_id else "",
-        "taskFrameId": f"mission-frame:{mission_id}" if mission_id else "",
-    }
 
 
 def _event_payload_declares_business_subject(event_type: str, payload: Dict[str, Any]) -> bool:
@@ -514,7 +406,7 @@ def _runtime_event_with_team_mission_identity(
     for key in (
         "mission_id",
         "conversation_id",
-        "stable_session_id",
+        "conversation_session_id",
         "node_id",
         "canonical_node_id",
         "participant_id",

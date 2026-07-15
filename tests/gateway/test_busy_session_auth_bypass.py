@@ -10,6 +10,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
 import sys
 import types
@@ -26,7 +27,7 @@ sys.modules.setdefault("telegram", _tg)
 sys.modules.setdefault("telegram.constants", _tg.constants)
 sys.modules.setdefault("telegram.ext", types.ModuleType("telegram.ext"))
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -62,7 +63,7 @@ def _make_event(text="hello", chat_id="123", user_id="user1", user_name="TestUse
 
 def _make_runner(authorized_users=None):
     """Build a minimal GatewayRunner with configurable auth."""
-    from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 
     if authorized_users is None:
         authorized_users = {"user1"}  # only user1 is authorized by default
@@ -106,7 +107,7 @@ class TestBusySessionAuthBypass:
     @pytest.mark.asyncio
     async def test_unauthorized_user_dropped_in_busy_path(self):
         """An unauthorized user's message must be silently dropped, not queued."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner, sentinel = _make_runner(authorized_users={"user1"})
         runner._busy_input_mode = "interrupt"
@@ -127,8 +128,8 @@ class TestBusySessionAuthBypass:
             thread_id="thread-abc",  # same thread → same session_key
         )
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, intruder_event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            intruder_event, sk
         )
 
         # Must return True (handled = dropped)
@@ -143,7 +144,7 @@ class TestBusySessionAuthBypass:
     @pytest.mark.asyncio
     async def test_authorized_user_still_processed_in_busy_path(self):
         """An authorized user's message must still be processed normally."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner, sentinel = _make_runner(authorized_users={"user1"})
         runner._busy_input_mode = "interrupt"
@@ -158,8 +159,8 @@ class TestBusySessionAuthBypass:
         runner._running_agents_ts[sk] = time.time()
         runner.adapters[event.source.platform] = adapter
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            event, sk
         )
 
         # Should return True (handled) but message is queued/processed
@@ -170,11 +171,11 @@ class TestBusySessionAuthBypass:
     @pytest.mark.asyncio
     async def test_unauthorized_user_during_drain_still_blocked(self):
         """Even during drain mode, unauthorized users must be dropped."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner, sentinel = _make_runner(authorized_users={"user1"})
         runner._draining = True
-        runner._queue_during_drain_enabled = lambda: True
+        busy_session_runtime_for(runner).queue_during_drain_enabled = lambda: True
         adapter = _make_adapter()
         runner.adapters[MagicMock(value="slack")] = adapter
 
@@ -186,8 +187,8 @@ class TestBusySessionAuthBypass:
         runner.adapters = MagicMock()
         runner.adapters.get = MagicMock(return_value=adapter)
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, intruder_event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            intruder_event, sk
         )
 
         # Auth check fires before drain logic — dropped
@@ -198,7 +199,7 @@ class TestBusySessionAuthBypass:
     @pytest.mark.asyncio
     async def test_unauthorized_user_cannot_steer_active_agent(self):
         """Steer mode must not allow unauthorized users to inject mid-run guidance."""
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner, sentinel = _make_runner(authorized_users={"user1"})
         runner._busy_input_mode = "steer"
@@ -212,8 +213,8 @@ class TestBusySessionAuthBypass:
         runner._running_agents[sk] = running_agent
         runner.adapters[event.source.platform] = adapter
 
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, event, sk
+        result = await busy_session_runtime_for(runner).handle_active_session_busy_message(
+            event, sk
         )
 
         assert result is True

@@ -52,6 +52,26 @@ def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
 
 
+def test_session_recall_uses_read_model_owner_without_legacy_fallback(agent, monkeypatch):
+    from hermes_agent.read_models.session_recall import SessionRecallReadModel
+
+    sentinel = object()
+
+    def open_default(*_args, **_kwargs):
+        return sentinel
+
+    def fail_session_db(*_args, **_kwargs):
+        raise AssertionError("AIAgent recall must not construct SessionDB")
+
+    monkeypatch.setattr(SessionRecallReadModel, "open_default", open_default)
+    monkeypatch.setattr(run_agent, "SessionDB", fail_session_db, raising=False)
+    agent._session_db = None
+    agent._session_recall_read_model = None
+
+    assert agent._get_session_db_for_recall() is sentinel
+    assert agent._get_session_db_for_recall() is sentinel
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""
@@ -1275,6 +1295,31 @@ class TestToolUseEnforcementConfig:
             prompt = a._build_system_prompt()
             assert TOOL_USE_ENFORCEMENT_GUIDANCE not in prompt
 
+    def test_removing_tools_invalidates_enforced_prompt_and_rebuilds_tool_free(
+        self, monkeypatch
+    ):
+        from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
+        from tui_gateway.services.toolset_scope import refresh_agent_tool_filter
+
+        agent = self._make_agent(
+            model="deepseek/deepseek-r1",
+            tool_use_enforcement="auto",
+        )
+        agent._cached_system_prompt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in agent._cached_system_prompt
+
+        monkeypatch.setattr(
+            "model_tools.get_tool_definitions",
+            lambda **_kwargs: [],
+        )
+        refresh_agent_tool_filter(agent, [])
+
+        assert agent.tools == []
+        assert agent.valid_tool_names == set()
+        assert agent._cached_system_prompt is None
+        rebuilt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE not in rebuilt
+
 
 class TestInvalidateSystemPrompt:
     def test_clears_cache(self, agent):
@@ -1849,7 +1894,7 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
-    def test_team_mission_handoff_skips_remaining_same_turn_tools(self, agent):
+    def test_team_mission_start_result_does_not_change_normal_tool_batch_semantics(self, agent):
         tc1 = _mock_tool_call(name="team_mission_start_task", arguments="{}", call_id="c1")
         tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
@@ -1863,26 +1908,23 @@ class TestExecuteToolCalls:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
+                "end_current_turn": True,
                 "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
+                "require_followup_response": False,
                 "await_final_deliverable": True,
             },
         })
 
-        with patch("run_agent.handle_function_call", return_value=handoff_result) as mock_hfc:
+        with patch("run_agent.handle_function_call", side_effect=[handoff_result, "search result"]) as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
 
-        assert mock_hfc.call_count == 1
+        assert mock_hfc.call_count == 2
         assert len(messages) == 2
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
         assert messages[1]["role"] == "tool"
         assert messages[1]["tool_call_id"] == "c2"
-        assert "Team Mission task was accepted" in messages[1]["content"]
-        assert "brief startup confirmation" in messages[1]["content"]
-        assert agent._tool_handoff_exit["kind"] == "team_mission_started"
-        assert agent._tool_handoff_exit["end_current_turn"] is False
-        assert agent._tool_handoff_exit["require_followup_response"] is True
+        assert messages[1]["content"] == "search result"
 
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
@@ -2723,6 +2765,32 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_run_conversation_persists_user_turn_before_model_call(self, agent):
+        self._setup_agent(agent)
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        persist_calls = []
+
+        def persist_session(messages, conversation_history=None):
+            persist_calls.append([dict(message) for message in messages])
+
+        def api_call(api_kwargs):
+            assert persist_calls
+            assert [message["role"] for message in persist_calls[0]] == ["user"]
+            assert persist_calls[0][0]["content"] == "hello"
+            return resp
+
+        agent._interruptible_api_call = api_call
+        agent._persist_session = persist_session
+
+        with (
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "Final answer"
+        assert len(persist_calls) >= 2
+
     def test_plain_assistant_content_is_not_emitted_as_reasoning_progress(self, agent):
         self._setup_agent(agent)
         progress_events = []
@@ -2760,7 +2828,7 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
-    def test_team_mission_start_task_returns_to_leader_for_natural_confirmation(self, agent):
+    def test_team_mission_start_task_returns_to_model_for_normal_final_response(self, agent):
         self._setup_agent(agent)
         agent.valid_tool_names.add("team_mission_start_task")
         tc = _mock_tool_call(
@@ -2768,12 +2836,16 @@ class TestRunConversation:
             arguments='{"objective":"plan the work"}',
             call_id="c1",
         )
-        start_response = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
-        confirmation_response = _mock_response(
-            content="团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。",
+        start_response = _mock_response(
+            content="好的，我来启动这个团队任务。",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        final_response = _mock_response(
+            content="团队任务已经启动，我会在画布中持续更新进度。",
             finish_reason="stop",
         )
-        agent.client.chat.completions.create.side_effect = [start_response, confirmation_response]
+        agent.client.chat.completions.create.side_effect = [start_response, final_response]
         handoff_result = json.dumps({
             "success": True,
             "mission_id": "mission-1",
@@ -2783,12 +2855,10 @@ class TestRunConversation:
             "message": "Planning started.",
             "hermes_control": {
                 "kind": "team_mission_started",
+                "end_current_turn": True,
                 "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
+                "require_followup_response": False,
                 "await_final_deliverable": True,
-                "assistant_followup_instruction": (
-                    "Reply naturally and briefly in the user's language."
-                ),
             },
         })
 
@@ -2800,11 +2870,58 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("start a team task")
 
-        assert result["final_response"] == "团队任务已经启动，正在后台处理。你可以在右侧画布查看进度，也可以继续发送新的任务。"
+        assert result["final_response"] == "团队任务已经启动，我会在画布中持续更新进度。"
         assert str(result["turn_exit_reason"]).startswith("text_response")
         assert result["api_calls"] == 2
         assert agent.client.chat.completions.create.call_count == 2
         assert mock_handle_function_call.call_count == 1
+        visible_assistant_messages = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("content")
+        ]
+        assert visible_assistant_messages[-1]["content"] == result["final_response"]
+        second_request_messages = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        assert any(
+            message.get("role") == "tool" and "mission-1" in str(message.get("content"))
+            for message in second_request_messages
+        )
+
+    def test_team_mission_start_task_without_preamble_still_uses_model_response(self, agent):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("team_mission_start_task")
+        tc = _mock_tool_call(name="team_mission_start_task", arguments="{}", call_id="c1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+            _mock_response(content="任务已启动，正在后台异步执行。", finish_reason="stop"),
+        ]
+        handoff_result = json.dumps({
+            "success": True,
+            "mission_id": "mission-1",
+            "hermes_control": {
+                "kind": "team_mission_started",
+                "end_current_turn": True,
+                "skip_remaining_tool_calls": True,
+                "require_followup_response": False,
+            },
+        })
+
+        with (
+            patch("run_agent.handle_function_call", return_value=handoff_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("启动一个团队任务")
+
+        assert result["final_response"] == "任务已启动，正在后台异步执行。"
+        assert result["api_calls"] == 2
+        visible_assistant_messages = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("content")
+        ]
+        assert visible_assistant_messages[-1]["content"] == result["final_response"]
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
@@ -4969,11 +5086,9 @@ class TestStreamingApiCall:
         # Stream delivers a tool call with incomplete JSON args and then ENDS
         # with no finish_reason (the SSE just stops — no terminator, no
         # [DONE]).  This is an upstream mid-tool-call drop, NOT an output cap.
-        # The builder must route it through the partial-stream-stub path
-        # (id=PARTIAL_STREAM_STUB_ID, tool_calls=None so it can't execute,
-        # finish_reason=length so the loop's continuation machinery fires with
-        # chunking guidance) rather than stamping a normal 'length' truncation.
-        from hermes_constants import PARTIAL_STREAM_STUB_ID
+        # The builder must route it through the partial-stream-stub path with
+        # tool_calls=None so the unconfirmed side effect cannot execute.
+        from hermes_constants import FINISH_REASON_STREAM_ERROR, PARTIAL_STREAM_STUB_ID
         chunks = [
             _make_chunk(tool_calls=[_make_tc_delta(0, "call_1", "write_file", '{"path":"x.txt","content":"hel')]),
         ]
@@ -4982,7 +5097,7 @@ class TestStreamingApiCall:
         resp = agent._interruptible_streaming_api_call({"messages": []})
 
         assert resp.id == PARTIAL_STREAM_STUB_ID
-        assert resp.choices[0].finish_reason == "length"
+        assert resp.choices[0].finish_reason == FINISH_REASON_STREAM_ERROR
         assert resp.choices[0].message.tool_calls is None
         assert getattr(resp, "_dropped_tool_names", None) == ["write_file"]
 
@@ -5310,9 +5425,37 @@ class TestPersistUserMessageOverride:
 
         agent._persist_session(messages, [])
 
-        assert messages[0]["content"] == "Hello there"
-        first_db_write = agent._session_db.append_message.call_args_list[0].kwargs
+        assert messages[0]["content"].startswith("[Voice input")
+        assert agent._session_messages[0]["content"] == "Hello there"
+        first_db_write = agent._session_db.messages.append.call_args_list[0].kwargs
         assert first_db_write["content"] == "Hello there"
+
+    def test_api_only_user_instruction_reaches_provider_but_not_returned_history(self, agent):
+        TestRunConversation()._setup_agent(agent)
+        agent._session_persistence_disabled = True
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="The terminal report is ready.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Publish the completed team activity report now.",
+                persist_user_message="",
+            )
+
+        provider_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(
+            message.get("role") == "user"
+            and message.get("content") == "Publish the completed team activity report now."
+            for message in provider_messages
+        )
+        returned_users = [message for message in result["messages"] if message.get("role") == "user"]
+        assert returned_users[-1]["content"] == ""
+        assert result["final_response"] == "The terminal report is ready."
 
 
 class TestReasoningReplayForStrictProviders:

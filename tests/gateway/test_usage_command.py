@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hermes_gateway.usage_command as usage_command
+
 
 def _make_mock_agent(**overrides):
     """Create a mock AIAgent with realistic session counters."""
@@ -44,7 +46,7 @@ def _make_mock_agent(**overrides):
 
 def _make_runner(session_key, agent=None, cached_agent=None):
     """Build a bare GatewayRunner with just the fields _handle_usage_command needs."""
-    from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
 
     runner = object.__new__(GatewayRunner)
     runner._running_agents = {}
@@ -80,7 +82,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=0.1234, status="estimated")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
         assert "35,000" in result  # input tokens
@@ -103,7 +105,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "80,000" in result   # running agent's total
         assert "API calls: 10" in result
@@ -111,7 +113,7 @@ class TestUsageCachedAgent:
     @pytest.mark.asyncio
     async def test_sentinel_skipped_uses_cache(self):
         """PENDING sentinel in _running_agents should fall through to cache."""
-        from gateway.run import _AGENT_PENDING_SENTINEL
+        from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
         cached = _make_mock_agent()
         runner = _make_runner(SK, cached_agent=cached)
@@ -121,7 +123,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
         assert "Session Token Usage" in result
@@ -141,7 +143,7 @@ class TestUsageCachedAgent:
         ]
 
         with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=500):
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Session Info" in result
         assert "Messages: 2" in result
@@ -157,7 +159,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Cache read" not in result
         assert "Cache write" not in result
@@ -172,7 +174,7 @@ class TestUsageCachedAgent:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="included")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "Cost: included" in result
 
@@ -189,11 +191,13 @@ class TestUsageAccountSection:
         event = MagicMock()
 
         monkeypatch.setattr(
-            "gateway.run.fetch_account_usage",
+            usage_command,
+            "fetch_account_usage",
             lambda provider, base_url=None, api_key=None: object(),
         )
         monkeypatch.setattr(
-            "gateway.run.render_account_usage_lines",
+            usage_command,
+            "render_account_usage_lines",
             lambda snapshot, markdown=False: [
                 "📈 **Account limits**",
                 "Provider: openai-codex (Pro)",
@@ -203,7 +207,7 @@ class TestUsageAccountSection:
         with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"), \
              patch("agent.usage_pricing.estimate_usage_cost") as mock_cost:
             mock_cost.return_value = MagicMock(amount_usd=None, status="included")
-            result = await runner._handle_usage_command(event)
+            result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert "📊 **Session Token Usage**" in result
         assert "📈 **Account limits**" in result
@@ -213,7 +217,7 @@ class TestUsageAccountSection:
     async def test_usage_command_uses_persisted_provider_when_agent_not_running(self, monkeypatch):
         runner = _make_runner(SK)
         runner._session_db = MagicMock()
-        runner._session_db.get_session.return_value = {
+        runner._session_db.sessions.get.return_value = {
             "billing_provider": "openai-codex",
             "billing_base_url": "https://chatgpt.com/backend-api/codex",
         }
@@ -231,13 +235,15 @@ class TestUsageAccountSection:
             calls["kwargs"] = kwargs
             return fn(*args, **kwargs)
 
-        monkeypatch.setattr("gateway.run.asyncio.to_thread", _fake_to_thread)
+        monkeypatch.setattr(usage_command.asyncio, "to_thread", _fake_to_thread)
         monkeypatch.setattr(
-            "gateway.run.fetch_account_usage",
+            usage_command,
+            "fetch_account_usage",
             lambda provider, base_url=None, api_key=None: object(),
         )
         monkeypatch.setattr(
-            "gateway.run.render_account_usage_lines",
+            usage_command,
+            "render_account_usage_lines",
             lambda snapshot, markdown=False: [
                 "📈 **Account limits**",
                 "Provider: openai-codex (Pro)",
@@ -245,7 +251,7 @@ class TestUsageAccountSection:
         )
 
         event = MagicMock()
-        result = await runner._handle_usage_command(event)
+        result = await usage_command.usage_command_for(runner).handle_usage_command(event)
 
         assert calls["args"] == ("openai-codex",)
         assert calls["kwargs"]["base_url"] == "https://chatgpt.com/backend-api/codex"

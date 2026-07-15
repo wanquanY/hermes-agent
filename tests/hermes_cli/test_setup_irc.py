@@ -8,7 +8,7 @@ interactive setup menus.
 import os
 import pytest
 
-from gateway.platform_registry import PlatformEntry, platform_registry
+from channels.platform_registry import PlatformEntry, platform_registry
 
 
 def _register_irc_platform(**overrides):

@@ -12,11 +12,16 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator, MutableMapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
+from hermes_agent.gateway.auth import requires_permission
+from hermes_agent.gateway import pipeline as _gateway_pipeline
+from hermes_agent.gateway.pipeline import AllowAllResolver, LegacyJsonRpcFrame
+from hermes_agent.gateway.registry import MethodRegistry, RegistryError
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
@@ -33,8 +38,10 @@ from tui_gateway.services.media import (
     estimate_image_tokens as _estimate_image_tokens,
     image_meta as _image_meta,
 )
+from hermes_agent.storage.cli_session_store import open_cli_session_store as _open_cli_session_store
 from tui_gateway.services.model_descriptor import (
     authoritative_catalog_model_id as _authoritative_catalog_model_id,
+    bind_session_agent as _bind_session_agent,
     normalize_model_descriptor as _normalize_model_descriptor,
     set_session_model_descriptor as _set_session_model_descriptor,
 )
@@ -70,7 +77,6 @@ from tui_gateway.services.transcript_messages import (
     history_to_messages as _history_to_messages,
     tool_context as _tool_ctx,
 )
-from dovie_extension import load_extension
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,10 @@ _DOVIE_STREAM_TRACE_EVENTS = {
     "message.complete",
     "reasoning.delta",
     "thinking.delta",
+    "subagent.output_delta",
+    "subagent.reasoning_delta",
+    "subagent.progress",
+    "subagent.tool",
 }
 
 
@@ -102,6 +112,16 @@ def _stream_trace_payload_summary(payload: dict | None) -> dict[str, Any]:
         "payload_len": len(text),
         "payload_sha1": digest,
         "payload_preview": text[:80].replace("\n", "\\n"),
+        "payload_offset": (payload or {}).get("offset"),
+        "subagent_id": str(
+            (payload or {}).get("subagent_id") or (payload or {}).get("subagentId") or ""
+        ),
+        "delegate_call_id": str(
+            (payload or {}).get("delegate_call_id")
+            or (payload or {}).get("delegateCallId")
+            or ""
+        ),
+        "source": str((payload or {}).get("source") or ""),
     }
 
 
@@ -128,14 +148,14 @@ def _diagnostic_param_summary(params: dict | None) -> dict[str, Any]:
         "conversationId",
         "conversation_session_id",
         "conversationSessionId",
-        "stable_team_session_id",
-        "stableTeamSessionId",
+        "conversation_team_session_id",
+        "conversationTeamSessionId",
         "node_id",
         "nodeId",
         "session_id",
         "sessionId",
-        "stored_session_id",
-        "storedSessionId",
+        "conversation_session_id",
+        "conversationSessionId",
         "runtime_scope_key",
         "runtimeScopeKey",
         "profile_runtime_scope_key",
@@ -174,7 +194,6 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
-_methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
 _db = None
@@ -192,6 +211,7 @@ _sessions_lock = threading.RLock()
 _prompt_lock = threading.Lock()
 _session_resume_lock = threading.Lock()
 _profile_env_lock = threading.RLock()
+_control_plane_db_lock = threading.RLock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
@@ -278,7 +298,7 @@ def _log_agent_build_stage(sid: str, session: dict | None, stage: str, **fields:
     pairs = {
         "stage": stage,
         "sid": sid,
-        "stored_session_id": str(session.get("session_key") or sid),
+        "conversation_session_id": str(session.get("session_key") or sid),
         "run_id": run_id,
         "turn_id": str(session.get("active_turn_id") or ""),
         "runtime_scope_key": runtime_scope_key,
@@ -289,6 +309,116 @@ _current_method: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tui_gateway_current_method",
     default="",
 )
+_METHOD_REGISTRY = MethodRegistry()
+_GATEWAY_PERMISSION_RESOLVER = AllowAllResolver()
+
+
+def _permission_for_gateway_method(name: str) -> str:
+    return f"gateway.{str(name or '').strip() or 'unknown'}"
+
+
+def _read_only_gateway_method(name: str) -> bool:
+    return str(name or "").strip() in _READ_ONLY_DB_METHODS
+
+
+def _adapt_legacy_method(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    method_name = str(name or "").strip()
+
+    @requires_permission(
+        _permission_for_gateway_method(method_name),
+        read_only=_read_only_gateway_method(method_name),
+    )
+    def _handler(params: dict[str, Any], ctx) -> LegacyJsonRpcFrame:
+        profile_token = _enter_profile_context(_profile_context_for_params(params))
+        method_token = _current_method.set(method_name)
+        try:
+            return LegacyJsonRpcFrame(fn(ctx.request_id, params))
+        finally:
+            _current_method.reset(method_token)
+            _leave_profile_context(profile_token)
+
+    setattr(_handler, "__legacy_jsonrpc_handler__", fn)
+    setattr(_handler, "__module__", getattr(fn, "__module__", __name__))
+    setattr(_handler, "__qualname__", getattr(fn, "__qualname__", method_name))
+    setattr(_handler, "__name__", getattr(fn, "__name__", method_name.replace(".", "_")))
+    setattr(_handler, "__legacy_gateway_raw_params__", True)
+    return _handler
+
+
+def _register_legacy_method(
+    name: str,
+    fn: Callable[..., Any],
+    *,
+    replace: bool = False,
+) -> None:
+    handler = _adapt_legacy_method(name, fn)
+    if replace:
+        _METHOD_REGISTRY.replace(name, handler)
+        return
+    try:
+        _METHOD_REGISTRY.register(name, handler)
+    except RegistryError:
+        pass
+
+
+class _RegistryMethodView(MutableMapping[str, Callable[..., Any]]):
+    """Compatibility mapping backed by the single gateway registry."""
+
+    def __getitem__(self, key: str) -> Callable[..., Any]:
+        entry = _METHOD_REGISTRY.get(key)
+        if entry is None:
+            raise KeyError(key)
+        legacy = getattr(entry.handler, "__legacy_jsonrpc_handler__", None)
+        if callable(legacy):
+            return legacy
+
+        def _call(rid: Any, params: dict | None = None) -> dict:
+            return _gateway_pipeline.dispatch(
+                _METHOD_REGISTRY,
+                {"id": rid, "method": key, "params": params or {}},
+                resolver=_GATEWAY_PERMISSION_RESOLVER,
+            )
+
+        return _call
+
+    def __setitem__(self, key: str, value: Callable[..., Any]) -> None:
+        _register_legacy_method(key, value, replace=True)
+
+    def __delitem__(self, key: str) -> None:
+        if key not in _METHOD_REGISTRY:
+            raise KeyError(key)
+        _METHOD_REGISTRY.unregister(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_METHOD_REGISTRY.names())
+
+    def __len__(self) -> int:
+        return len(_METHOD_REGISTRY)
+
+    def clear(self) -> None:
+        _METHOD_REGISTRY.clear()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(
+        self,
+        key: str,
+        default: Callable[..., Any] | None = None,
+    ) -> Callable[..., Any] | None:
+        current = self.get(key)
+        if current is not None:
+            return current
+        if default is not None:
+            self[key] = default
+        return default
+
+
+_methods: MutableMapping[str, Callable[..., Any]] = _RegistryMethodView()
+
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
 # to minutes (slash.exec, cli.exec, shell.exec, session.resume,
@@ -333,9 +463,6 @@ sys.stdout = sys.stderr
 # contextvar or session. Stream resolved through a lambda so runtime monkey-
 # patches of `_real_stdout` (used extensively in tests) still land correctly.
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
-
-_DOVIE_EXTENSION = load_extension()
-_EXTRACTED_METHOD_OVERRIDES = _DOVIE_EXTENSION.gateway_method_overrides()
 
 
 def _load_busy_input_mode() -> str:
@@ -403,7 +530,7 @@ def _finalize_session(
             try:
                 db = _db_for_stable_session(str(session_id or session_key or ""))
                 if db is not None:
-                    db.end_session(session_id, end_reason)
+                    db.sessions.end(session_id, end_reason)
             except Exception:
                 pass
     finally:
@@ -416,10 +543,10 @@ def _terminalize_active_run_for_shutdown(
     end_reason: str,
     runtime_sid: str = "",
 ) -> None:
-    stable_session_id = str(session.get("session_key") or runtime_sid or "").strip()
-    if not stable_session_id:
+    conversation_session_id = str(session.get("session_key") or runtime_sid or "").strip()
+    if not conversation_session_id:
         return
-    db = _db_for_stable_session(stable_session_id)
+    db = _db_for_stable_session(conversation_session_id)
     if db is None:
         return
     run_id = str(session.get("active_run_id") or "").strip()
@@ -427,12 +554,12 @@ def _terminalize_active_run_for_shutdown(
     runtime_scope_key = str(
         session.get("active_runtime_scope_key")
         or session.get("runtime_scope_key")
-        or stable_session_id
+        or conversation_session_id
     ).strip()
     if not run_id:
         try:
             status = run_control.session_status(
-                stable_session_id,
+                conversation_session_id,
                 db=db,
                 current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
             )
@@ -441,12 +568,12 @@ def _terminalize_active_run_for_shutdown(
             runtime_scope_key = str(
                 status.get("runtime_scope_key")
                 or runtime_scope_key
-                or stable_session_id
+                or conversation_session_id
             ).strip()
         except Exception:
             logger.warning(
                 "[dovie-gateway] shutdown active-run lookup failed session_id=%s",
-                stable_session_id,
+                conversation_session_id,
                 exc_info=True,
             )
             return
@@ -455,17 +582,17 @@ def _terminalize_active_run_for_shutdown(
     message = f"gateway {end_reason} before run reached terminal state"
     logger.warning(
         "[dovie-gateway] terminalizing active run during shutdown session_id=%s run_id=%s turn_id=%s reason=%s",
-        stable_session_id,
+        conversation_session_id,
         run_id,
         turn_id,
         end_reason,
     )
-    run_control.publish_run_terminal_event(
-        stored_session_id=stable_session_id,
+    run_control.terminate_run(
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
-        runtime_scope_key=runtime_scope_key or stable_session_id,
-        runtime_session_id=str(runtime_sid or "").strip(),
+        runtime_scope_key=runtime_scope_key or conversation_session_id,
+        execution_session_id=str(runtime_sid or "").strip(),
         status="interrupted",
         message=message,
         db=db,
@@ -493,7 +620,7 @@ atexit.register(_shutdown_sessions)
 
 
 def _get_db():
-    """Return the request-scoped control-plane ``SessionDB``.
+    """Return the request-scoped control-plane session store.
 
     Option D keeps one canonical control-plane DB: the Hermes root
     ``state.db``. ``DOVIE_HERMES_CONTROL_HOME`` remains only as an explicit
@@ -502,28 +629,23 @@ def _get_db():
     return _get_control_plane_db()
 
 
-def _is_control_plane_stable_session_id(stable_session_id: str) -> bool:
-    stable = str(stable_session_id or "").strip()
+def _is_control_plane_conversation_session_id(conversation_session_id: str) -> bool:
+    stable = str(conversation_session_id or "").strip()
     return stable.startswith(
         (
             "team:mission-",
             "team-session-team-conversation-",
             "team-conversation-",
-            # Group-chat member-chat worker session: the worker runs in its own
-            # profile process, but its run-registry / event-stream MUST live in
-            # the same control-plane db as the team conversation it mirrors
-            # into. Without this, run reservations / terminal events / status
-            # lookups split across two databases (control-plane vs profile),
-            # and prompt.py's terminalize_if_still_active sees a stale
-            # status="running" in one db while the worker already terminalized
-            # in the other ("prompt worker terminal event did not close active
-            # run"). Routing to the control-plane db keeps both halves in sync.
-            "memberchat:",
         )
     )
 
 
 def _get_control_plane_db(*, use_active_profile: bool = True):
+    with _control_plane_db_lock:
+        return _get_control_plane_db_locked(use_active_profile=use_active_profile)
+
+
+def _get_control_plane_db_locked(*, use_active_profile: bool = True):
     global _db, _db_error
     # ``use_active_profile`` is retained for older callers, but Option D makes
     # the control plane a root-level singleton. ``DOVIE_HERMES_CONTROL_HOME``
@@ -535,13 +657,15 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
         control_home = _resolve_home_path(control_home_env, fallback=control_home_env)
     else:
         control_home = process_home
+    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
+    if not create_if_missing and not (control_home / "state.db").exists():
+        return None
 
     if control_home == process_home:
         # Main gateway path: continue using the process-level `_db` slot via
         # the shared session_store helper (its `active_home == default_home`
-        # fast path is correct here — the implicit SessionDB() also routes to
+        # fast path is correct here — the implicit session store also routes to
         # process_home, matching active_home).
-        create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
         result = _get_session_db_for_home(
             active_home=control_home,
             default_home=control_home,
@@ -562,27 +686,22 @@ def _get_control_plane_db(*, use_active_profile: bool = True):
     cached = _db_by_home.get(home_key)
     if cached is not None:
         return cached
-    create_if_missing = _current_method.get("") not in _READ_ONLY_DB_METHODS
     db_path = control_home / "state.db"
-    if not create_if_missing and not db_path.exists():
-        return None
     try:
-        from hermes_state import SessionDB
-
-        ctrl_db = SessionDB(db_path=db_path)
+        ctrl_db = _open_cli_session_store(db_path)
         _db_by_home[home_key] = ctrl_db
         _db_error_by_home.pop(home_key, None)
         return ctrl_db
     except Exception as exc:
         _db_error_by_home[home_key] = str(exc)
         logger.warning(
-            "control-plane SessionDB unavailable at %s: %s", db_path, exc,
+            "control-plane session store unavailable at %s: %s", db_path, exc,
         )
         return None
 
 
-def _db_for_stable_session(stable_session_id: str):
-    if _is_control_plane_stable_session_id(stable_session_id):
+def _db_for_stable_session(conversation_session_id: str):
+    if _is_control_plane_conversation_session_id(conversation_session_id):
         return _get_control_plane_db(use_active_profile=False)
     return _get_db()
 
@@ -675,7 +794,7 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
         session = _sessions.pop(sid, None)
     if session is None:
         return False
-    runtime_sid = session.get("runtime_session_id") or ""
+    runtime_sid = session.get("execution_session_id") or ""
     _finalize_session(session, end_reason=end_reason, runtime_sid=runtime_sid)
     # tools.approval can hold a notify callback bound to this session_key
     try:
@@ -766,7 +885,7 @@ def write_json(obj: dict) -> bool:
 def _emit(event: str, sid: str, payload: dict | None = None):
     params = {"type": event, "session_id": sid}
     event_payload = payload or {}
-    stable_session_id = ""
+    conversation_session_id = ""
     run_id = ""
     turn_id = ""
     runtime_scope_key = ""
@@ -776,24 +895,24 @@ def _emit(event: str, sid: str, payload: dict | None = None):
 
         with _sessions_lock:
             session = _sessions.get(sid) or {}
-        stable_session_id = str(session.get("session_key") or sid or "")
+        conversation_session_id = str(session.get("session_key") or sid or "")
         run_id = str(event_payload.get("run_id") or session.get("active_run_id") or "")
         turn_id = str(event_payload.get("turn_id") or session.get("active_turn_id") or "")
         runtime_scope_key = str(
             event_payload.get("runtime_scope_key")
             or session.get("active_runtime_scope_key")
             or session.get("runtime_scope_key")
-            or stable_session_id
+            or conversation_session_id
         )
         run_context = session.get("run_context")
         activity_id = str(
             event_payload.get("activity_id")
             or event_payload.get("activityId")
             or getattr(run_context, "activity_id", "")
-            or (f"chat:{stable_session_id}" if stable_session_id else "")
+            or (f"chat:{conversation_session_id}" if conversation_session_id else "")
         ).strip()
-        if stable_session_id:
-            params["stored_session_id"] = stable_session_id
+        if conversation_session_id:
+            params["conversation_session_id"] = conversation_session_id
         if run_id:
             params["run_id"] = run_id
         if turn_id:
@@ -803,19 +922,19 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         if activity_id:
             params["activity_id"] = activity_id
         if sid:
-            params["runtime_session_id"] = sid
+            params["execution_session_id"] = sid
         session_transport = session.get("transport")
         context_transport = current_transport()
-        direct_transport = session_transport or context_transport or _stdio_transport
-        if stable_session_id and (run_id or event == "session.info"):
-            event_db = _db_for_stable_session(stable_session_id)
+        direct_transport = session_transport or context_transport
+        if conversation_session_id and (run_id or event == "session.info"):
+            event_db = _db_for_stable_session(conversation_session_id)
             frame = {
                 "type": event,
                 "session_id": sid,
-                "stored_session_id": stable_session_id,
+                "conversation_session_id": conversation_session_id,
                 "run_id": run_id,
                 "turn_id": turn_id,
-                "runtime_session_id": sid,
+                "execution_session_id": sid,
                 "runtime_scope_key": runtime_scope_key,
                 "activity_id": activity_id,
                 "activityId": activity_id,
@@ -828,8 +947,6 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                     **({"activity_id": activity_id, "activityId": activity_id} if activity_id else {}),
                 },
             }
-            frame["seq"] = run_control.next_event_seq(stable_session_id, db=event_db)
-            params["seq"] = frame["seq"]
             terminal_event = _is_terminal_run_event(event)
             recorded_deliveries = run_control.publish_recorded_event(
                 frame,
@@ -840,16 +957,20 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 if terminal_event
                 else None,
             )
+            params.update(frame)
+            normalized_payload = frame.get("payload")
+            if isinstance(normalized_payload, dict):
+                event_payload = normalized_payload
             if event in _DOVIE_STREAM_TRACE_EVENTS:
                 _trace_stream_route(
                     "record-publish",
                     event_type=event,
                     session_id=sid,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     run_id=run_id,
                     turn_id=turn_id,
                     runtime_scope_key=runtime_scope_key,
-                    seq=frame["seq"],
+                    seq=frame.get("seq") or 0,
                     session_transport=_transport_debug_id(session_transport),
                     context_transport=_transport_debug_id(context_transport),
                     owner_transport=_transport_debug_id(direct_transport),
@@ -858,10 +979,10 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                 )
     except Exception:
         logger.warning(
-            "[dovie-gateway] emit record failed event=%s session_id=%s stored_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
+            "[dovie-gateway] emit record failed event=%s session_id=%s conversation_session_id=%s run_id=%s turn_id=%s runtime_scope_key=%s",
             event,
             sid,
-            stable_session_id,
+            conversation_session_id,
             run_id,
             turn_id,
             runtime_scope_key,
@@ -869,13 +990,17 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         )
     if payload is not None:
         params["payload"] = payload
-    direct_delivered = write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    direct_frame = {"jsonrpc": "2.0", "method": "event", "params": params}
+    if direct_transport is not None:
+        direct_delivered = direct_transport.write(direct_frame)
+    else:
+        direct_delivered = write_json(direct_frame)
     if event in _DOVIE_STREAM_TRACE_EVENTS:
         _trace_stream_route(
             "direct-write",
             event_type=event,
             session_id=sid,
-            stored_session_id=stable_session_id,
+            conversation_session_id=conversation_session_id,
             run_id=run_id,
             turn_id=turn_id,
             runtime_scope_key=runtime_scope_key,
@@ -945,9 +1070,9 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
     """Emit an approval request through the shared command-redaction path."""
     payload = dict(data or {})
     if "command" in payload:
-        from gateway.run import _redact_approval_command
+        from hermes_agent.gateway.runtime_config import redact_approval_command
 
-        payload["command"] = _redact_approval_command(payload.get("command"))
+        payload["command"] = redact_approval_command(payload.get("command"))
     _emit("approval.request", sid, payload)
 
 
@@ -962,10 +1087,10 @@ def _err(rid, code: int, msg: str) -> dict:
 def method(name: str):
     def dec(fn):
         owner_module = str(getattr(fn, "__module__", ""))
-        if owner_module.startswith(("tui_gateway.methods.", "hermes_team_mission.gateway.")):
-            _methods[name] = fn
-        else:
-            _methods.setdefault(name, fn)
+        replace = owner_module.startswith(
+            ("tui_gateway.methods.", "hermes_team_mission.gateway.")
+        )
+        _register_legacy_method(name, fn, replace=replace)
         return fn
 
     return dec
@@ -995,26 +1120,16 @@ def handle_request(req: dict) -> dict | None:
     if isinstance(normalized, dict):
         return normalized
 
-    rid, method, params = normalized
-    fn = _methods.get(method)
-    if (
-        fn is None
-        or (
-            method in _EXTRACTED_METHOD_OVERRIDES
-            and str(getattr(fn, "__module__", "")) == __name__
-        )
-    ):
+    rid, method, _params = normalized
+    if _METHOD_REGISTRY.get(method) is None:
         _register_extracted_method_modules()
-        fn = _methods.get(method)
-    if not fn:
+    if _METHOD_REGISTRY.get(method) is None:
         return _err(rid, -32601, f"unknown method: {method}")
-    profile_token = _enter_profile_context(_profile_context_for_params(params))
-    method_token = _current_method.set(method)
-    try:
-        return fn(rid, params)
-    finally:
-        _current_method.reset(method_token)
-        _leave_profile_context(profile_token)
+    return _gateway_pipeline.dispatch(
+        _METHOD_REGISTRY,
+        req,
+        resolver=_GATEWAY_PERMISSION_RESOLVER,
+    )
 
 
 def _push_profile_context_for_request(req: dict) -> Any:
@@ -1030,7 +1145,7 @@ def _push_profile_context_for_request(req: dict) -> Any:
          request params (or inside ``dovie_profile``).
       2. ``agent_profile_id`` → synthesize ``profile:<id>`` (matches
          ``runtime_scope_from_params`` semantics).
-      3. ``stored_session_id`` / ``session_id`` → look up cached
+      3. ``conversation_session_id`` / ``session_id`` → look up cached
          scope mapping; on miss leave the ContextVar unset (rather
          than blocking the dispatch on a DB query).
 
@@ -1040,7 +1155,7 @@ def _push_profile_context_for_request(req: dict) -> Any:
     profile metadata aren't broken by the new resolver.
     """
     try:
-        from tui_gateway.services.runtime_proxy import runtime_scope_from_request
+        from tui_gateway.services.runtime_scope import runtime_scope_from_request
         from tui_gateway.services.profile_context import (
             current_profile,
             profile_registry,
@@ -1055,8 +1170,8 @@ def _push_profile_context_for_request(req: dict) -> Any:
         if not scope_key and isinstance(req, dict):
             params = req.get("params") if isinstance(req.get("params"), dict) else {}
             stable = str(
-                params.get("stored_session_id")
-                or params.get("storedSessionId")
+                params.get("conversation_session_id")
+                or params.get("conversationSessionId")
                 or params.get("session_id")
                 or ""
             ).strip()
@@ -1143,14 +1258,14 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
 def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None:
-        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-start", timeout=timeout)
+        _log_agent_build_stage(str(session.get("execution_session_id") or ""), session, "wait-start", timeout=timeout)
         if not ready.wait(timeout=timeout):
-            _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-timeout", timeout=timeout)
+            _log_agent_build_stage(str(session.get("execution_session_id") or ""), session, "wait-timeout", timeout=timeout)
             return _err(rid, 5032, "agent initialization timed out")
-        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-end")
+        _log_agent_build_stage(str(session.get("execution_session_id") or ""), session, "wait-end")
     err = session.get("agent_error")
     if err:
-        _log_agent_build_stage(str(session.get("runtime_session_id") or ""), session, "wait-error", error=err)
+        _log_agent_build_stage(str(session.get("execution_session_id") or ""), session, "wait-error", error=err)
     return _err(rid, 5032, err) if err else None
 
 
@@ -1174,7 +1289,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             return
         session["agent_build_started"] = True
     key = session["session_key"]
-    session["runtime_session_id"] = sid
+    session["execution_session_id"] = sid
     _log_agent_build_stage(sid, session, "start")
 
     def _build() -> None:
@@ -1198,7 +1313,17 @@ def _start_agent_build(sid: str, session: dict) -> None:
             tokens = _set_session_context(key, terminal_cwd=cwd)
             try:
                 _log_agent_build_stage(sid, current, "make-agent-start")
-                agent = _make_agent(sid, key, cwd=cwd)
+                agent = _make_agent(
+                    sid,
+                    key,
+                    cwd=cwd,
+                    reasoning_config_override=current.get(
+                        "create_reasoning_override"
+                    ),
+                    service_tier_override=current.get(
+                        "create_service_tier_override"
+                    ),
+                )
                 _log_agent_build_stage(
                     sid,
                     current,
@@ -1213,7 +1338,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
-            current["agent"] = agent
+            _bind_session_agent(current, agent)
 
             try:
                 _log_agent_build_stage(sid, current, "slash-worker-start")
@@ -1365,23 +1490,23 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
     from tui_gateway.services import run_control
 
     session = session or {}
-    stable_session_id = str(session.get("session_key") or runtime_sid or "")
+    conversation_session_id = str(session.get("session_key") or runtime_sid or "")
     control_state = run_control.session_status(
-        stable_session_id,
+        conversation_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
     running = bool(session.get("running") or control_state.get("running"))
     return {
         "session_id": runtime_sid or "",
-        "stored_session_id": stable_session_id,
+        "conversation_session_id": conversation_session_id,
         "running": running,
         "runtime_scope_key": str(
             control_state.get("runtime_scope_key")
             or session.get("active_runtime_scope_key")
-            or stable_session_id
+            or conversation_session_id
         ),
-        "active_runtime_session_id": runtime_sid or "",
+        "active_execution_session_id": runtime_sid or "",
         "active_run_id": str(
             session.get("active_run_id") or control_state.get("active_run_id") or ""
         ) if running else "",
@@ -1671,7 +1796,6 @@ def _register_extracted_method_modules() -> None:
     from tui_gateway.core.method_registration import register_method_modules
 
     register_method_modules(globals())
-    _DOVIE_EXTENSION.register_gateway_methods(_methods)
     integrations = sys.modules.get("tui_gateway.methods.integrations")
     if integrations is not None:
         for name, value in injected_integrations.items():
@@ -1765,5 +1889,37 @@ from tui_gateway.core.agent_session import (
     _make_agent,
     _init_session,
 )
+from tui_gateway.services.completions import fuzzy_cache as _fuzzy_cache
+from tui_gateway.core import agent_session as _agent_session_module
+
+_core_init_session = _init_session
+
+
+def _init_session(*args, **kwargs):
+    session_info_hook = globals().get("_session_info")
+
+    def _session_info_adapter(agent, session=None):
+        try:
+            return session_info_hook(agent, session)  # type: ignore[misc]
+        except TypeError:
+            return session_info_hook(agent)  # type: ignore[misc]
+
+    for name in (
+        "_SlashWorker",
+        "_wire_callbacks",
+        "_notify_session_boundary",
+        "_load_show_reasoning",
+        "_load_tool_progress_mode",
+        "_emit",
+        "_sessions",
+        "_sessions_lock",
+        "_stdio_transport",
+        "_resolve_model",
+    ):
+        if name in globals():
+            setattr(_agent_session_module, name, globals()[name])
+    if session_info_hook is not None:
+        setattr(_agent_session_module, "_session_info", _session_info_adapter)
+    return _core_init_session(*args, **kwargs)
 
 _register_extracted_method_modules()

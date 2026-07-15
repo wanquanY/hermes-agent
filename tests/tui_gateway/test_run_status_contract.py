@@ -40,6 +40,7 @@ def server():
 def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(server, monkeypatch):
     class _RunDB:
         def __init__(self):
+            self.runs = self
             self.run = {
                 "run_id": "run-common",
                 "turn_id": "turn-common",
@@ -51,10 +52,10 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
                 "last_seq": 9,
             }
 
-        def get_run(self, run_id):
+        def get(self, run_id):
             return dict(self.run) if run_id == "run-common" else None
 
-        def list_runs(
+        def list(
             self,
             session_id,
             runtime_scope_key="",
@@ -63,7 +64,7 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
         ):
             return [dict(self.run)] if session_id == "stored-common" else []
 
-        def get_session_run_status(self, session_id):
+        def session_status(self, session_id):
             assert session_id == "stored-common"
             return {
                 "running": True,
@@ -90,7 +91,7 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
         {
             "id": "by-session",
             "method": "run.status",
-            "params": {"stored_session_id": "stored-common"},
+            "params": {"conversation_session_id": "stored-common"},
         }
     )
 
@@ -99,7 +100,7 @@ def test_run_status_returns_common_top_level_fields_for_run_and_session_paths(se
     expected_common = {
         "status": "running",
         "run_id": "run-common",
-        "stored_session_id": "stored-common",
+        "conversation_session_id": "stored-common",
         "last_event_seq": 9,
     }
     assert {key: by_run["result"][key] for key in expected_common} == expected_common

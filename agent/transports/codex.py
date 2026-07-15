@@ -125,6 +125,16 @@ class ResponsesApiTransport(ProviderTransport):
                 reasoning_effort = reasoning_config["effort"]
 
         _effort_clamp = {"minimal": "low"}
+        if "gpt-5.6" in (model or "").lower():
+            # ``ultra`` is a Hermes/Codex product tier; the Responses wire
+            # contract names the strongest GPT-5.6 effort ``max``.
+            _effort_clamp["ultra"] = "max"
+        if is_xai_responses:
+            # xAI Responses tops out at high. Keep stronger generic choices
+            # usable without forwarding unsupported values.
+            _effort_clamp.update(
+                {"xhigh": "high", "max": "high", "ultra": "high"}
+            )
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
         response_tools = _responses_tools(tools)

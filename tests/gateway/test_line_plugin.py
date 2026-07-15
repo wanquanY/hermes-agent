@@ -307,7 +307,7 @@ class TestSendRouting:
     def adapter(self, monkeypatch):
         monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("LINE_CHANNEL_SECRET", raising=False)
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(enabled=True, extra={
             "channel_access_token": "tok",
             "channel_secret": "sec",
@@ -452,7 +452,7 @@ class TestRegister:
     def test_register_factory_yields_line_adapter(self):
         ctx = self._FakeCtx()
         register(ctx)
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(enabled=True, extra={
             "channel_access_token": "tok",
             "channel_secret": "sec",
@@ -497,20 +497,20 @@ class TestStandaloneSend:
 
     def test_missing_token_returns_error(self, monkeypatch):
         monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(enabled=True, extra={})
         result = asyncio.run(_standalone_send(cfg, "Uchat", "hi"))
         assert "error" in result
 
     def test_missing_chat_id_returns_error(self, monkeypatch):
         monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "tok")
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(enabled=True, extra={})
         result = asyncio.run(_standalone_send(cfg, "", "hi"))
         assert "error" in result
 
     def test_pushes_via_client_when_credentials_present(self, monkeypatch):
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
 
         push_calls = []
 
@@ -574,7 +574,7 @@ class TestCheckRequirements:
 class TestValidateConfig:
 
     def test_validates_from_extra(self):
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(
             enabled=True,
             extra={"channel_access_token": "t", "channel_secret": "s"},
@@ -584,7 +584,7 @@ class TestValidateConfig:
     def test_rejects_empty_config(self, monkeypatch):
         monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("LINE_CHANNEL_SECRET", raising=False)
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(enabled=True, extra={})
         assert not validate_config(cfg)
 
@@ -594,7 +594,7 @@ class TestAdapterInit:
     def test_init_from_config_extra(self, monkeypatch):
         for k in ("LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "LINE_PORT"):
             monkeypatch.delenv(k, raising=False)
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(
             enabled=True,
             extra={
@@ -615,7 +615,7 @@ class TestAdapterInit:
     def test_env_overrides_extra(self, monkeypatch):
         monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "env-tok")
         monkeypatch.setenv("LINE_PORT", "1234")
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         cfg = PlatformConfig(
             enabled=True,
             extra={"channel_access_token": "extra-tok", "channel_secret": "s", "port": 5555},
@@ -629,7 +629,7 @@ class TestAdapterInit:
         monkeypatch.setenv("LINE_CHANNEL_SECRET", "s")
         monkeypatch.setenv("LINE_ALLOWED_USERS", "U1, U2,U3")
         monkeypatch.setenv("LINE_ALLOWED_GROUPS", "C1")
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         ad = LineAdapter(PlatformConfig(enabled=True))
         assert ad.allowed_users == {"U1", "U2", "U3"}
         assert ad.allowed_groups == {"C1"}
@@ -637,7 +637,7 @@ class TestAdapterInit:
     def test_get_chat_info_infers_type_from_prefix(self, monkeypatch):
         monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "t")
         monkeypatch.setenv("LINE_CHANNEL_SECRET", "s")
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         ad = LineAdapter(PlatformConfig(enabled=True))
         assert asyncio.run(ad.get_chat_info("U123"))["type"] == "dm"
         assert asyncio.run(ad.get_chat_info("C123"))["type"] == "group"

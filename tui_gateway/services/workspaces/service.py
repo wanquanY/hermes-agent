@@ -298,7 +298,7 @@ def session_cwd(session: dict | None = None) -> str:
     if session and session.get("cwd"):
         return str(session["cwd"])
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         return normalize_session_cwd(get_session_env("TERMINAL_CWD", ""))
     except Exception:

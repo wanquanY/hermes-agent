@@ -626,7 +626,7 @@ class ContextCompressor(ContextEngine):
         self.awaiting_real_usage_after_compression = False
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        """Clear per-session compaction state at a real session boundary.
+        """Clear all per-session compaction state at a real boundary.
 
         ``_previous_summary`` is per-session iterative-summary state. It is
         cleared on ``on_session_reset()`` (/new, /reset), but session *end*
@@ -640,6 +640,22 @@ class ContextCompressor(ContextEngine):
         owning session ends.
         """
         self._previous_summary = None
+        self._last_summary_error = None
+        self._last_summary_dropped_count = 0
+        self._last_summary_fallback_used = False
+        self._last_aux_model_failure_error = None
+        self._last_aux_model_failure_model = None
+        self._last_compression_savings_pct = 100.0
+        self._ineffective_compression_count = 0
+        self._summary_failure_cooldown_until = 0.0
+        self._last_compress_aborted = False
+        self._last_summary_auth_failure = False
+        self._context_probed = False
+        self._context_probe_persistable = False
+        self.last_real_prompt_tokens = 0
+        self.last_compression_rough_tokens = 0
+        self.last_rough_tokens_when_real_prompt_fit = 0
+        self.awaiting_real_usage_after_compression = False
 
     def update_model(
         self,
@@ -1342,6 +1358,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         self,
         turns_to_summarize: List[Dict[str, Any]],
         focus_topic: Optional[str] = None,
+        preservation_context: str = "",
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
@@ -1531,6 +1548,14 @@ Use this exact structure:
 FOCUS TOPIC: "{focus_topic}"
 This compaction should PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
 
+        if preservation_context:
+            prompt += f"""
+
+PRE-COMPRESSION MEMORY PROVIDER CHECKPOINT:
+{preservation_context}
+
+Preserve the checkpoint facts above with their original ownership and provenance. It is trusted runtime context, not a new user request, and must not be quoted as user-authored speech."""
+
         try:
             call_kwargs = {
                 "task": "compression",
@@ -1660,7 +1685,11 @@ This compaction should PRIORITISE preserving all information related to the focu
                 else:
                     _reason = "timed out"
                 self._fallback_to_main_for_compression(e, _reason)
-                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)  # retry immediately
+                return self._generate_summary(
+                    turns_to_summarize,
+                    focus_topic=focus_topic,
+                    preservation_context=preservation_context,
+                )  # retry immediately
 
             # Unknown-error best-effort retry on main model.  Losing N turns of
             # context is almost always worse than one extra summary attempt, so
@@ -1677,7 +1706,11 @@ This compaction should PRIORITISE preserving all information related to the focu
                 and not getattr(self, "_summary_model_fallen_back", False)
             ):
                 self._fallback_to_main_for_compression(e, "failed")
-                return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+                return self._generate_summary(
+                    turns_to_summarize,
+                    focus_topic=focus_topic,
+                    preservation_context=preservation_context,
+                )
 
             # Transient errors (timeout, rate limit, network, JSON decode,
             # streaming premature-close) — shorter cooldown for JSON decode and
@@ -2233,7 +2266,14 @@ This compaction should PRIORITISE preserving all information related to the focu
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
+    def compress(
+        self,
+        messages: List[Dict[str, Any]],
+        current_tokens: int = None,
+        focus_topic: str = None,
+        force: bool = False,
+        preservation_context: str = "",
+    ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -2366,7 +2406,11 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Phase 3: Generate structured summary
         summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
-        summary = self._generate_summary(turns_to_summarize, focus_topic=summary_focus_topic)
+        summary = self._generate_summary(
+            turns_to_summarize,
+            focus_topic=summary_focus_topic,
+            preservation_context=preservation_context,
+        )
 
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):

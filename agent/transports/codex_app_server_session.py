@@ -74,6 +74,8 @@ class TurnResult:
     token_usage_last: Optional[dict[str, Any]] = None
     token_usage_total: Optional[dict[str, Any]] = None
     model_context_window: Optional[int] = None
+    requested_model: Optional[str] = None
+    actual_model: Optional[str] = None
     # Hint to the caller that the underlying codex subprocess is likely
     # wedged (turn-level timeout fired, post-tool watchdog tripped, or
     # token-refresh failure killed the child). The caller should retire
@@ -88,6 +90,26 @@ class TurnResult:
 # items when an interrupt or upstream error tears the turn down before the
 # normal completion path fires. Mirrors openclaw beta.8 fix.
 _TURN_ABORTED_MARKERS = ("<turn_aborted>", "<turn_aborted/>")
+
+
+def _coerce_turn_input_text(user_input: Any) -> str:
+    if isinstance(user_input, str):
+        return user_input
+    if isinstance(user_input, list):
+        parts: list[str] = []
+        for item in user_input:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type == "text":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+            elif item_type in {"image_url", "input_image", "image"}:
+                parts.append("[image attached]")
+        if parts:
+            return "\n\n".join(parts)
+    return str(user_input or "")
 
 
 # Substrings in codex stderr / JSON-RPC error messages that signal the
@@ -169,15 +191,21 @@ class CodexAppServerSession:
         cwd: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        extra_env: Optional[dict[str, str]] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        prior_thread_id: Optional[str] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
         self._codex_home = codex_home
+        # Extra env vars merged into the codex subprocess spawn env — used
+        # by Dovie to inject DOXIE_PLATFORM_API_KEY for platform-mode
+        # employees. Deep-copied to avoid mutation after spawn.
+        self._extra_env = dict(extra_env) if extra_env else None
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -191,6 +219,15 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self._protocol_model: Optional[str] = None
+        # When set, ensure_started() calls thread/resume instead of thread/start
+        # so the conversation transcript from a previous run continues in this
+        # codex thread. Cleared to None once we've committed to a live thread
+        # (either via successful resume or a fresh start after resume failed).
+        self._prior_thread_id: Optional[str] = (
+            str(prior_thread_id).strip() or None if prior_thread_id else None
+        )
+        self._thread_rebuilt_from_prior = False
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -208,15 +245,25 @@ class CodexAppServerSession:
         return the same thread id."""
         if self._thread_id is not None:
             return self._thread_id
+        _t0 = time.monotonic()
+        logger.debug("[codex-perf][ensure_started] BEGIN prior=%s", (self._prior_thread_id or "")[:8])
         if self._client is None:
-            self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
-            )
+            client_kwargs = {
+                "codex_bin": self._codex_bin,
+                "codex_home": self._codex_home,
+            }
+            if self._extra_env is not None:
+                client_kwargs["env"] = self._extra_env
+            _t_before_spawn = time.monotonic()
+            self._client = self._client_factory(**client_kwargs)
+            logger.debug("[codex-perf][ensure_started] client spawned dt=%.3fs", time.monotonic() - _t_before_spawn)
+        _t_before_init = time.monotonic()
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
         )
+        logger.debug("[codex-perf][ensure_started] initialize dt=%.3fs", time.monotonic() - _t_before_init)
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
         #   1. `thread/start.permissions` is gated behind the experimentalApi
@@ -232,35 +279,87 @@ class CodexAppServerSession:
         # codex CLI workflow and avoids fighting codex's own validation.
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
-        params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
-        # Cross-fill thread.id/sessionId — different codex versions have
-        # serialized this under either key. Mirrors openclaw beta.8's
-        # tolerance fix so future codex drops/renames don't KeyError us
-        # at handshake time.
-        thread_obj = result.get("thread") or {}
-        thread_id = (
-            thread_obj.get("id")
-            or thread_obj.get("sessionId")
-            or result.get("sessionId")
-            or result.get("threadId")
-        )
+        thread_id: Optional[str] = None
+        resumed = False
+        resume_failed = False
+        had_prior_thread = bool(self._prior_thread_id)
+        if self._prior_thread_id:
+            try:
+                _t_resume = time.monotonic()
+                resume_result = self._client.request(
+                    "thread/resume",
+                    {"threadId": self._prior_thread_id},
+                    timeout=15,
+                )
+                logger.debug("[codex-perf][ensure_started] thread/resume dt=%.3fs", time.monotonic() - _t_resume)
+                thread_obj = resume_result.get("thread") or {}
+                thread_id = (
+                    thread_obj.get("id")
+                    or thread_obj.get("sessionId")
+                    or resume_result.get("sessionId")
+                    or resume_result.get("threadId")
+                    or self._prior_thread_id
+                )
+                resumed = bool(thread_id)
+                model = _extract_protocol_model(resume_result)
+                if model:
+                    self._protocol_model = model
+            except Exception as exc:
+                # Rollout gone / thread expired / codex version change — fall
+                # through to thread/start so the caller isn't stuck. The
+                # transcript from the old thread is lost, but at least the
+                # session keeps working.
+                logger.warning(
+                    "codex thread/resume failed for %s (%s); falling back to thread/start",
+                    self._prior_thread_id[:8],
+                    exc,
+                )
+                resume_failed = True
+                thread_id = None
         if not thread_id:
-            raise CodexAppServerError(
-                code=-32603,
-                message=(
-                    "codex thread/start returned no thread id "
-                    f"(payload keys: {sorted(result.keys())})"
-                ),
+            params: dict[str, Any] = {"cwd": self._cwd}
+            _t_start = time.monotonic()
+            result = self._client.request("thread/start", params, timeout=15)
+            logger.debug("[codex-perf][ensure_started] thread/start dt=%.3fs", time.monotonic() - _t_start)
+            model = _extract_protocol_model(result)
+            if model:
+                self._protocol_model = model
+            # Cross-fill thread.id/sessionId — different codex versions have
+            # serialized this under either key. Mirrors openclaw beta.8's
+            # tolerance fix so future codex drops/renames don't KeyError us
+            # at handshake time.
+            thread_obj = result.get("thread") or {}
+            thread_id = (
+                thread_obj.get("id")
+                or thread_obj.get("sessionId")
+                or result.get("sessionId")
+                or result.get("threadId")
             )
+            if not thread_id:
+                raise CodexAppServerError(
+                    code=-32603,
+                    message=(
+                        "codex thread/start returned no thread id "
+                        f"(payload keys: {sorted(result.keys())})"
+                    ),
+                )
         self._thread_id = thread_id
+        self._prior_thread_id = None
+        self._thread_rebuilt_from_prior = bool(had_prior_thread and resume_failed)
+        logger.debug("[codex-perf][ensure_started] END total_dt=%.3fs resumed=%s tid=%s", time.monotonic() - _t0, resumed, self._thread_id[:8])
         logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s",
+            "codex app-server thread %s: id=%s profile=%s cwd=%s",
+            "resumed" if resumed else "started",
             self._thread_id[:8],
             self._permission_profile,
             self._cwd,
         )
         return self._thread_id
+
+    def consume_thread_rebuilt_from_prior(self) -> bool:
+        rebuilt = bool(self._thread_rebuilt_from_prior)
+        self._thread_rebuilt_from_prior = False
+        return rebuilt
 
     def close(self) -> None:
         if self._closed:
@@ -335,6 +434,8 @@ class CodexAppServerSession:
         turn_timeout: float = 600.0,
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
+        no_event_timeout: float = 90.0,
+        model_override: Optional[str] = None,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
@@ -345,6 +446,11 @@ class CodexAppServerSession:
         `turn/completed`, fast-fail and mark the session for retirement.
         Mirrors openclaw beta.8's post-tool completion watchdog (#81697)
         so a wedged codex doesn't burn the full turn deadline.
+
+        no_event_timeout: after codex confirms `turn/started`, if no further
+        notification arrives within this many seconds, treat the stream as
+        wedged and retire the subprocess. This catches upstream stalls that
+        are not preceded by a tool result.
         """
         # Pre-create the result so startup failures (codex subprocess can't
         # spawn, initialize handshake rejects, thread/start blows up) surface
@@ -364,6 +470,7 @@ class CodexAppServerSession:
             return result
         assert self._client is not None and self._thread_id is not None
         result.thread_id = self._thread_id
+        result.actual_model = self._protocol_model
 
         self._interrupt_event.clear()
         projector = CodexEventProjector()
@@ -371,14 +478,30 @@ class CodexAppServerSession:
         # Send turn/start with the user input. Text-only for now (codex
         # supports rich content but Hermes' text path is the common case).
         try:
+            input_text = _coerce_turn_input_text(user_input)
+            _t_turn_begin = time.monotonic()
+            _first_delta_at: list[float] = []
+            self._first_delta_at = _first_delta_at  # picked up in event loop
+            logger.debug("[codex-flow][run_turn] SENDING turn/start thread=%s input_len=%s", self._thread_id, len(input_text))
+            _t_ts = time.monotonic()
+            turn_params: dict[str, Any] = {
+                "threadId": self._thread_id,
+                "input": [{"type": "text", "text": input_text}],
+            }
+            turn_model = str(model_override or "").strip()
+            if turn_model:
+                turn_params["model"] = turn_model
+                result.requested_model = turn_model
             ts = self._client.request(
                 "turn/start",
-                {
-                    "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": user_input}],
-                },
+                turn_params,
                 timeout=10,
             )
+            model = _extract_protocol_model(ts)
+            if model:
+                result.actual_model = model
+            logger.debug("[codex-perf][run_turn] turn/start dt=%.3fs", time.monotonic() - _t_ts)
+            logger.debug("[codex-flow][run_turn] turn/start REPLIED turn_id=%s ts_keys=%s", (ts.get("turn") or {}).get("id"), sorted(ts.keys()) if isinstance(ts, dict) else "?")
         except CodexAppServerError as exc:
             # Classify auth/refresh failures so the user gets a clear
             # `codex login` pointer instead of a raw RPC error string.
@@ -414,6 +537,19 @@ class CodexAppServerSession:
         # within post_tool_quiet_timeout and the turn hasn't completed, we
         # fast-fail and retire the session.
         last_tool_completion_at: Optional[float] = None
+        turn_started_at: Optional[float] = None
+        last_notification_at: Optional[float] = None
+
+        def mark_notification(note: dict) -> None:
+            nonlocal turn_started_at, last_notification_at
+            method = note.get("method")
+            if method != "turn/started" and turn_started_at is None:
+                return
+            now = time.monotonic()
+            if method == "turn/started" and turn_started_at is None:
+                turn_started_at = now
+            if turn_started_at is not None:
+                last_notification_at = now
 
         while time.monotonic() < deadline and not turn_complete:
             if self._interrupt_event.is_set():
@@ -438,6 +574,24 @@ class CodexAppServerSession:
                 result.should_retire = True
                 break
 
+            if (
+                no_event_timeout > 0
+                and last_notification_at is not None
+                and (time.monotonic() - last_notification_at) > no_event_timeout
+            ):
+                self._issue_interrupt(result.turn_id)
+                result.interrupted = True
+                result.error = (
+                    "codex_app_server_no_event_timeout: no codex "
+                    f"notifications for {no_event_timeout:.0f}s after "
+                    "turn/started; retiring app-server session. Hint: the "
+                    "upstream stream may be wedged, so the next turn will "
+                    "start a fresh Codex app-server session."
+                )
+                result.should_retire = True
+                self.close()
+                break
+
             # Post-tool watchdog: if a tool completion was the most recent
             # signal and codex has been silent past the quiet timeout, give
             # up on this turn instead of waiting for the outer deadline.
@@ -460,6 +614,7 @@ class CodexAppServerSession:
             # reading notifications, so the codex side isn't blocked.
             sreq = self._client.take_server_request(timeout=0)
             if sreq is not None:
+                logger.debug("[codex-flow][run_turn] SERVER_REQUEST method=%r keys=%s", sreq.get("method"), sorted(sreq.keys()))
                 # Drain any pending notifications first so per-turn state
                 # (e.g. _pending_file_changes for fileChange approvals) is
                 # up to date when we make the approval decision. Bounded
@@ -468,6 +623,8 @@ class CodexAppServerSession:
                     pending = self._client.take_notification(timeout=0)
                     if pending is None:
                         break
+                    mark_notification(pending)
+                    _apply_protocol_model_notification(result, pending)
                     _apply_token_usage_notification(result, pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
@@ -498,12 +655,20 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
+            if method == "item/agentMessage/delta" and not _first_delta_at:
+                _first_delta_at.append(time.monotonic())
+                logger.debug("[codex-perf][run_turn] FIRST agentMessage/delta after turn_start dt=%.3fs", _first_delta_at[0] - _t_turn_begin)
+            mark_notification(note)
             if self._on_event is not None:
                 try:
                     self._on_event(note)
                 except Exception:  # pragma: no cover - display callback
                     logger.debug("on_event callback raised", exc_info=True)
+                if method == "item/agentMessage/delta" and len(_first_delta_at) == 1:
+                    _first_delta_at.append(time.monotonic())  # sentinel
+                    logger.debug("[codex-flow][on_event] FIRST delta forwarded to hermes")
 
+            _apply_protocol_model_notification(result, note)
             _apply_token_usage_notification(result, note)
 
             # Track in-progress fileChange items so the approval bridge
@@ -529,8 +694,19 @@ class CodexAppServerSession:
                     last_tool_completion_at = None
             if projection.final_text is not None:
                 # Codex can emit multiple agentMessage items in one turn
-                # (e.g. partial then final). Take the last one as canonical.
-                result.final_text = projection.final_text
+                # (message → shell → message → …). Concatenate all agentMessage
+                # texts (blank line between segments — matches what codex
+                # actually streams between items) so the returned final_text
+                # equals the delta stream the frontend accumulated. That
+                # keeps hermes's final-response-reconciliation invariant
+                # (raw_text prefix/equals stream_text) and stops it from
+                # re-emitting the tail as a duplicate delta on message.complete.
+                if result.final_text:
+                    result.final_text = (
+                        result.final_text + "\n\n" + projection.final_text
+                    )
+                else:
+                    result.final_text = projection.final_text
                 # Some codex builds tear a turn down by emitting a
                 # `<turn_aborted>` marker in the agent message text and
                 # never sending turn/completed. Treat the marker itself
@@ -770,6 +946,46 @@ class CodexAppServerSession:
         if not cached:
             return None
         return cached
+
+
+def _clean_protocol_model(value: Any) -> Optional[str]:
+    text = str(value or "").strip() if value is not None else ""
+    return text or None
+
+
+def _extract_protocol_model(payload: Any) -> Optional[str]:
+    """Return a model reported by Codex on stable response/event envelopes.
+
+    Current codex 0.142.3 schemas expose `model` on request params, but not on
+    TurnStartResponse, TurnStartedNotification, TurnCompletedNotification, or
+    ThreadTokenUsageUpdatedNotification. Keep this extractor narrow to those
+    response/event envelope locations so nested collab-tool `model` fields are
+    not mistaken for the actual model that ran the turn.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if model := _clean_protocol_model(payload.get("model")):
+        return model
+    for key in ("turn", "thread", "tokenUsage"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            if model := _clean_protocol_model(nested.get("model")):
+                return model
+    return None
+
+
+def _apply_protocol_model_notification(result: TurnResult, note: dict) -> None:
+    if not isinstance(note, dict):
+        return
+    if note.get("method") not in {
+        "turn/started",
+        "turn/completed",
+        "thread/tokenUsage/updated",
+    }:
+        return
+    model = _extract_protocol_model(note.get("params") or {})
+    if model:
+        result.actual_model = model
 
 
 def _apply_token_usage_notification(result: TurnResult, note: dict) -> None:

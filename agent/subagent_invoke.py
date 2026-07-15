@@ -47,17 +47,34 @@ def invoke_subagent(
 
     token = set_hermes_home_override(target_home)
     try:
-        return _invoke_subagent_scoped(
-            caller_agent,
-            client,
-            target_home,
-            prompt,
-            files=files,
-            tools_subset=tools_subset,
-            timeout_s=timeout_s,
-            max_turns=max_turns,
-            started=started,
-        )
+        executing_profile_id = str(target_profile_id or "").strip()
+        if executing_profile_id:
+            from agent.dovie_attribution import dovie_child_run_overlay
+
+            with dovie_child_run_overlay(executing_profile_id, "subagent"):
+                return _invoke_subagent_scoped(
+                    caller_agent,
+                    client,
+                    target_home,
+                    prompt,
+                    files=files,
+                    tools_subset=tools_subset,
+                    timeout_s=timeout_s,
+                    max_turns=max_turns,
+                    started=started,
+                )
+        else:
+            return _invoke_subagent_scoped(
+                caller_agent,
+                client,
+                target_home,
+                prompt,
+                files=files,
+                tools_subset=tools_subset,
+                timeout_s=timeout_s,
+                max_turns=max_turns,
+                started=started,
+            )
     finally:
         reset_hermes_home_override(token)
 
@@ -331,6 +348,17 @@ def _create_chat_completion(
         for key, value in request_overrides.items():
             if key not in kwargs:
                 kwargs[key] = value
+    try:
+        from agent.dovie_attribution import build_dovie_attribution_overlay_headers
+
+        headers = build_dovie_attribution_overlay_headers()
+        if headers:
+            existing = kwargs.get("extra_headers")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged.update(headers)
+            kwargs["extra_headers"] = merged
+    except Exception:
+        pass
     return client.chat.completions.create(**kwargs)
 
 

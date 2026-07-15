@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 
 
@@ -10,19 +10,19 @@ CONVERSATION_ID = "conversation-1"
 CONVERSATION_SESSION_ID = "team-session-1"
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _wire_gateway_db(monkeypatch, db: SessionDB) -> None:
+def _wire_gateway_db(monkeypatch, db: CliSessionStore) -> None:
     team_mission = team_mission_gateway()
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
 
-def _create_conversation(db: SessionDB, *, active_mission_id: str = "") -> None:
+def _create_conversation(db: CliSessionStore, *, active_mission_id: str = "") -> None:
     db.upsert_team_mission_conversation(
         conversation_id=CONVERSATION_ID,
-        stable_session_id=CONVERSATION_SESSION_ID,
+        conversation_session_id=CONVERSATION_SESSION_ID,
         team_id="team-1",
         title="Team conversation",
         status="active",
@@ -31,12 +31,12 @@ def _create_conversation(db: SessionDB, *, active_mission_id: str = "") -> None:
 
 
 def _create_index(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str,
     active_run_id: str = "run-active",
 ) -> None:
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id=CONVERSATION_SESSION_ID,
         title="Team conversation",
         source="team_mission",
@@ -48,13 +48,13 @@ def _create_index(
         running=True,
         status="running",
         active_run_id=active_run_id,
-        active_runtime_session_id=f"runtime-{active_run_id}",
+        active_execution_session_id=f"runtime-{active_run_id}",
         started_at=1.0,
         updated_at=2.0,
     )
 
 
-def _create_mission(db: SessionDB, mission_id: str, *, status: str = "running") -> None:
+def _create_mission(db: CliSessionStore, mission_id: str, *, status: str = "running") -> None:
     db.upsert_team_mission(
         mission_id=mission_id,
         conversation_id=CONVERSATION_ID,
@@ -70,7 +70,7 @@ def _create_mission(db: SessionDB, mission_id: str, *, status: str = "running") 
         mission_id=mission_id,
         status="active" if status not in {"completed", "failed", "cancelled", "canceled"} else status,
     )
-    db.ensure_mission_activity(
+    db.activities.ensure_mission(
         conversation_id=CONVERSATION_SESSION_ID,
         mission_id=mission_id,
         status="running" if status not in {"completed", "failed", "cancelled", "canceled"} else "cancelled",
@@ -78,7 +78,7 @@ def _create_mission(db: SessionDB, mission_id: str, *, status: str = "running") 
 
 
 def _bind_member_run(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str,
     run_id: str,
@@ -95,11 +95,11 @@ def _bind_member_run(
         status="running",
         runtime_scope_key=session_id,
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id=run_id,
         session_id=session_id,
         runtime_scope_key=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         status=status,
     )
     db.bind_team_mission_run(
@@ -107,13 +107,13 @@ def _bind_member_run(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key=session_id,
         role="worker",
     )
 
 
-def _cancel_via_gateway(monkeypatch, db: SessionDB, mission_id: str) -> tuple[dict, list[dict]]:
+def _cancel_via_gateway(monkeypatch, db: CliSessionStore, mission_id: str) -> tuple[dict, list[dict]]:
     from tui_gateway import server
 
     _wire_gateway_db(monkeypatch, db)
@@ -121,10 +121,10 @@ def _cancel_via_gateway(monkeypatch, db: SessionDB, mission_id: str) -> tuple[di
 
     def fake_run_cancel(rid, params):
         canceled.append(dict(params))
-        db.upsert_run(
+        db.runs.upsert(
             run_id=params["run_id"],
-            session_id=params["stored_session_id"],
-            runtime_session_id=params["runtime_session_id"],
+            session_id=params["conversation_session_id"],
+            execution_session_id=params["execution_session_id"],
             runtime_scope_key=params["runtime_scope_key"],
             status="cancelled",
         )
@@ -147,14 +147,14 @@ def test_team_mission_cancel_marks_only_mission_activity_cancelled(monkeypatch, 
 
     _cancel_via_gateway(monkeypatch, db, "mission-A")
 
-    activity_a = db.get_activity_for_mission("mission-A")
-    activity_b = db.get_activity_for_mission("mission-B")
+    activity_a = db.activities.get_for_mission("mission-A")
+    activity_b = db.activities.get_for_mission("mission-B")
     assert activity_a is not None
     assert activity_b is not None
     assert activity_a["status"] == "cancelled"
     assert activity_a["completed_at"] is not None
     assert activity_b["status"] == "running"
-    assert [row["target_mission_id"] for row in db.list_active_mission_activities(CONVERSATION_SESSION_ID)] == [
+    assert [row["target_mission_id"] for row in db.activities.list_active_missions(CONVERSATION_SESSION_ID)] == [
         "mission-B"
     ]
 
@@ -167,18 +167,18 @@ def test_team_mission_cancel_does_not_idle_conversation_with_other_active_runs(
     _create_conversation(db, active_mission_id="mission-A")
     _create_mission(db, "mission-A")
     _bind_member_run(db, mission_id="mission-A", run_id="run-mission-A")
-    db.upsert_run(run_id="run-chat", session_id=CONVERSATION_SESSION_ID, status="running")
+    db.runs.upsert(run_id="run-chat", session_id=CONVERSATION_SESSION_ID, status="running")
     _create_index(db, mission_id="mission-A", active_run_id="run-chat")
 
     _cancel_via_gateway(monkeypatch, db, "mission-A")
 
-    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    row = db.session_index.get(CONVERSATION_SESSION_ID)
     assert row is not None
     assert row["running"] is True
     assert row["status"] == "running"
     assert row["active_run_id"] == "run-chat"
-    assert db.get_run("run-mission-A")["status"] == "cancelled"
-    assert db.get_run("run-chat")["status"] == "running"
+    assert db.runs.get("run-mission-A")["status"] == "cancelled"
+    assert db.runs.get("run-chat")["status"] == "running"
 
 
 def test_team_mission_cancel_does_cancel_its_own_member_runs(monkeypatch, tmp_path: Path) -> None:
@@ -193,8 +193,8 @@ def test_team_mission_cancel_does_cancel_its_own_member_runs(monkeypatch, tmp_pa
 
     assert [item["run_id"] for item in result["canceled_runs"]] == ["run-A"]
     assert [item["run_id"] for item in canceled] == ["run-A"]
-    assert db.get_run("run-A")["status"] == "cancelled"
-    assert db.get_run("run-B")["status"] == "running"
+    assert db.runs.get("run-A")["status"] == "cancelled"
+    assert db.runs.get("run-B")["status"] == "running"
 
 
 def test_multi_mission_parallel_cancel_one_does_not_affect_others(monkeypatch, tmp_path: Path) -> None:
@@ -208,11 +208,11 @@ def test_multi_mission_parallel_cancel_one_does_not_affect_others(monkeypatch, t
 
     _cancel_via_gateway(monkeypatch, db, "mission-A")
 
-    assert db.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
-    assert db.get_team_mission_graph("mission-B")["mission"]["status"] == "running"
-    assert db.get_activity_for_mission("mission-A")["status"] == "cancelled"
-    assert db.get_activity_for_mission("mission-B")["status"] == "running"
-    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    assert db.team_mission_graphs.get_team_mission_graph("mission-A")["mission"]["status"] == "cancelled"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-B")["mission"]["status"] == "running"
+    assert db.activities.get_for_mission("mission-A")["status"] == "cancelled"
+    assert db.activities.get_for_mission("mission-B")["status"] == "running"
+    row = db.session_index.get(CONVERSATION_SESSION_ID)
     assert row is not None
     assert row["running"] is True
     assert row["active_run_id"] == "run-B"
@@ -225,12 +225,12 @@ def test_reaper_only_idles_conversation_when_all_runs_terminal_AND_no_active_mis
     _create_conversation(db, active_mission_id="mission-B")
     _create_mission(db, "mission-A", status="cancelled")
     _create_mission(db, "mission-B")
-    db.upsert_run(run_id="run-terminal", session_id=CONVERSATION_SESSION_ID, status="completed")
+    db.runs.upsert(run_id="run-terminal", session_id=CONVERSATION_SESSION_ID, status="completed")
     _create_index(db, mission_id="mission-A", active_run_id="run-terminal")
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
-    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    row = db.session_index.get(CONVERSATION_SESSION_ID)
     assert row is not None
     assert row["running"] is True
     assert row["status"] == "running"
@@ -240,9 +240,9 @@ def test_reaper_only_idles_conversation_when_all_runs_terminal_AND_no_active_mis
         mission_id="mission-B",
         status="cancelled",
     )
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
-    row = db.get_session_index(CONVERSATION_SESSION_ID)
+    row = db.session_index.get(CONVERSATION_SESSION_ID)
     assert row is not None
     assert row["running"] is False
     assert row["status"] == "idle"

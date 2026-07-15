@@ -88,9 +88,9 @@ except ImportError:
     ExecuteAction = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.helpers import MessageDeduplicator
-from gateway.platforms.base import (
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.helpers import MessageDeduplicator
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,

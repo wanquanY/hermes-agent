@@ -447,7 +447,7 @@ class TestMarkJobRun:
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "timeout"
 
-    def test_records_last_runtime_session_id(self, tmp_cron_dir):
+    def test_records_last_execution_session_id(self, tmp_cron_dir):
         job = create_job(prompt="Report", schedule="every 1h")
         mark_job_run(job["id"], success=True, session_id="cron_job_20260521_090000")
         updated = get_job(job["id"])

@@ -1,0 +1,65 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p2:no_sessiondb_production",
+      "message": "hermes_state_member_chat.py:199: class SessionDBMemberChatMixin:\nhermes_state_branch.py:11: class SessionDBBranchMixin:\nhermes_state_run_event_reference.py:11: from hermes_state_run_event_codec import decode_run_event_row\nhermes_state_run_event_reference.py:12: from hermes_state_run_event_codec import encode_run_event_frame\nhermes_state_run_event_reference.py:13: from hermes_state_run_event_index import (\nhermes_state_tool_events.py:9: from hermes_state_run_event_codec import decode_run_event_row\nhermes_state_tool_events.py:655: Mirrors the decode path used by ``SessionDB.list_run_events`` minus the\nrun_agent.py:491: \"\"\"Return a SessionDB for recall, lazily creating it if an entrypoint forgot.\nrun_agent.py:503: from hermes_state import SessionDB\nrun_agent.py:505: self._session_db = SessionDB()\nrun_agent.py:508: logger.debug(\"SessionDB unavailable for recall\", exc_info=True)\nrun_agent.py:1614: \"\"\"Stamp a stable per-run key used by SessionDB for idempotent append.\"\"\"\nrun_agent.py:1716: SessionDB's persisted run-message key for idempotency.\nhermes_state_participants.py:527: SessionDBParticipantMixin = ParticipantsMixin\nhermes_state_agent_profiles.py:109: class SessionDBAgentProfileMixin:\nhermes_state_team_registry.py:56: class SessionDBTeamRegistryMixin:\ncli.py:1083: \"\"\"Call ``SessionDB.maybe_auto_prune_and_vacuum`` using current config.\ncli.py:2887: from hermes_state import SessionDB\ncli.py:2888: self._session_db = SessionDB()\ncli.py:2890: logger.warning(\"Failed to initialize SessionDB — session will NOT be indexed for search: %s\", e)\ncli.py:4630: from hermes_state import SessionDB\ncli.py:4631: self._session_db = SessionDB()\ncli.py:4647: # See #15000 and SessionDB.resolve_resume_session_id.\ncli.py:6206: from hermes_state import SessionDB\ncli.py:6208: sanitized = SessionDB.sanitize_title(title)\ncli.py:6268: from hermes_state import format_session_db_unavailable\ncli.py:6315: # Make sure we have a SessionDB handle.\ncli.py:6318: from hermes_state import SessionDB\ncli.py:6319: self._session_db = SessionDB()\ncli.py:6414: from hermes_state import format_session_db_unavailable",
+      "ok": false
+    },
+    {
+      "id": "p2:no_legacy_identity_alias_internal",
+      "message": "hermes_state_run_event_codec.py:77: event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\", \"\"))\nhermes_state_run_event_codec.py:78: event.setdefault(\"session_id\", _row_value(row, \"runtime_session_id\", \"\"))\nhermes_state_run_event_codec.py:79: event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\", \"\"))\nhermes_state_branch.py:213: \"stored_session_id\": row[\"id\"],\nhermes_state_run_event_reference.py:95: event.get(\"stored_session_id\")\nhermes_state_run_event_reference.py:97: or payload.get(\"stored_session_id\")\nhermes_state_run_event_reference.py:139: event.get(\"stored_session_id\")\nhermes_state_run_event_reference.py:140: or payload.get(\"stored_session_id\")\nhermes_state_tool_events.py:73: event.get(\"stored_session_id\"),\nhermes_state_tool_events.py:75: payload.get(\"stored_session_id\"),\nhermes_state_tool_events.py:260: \"runtime_session_id\": event.get(\"runtime_session_id\") or event.get(\"session_id\"),\nhermes_state_tool_events.py:540: event.setdefault(\"stored_session_id\", _row_value(row, \"session_id\"))\nhermes_state_tool_events.py:543: event.setdefault(\"runtime_session_id\", _row_value(row, \"runtime_session_id\"))\nhermes_state_tool_events.py:575: \"stored_session_id\": _text(_row_value(row, \"session_id\")),\nhermes_state_tool_events.py:663: # ``decode_run_event_row`` already populates: type, stored_session_id,\nhermes_state_tool_events.py:664: # session_id, runtime_session_id, runtime_scope_key, run_id, turn_id,\nhermes_state_tool_events.py:683: output: ``{type, seq, run_id, turn_id, payload, stored_session_id, ...}``.\nrun_agent.py:1933: runtime_session_id = str(getattr(self, \"session_id\", \"\") or \"\").strip()\nrun_agent.py:1934: if runtime_session_id:\nrun_agent.py:1935: target_session_id = runtime_session_id\nhermes_team_leader_runtime_context.py:67: or params.get(\"stable_session_id\")\nhermes_team_leader_runtime_context.py:68: or params.get(\"stored_session_id\")\nhermes_state.py:303: active_runtime_session_id TEXT NOT NULL DEFAULT '',\nhermes_state.py:461: runtime_session_id TEXT,\nhermes_state.py:486: runtime_session_id TEXT,\nhermes_state.py:530: runtime_session_id TEXT,\nhermes_state.py:1629: session_id = str(event.get(\"stored_session_id\") or row[\"session_id\"] or \"\").strip()\nhermes_state.py:1636: runtime_session_id=str(\nhermes_state.py:1637: event.get(\"runtime_session_id\")\nhermes_state.py:1639: or row[\"runtime_session_id\"]",
+      "ok": false
+    },
+    {
+      "id": "p2:event_ledger_single_writer",
+      "message": "run_events INSERT is owned by EventLedger only",
+      "ok": true
+    },
+    {
+      "id": "p2:run_state_single_writer",
+      "message": "runs UPDATE is owned by RunTerminator/RunRepo only",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p2_human_signoff.md",
+  "phase": "P2",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/observability/test_zero_debt_gates.py -q",
+    ".venv/bin/pytest tests/gateway tests/storage tests/tui_gateway -q"
+  ],
+  "status": "fail",
+  "warnings": [
+    "worktree is dirty; P1+ requires an explicit baseline or clean handoff",
+    "P2 verdict is the data-plane ownership gate. It is expected to fail until P2 vertical slices migrate SessionDB/hermes_state production ownership into repositories and domain services."
+  ]
+}

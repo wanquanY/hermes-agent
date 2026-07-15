@@ -116,7 +116,7 @@ def _load_google_modules() -> bool:
     GOOGLE_CHAT_AVAILABLE = True
     return True
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 # Trigger registration of the dynamic ``google_chat`` enum member at module
 # import time.  ``_missing_()`` caches the pseudo-member in
@@ -127,8 +127,8 @@ from gateway.config import Platform, PlatformConfig
 # Built-ins avoid this because they have explicit enum members; plugin
 # platforms earn the attribute by asking for it once.
 Platform("google_chat")
-from gateway.platforms.helpers import MessageDeduplicator
-from gateway.platforms.base import (
+from channels.platforms.helpers import MessageDeduplicator
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
@@ -451,7 +451,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         # ``Platform("google_chat")`` resolves via ``_missing_()`` → pseudo-member
         # cached in ``_value2member_map_``.  We deliberately do NOT add an enum
-        # attribute to ``gateway.config.Platform`` — bundled platform plugins
+        # attribute to ``hermes_gateway.config.Platform`` — bundled platform plugins
         # are looked up by value, not attribute (matches Teams, IRC).
         super().__init__(config, Platform("google_chat"))
         # Trigger the deferred google-cloud + googleapiclient import here so

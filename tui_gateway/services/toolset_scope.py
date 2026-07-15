@@ -183,6 +183,7 @@ def refresh_agent_tool_filter(
 ) -> None:
     from model_tools import get_tool_definitions
 
+    previous_tool_names = set(getattr(agent, "valid_tool_names", None) or set())
     if disabled_toolsets is _UNCHANGED:
         disabled_toolsets = getattr(agent, "disabled_toolsets", None)
     disabled_toolsets = list(disabled_toolsets or []) or None
@@ -198,6 +199,11 @@ def refresh_agent_tool_filter(
         for tool in agent.tools or []
         if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
     }
+    if agent.valid_tool_names != previous_tool_names:
+        # The rendered system prompt contains guidance selected from the
+        # effective tool names. Keeping the old in-memory snapshot after a
+        # tool-surface change sends a contradictory prompt/schema pair.
+        agent._cached_system_prompt = None
 
 
 def ensure_session_turn_toolsets(

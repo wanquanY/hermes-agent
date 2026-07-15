@@ -57,6 +57,31 @@ def content_display_text(content: Any) -> str:
     return str(content)
 
 
+def _copy_message_identity(source: dict, target: dict) -> None:
+    """Expose storage and semantic identities without conflating them.
+
+    ``message_id`` remains the sqlite row identity used by artifact anchors.
+    ``conversation_message_id`` is the stable, cross-restart identity shared
+    with canonical run events and is therefore the identity renderers must use
+    for message reconciliation.
+    """
+    storage_message_id = (
+        source.get("message_id")
+        if source.get("message_id") is not None
+        else source.get("id")
+    )
+    if storage_message_id is not None:
+        target["message_id"] = str(storage_message_id)
+    conversation_message_id = str(
+        source.get("conversation_message_id")
+        or source.get("conversationMessageId")
+        or ""
+    ).strip()
+    if conversation_message_id:
+        target["conversation_message_id"] = conversation_message_id
+        target["conversationMessageId"] = conversation_message_id
+
+
 def history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -101,9 +126,7 @@ def history_to_messages(history: list[dict]) -> list[dict]:
                 item["arguments"] = serializable_tool_args(args)
             if content_text.strip():
                 item["result_text"] = content_text
-            message_id = message.get("message_id") if message.get("message_id") is not None else message.get("id")
-            if message_id is not None:
-                item["message_id"] = str(message_id)
+            _copy_message_identity(message, item)
             if message.get("timestamp") is not None:
                 item["timestamp"] = message.get("timestamp")
             participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()
@@ -117,9 +140,7 @@ def history_to_messages(history: list[dict]) -> list[dict]:
         if not content_text.strip() and not reasoning_text.strip():
             continue
         item = {"role": role, "text": content_text}
-        message_id = message.get("message_id") if message.get("message_id") is not None else message.get("id")
-        if message_id is not None:
-            item["message_id"] = str(message_id)
+        _copy_message_identity(message, item)
         if message.get("timestamp") is not None:
             item["timestamp"] = message.get("timestamp")
         participant_id = str(message.get("participant_id") or message.get("participantId") or "").strip()

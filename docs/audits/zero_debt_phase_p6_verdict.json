@@ -1,0 +1,152 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/phase_closure.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_channels_p1_boundary.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "p2:no_sessiondb_production",
+      "message": "production code has no hermes_state/SessionDB dependency",
+      "ok": true
+    },
+    {
+      "id": "p2:no_legacy_identity_alias_internal",
+      "message": "legacy identity aliases appear only at the wire folding boundary",
+      "ok": true
+    },
+    {
+      "id": "p2:event_ledger_single_writer",
+      "message": "run_events INSERT is owned by EventLedger only",
+      "ok": true
+    },
+    {
+      "id": "p2:run_state_single_writer",
+      "message": "runs UPDATE is owned by RunTerminator/RunRepo only",
+      "ok": true
+    },
+    {
+      "id": "p2:no_hermes_state_store_production_instantiation",
+      "message": "production code does not instantiate HermesStateStore",
+      "ok": true
+    },
+    {
+      "id": "p2:state_store_decomposed",
+      "message": "state_store/state_mixins total lines 93 <= 100",
+      "ok": true
+    },
+    {
+      "id": "p2:hermes_state_store_no_methods",
+      "message": "HermesStateStore class has no remaining methods",
+      "ok": true
+    },
+    {
+      "id": "p2:aggregate_table_single_owner",
+      "message": "all aggregate table writes are owned by their aggregate repositories",
+      "ok": true
+    },
+    {
+      "id": "p2:no_silent_swallow_in_v3",
+      "message": "hermes_agent has no silent swallow handlers",
+      "ok": true
+    },
+    {
+      "id": "p3:no_method_modules",
+      "message": "legacy METHOD_MODULES registration is gone",
+      "ok": true
+    },
+    {
+      "id": "p3:no_dovie_overrides",
+      "message": "DOVIE_GATEWAY_METHOD_OVERRIDES is gone",
+      "ok": true
+    },
+    {
+      "id": "p3:single_dispatch_registry",
+      "message": "tui_gateway/server.py dispatches through hermes_agent.gateway.pipeline and no secondary method maps remain",
+      "ok": true
+    },
+    {
+      "id": "p4:worker_services_decomposed",
+      "message": "legacy worker services total lines 0 <= 100",
+      "ok": true
+    },
+    {
+      "id": "p4:no_relocated_worker_monolith",
+      "message": "no god-object class in blessed runtime trees",
+      "ok": true
+    },
+    {
+      "id": "p4:worker_single_owner",
+      "message": "worker runtime has a single target owner",
+      "ok": true
+    },
+    {
+      "id": "p5:gateway_directory_removed",
+      "message": "gateway/ is removed",
+      "ok": true
+    },
+    {
+      "id": "p5:no_legacy_gateway_imports",
+      "message": "production code has no legacy gateway imports",
+      "ok": true
+    },
+    {
+      "id": "p5:no_relocated_gateway_monolith",
+      "message": "no gateway god-object class was relocated into blessed trees",
+      "ok": true
+    },
+    {
+      "id": "p5:no_mixin_recomposed_gateway_monolith",
+      "message": "no production gateway god-object is recomposed through local mixins",
+      "ok": true
+    },
+    {
+      "id": "p5:gateway_run_decomposed",
+      "message": "gateway/run.py is gone and target gateway files are below monolith threshold",
+      "ok": true
+    },
+    {
+      "id": "p6:no_silent_swallow_in_clean_trees",
+      "message": "hermes_agent/hermes_gateway have no silent swallow handlers",
+      "ok": true
+    },
+    {
+      "id": "p6:no_relocated_god_objects",
+      "message": "no god-object classes remain in blessed trees",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p6_human_signoff.md",
+  "phase": "P6",
+  "required_test_commands": [
+    ".venv/bin/pytest tests/observability tests/repositories tests/gateway tests/tui_gateway -q",
+    "python scripts/zero_debt/phase_closure.py --phase P6 --json"
+  ],
+  "status": "pass",
+  "warnings": []
+}

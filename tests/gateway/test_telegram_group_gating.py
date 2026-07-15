@@ -3,9 +3,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
-from gateway.platforms.base import MessageType
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
+from channels.platforms.base import MessageType
+from hermes_gateway.session import SessionSource
 
 
 def _make_adapter(
@@ -23,7 +23,7 @@ def _make_adapter(
     observe_unmentioned_group_messages=None,
     bot_username="hermes_bot",
 ):
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     extra = {}
     if require_mention is not None:
@@ -249,7 +249,7 @@ def test_unmentioned_group_observe_requires_chat_allowlist_for_shared_context():
 
 
 def test_shared_group_observe_source_is_authorized_by_group_allowed_chats(monkeypatch):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
@@ -654,7 +654,7 @@ def test_top_level_require_mention_bridges_to_telegram(monkeypatch, tmp_path):
 
     # The adapter's extra dict must also carry the setting so that
     # _telegram_require_mention() works even without the env var.
-    tg_cfg = config.platforms.get(__import__("gateway.config", fromlist=["Platform"]).Platform.TELEGRAM)
+    tg_cfg = config.platforms.get(__import__("hermes_gateway.config", fromlist=["Platform"]).Platform.TELEGRAM)
     if tg_cfg is not None:
         assert tg_cfg.extra.get("require_mention") is True
 

@@ -18,15 +18,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import (
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     ProcessingOutcome,
     SendResult,
 )
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ class TestEmptyResponseNotSuppressed:
         )
 
     def _apply_suppression_logic(self, response, sc):
-        """Reproduce the fixed logic from gateway/run.py return path."""
+        """Reproduce the fixed logic from hermes_gateway/runner.py return path."""
         if sc and isinstance(response, dict) and not response.get("failed"):
             _final = response.get("final_response") or ""
             _is_empty_sentinel = not _final or _final == "(empty)"

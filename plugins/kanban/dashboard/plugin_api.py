@@ -1496,7 +1496,7 @@ def _configured_home_channels() -> list[dict]:
     order and drops platforms without a home.
     """
     try:
-        from gateway.config import load_gateway_config
+        from hermes_gateway.config import load_gateway_config
     except Exception:
         return []
     try:

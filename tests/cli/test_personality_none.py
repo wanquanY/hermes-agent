@@ -3,6 +3,8 @@ import pytest
 from unittest.mock import MagicMock, patch, mock_open
 import yaml
 
+import hermes_gateway.personality_command as personality_command
+
 
 # ── CLI tests ──────────────────────────────────────────────────────────────
 
@@ -81,7 +83,7 @@ class TestGatewayPersonalityNone:
         return event
 
     def _make_runner(self, personalities=None):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._ephemeral_system_prompt = "You are kawaii~"
         runner.config = {
@@ -98,9 +100,9 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("none")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert runner._ephemeral_system_prompt == ""
         assert "cleared" in result.lower()
@@ -112,9 +114,9 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("default")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert runner._ephemeral_system_prompt == ""
 
@@ -125,9 +127,9 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert "none" in result.lower()
 
@@ -138,9 +140,9 @@ class TestGatewayPersonalityNone:
         config_file = tmp_path / "config.yaml"
         config_file.write_text(yaml.dump(config_data))
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path):
             event = self._make_event("nonexistent")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert "none" in result.lower()
 
@@ -149,10 +151,10 @@ class TestGatewayPersonalityNone:
         runner = self._make_runner(personalities={})
         (tmp_path / "config.yaml").write_text(yaml.dump({"agent": {"personalities": {}}}))
 
-        with patch("gateway.run._hermes_home", tmp_path), \
+        with patch.object(personality_command, "GATEWAY_HOME", tmp_path), \
              patch("hermes_constants.display_hermes_home", return_value="~/.hermes/profiles/coder"):
             event = self._make_event("")
-            result = await runner._handle_personality_command(event)
+            result = await personality_command.personality_command_for(runner).handle_personality_command(event)
 
         assert result == "No personalities configured in `~/.hermes/profiles/coder/config.yaml`"
 

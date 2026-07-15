@@ -2,9 +2,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter
-from gateway.run import GatewayRunner
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter
+from hermes_gateway.runner import GatewayRunner
 
 
 class _FatalAdapter(BasePlatformAdapter):
@@ -91,7 +91,9 @@ async def test_runner_queues_retryable_runtime_fatal_for_reconnection(monkeypatc
     runner.delivery_router.adapters = runner.adapters
     runner.stop = AsyncMock()
 
-    await runner._handle_adapter_fatal_error(adapter)
+    from hermes_gateway.platform_runtime import platform_runtime_for
+
+    await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
     # Gateway stays alive — watcher will retry in background
     runner.stop.assert_not_awaited()

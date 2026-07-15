@@ -48,10 +48,10 @@ def _make_agent(session_db, session_id, *, in_place):
 
 
 def _seed(db, sid, title, n=8):
-    db.create_session(sid, "cli", model="test/model")
-    db.set_session_title(sid, title)
+    db.sessions.create(sid, "cli", model="test/model")
+    db.sessions.set_title(sid, title)
     for i in range(n):
-        db.append_message(
+        db.messages.append(
             session_id=sid,
             role="user" if i % 2 == 0 else "assistant",
             content=f"msg {i}",
@@ -61,11 +61,11 @@ def _seed(db, sid, title, n=8):
 class TestInPlaceCompaction:
     def test_in_place_keeps_same_session_id(self):
         """In-place mode: id unchanged, no child row, no rename, history kept."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = SessionDB(db_path=Path(tmp) / "t.db")
+            db = open_cli_session_store(db_path=Path(tmp) / "t.db")
             sid = "20260619_120000_aaaaaa"
             _seed(db, sid, "my-research")
             agent = _make_agent(db, sid, in_place=True)
@@ -84,7 +84,7 @@ class TestInPlaceCompaction:
             ).fetchall()
             assert child == []
             # Session not ended; title untouched (no "#2").
-            row = db.get_session(sid)
+            row = db.sessions.get(sid)
             assert row["end_reason"] is None
             assert row["title"] == "my-research"
             # Pre-compaction messages remain under the one id (FTS continuity).
@@ -93,16 +93,18 @@ class TestInPlaceCompaction:
             # row starts empty); in-place keeps writing to the same row, so the
             # cursor only ever advances as current-turn messages are persisted.
             assert agent._last_flushed_db_idx != 0
-            # Transcript actually shrank.
-            assert len(compressed) == 2
+            # Two compacted transcript entries plus the durable boundary event.
+            assert len(compressed) == 3
+            assert compressed[-1]["role"] == "system"
+            assert "Context compacted" in compressed[-1]["content"]
 
     def test_in_place_alternation_preserved(self):
         """The compacted list must not introduce consecutive same-role messages."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = SessionDB(db_path=Path(tmp) / "t.db")
+            db = open_cli_session_store(db_path=Path(tmp) / "t.db")
             sid = "20260619_120500_cccccc"
             _seed(db, sid, "alt")
             agent = _make_agent(db, sid, in_place=True)
@@ -117,11 +119,11 @@ class TestInPlaceCompaction:
 class TestRotationStillDefault:
     def test_rotation_when_flag_off(self):
         """Regression guard: flag off => legacy rotation is unchanged."""
-        from hermes_state import SessionDB
+        from hermes_agent.storage.cli_session_store import open_cli_session_store
         from agent.conversation_compression import compress_context
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = SessionDB(db_path=Path(tmp) / "t.db")
+            db = open_cli_session_store(db_path=Path(tmp) / "t.db")
             sid = "20260619_130000_bbbbbb"
             _seed(db, sid, "my-research")
             agent = _make_agent(db, sid, in_place=False)
@@ -135,7 +137,7 @@ class TestRotationStillDefault:
             # Identity rotated to a fresh id.
             assert agent.session_id != sid
             # Old session ended via compression; continuation forked + renamed.
-            assert db.get_session(sid)["end_reason"] == "compression"
+            assert db.sessions.get(sid)["end_reason"] == "compression"
             child = db._conn.execute(
                 "SELECT id, title FROM sessions WHERE parent_session_id = ?", (sid,)
             ).fetchall()

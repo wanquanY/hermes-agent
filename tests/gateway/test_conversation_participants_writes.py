@@ -3,25 +3,25 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.gateway import runtime_methods
 from tui_gateway import server
 
 
-def _participant_ids(db: SessionDB, session_id: str) -> set[str]:
-    return {p["participant_id"] for p in db.list_conversation_participants(session_id)}
+def _participant_ids(db: CliSessionStore, session_id: str) -> set[str]:
+    return {p["participant_id"] for p in db.participants.list_conversation_participants(session_id)}
 
 
-def _seed_team(db: SessionDB) -> None:
-    db.upsert_agent_team(team_id="team-1", name="Team", description="")
-    db.upsert_agent_team_member(
+def _seed_team(db: CliSessionStore) -> None:
+    db.teams.upsert_agent_team(team_id="team-1", name="Team", description="")
+    db.teams.upsert_agent_team_member(
         member_id="m-lead",
         team_id="team-1",
         agent_profile_id="p-lead",
         role="lead",
         profile_name="Lead",
     )
-    db.upsert_agent_team_member(
+    db.teams.upsert_agent_team_member(
         member_id="m-alice",
         team_id="team-1",
         agent_profile_id="p-alice",
@@ -31,17 +31,17 @@ def _seed_team(db: SessionDB) -> None:
 
 
 def test_team_conversation_create_upserts_leader_and_members(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team(db)
 
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Conversation",
     )
 
-    participants = db.list_conversation_participants("team-session-1")
+    participants = db.participants.list_conversation_participants("team-session-1")
     by_id = {p["participant_id"]: p for p in participants}
     assert set(by_id) == {"leader:conv-1", "member:m-alice"}
     assert by_id["leader:conv-1"]["role"] == "leader"
@@ -53,15 +53,15 @@ def test_team_conversation_create_upserts_leader_and_members(tmp_path: Path):
 
 
 def test_member_submit_upserts_mentioned_member_idempotently(tmp_path: Path, monkeypatch):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     _seed_team(db)
     db.ensure_team_mission_conversation(
         conversation_id="conv-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Conversation",
     )
-    before = db.list_conversation_participants("team-session-1")
+    before = db.participants.list_conversation_participants("team-session-1")
 
     monkeypatch.setattr(runtime_methods, "_proxy_run_submit_via_worker", lambda _params: {"ok": True})
     mission = {
@@ -107,17 +107,17 @@ def test_member_submit_upserts_mentioned_member_idempotently(tmp_path: Path, mon
     )
 
     assert "error" not in response
-    participants = db.list_conversation_participants("team-session-1")
+    participants = db.participants.list_conversation_participants("team-session-1")
     assert _participant_ids(db, "team-session-1") == {"leader:conv-1", "member:m-alice"}
     assert len(participants) == len(before)
-    alice = db.get_conversation_participant("team-session-1", "member:m-alice")
+    alice = db.participants.get_conversation_participant("team-session-1", "member:m-alice")
     assert alice["runtime_scope_key"] == "member-chat:conv-1:m-alice"
     assert alice["display_name"] == "Alice"
 
 
 def test_session_create_upserts_user_and_agent_participants(tmp_path: Path, monkeypatch):
     session_methods = importlib.reload(importlib.import_module("tui_gateway.methods.session"))
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
     monkeypatch.setattr(
@@ -143,8 +143,8 @@ def test_session_create_upserts_user_and_agent_participants(tmp_path: Path, monk
     )
 
     assert "error" not in response
-    session_id = response["result"]["stored_session_id"]
-    participants = db.list_conversation_participants(session_id)
+    session_id = response["result"]["conversation_session_id"]
+    participants = db.participants.list_conversation_participants(session_id)
     by_id = {p["participant_id"]: p for p in participants}
     assert set(by_id) == {"user", "agent:profile-1"}
     assert by_id["user"]["role"] == "user"

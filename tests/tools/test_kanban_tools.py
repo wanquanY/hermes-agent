@@ -400,7 +400,7 @@ def test_complete_with_result_only(worker_env):
 def test_complete_with_artifacts_lands_in_event_payload(worker_env):
     """``artifacts=[...]`` rides into the completed event payload so the
     gateway notifier can upload them as native attachments. See the
-    kanban notifier in gateway/run.py for the consumer side."""
+    kanban notifier in hermes_gateway/runner.py for the consumer side."""
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 

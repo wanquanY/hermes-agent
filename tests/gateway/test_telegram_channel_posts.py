@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.platforms.base import MessageType
+from hermes_gateway.config import PlatformConfig
+from channels.platforms.base import MessageType
 
 
 def _build_telegram_stubs():
@@ -63,7 +63,7 @@ def _build_telegram_stubs():
 @pytest.fixture
 def telegram_adapter_cls(monkeypatch):
     """Import TelegramAdapter without leaking temporary telegram stubs."""
-    module_name = "gateway.platforms.telegram"
+    module_name = "channels.platforms.telegram"
     existing_module = sys.modules.get(module_name)
     if existing_module is not None:
         yield existing_module.TelegramAdapter

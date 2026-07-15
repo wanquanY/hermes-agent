@@ -20,37 +20,17 @@ def _mission_id_from_activity_id(activity_id: str) -> str:
     return activity_id[len(prefix):].strip() if activity_id.startswith(prefix) else ""
 
 
-def _event_seq_value(event: dict[str, Any]) -> int:
-    for key in ("seq", "team_mission_event_seq", "teamMissionEventSeq"):
-        try:
-            value = int(event.get(key) or 0)
-        except (TypeError, ValueError):
-            value = 0
-        if value > 0:
-            return value
-    return 0
-
-
 def _latest_team_mission_event_seq(db: Any, mission_id: str) -> int:
-    if hasattr(db, "_lock") and hasattr(db, "_conn"):
-        try:
-            with db._lock:
-                row = db._conn.execute(
-                    "SELECT COALESCE(MAX(seq), 0) AS latest_seq FROM team_mission_events WHERE mission_id = ?",
-                    (mission_id,),
-                ).fetchone()
-            if row is not None:
-                return int(row["latest_seq"] or 0)
-        except Exception:
-            pass
-    lister = getattr(db, "list_team_mission_events", None)
-    if callable(lister):
-        try:
-            events = lister(mission_id, limit=10000)
-        except Exception:
-            events = []
-        return max((_event_seq_value(event) for event in events if isinstance(event, dict)), default=0)
-    return 0
+    try:
+        events = db.runs.list_events_by_mission_activity(
+            mission_id,
+            after_seq=0,
+            limit=1,
+            reverse=True,
+        )
+        return max((int(event.get("seq") or 0) for event in events), default=0)
+    except Exception:
+        return 0
 
 
 def _result_for_graph(db: Any, mission_id: str, graph: dict[str, Any]) -> dict[str, Any]:
@@ -174,7 +154,7 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
     mission_id = str(mission_id or "").strip()
     if not mission_id:
         return {}
-    graph = graph if isinstance(graph, dict) else db.get_team_mission_graph(mission_id)
+    graph = graph if isinstance(graph, dict) else db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not isinstance(graph, dict) or not graph:
         return {}
     mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
@@ -225,7 +205,7 @@ def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, A
     mission_id = _mission_id_from_params(params) or _mission_id_from_activity_id(_activity_id_from_params(params))
     conversation_id = _conversation_id_from_params(params)
     if conversation_id:
-        graph = db.get_team_mission_conversation_graph(conversation_id)
+        graph = db.team_mission_graphs.get_team_mission_conversation_graph(conversation_id)
         if not graph:
             return "", {}, {}
         mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
@@ -237,7 +217,7 @@ def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, A
         ).strip()
         return resolved_mission_id, graph, {"conversation_id": conversation_id}
     if mission_id:
-        return mission_id, db.get_team_mission_graph(mission_id), {}
+        return mission_id, db.team_mission_graphs.get_team_mission_graph(mission_id), {}
     return "", {}, {}
 
 
@@ -291,7 +271,7 @@ def _(rid, params: dict) -> dict:
     mission_id = _mission_id_from_params(params) or _mission_id_from_activity_id(_activity_id_from_params(params))
     if not mission_id:
         return _err(rid, 4006, "mission_id or activity_id required")
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not graph:
         return _err(rid, 4040, "team mission not found")
     result = _result_for_graph(db, mission_id, graph)

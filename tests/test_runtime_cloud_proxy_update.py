@@ -17,8 +17,8 @@ from tui_gateway.run_worker import (
     decode_incoming,
     encode_incoming,
 )
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 class _FakeSupervisor:
@@ -90,7 +90,7 @@ def _managed_proxy_env(origin: str) -> dict[str, str]:
 
 def _install_fake_supervisor(monkeypatch: pytest.MonkeyPatch, supervisor: _FakeSupervisor) -> None:
     monkeypatch.setattr(
-        "tui_gateway.services.worker_runtime.worker_supervisor",
+        "hermes_agent.orchestration.worker_runtime.worker_supervisor",
         lambda: supervisor,
     )
 
@@ -120,6 +120,7 @@ async def test_runtime_cloud_proxy_update_sets_main_process_env(
     assert supervisor.updates == [
         {
             "DOVIE_LLM_RUNTIME_TOKEN": "token-1",
+            "DOXIE_PLATFORM_API_KEY": "token-1",
             "DOVIE_API_ORIGIN": "https://api.example.test",
             **_managed_proxy_env("https://api.example.test"),
         }
@@ -141,6 +142,7 @@ async def test_runtime_cloud_proxy_update_broadcasts_to_workers(
     assert supervisor.updates == [
         {
             "DOVIE_LLM_RUNTIME_TOKEN": "worker-token",
+            "DOXIE_PLATFORM_API_KEY": "worker-token",
             "DOVIE_API_ORIGIN": "https://runtime.example.test",
             **_managed_proxy_env("https://runtime.example.test"),
         }

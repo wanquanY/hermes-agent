@@ -944,7 +944,7 @@ DEFAULT_CONFIG = {
                                       # 0 for long-running rolling-compaction sessions
                                       # where you want nothing pinned except the
                                       # system prompt + rolling summary + recent tail.
-        "abort_on_summary_failure": False,  # When True, auto-compression that fails
+        "abort_on_summary_failure": True,  # Fail open: never drop context when summary generation fails.
                                       # to generate a summary (aux LLM errored / returned
                                       # non-JSON / timed out) aborts entirely instead of
                                       # dropping the middle window with a static
@@ -955,15 +955,12 @@ DEFAULT_CONFIG = {
                                       # Default False matches historical behavior; set to
                                       # True if you'd rather pause than silently lose
                                       # context turns when your aux model is flaky.
-        "codex_gpt55_autoraise": True,  # When True, gpt-5.5 on the ChatGPT Codex OAuth
-                                      # route raises its compaction trigger to 85% when the
-                                      # global `threshold` above is lower. Codex hard-caps
-                                      # gpt-5.5 at a 272K window, so early compression would
-                                      # waste usable context. Set to False to keep the global
-                                      # threshold exactly for Codex gpt-5.5 sessions. Only this
-                                      # exact route is affected — gpt-5.5 on OpenAI's
-                                      # direct API, OpenRouter, and Copilot keep the
-                                      # global threshold regardless.
+        "codex_gpt55_autoraise": True,  # Historical key name kept for compatibility.
+                                      # When True, gpt-5.4 / gpt-5.5 / gpt-5.6 on the
+                                      # ChatGPT Codex OAuth route raise their compaction
+                                      # trigger to 85% when the global threshold is lower.
+                                      # Codex caps these families at 272K, while direct API,
+                                      # OpenRouter, and Copilot retain their larger windows.
         "in_place": False,            # When True, compaction rewrites the message
                                       # list and rebuilds the system prompt WITHOUT
                                       # rotating the session id — the conversation
@@ -1239,7 +1236,7 @@ DEFAULT_CONFIG = {
         # "♻ Restarting gateway…", "⚡ Stopped…") after N seconds on platforms
         # that support message deletion (currently Telegram; other platforms
         # ignore and leave the message in place).  Only affects slash-command
-        # replies wrapped with gateway.platforms.base.EphemeralReply — agent
+        # replies wrapped with channels.platforms.base.EphemeralReply — agent
         # responses and content messages are never touched.  Default 0
         # (disabled) preserves prior behavior.
         "ephemeral_system_ttl": 0,
@@ -1886,7 +1883,7 @@ DEFAULT_CONFIG = {
         "trust_recent_files_seconds": 600,
 
         # OpenAI-compatible API server platform
-        # (gateway/platforms/api_server.py).
+        # (channels/platforms/api_server.py).
         "api_server": {
             # Maximum number of agent runs the API server will service
             # concurrently. Requests to /v1/chat/completions, /v1/responses,
@@ -3573,7 +3570,7 @@ def get_custom_provider_context_length(
       * ``AIAgent.__init__`` (startup resolution)
       * ``AIAgent.switch_model`` (mid-session ``/model`` switch)
       * ``hermes_cli.model_switch.resolve_display_context_length`` (``/model`` confirmation display)
-      * ``gateway.run._format_session_info`` (``/info`` display)
+      * gateway session-info formatting (``/info`` display)
       * ``agent.model_metadata.get_model_context_length`` (when custom_providers is threaded through)
 
     Before this helper existed, the lookup was duplicated in ``run_agent.py``'s

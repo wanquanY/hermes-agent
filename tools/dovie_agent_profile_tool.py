@@ -190,7 +190,7 @@ def _backend_call(command: str, payload: dict | None = None) -> Any:
 
 def _session_design_context() -> dict:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:

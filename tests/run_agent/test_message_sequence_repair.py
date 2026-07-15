@@ -1,12 +1,10 @@
-"""Tests for pre-API-call message-sequence repair.
+"""Tests for pre-API-call tool-result sequence repair.
 
 Covers ``_repair_message_sequence`` and the extended
 ``_drop_trailing_empty_response_scaffolding`` behavior that rewinds past
 orphan tool-result tails. Together these prevent the self-reinforcing empty-
-response loop observed in session 20260507_044111_fa7e65, where a tool-result
-followed directly by a user message produced silent empty responses from
-providers (violating role alternation), which retriggered the empty-retry
-recovery every turn.
+response loop observed in session 20260507_044111_fa7e65. Participant/user
+events are deliberately outside this repairer's ownership and stay separate.
 """
 
 from run_agent import AIAgent
@@ -78,7 +76,7 @@ def test_drop_scaffolding_handles_multiple_parallel_tool_results():
 
 # ── _repair_message_sequence ───────────────────────────────────────────────
 
-def test_repair_merges_consecutive_user_messages():
+def test_repair_preserves_consecutive_user_messages():
     agent = _bare_agent()
     messages = [
         {"role": "user", "content": "first"},
@@ -87,22 +85,27 @@ def test_repair_merges_consecutive_user_messages():
 
     repairs = AIAgent._repair_message_sequence(agent, messages)
 
-    assert repairs == 1
-    assert len(messages) == 1
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "first\n\nsecond"
+    assert repairs == 0
+    assert messages == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
 
 
-def test_repair_preserves_user_content_when_one_side_empty():
+def test_repair_preserves_empty_and_nonempty_user_event_boundaries():
     agent = _bare_agent()
     messages = [
         {"role": "user", "content": ""},
         {"role": "user", "content": "real message"},
     ]
 
-    AIAgent._repair_message_sequence(agent, messages)
+    repairs = AIAgent._repair_message_sequence(agent, messages)
 
-    assert messages == [{"role": "user", "content": "real message"}]
+    assert repairs == 0
+    assert messages == [
+        {"role": "user", "content": ""},
+        {"role": "user", "content": "real message"},
+    ]
 
 
 def test_repair_does_not_rewind_ongoing_dialog_tool_pair():

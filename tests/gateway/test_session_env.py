@@ -3,10 +3,10 @@ import os
 
 import pytest
 
-from gateway.config import Platform
-from gateway.run import GatewayRunner
-from gateway.session import SessionContext, SessionSource
-from gateway.session_context import (
+from hermes_gateway.config import Platform
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionContext, SessionSource
+from channels.session_context import (
     get_session_env,
     get_session_context_env,
     set_session_vars,

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# Gemini native generateContent applies a small internal default when this
+# field is absent. Hermes uses None to mean "use the model ceiling", so the
+# adapter must translate None explicitly to avoid truncated tool calls.
+GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
+
 
 def is_native_gemini_base_url(base_url: str) -> bool:
     """Return True when the endpoint speaks Gemini's native REST API."""
@@ -412,8 +417,11 @@ def build_gemini_request(
     generation_config: Dict[str, Any] = {}
     if temperature is not None:
         generation_config["temperature"] = temperature
-    if max_tokens is not None:
-        generation_config["maxOutputTokens"] = max_tokens
+    generation_config["maxOutputTokens"] = (
+        max_tokens
+        if max_tokens is not None
+        else GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+    )
     if top_p is not None:
         generation_config["topP"] = top_p
     if stop:

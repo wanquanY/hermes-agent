@@ -12,12 +12,64 @@ Verifies that:
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import run_agent
 from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
+
+
+class _UsageDB:
+    def __init__(self):
+        self.calls = []
+        self.sessions = self
+
+    def update_token_counts(self, session_id, **kwargs):
+        self.calls.append({"session_id": session_id, **kwargs})
+
+
+def _usage_agent(*, account_mode: str, model: str = "glm-5.2-polluted"):
+    return SimpleNamespace(
+        api_mode="codex_app_server",
+        model=model,
+        provider="openai-codex",
+        base_url="",
+        api_key="",
+        codex_account_mode=account_mode,
+        session_id="session-usage",
+        _session_db=_UsageDB(),
+        _session_db_created=True,
+        _ensure_db_session=lambda: None,
+        context_compressor=None,
+        session_api_calls=0,
+        session_prompt_tokens=0,
+        session_completion_tokens=0,
+        session_total_tokens=0,
+        session_input_tokens=0,
+        session_output_tokens=0,
+        session_cache_read_tokens=0,
+        session_cache_write_tokens=0,
+        session_reasoning_tokens=0,
+        session_estimated_cost_usd=0.0,
+        session_cost_status="unknown",
+        session_cost_source="",
+    )
+
+
+def _usage_turn(**kwargs):
+    return TurnResult(
+        token_usage_last={
+            "totalTokens": 130,
+            "inputTokens": 80,
+            "cachedInputTokens": 20,
+            "outputTokens": 25,
+            "reasoningOutputTokens": 5,
+        },
+        **kwargs,
+    )
 
 
 @pytest.fixture
@@ -64,9 +116,150 @@ def _make_codex_agent():
     )
 
 
+def _make_team_codex_agent(tmp_path, *, session_id="team-session-team-conversation-cx-h3"):
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id=session_id, source="team_mission", model="test")
+    db.session_index.upsert(
+        session_id=session_id,
+        source="team_mission",
+        session_kind="team_mission",
+        conversation_kind="team",
+        status="idle",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=session_id,
+        participant_id="user",
+        role="user",
+        display_name="",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=session_id,
+        participant_id="leader:team-1",
+        role="leader",
+        display_name="小多",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=session_id,
+        participant_id="member:codex-member",
+        role="member",
+        member_id="codex-member",
+        display_name="Codex 成员",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=session_id,
+        participant_id="member:designer",
+        role="member",
+        member_id="designer",
+        display_name="UI/UX设计师",
+    )
+
+    with patch("hermes_logging.setup_logging"):
+        agent = _make_codex_agent()
+    agent.session_id = session_id
+    agent._session_db = db
+    agent._session_db_created = True
+    agent.codex_home = str(tmp_path / "codex-home")
+    return agent, db
+
+
+def _set_member_chat_dovie_context(monkeypatch, *, session_id, member_id="codex-member"):
+    monkeypatch.setenv(
+        "HERMES_DOVIE_PRODUCT_CONTEXT",
+        json.dumps(
+            {
+                "team_mission": {
+                    "kind": "member_chat",
+                    "surface": "member_chat",
+                    "conversation_session_id": session_id,
+                    "member_id": member_id,
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+def _append_team_context_message(
+    db,
+    session_id,
+    *,
+    content,
+    participant_id,
+    role="assistant",
+    conversation_message_id=None,
+    metadata=None,
+):
+    base_metadata = {
+        "activity_kind": "leader_chat",
+        "transcript_activity_kind": "leader_chat",
+        "team_mission": {"kind": "leader_chat"},
+    }
+    if participant_id.startswith("member:"):
+        base_metadata["activity_kind"] = "member_direct_chat"
+        base_metadata["transcript_activity_kind"] = "member_direct_chat"
+        base_metadata["team_mission"] = {"kind": "member_chat_response"}
+    if role == "user":
+        base_metadata["activity_kind"] = "member_direct_chat"
+        base_metadata["transcript_activity_kind"] = "member_direct_chat"
+        base_metadata["team_mission"] = {
+            "kind": "member_chat_user",
+            "target_member_id": "codex-member",
+        }
+    if metadata:
+        base_metadata.update(metadata)
+    return db.messages.append(
+        session_id=session_id,
+        role=role,
+        content=content,
+        participant_id=participant_id,
+        conversation_message_id=conversation_message_id or f"cx-h3-{content}",
+        metadata=base_metadata,
+    )
+
+
+def _install_capturing_codex(monkeypatch, turns=None, ensure_started=None):
+    captured = []
+    queued_turns = list(turns or [])
+
+    def fake_run_turn(self, user_input: str, **kwargs):
+        captured.append(user_input)
+        if queued_turns:
+            return queued_turns.pop(0)
+        return TurnResult(
+            final_text="done",
+            projected_messages=[{"role": "assistant", "content": "done"}],
+            turn_id="turn-ok",
+            thread_id="thread-ok",
+        )
+
+    monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+    monkeypatch.setattr(
+        CodexAppServerSession,
+        "ensure_started",
+        ensure_started or (lambda self: "thread-ok"),
+    )
+    return captured
+
+
+def _run_codex_turn_no_persist(agent, text):
+    with patch.object(agent, "_spawn_background_review", return_value=None), patch.object(
+        agent, "_persist_session", return_value=None
+    ):
+        return agent.run_conversation(text)
+
+
+def _context_watermark_file(agent):
+    from pathlib import Path
+
+    return Path(agent.codex_home) / "hermes_context_watermarks.json"
+
+
 class TestApiModeAccepted:
     def test_api_mode_is_codex_app_server(self):
-        agent = _make_codex_agent()
+        with patch("hermes_logging.setup_logging"):
+            agent = _make_codex_agent()
         assert agent.api_mode == "codex_app_server"
 
 
@@ -133,6 +326,69 @@ class TestRunConversationCodexPath:
         assert agent.context_compressor.last_completion_tokens == 25
         assert agent.context_compressor.last_total_tokens == 130
         assert agent.context_compressor.context_length == 200000
+
+    def test_run_turn_model_override_wired_from_account_mode(self, monkeypatch):
+        """run_conversation must derive turn/start's model_override from the
+        account-mode decision (codex_app_server_turn_model): BYO sends no
+        model even when a polluted explicit model is lingering on the agent,
+        platform sends the explicit model."""
+        captured: list = []
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            captured.append(kwargs.get("model_override"))
+            return TurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                turn_id="turn-model-1",
+                thread_id="thread-model-1",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession, "ensure_started", lambda self: "thread-model-1"
+        )
+
+        byo_agent = _make_codex_agent()
+        byo_agent.codex_account_mode = "byo"
+        byo_agent.codex_explicit_model = "glm-5.2"  # leftover must NOT leak
+        with patch.object(byo_agent, "_spawn_background_review", return_value=None):
+            byo_agent.run_conversation("hello")
+        assert captured[-1] == ""
+
+        platform_agent = _make_codex_agent()
+        platform_agent.codex_account_mode = "platform"
+        platform_agent.codex_explicit_model = "glm-5.2"
+        with patch.object(platform_agent, "_spawn_background_review", return_value=None):
+            platform_agent.run_conversation("hello")
+        assert captured[-1] == "glm-5.2"
+
+    def test_byo_usage_model_uses_codex_default_not_polluted_agent_model(self):
+        from agent.codex_runtime import _record_codex_app_server_usage
+        from tui_gateway.services.session_info import get_usage
+
+        agent = _usage_agent(account_mode="byo", model="glm-5.2")
+        result = _record_codex_app_server_usage(agent, _usage_turn())
+
+        assert result["model"] == "gpt-5.5"
+        assert agent.model == "gpt-5.5"
+        assert get_usage(agent)["model"] == "gpt-5.5"
+        assert agent._session_db.calls[-1]["model"] == "gpt-5.5"
+
+    def test_platform_usage_model_uses_explicit_turn_start_model(self):
+        from agent.codex_runtime import _record_codex_app_server_usage
+        from tui_gateway.services.session_info import get_usage
+
+        agent = _usage_agent(account_mode="platform", model="glm-5.2-polluted")
+        agent.codex_explicit_model = "glm-5.2"
+        result = _record_codex_app_server_usage(
+            agent,
+            _usage_turn(requested_model="glm-5.2"),
+        )
+
+        assert result["model"] == "glm-5.2"
+        assert agent.model == "glm-5.2"
+        assert get_usage(agent)["model"] == "glm-5.2"
+        assert agent._session_db.calls[-1]["model"] == "glm-5.2"
 
     def test_projected_messages_are_spliced(self, fake_session):
         agent = _make_codex_agent()
@@ -307,6 +563,7 @@ class TestRunConversationCodexPath:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
         monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
 
         agent = _make_codex_agent()
         assert not hasattr(agent, "session_cwd")
@@ -314,6 +571,201 @@ class TestRunConversationCodexPath:
             agent.run_conversation("hi")
 
         assert captured["cwd"] == str(tmp_path)
+
+    def test_agent_codex_home_seeds_codex_session(self, monkeypatch, tmp_path):
+        from agent.transports.codex_app_server_session import (
+            CodexAppServerSession, TurnResult,
+        )
+
+        captured: dict[str, str | None] = {}
+
+        def fake_init(self, **kwargs):
+            captured["codex_home"] = kwargs.get("codex_home")
+            self._thread_id = "thread-stub-1"
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="ok",
+                projected_messages=[{"role": "assistant", "content": "ok"}],
+                turn_id="turn-stub-1",
+                thread_id="thread-stub-1",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+
+        with patch("hermes_logging.setup_logging"):
+            agent = _make_codex_agent()
+        agent.codex_home = str(tmp_path / "codex-home")
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hi")
+
+        assert captured["codex_home"] == str(tmp_path / "codex-home")
+
+
+class TestTeamMemberCodexContextInjection:
+    def test_member_chat_codex_context_excludes_own_member_messages(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        agent, db = _make_team_codex_agent(tmp_path)
+        session_id = agent.session_id
+        _set_member_chat_dovie_context(monkeypatch, session_id=session_id)
+        captured = _install_capturing_codex(monkeypatch)
+
+        _append_team_context_message(
+            db,
+            session_id,
+            content="Leader context survives",
+            participant_id="leader:team-1",
+        )
+        _append_team_context_message(
+            db,
+            session_id,
+            content="Designer context survives",
+            participant_id="member:designer",
+        )
+        _append_team_context_message(
+            db,
+            session_id,
+            content="SELF MESSAGE MUST NOT BE IN PREFACE",
+            participant_id="member:codex-member",
+        )
+        _append_team_context_message(
+            db,
+            session_id,
+            role="user",
+            content="请总结一下",
+            participant_id="",
+        )
+
+        _run_codex_turn_no_persist(agent, "请总结一下")
+
+        assert captured, "codex turn was not submitted"
+        turn_input = captured[-1]
+        assert turn_input.startswith("[团队会话背景")
+        assert "小多 (Leader): Leader context survives" in turn_input
+        assert "UI/UX设计师: Designer context survives" in turn_input
+        assert "SELF MESSAGE MUST NOT BE IN PREFACE" not in turn_input
+        assert turn_input.count("请总结一下") == 1
+        assert turn_input.endswith("\n\n请总结一下")
+
+    def test_member_chat_codex_turn_start_failure_does_not_advance_watermark(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        agent, db = _make_team_codex_agent(tmp_path)
+        session_id = agent.session_id
+        _set_member_chat_dovie_context(monkeypatch, session_id=session_id)
+        captured = _install_capturing_codex(
+            monkeypatch,
+            turns=[
+                TurnResult(error="turn/start failed", thread_id="thread-ok"),
+                TurnResult(
+                    final_text="done",
+                    projected_messages=[{"role": "assistant", "content": "done"}],
+                    turn_id="turn-ok-2",
+                    thread_id="thread-ok",
+                ),
+            ],
+        )
+        _append_team_context_message(
+            db,
+            session_id,
+            content="retry-visible-context",
+            participant_id="leader:team-1",
+        )
+
+        _run_codex_turn_no_persist(agent, "第一次")
+        watermark_path = _context_watermark_file(agent)
+        assert not watermark_path.exists(), "turn/start failure must not write watermark"
+
+        _run_codex_turn_no_persist(agent, "第二次")
+
+        assert len(captured) == 2
+        assert "retry-visible-context" in captured[0]
+        assert "retry-visible-context" in captured[1]
+        assert watermark_path.exists(), "successful turn/start should persist watermark"
+
+    def test_member_chat_codex_first_backlog_truncates_at_limit(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        agent, db = _make_team_codex_agent(tmp_path)
+        session_id = agent.session_id
+        _set_member_chat_dovie_context(monkeypatch, session_id=session_id)
+        captured = _install_capturing_codex(monkeypatch)
+
+        for index in range(31):
+            _append_team_context_message(
+                db,
+                session_id,
+                content=f"history-{index:02d}",
+                participant_id="leader:team-1",
+                conversation_message_id=f"history-{index:02d}",
+            )
+
+        _run_codex_turn_no_persist(agent, "看历史")
+
+        turn_input = captured[-1]
+        assert "更早历史已省略" in turn_input
+        assert "history-00" not in turn_input
+        assert "history-01" in turn_input
+        assert "history-30" in turn_input
+
+    def test_direct_codex_turn_input_is_unchanged_without_member_context(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        monkeypatch.delenv("HERMES_DOVIE_PRODUCT_CONTEXT", raising=False)
+        with patch("hermes_logging.setup_logging"):
+            agent = _make_codex_agent()
+        agent.codex_home = str(tmp_path / "codex-home")
+        captured = _install_capturing_codex(monkeypatch)
+
+        original = "plain direct codex message"
+        _run_codex_turn_no_persist(agent, original)
+
+        assert captured == [original]
+        assert not _context_watermark_file(agent).exists()
+
+    def test_member_chat_codex_thread_rebuild_clears_watermark_and_resends_backlog(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+        agent, db = _make_team_codex_agent(tmp_path)
+        session_id = agent.session_id
+        _set_member_chat_dovie_context(monkeypatch, session_id=session_id)
+        seq = _append_team_context_message(
+            db,
+            session_id,
+            content="backlog-after-thread-rebuild",
+            participant_id="leader:team-1",
+        )
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir(parents=True)
+        (codex_home / "hermes_thread_map.json").write_text(
+            json.dumps({session_id: "old-thread"}),
+            encoding="utf-8",
+        )
+        watermark_path = _context_watermark_file(agent)
+        watermark_path.write_text(
+            json.dumps({f"{session_id}::member:codex-member": seq}),
+            encoding="utf-8",
+        )
+
+        def ensure_started_with_rebuild(self):
+            self._thread_id = "new-thread"
+            self._thread_rebuilt_from_prior = True
+            return "new-thread"
+
+        captured = _install_capturing_codex(
+            monkeypatch,
+            ensure_started=ensure_started_with_rebuild,
+        )
+
+        _run_codex_turn_no_persist(agent, "线程重建后继续")
+
+        assert "backlog-after-thread-rebuild" in captured[-1]
+        watermark_data = json.loads(watermark_path.read_text(encoding="utf-8"))
+        assert watermark_data[f"{session_id}::member:codex-member"] >= seq
 
 
 class TestReviewForkApiModeDowngrade:

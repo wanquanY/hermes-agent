@@ -87,15 +87,15 @@ logger = logging.getLogger(__name__)
 # already loaded.
 # ---------------------------------------------------------------------------
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     SendResult,
     cache_image_from_bytes,
 )
-from gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from channels.session_identity import SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +737,7 @@ class LineAdapter(BasePlatformAdapter):
 
         # Prevent two profiles from running on the same channel access token.
         try:
-            from gateway.status import acquire_scoped_lock
+            from channels.runtime_status import acquire_scoped_lock
             # Use a hash of the token so we don't write the secret to disk.
             tok_hash = hashlib.sha256(self.channel_access_token.encode()).hexdigest()[:16]
             if not acquire_scoped_lock("line", tok_hash):
@@ -835,7 +835,7 @@ class LineAdapter(BasePlatformAdapter):
 
         if self._lock_key:
             try:
-                from gateway.status import release_scoped_lock
+                from channels.runtime_status import release_scoped_lock
                 release_scoped_lock("line", self._lock_key)
             except Exception:
                 pass

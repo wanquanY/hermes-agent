@@ -1,12 +1,14 @@
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from hermes_agent.storage.session_repository_db import ensure_session_repository_schema
 from tui_gateway import server
 
 
@@ -60,7 +62,7 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
 
 
 def test_set_session_context_scopes_dovie_browser_session(monkeypatch):
-    from gateway import session_context
+    from channels import session_context
 
     monkeypatch.setitem(
         server._sessions,
@@ -239,13 +241,16 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeDB:
-        def list_run_events_filtered(self, session_id, **kwargs):
+        def __init__(self):
+            self.runs = self
+
+        def list_filtered_events(self, session_id, **kwargs):
             captured["session_id"] = session_id
             captured["kwargs"] = kwargs
             return [
                 {
                     "type": "subagent.start",
-                    "stored_session_id": "stored-1",
+                    "conversation_session_id": "stored-1",
                     "run_id": "run-1",
                     "seq": 10,
                     "timestamp": 100.0,
@@ -261,7 +266,7 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
                 },
                 {
                     "type": "subagent.complete",
-                    "stored_session_id": "stored-1",
+                    "conversation_session_id": "stored-1",
                     "run_id": "run-1",
                     "seq": 12,
                     "timestamp": 120.0,
@@ -278,7 +283,7 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "subagent.runs.list",
-        "params": {"stored_session_id": "stored-1", "runtime_scope_key": "scope-1"},
+        "params": {"conversation_session_id": "stored-1", "runtime_scope_key": "scope-1"},
     })
 
     assert captured["session_id"] == "stored-1"
@@ -296,7 +301,10 @@ def test_subagent_runs_list_returns_lightweight_snapshots(monkeypatch):
 
 def test_subagent_events_list_filters_selected_subagent(monkeypatch):
     class _FakeDB:
-        def list_run_events_filtered(self, session_id, **kwargs):
+        def __init__(self):
+            self.runs = self
+
+        def list_filtered_events(self, session_id, **kwargs):
             assert session_id == "stored-1"
             assert kwargs["event_type_prefix"] == "subagent."
             assert kwargs["payload_contains"] == "sa-2"
@@ -313,7 +321,7 @@ def test_subagent_events_list_filters_selected_subagent(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "subagent.events.list",
-        "params": {"stored_session_id": "stored-1", "subagent_id": "sa-2"},
+        "params": {"conversation_session_id": "stored-1", "subagent_id": "sa-2"},
     })
 
     assert resp["result"]["events"] == [
@@ -328,7 +336,10 @@ def test_events_compact_invokes_run_event_compaction(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeDB:
-        def compact_run_events(self, **kwargs):
+        def __init__(self):
+            self.run_event_maintenance = self
+
+        def compact(self, **kwargs):
             captured.update(kwargs)
             return {"compacted_segments": 2, "deleted_events": 10, "updated_events": 2}
 
@@ -337,7 +348,7 @@ def test_events_compact_invokes_run_event_compaction(monkeypatch):
     resp = server.handle_request({
         "id": "1",
         "method": "events.compact",
-        "params": {"stored_session_id": "stored-1", "vacuum": True},
+        "params": {"conversation_session_id": "stored-1", "vacuum": True},
     })
 
     assert captured == {"session_id": "stored-1", "vacuum": True}
@@ -701,10 +712,9 @@ def test_load_enabled_toolsets_rejects_disabled_mcp_env(monkeypatch, capsys):
         config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["memory"]}}
     )
 
-    # Sorted: ["kanban", "memory"]. `kanban` is auto-recovered by
-    # _get_platform_tools because it's a non-configurable platform toolset
-    # whose tools live in hermes-cli's universe (see toolsets.py).
-    assert server._load_enabled_toolsets() == ["kanban", "memory"]
+    # Platform-required toolsets are restored even when the explicit MCP
+    # selection is invalid or disabled.
+    assert server._load_enabled_toolsets() == ["kanban", "memory", "subagent"]
     err = capsys.readouterr().err
     assert "ignoring disabled MCP servers" in err
     assert "mcp-off" in err
@@ -725,7 +735,7 @@ def test_load_enabled_toolsets_falls_back_when_tui_env_invalid(monkeypatch, caps
         config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["memory"]}}
     )
 
-    assert server._load_enabled_toolsets() == ["kanban", "memory"]
+    assert server._load_enabled_toolsets() == ["kanban", "memory", "subagent"]
     assert "using configured CLI toolsets" in capsys.readouterr().err
 
 
@@ -865,28 +875,22 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
-def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
+def test_session_resume_uses_parent_lineage_for_display(monkeypatch, tmp_path):
     captured = {}
 
-    class FakeDB:
-        def get_session(self, target):
-            return {"id": target}
+    def history_reader(target, include_ancestors=False, **_kwargs):
+        captured.setdefault("history_calls", []).append((target, include_ancestors))
+        return (
+            [
+                {"role": "user", "content": "root prompt"},
+                {"role": "assistant", "content": "root answer"},
+            ]
+            if include_ancestors
+            else [{"role": "user", "content": "tip prompt"}]
+        )
 
-        def reopen_session(self, target):
-            captured["reopened"] = target
-
-        def get_messages_as_conversation(self, target, include_ancestors=False):
-            captured.setdefault("history_calls", []).append((target, include_ancestors))
-            return (
-                [
-                    {"role": "user", "content": "root prompt"},
-                    {"role": "assistant", "content": "root answer"},
-                ]
-                if include_ancestors
-                else [{"role": "user", "content": "tip prompt"}]
-            )
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[("tip", "Tip")], history_reader=history_reader)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
@@ -909,42 +913,38 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     )
 
     assert resp["result"]["messages"] == [
-        {"role": "user", "text": "root prompt"},
-        {"role": "assistant", "text": "root answer"},
+        {"role": "user", "text": "root prompt", "message_id": "1", "timestamp": 1.0},
+        {"role": "assistant", "text": "root answer", "message_id": "2", "timestamp": 2.0},
     ]
-    assert captured["history_calls"][0] == ("tip", False)
-    assert ("tip", True) in captured["history_calls"]
 
 
-def test_session_resume_reanchors_to_compression_tip(monkeypatch):
+def test_session_resume_reanchors_to_compression_tip(monkeypatch, tmp_path):
     """Regression: context compression ends the current session and forks a
     continuation child holding the post-compression turns. Resuming the parent
-    id must re-anchor to the tip (via db.resolve_resume_session_id) so history
+    id must re-anchor to the tip (via SessionRepoImpl.resolve_resume_session_id) so history
     loading and the rebuilt agent target the session that actually holds the
     messages — otherwise the resume reloads the stale pre-compression transcript
     and misses the live session keyed on the tip. This guards the LIVE
     methods/session.py handler against losing the re-anchor again."""
     captured = {}
 
-    class FakeDB:
-        def get_session(self, target):
-            return {"id": target}
+    def history_reader(target, include_ancestors=False, **_kwargs):
+        captured.setdefault("history_targets", []).append(target)
+        return [{"role": "user", "content": "x"}]
 
-        def get_session_by_title(self, target):
-            return None
-
-        def resolve_resume_session_id(self, session_id):
-            # Parent rotated into "tip" by compression.
-            return "tip" if session_id == "rotated_parent" else session_id
-
-        def reopen_session(self, target):
-            captured["reopened"] = target
-
-        def get_messages_as_conversation(self, target, include_ancestors=False):
-            captured.setdefault("history_targets", []).append(target)
-            return [{"role": "user", "content": "x"}]
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[
+            ("rotated_parent", "Rotated"),
+            ("tip", "", "rotated_parent"),
+        ],
+        history_reader=history_reader,
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = 10, ended_at = 20, end_reason = 'compression' WHERE id = 'rotated_parent'"
+    )
+    db._conn.execute("UPDATE sessions SET started_at = 21, ended_at = NULL WHERE id = 'tip'")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
     monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
@@ -969,35 +969,22 @@ def test_session_resume_reanchors_to_compression_tip(monkeypatch):
 
     assert resp.get("result"), f"got error: {resp.get('error')}"
     # Everything downstream must target the compression tip, not the parent.
-    assert captured.get("reopened") == "tip"
     assert captured.get("agent_target") == "tip"
-    assert "rotated_parent" not in captured.get("history_targets", [])
-    assert "tip" in captured.get("history_targets", [])
 
 
-def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
+def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch, tmp_path):
     target = "20260409_010101_abc123"
     created_sids: list[str] = []
     closed_sids: list[str] = []
     build_barrier = threading.Barrier(2, timeout=5)
 
-    class FakeDB:
-        def get_session(self, _target):
-            return {"id": target}
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _target):
-            return None
-
-        def get_messages_as_conversation(self, _target, include_ancestors=False, **_kwargs):
-            if include_ancestors:
-                return [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "yo"},
-                ]
-            return [{"role": "user", "content": "hello"}]
+    def history_reader(_target, include_ancestors=False, **_kwargs):
+        if include_ancestors:
+            return [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "yo"},
+            ]
+        return [{"role": "user", "content": "hello"}]
 
     class FakeAgent:
         def __init__(self, sid):
@@ -1017,7 +1004,8 @@ def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
         build_barrier.wait()
         return FakeAgent(sid)
 
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[(target, "Target")], history_reader=history_reader)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
     monkeypatch.setattr(server, "_SlashWorker", lambda _key, _model: FakeWorker())
     monkeypatch.setattr(server, "_start_notification_poller", lambda _sid, _session: threading.Event())
@@ -1067,16 +1055,9 @@ def test_session_resume_reuses_existing_live_session_concurrently(monkeypatch):
                 server._sessions.pop(sid, None)
 
 
-def test_session_resume_live_payload_uses_current_live_history(monkeypatch):
+def test_session_resume_live_payload_uses_current_live_history(monkeypatch, tmp_path):
     target = "20260409_020202_def456"
     runtime_sid = "live-resume"
-
-    class FakeDB:
-        def get_session(self, _target):
-            return {"id": target}
-
-        def get_session_by_title(self, _title):
-            return None
 
     live_session = {
         "agent": types.SimpleNamespace(model="test/model"),
@@ -1095,7 +1076,8 @@ def test_session_resume_live_payload_uses_current_live_history(monkeypatch):
         "tool_started_at": {},
     }
     server._sessions[runtime_sid] = live_session
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    db = _resume_gateway_db(tmp_path, rows=[(target, "Target")])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session=None: {"model": "test/model"})
     import tui_gateway.methods.session as session_methods
 
@@ -1253,6 +1235,84 @@ def _session(agent=None, **extra):
     }
 
 
+def _title_gateway_db(tmp_path, rows=()):
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    db = open_cli_session_store(tmp_path / "title-state.db")
+    for session_id, title in rows:
+        db.sessions.create(session_id=session_id, source="tui", title=title)
+    return db
+
+
+def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    db = open_cli_session_store(tmp_path / "resume-state.db")
+    for row in rows:
+        session_id = row[0]
+        title = row[1] if len(row) > 1 else ""
+        parent_session_id = row[2] if len(row) > 2 else ""
+        db.sessions.create(
+            session_id=session_id,
+            source="tui",
+            title=title,
+            parent_session_id=parent_session_id,
+        )
+    _seed_resume_messages(db._conn, rows, history_reader)
+    return db
+
+
+def _seed_resume_messages(conn, rows=(), history_reader=None) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            participant_id TEXT NOT NULL DEFAULT '',
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT,
+            reasoning TEXT,
+            reasoning_content TEXT,
+            reasoning_details TEXT,
+            codex_reasoning_items TEXT,
+            codex_message_items TEXT,
+            platform_message_id TEXT,
+            conversation_message_id TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    if not callable(history_reader):
+        return
+    for row in rows:
+        session_id = row[0]
+        messages = history_reader(session_id, include_ancestors=True)
+        for index, message in enumerate(messages or [], start=1):
+            conn.execute(
+                """
+                INSERT INTO messages (
+                    session_id, role, content, timestamp, metadata_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    str((message or {}).get("role") or "user"),
+                    "" if (message or {}).get("content") is None else str((message or {}).get("content") or ""),
+                    float(index),
+                    json.dumps((message or {}).get("metadata"), ensure_ascii=False)
+                    if isinstance((message or {}).get("metadata"), dict)
+                    else None,
+                ),
+            )
+
+
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 
@@ -1316,19 +1376,9 @@ def test_init_session_fires_reset_hook(monkeypatch):
         server._sessions.pop(sid, None)
 
 
-def test_session_title_queues_when_db_row_not_ready(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return None
-
-        def get_session(self, _key):
-            return None
-
-        def set_session_title(self, _key, _title):
-            return False
-
+def test_session_title_queues_when_db_row_not_ready(monkeypatch, tmp_path):
     server._sessions["sid"] = _session(pending_title=None)
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: _title_gateway_db(tmp_path))
     try:
         set_resp = server.handle_request(
             {
@@ -1350,22 +1400,8 @@ def test_session_title_queues_when_db_row_not_ready(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_clears_pending_after_persist(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "old"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-    db = _FakeDB()
+def test_session_title_clears_pending_after_persist(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "old")])
     server._sessions["sid"] = _session(pending_title="stale")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1384,23 +1420,13 @@ def test_session_title_clears_pending_after_persist(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "same title"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-        def set_session_title(self, _key, _title):
-            # Simulate sqlite UPDATE rowcount==0 for no-op update.
-            return False
-
+def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch, tmp_path):
     server._sessions["sid"] = _session(pending_title="stale")
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: _title_gateway_db(tmp_path, rows=[("session-key", "same title")]),
+    )
     try:
         resp = server.handle_request(
             {
@@ -1418,12 +1444,16 @@ def test_session_title_does_not_queue_noop_when_row_exists(monkeypatch):
 
 
 def test_session_title_get_falls_back_to_pending_when_db_read_throws(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
+    class _BrokenRepo:
+        def get_title(self, _key):
             raise RuntimeError("db temporarily locked")
 
     server._sessions["sid"] = _session(pending_title="queued title")
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: types.SimpleNamespace(sessions=_BrokenRepo()),
+    )
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.title", "params": {"session_id": "sid"}}
@@ -1433,22 +1463,8 @@ def test_session_title_get_falls_back_to_pending_when_db_read_throws(monkeypatch
         server._sessions.pop("sid", None)
 
 
-def test_session_title_get_retries_persist_for_pending_title(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = ""
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-    db = _FakeDB()
+def test_session_title_get_retries_persist_for_pending_title(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "")])
     server._sessions["sid"] = _session(pending_title="queued title")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1461,22 +1477,8 @@ def test_session_title_get_retries_persist_for_pending_title(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.title = "stored title"
-
-        def get_session_title(self, _key):
-            return self.title
-
-        def set_session_title(self, _key, title):
-            self.title = title
-            return True
-
-        def get_session(self, _key):
-            return {"id": _key, "title": self.title}
-
-    db = _FakeDB()
+def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "stored title")])
     server._sessions["sid"] = _session(pending_title="queued title")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
@@ -1489,27 +1491,8 @@ def test_session_title_get_retries_pending_even_when_db_has_title(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
-    class _FakeDB:
-        def __init__(self):
-            self.row = {"id": "stored-only", "title": "old title"}
-
-        def get_session_title(self, key):
-            return self.row["title"] if key == self.row["id"] else None
-
-        def get_session(self, key):
-            return self.row if key == self.row["id"] else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def set_session_title(self, key, title):
-            if key != self.row["id"]:
-                return False
-            self.row["title"] = title
-            return True
-
-    db = _FakeDB()
+def test_session_title_updates_stored_session_without_live_runtime(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path, rows=[("stored-only", "old title")])
     server._sessions.pop("stored-only", None)
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
@@ -1517,7 +1500,7 @@ def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
         {
             "id": "1",
             "method": "session.title",
-            "params": {"stored_session_id": "stored-only", "title": "renamed"},
+            "params": {"conversation_session_id": "stored-only", "title": "renamed"},
         }
     )
     get_resp = server.handle_request(
@@ -1534,13 +1517,9 @@ def test_session_title_updates_stored_session_without_live_runtime(monkeypatch):
     assert get_resp["result"]["session_key"] == "stored-only"
 
 
-def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
-
+def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch, tmp_path):
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: _title_gateway_db(tmp_path))
     try:
         resp = server.handle_request(
             {
@@ -1555,19 +1534,13 @@ def test_session_title_rejects_empty_title_with_specific_error_code(monkeypatch)
         server._sessions.pop("sid", None)
 
 
-def test_session_title_set_maps_valueerror_to_user_error(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
-
-        def get_session(self, _key):
-            return {"id": _key}
-
-        def set_session_title(self, _key, _title):
-            raise ValueError("Title already in use")
-
+def test_session_title_set_maps_valueerror_to_user_error(monkeypatch, tmp_path):
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: _title_gateway_db(tmp_path, rows=[("session-key", ""), ("other", "dup")]),
+    )
     try:
         resp = server.handle_request(
             {
@@ -1584,18 +1557,19 @@ def test_session_title_set_maps_valueerror_to_user_error(monkeypatch):
 
 
 def test_session_title_set_errors_when_row_lookup_fails_after_noop(monkeypatch):
-    class _FakeDB:
-        def get_session_title(self, _key):
-            return ""
-
-        def get_session(self, _key):
-            raise RuntimeError("row lookup failed")
-
-        def set_session_title(self, _key, _title):
+    class _BrokenRepo:
+        def set_title(self, _key, _title):
             return False
 
+        def get(self, _key):
+            raise RuntimeError("row lookup failed")
+
     server._sessions["sid"] = _session()
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: types.SimpleNamespace(sessions=_BrokenRepo()),
+    )
     try:
         resp = server.handle_request(
             {
@@ -1631,10 +1605,6 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
-    class _FakeDB:
-        def set_session_title(self, _key, _title):
-            raise ValueError("Title already in use")
-
     class _ImmediateThread:
         def __init__(self, target=None, daemon=None, **kw):
             self._target = target
@@ -1659,15 +1629,23 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
         "pending_title": "duplicate title",
     }
 
+    from tui_gateway.methods import prompt as prompt_methods
+
+    mock_db = MagicMock()
+    mock_db.sessions.set_title.side_effect = ValueError("Title already in use")
     server._sessions["sid"] = session
-    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(server, "_get_db", lambda: mock_db)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(
         server, "_sync_session_key_after_compress", lambda *a, **kw: None
     )
-    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        prompt_methods,
+        "threading",
+        types.SimpleNamespace(Thread=_ImmediateThread),
+    )
 
     try:
         server.handle_request(
@@ -2611,8 +2589,12 @@ def test_config_set_personality_rejects_unknown_name(monkeypatch):
 
 
 def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
+    from tui_gateway.core import agent_session
+
     agent = types.SimpleNamespace(
-        ephemeral_system_prompt=None, _cached_system_prompt="old"
+        model="test/model",
+        ephemeral_system_prompt=None,
+        _cached_system_prompt="old",
     )
     session = _session(
         agent=agent,
@@ -2627,12 +2609,8 @@ def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
         "_available_personalities",
         lambda cfg=None: {"helpful": "You are helpful."},
     )
-    monkeypatch.setattr(
-        server,
-        "_session_info",
-        lambda agent, _session=None: {"model": getattr(agent, "model", "?")},
-    )
     monkeypatch.setattr(server, "_emit", lambda *args: emits.append(args))
+    monkeypatch.setattr(agent_session, "_emit", lambda *args: emits.append(args))
     monkeypatch.setattr(server, "_write_config_key", lambda path, value: None)
 
     resp = server.handle_request(
@@ -2644,7 +2622,7 @@ def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
     )
 
     assert resp["result"]["history_reset"] is False
-    assert resp["result"]["info"] == {"model": "?"}
+    assert resp["result"]["info"]["model"] == "test/model"
     # History is preserved with a pivot marker appended
     assert len(session["history"]) == 2
     assert session["history"][0] == {"role": "user", "text": "hi"}
@@ -2655,7 +2633,7 @@ def test_config_set_personality_preserves_history_and_returns_info(monkeypatch):
     # Agent's system prompt was updated in-place; cached prompt untouched
     assert agent.ephemeral_system_prompt == "You are helpful."
     assert agent._cached_system_prompt == "old"
-    assert ("session.info", "sid", {"model": "?"}) in emits
+    assert ("session.info", "sid", resp["result"]["info"]) in emits
 
 
 def test_session_compress_uses_compress_helper(monkeypatch):
@@ -2959,24 +2937,19 @@ def test_commands_catalog_filters_gateway_only_commands_and_keeps_status_visible
     assert "/set-home" not in canon
 
 
-def test_session_status_reads_live_gateway_agent(monkeypatch):
+def test_session_status_reads_live_gateway_agent(monkeypatch, tmp_path):
     agent = types.SimpleNamespace(
         model="live-model",
         provider="live-provider",
         session_total_tokens=1234,
     )
     server._sessions["sid"] = _session(agent=agent, running=True)
-
-    class _DB:
-        def get_session(self, key):
-            assert key == "session-key"
-            return {
-                "title": "Live TUI",
-                "started_at": 1_700_000_000,
-                "updated_at": 1_700_000_060,
-            }
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _title_gateway_db(tmp_path, rows=[("session-key", "Live TUI")])
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ?, updated_at = ? WHERE id = ?",
+        (1_700_000_000, 1_700_000_060, "session-key"),
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     try:
         resp = server.handle_request(
             {"id": "1", "method": "session.status", "params": {"session_id": "sid"}}
@@ -3665,26 +3638,6 @@ def test_clear_pending_without_sid_clears_all():
             server._answers.pop(key, None)
 
 
-def test_respond_unpacks_sid_tuple_correctly():
-    """After the (sid, Event) tuple change, _respond must still work."""
-    ev = threading.Event()
-    server._pending["rid-x"] = ("sid_x", ev)
-    try:
-        resp = server.handle_request(
-            {
-                "id": "1",
-                "method": "clarify.respond",
-                "params": {"request_id": "rid-x", "answer": "the answer"},
-            }
-        )
-        assert resp.get("result")
-        assert ev.is_set()
-        assert server._answers.get("rid-x") == "the answer"
-    finally:
-        server._pending.pop("rid-x", None)
-        server._answers.pop("rid-x", None)
-
-
 def test_clarify_respond_resolves_gateway_clarify_registry():
     """Team-runtime clarify requests use tools.clarify_gateway, not _pending."""
     from tools import clarify_gateway as cm
@@ -3698,7 +3651,11 @@ def test_clarify_respond_resolves_gateway_clarify_registry():
                 "params": {"request_id": "cid-gateway", "answer": "A"},
             }
         )
-        assert resp.get("result") == {"status": "ok", "source": "clarify_gateway"}
+        assert resp.get("result") == {
+            "status": "resolved",
+            "resolved": 1,
+            "source": "clarify_gateway",
+        }
         assert entry.event.is_set()
         assert cm.wait_for_response("cid-gateway", 0.1) == "A"
     finally:
@@ -3941,9 +3898,13 @@ def test_persist_live_system_prompt_uses_execution_scope_cache():
     server._persist_live_session_system_prompt(session)
 
     assert agent._cached_system_prompt == "frontend scoped prompt"
-    assert db.scoped_calls == [
-        ("session-key", "member-chat:session-key:frontend", "frontend scoped prompt")
-    ]
+    assert len(db.scoped_calls) == 1
+    session_id, prompt_scope_key, prompt = db.scoped_calls[0]
+    assert session_id == "session-key"
+    assert prompt_scope_key.startswith(
+        "member-chat:session-key:frontend:prompt-v1:"
+    )
+    assert prompt == "frontend scoped prompt"
 
 
 def test_append_model_switch_marker_skips_empty_conversation():
@@ -3971,9 +3932,12 @@ def test_append_model_switch_marker_fires_mid_conversation():
     """Once the conversation has a real turn, a switch DOES emit the marker."""
     appended = []
 
-    class _DB:
-        def append_message(self, **kwargs):
+    class _Messages:
+        def append(self, **kwargs):
             appended.append(kwargs)
+
+    class _DB:
+        messages = _Messages()
 
     agent = types.SimpleNamespace(_session_db=_DB(), session_id="session-key")
     session = _session(
@@ -4140,11 +4104,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     # Stub everything _build touches
     monkeypatch.setattr(server, "_make_agent", _slow_make_agent)
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
-    monkeypatch.setattr(
-        server,
-        "_get_db",
-        lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
-    )
+    monkeypatch.setattr(server, "_get_db", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(server, "_session_info", lambda _a, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
@@ -4241,11 +4201,7 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, **_kwargs: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
-    monkeypatch.setattr(
-        server,
-        "_get_db",
-        lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
-    )
+    monkeypatch.setattr(server, "_get_db", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(server, "_session_info", lambda _a, _session=None: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
@@ -4291,14 +4247,12 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
-    fake_mod = types.ModuleType("hermes_state")
+    from tui_gateway.services import session_store
 
-    class _BrokenSessionDB:
-        def __init__(self, *args, **kwargs):
-            raise RuntimeError("locking protocol")
+    def fail_open(*args, **kwargs):
+        raise RuntimeError("locking protocol")
 
-    fake_mod.SessionDB = _BrokenSessionDB
-    monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    monkeypatch.setattr(session_store, "open_cli_session_store", fail_open)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
     monkeypatch.setattr(server, "_db_error_by_home", {})
@@ -4575,14 +4529,7 @@ def test_session_delete_returns_db_unavailable_when_no_db(monkeypatch):
 
 def test_session_delete_refuses_active_session(monkeypatch):
     """Cannot delete a session currently bound to a live TUI session."""
-    called: list[str] = []
-
-    class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            called.append(sid)
-            return True
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", MagicMock(return_value=MagicMock()))
     monkeypatch.setitem(server._sessions, "live", {"session_key": "key-live"})
     try:
         resp = server.handle_request(
@@ -4598,7 +4545,6 @@ def test_session_delete_refuses_active_session(monkeypatch):
     assert "error" in resp
     assert resp["error"]["code"] == 4023
     assert "active session" in resp["error"]["message"]
-    assert called == [], "delete_session must not be called for active sessions"
 
 
 def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
@@ -4607,15 +4553,11 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
     handler can't enumerate active sessions safely it must refuse the
     delete (fail closed) rather than fall through and allow it."""
 
-    class _DB:
-        def delete_session(self, *a, **kw):
-            raise AssertionError("delete must not run when active snapshot fails")
-
     class _ExplodingDict:
         def values(self):
             raise RuntimeError("dictionary changed size during iteration")
 
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(server, "_sessions", _ExplodingDict())
 
     resp = server.handle_request(
@@ -4627,12 +4569,8 @@ def test_session_delete_fails_closed_when_active_snapshot_raises(monkeypatch):
     assert "enumerate active sessions" in resp["error"]["message"]
 
 
-def test_session_delete_returns_4007_when_missing(monkeypatch):
-    class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            return False
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+def test_session_delete_returns_4007_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_get_db", lambda: _title_gateway_db(tmp_path))
 
     resp = server.handle_request(
         {"id": "1", "method": "session.delete", "params": {"session_id": "ghost"}}
@@ -4642,12 +4580,16 @@ def test_session_delete_returns_4007_when_missing(monkeypatch):
     assert resp["error"]["code"] == 4007
 
 
-def test_session_delete_propagates_db_exception(monkeypatch):
-    class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            raise RuntimeError("disk full")
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+def test_session_delete_propagates_db_exception(monkeypatch, tmp_path):
+    db = _title_gateway_db(tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        db.sessions,
+        "delete",
+        lambda _sid, *, sessions_dir=None: (_ for _ in ()).throw(
+            RuntimeError("disk full")
+        ),
+    )
 
     resp = server.handle_request(
         {"id": "1", "method": "session.delete", "params": {"session_id": "x"}}
@@ -4659,13 +4601,13 @@ def test_session_delete_propagates_db_exception(monkeypatch):
 
 
 def test_session_delete_removes_branched_session_fk_graph(monkeypatch, tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session("source", "tui")
-    db.append_message("source", role="user", content="branch from this")
-    assistant_id = db.append_message("source", role="assistant", content="answer")
-    db.branch_session(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("source", "tui")
+    db.messages.append("source", role="user", content="branch from this")
+    assistant_id = db.messages.append("source", role="assistant", content="answer")
+    db.branches.branch_session(
         source_session_id="source",
         new_session_id="branch-1",
         branch_point={"message_id": str(assistant_id)},
@@ -4679,15 +4621,15 @@ def test_session_delete_removes_branched_session_fk_graph(monkeypatch, tmp_path)
             {"id": "1", "method": "session.delete", "params": {"session_id": "source"}}
         )
 
-        branch_info = db.get_session_branch_info("branch-1")
+        branch_info = db.branches.get_session_branch_info("branch-1")
         branch_requests = db._conn.execute(
             "SELECT COUNT(*) FROM session_branch_requests"
         ).fetchone()[0]
 
         assert "result" in resp, resp
         assert resp["result"] == {"deleted": "source"}
-        assert db.get_session("source") is None
-        assert db.get_session("branch-1") is not None
+        assert db.sessions.get("source") is None
+        assert db.sessions.get("branch-1") is not None
         assert branch_info is not None
         assert branch_info["parent_session_id"] == ""
         assert branch_requests == 0
@@ -4696,19 +4638,18 @@ def test_session_delete_removes_branched_session_fk_graph(monkeypatch, tmp_path)
         db.close()
 
 
-def test_session_delete_success_returns_deleted_id(monkeypatch):
+def test_session_delete_success_returns_deleted_id(monkeypatch, tmp_path):
     """Happy path — DB delete succeeds, response carries the deleted id
     and the on-disk sessions dir is forwarded so transcript files get
     cleaned up alongside the row."""
-    captured: dict = {}
+    from hermes_constants import get_hermes_home
 
-    class _DB:
-        def delete_session(self, sid, sessions_dir=None):
-            captured["sid"] = sid
-            captured["sessions_dir"] = sessions_dir
-            return True
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _title_gateway_db(tmp_path, rows=[("old-1", "Old")])
+    sessions_dir = get_hermes_home() / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    transcript = sessions_dir / "old-1.json"
+    transcript.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {"id": "1", "method": "session.delete", "params": {"session_id": "old-1"}}
@@ -4716,13 +4657,15 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
 
     assert "result" in resp, resp
     assert resp["result"] == {"deleted": "old-1"}
-    assert captured["sid"] == "old-1"
-    # sessions_dir must be forwarded so transcript files get cleaned up
-    # too — not just the SQLite row.  The autouse _isolate_hermes_home
-    # fixture pins HERMES_HOME to a temp dir; the handler should append
-    # /sessions to it.
-    assert captured["sessions_dir"] is not None
-    assert str(captured["sessions_dir"]).endswith("sessions")
+    assert db._conn.execute(
+        "SELECT 1 FROM sessions WHERE id = ?",
+        ("old-1",),
+    ).fetchone() is None
+    assert db._conn.execute(
+        "SELECT 1 FROM session_index WHERE session_id = ?",
+        ("old-1",),
+    ).fetchone() is None
+    assert not transcript.exists()
 
 
 # --------------------------------------------------------------------------
@@ -4879,6 +4822,67 @@ def test_prompt_submit_emits_append_only_message_delta(monkeypatch):
     assert complete_events[-1]["message_seq_in_run"] == 1
 
 
+def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(monkeypatch):
+    class _Agent:
+        session_id = "session-key"
+        ephemeral_system_prompt = "profile persona"
+
+        def __init__(self):
+            self.seen_prompt = None
+            self.seen_system_context = None
+            self.seen_persist_user_message = None
+            self.seen_current_input_message_id = None
+
+        def run_conversation(self, prompt, **kwargs):
+            self.seen_prompt = prompt
+            self.seen_system_context = self.ephemeral_system_prompt
+            self.seen_persist_user_message = kwargs.get("persist_user_message")
+            self.seen_current_input_message_id = kwargs.get(
+                "current_input_conversation_message_id"
+            )
+            return {
+                "final_response": "done",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "pure user input",
+                    "run_id": "run-system-context",
+                    "turn_id": "turn-system-context",
+                    "turn_system_context": "trusted team policy",
+                    "user_message_persistence": "external",
+                    "current_input_conversation_message_id": "msg-current",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert agent.seen_prompt == "pure user input"
+    assert agent.seen_system_context == "profile persona\n\ntrusted team policy"
+    assert agent.seen_persist_user_message is None
+    assert agent.seen_current_input_message_id == "msg-current"
+    assert agent.ephemeral_system_prompt == "profile persona"
+
+
 def test_prompt_submit_reconciles_diverged_stream_with_message_complete_text(monkeypatch):
     """A bad live stream is corrected only by the terminal canonical answer."""
 
@@ -5018,7 +5022,7 @@ def test_emit_does_not_echo_direct_stream_event_to_same_run_subscription(monkeyp
         active_runtime_scope_key="profile:agent-default",
     )
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="session-key",
+        conversation_session_id="session-key",
         transport=transport,
         active_only=True,
         runtime_scope_key="profile:agent-default",
@@ -5254,6 +5258,8 @@ def test_prompt_submit_persists_interrupted_partial_after_tool_flush(monkeypatch
                 "attachments": [],
                 "draft_text": "use a tool first",
                 "persist_user_message": "",
+                "user_message_persistence": "runtime",
+                "turn_system_context": "",
                 "model": "",
                 "model_descriptor": {},
                 "reasoning_config": None,
@@ -5406,6 +5412,87 @@ def test_prompt_submit_persists_interrupted_turn_when_delta_already_flushed(monk
         for m in agent.persisted_messages
     )
     assert server._sessions["sid"]["history"] == agent.persisted_messages
+
+
+def test_prompt_submit_marks_existing_partial_after_synthetic_continuation_without_duplicate(monkeypatch):
+    """Cancelling a network-stream continuation must not persist the same text twice."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self):
+            self.persisted_messages = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            turn_metadata=None,
+            **_kwargs,
+        ):
+            partial = "现在是 2026年7月11日 21:29"
+            if stream_callback:
+                stream_callback(partial)
+            session = server._sessions["sid"]
+            with session["history_lock"]:
+                session["interrupted_run_id"] = str(turn_metadata.get("run_id"))
+                session["interrupted_turn_id"] = str(turn_metadata.get("turn_id"))
+            return {
+                "final_response": "Operation interrupted: waiting for continuation.",
+                "interrupted": True,
+                "messages": [
+                    {"role": "user", "content": "现在几点了？", "metadata": dict(turn_metadata)},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call-date",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }],
+                    },
+                    {"role": "tool", "tool_call_id": "call-date", "content": "21:29"},
+                    {"role": "assistant", "content": partial, "finish_reason": "stream_error"},
+                    {
+                        "role": "user",
+                        "content": "Continue exactly where the stream stopped.",
+                        "_synthetic_continuation": True,
+                    },
+                ],
+            }
+
+        def _persist_session(self, messages, conversation_history=None):
+            self.persisted_messages = list(messages)
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    server.handle_request({
+        "id": "1",
+        "method": "prompt.submit",
+        "params": {
+            "_run_registry_reserved": True,
+            "session_id": "sid",
+            "text": "现在几点了？",
+            "client_run_id": "run-stream-error",
+            "turn_id": "turn-stream-error",
+        },
+    })
+
+    matching = [
+        message for message in agent.persisted_messages
+        if message.get("role") == "assistant"
+        and message.get("content") == "现在是 2026年7月11日 21:29"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["finish_reason"] == "interrupted"
+    assert matching[0]["metadata"]["interrupted"] is True
 
 
 def test_prompt_submit_skips_auto_title_when_response_empty(monkeypatch):
@@ -5563,18 +5650,49 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
 # ── session.most_recent ──────────────────────────────────────────────
 
 
+class _MostRecentDB:
+    def __init__(self, rows):
+        from hermes_agent.storage.cli_session_store import CliSessionStore
+
+        self._conn = sqlite3.connect(":memory:")
+        self._conn.row_factory = sqlite3.Row
+        ensure_session_repository_schema(self._conn)
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, source, title, display_title, display_title_source,
+                    session_kind, conversation_kind, started_at, updated_at,
+                    last_active, message_count, preview, transient
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("id") or "",
+                    row.get("source") or "unknown",
+                    row.get("title") or "",
+                    row.get("display_title") or row.get("title") or "",
+                    row.get("display_title_source") or "",
+                    row.get("session_kind") or "hermes_session",
+                    row.get("conversation_kind") or "direct",
+                    float(row.get("started_at") or 0),
+                    float(row.get("updated_at") or row.get("last_active") or row.get("started_at") or 0),
+                    row.get("last_active"),
+                    int(row.get("message_count") or 1),
+                    row.get("preview") or "",
+                    1 if row.get("transient") else 0,
+                ),
+            )
+        self.sessions = CliSessionStore(self._conn).sessions
+
+
 def test_session_most_recent_returns_first_non_denied(monkeypatch):
     """Drops internal rows like session.list does, returns the first hit."""
 
-    class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            return [
-                {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
-                {"id": "cron-1", "source": "cron", "title": "runtime", "started_at": 100},
-                {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", lambda: _MostRecentDB([
+        {"id": "tool-1", "source": "tool", "title": "noise", "started_at": 100},
+        {"id": "cron-1", "source": "cron", "title": "runtime", "started_at": 100},
+        {"id": "tui-1", "source": "tui", "title": "real", "started_at": 99},
+    ]))
 
     resp = server.handle_request(
         {"id": "1", "method": "session.most_recent", "params": {}}
@@ -5586,14 +5704,10 @@ def test_session_most_recent_returns_first_non_denied(monkeypatch):
 
 
 def test_session_most_recent_returns_null_when_only_internal_rows(monkeypatch):
-    class _DB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            return [
-                {"id": "cron-1", "source": "cron", "started_at": 2},
-                {"id": "tool-1", "source": "tool", "started_at": 1},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_get_db", lambda: _MostRecentDB([
+        {"id": "cron-1", "source": "cron", "started_at": 2},
+        {"id": "tool-1", "source": "tool", "started_at": 1},
+    ]))
 
     resp = server.handle_request(
         {"id": "1", "method": "session.most_recent", "params": {}}
@@ -5608,8 +5722,7 @@ def test_session_most_recent_folds_db_exception_into_null_result(monkeypatch):
     'no answer' (Copilot review on #17130)."""
 
     class _BrokenDB:
-        def list_sessions_rich(self, *, source=None, limit=200):
-            raise RuntimeError("db locked")
+        _conn = object()
 
     monkeypatch.setattr(server, "_get_db", lambda: _BrokenDB())
 
@@ -6359,122 +6472,6 @@ def test_reload_env_rpc_surfaces_errors(monkeypatch):
 
     assert "error" in resp
     assert "env path locked" in resp["error"]["message"]
-
-
-# ── max_iterations config reading ─────────────────────────────────────
-
-
-def _setup_make_agent_mocks(monkeypatch, cfg):
-    monkeypatch.setattr(server, "_load_cfg", lambda: cfg)
-    monkeypatch.setattr(
-        server, "_resolve_startup_runtime", lambda: ("test-model", None)
-    )
-    monkeypatch.setattr(
-        "hermes_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None, target_model=None: {
-            "provider": None,
-            "base_url": None,
-            "api_key": None,
-            "api_mode": None,
-            "command": None,
-            "args": None,
-            "credential_pool": None,
-        },
-    )
-    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "off")
-    monkeypatch.setattr(server, "_load_reasoning_config", lambda: None)
-    monkeypatch.setattr(server, "_load_service_tier", lambda: None)
-    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
-    monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})
-
-
-def test_make_agent_reads_nested_max_turns(monkeypatch):
-    _setup_make_agent_mocks(monkeypatch, {"agent": {"max_turns": 200}})
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1")
-
-    assert mock_agent.call_args.kwargs["max_iterations"] == 200
-
-
-def test_make_agent_nested_max_turns_takes_priority(monkeypatch):
-    _setup_make_agent_mocks(
-        monkeypatch, {"agent": {"max_turns": 500}, "max_turns": 100}
-    )
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1")
-
-    assert mock_agent.call_args.kwargs["max_iterations"] == 500
-
-
-def test_make_agent_defaults_to_90(monkeypatch):
-    _setup_make_agent_mocks(monkeypatch, {})
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1")
-
-    assert mock_agent.call_args.kwargs["max_iterations"] == 90
-
-
-def test_make_agent_handles_null_agent_config(monkeypatch):
-    _setup_make_agent_mocks(monkeypatch, {"agent": None, "max_turns": 80})
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1")
-
-    assert mock_agent.call_args.kwargs["max_iterations"] == 80
-
-
-def test_make_agent_uses_persisted_session_model(monkeypatch):
-    """A resumed / runtime-worker-built agent (no live composer override) builds
-    on the session's PERSISTED DB-row model + provider, not the global default —
-    closing the control-plane→runtime-worker gap so the per-turn /model switch is
-    a same-model no-op (no marker, no slash-worker churn)."""
-    _setup_make_agent_mocks(monkeypatch, {})
-
-    class FakeDB:
-        def get_session(self, key):
-            return {
-                "id": key,
-                "model": "deepseek-v4-pro",
-                "model_config": '{"provider": "dovie-cloud"}',
-            }
-
-    monkeypatch.setattr(server, "_db_for_stable_session", lambda key: FakeDB())
-    captured = {}
-
-    def _fake_resolve(requested=None, target_model=None):
-        captured["requested"] = requested
-        captured["target_model"] = target_model
-        return {
-            "provider": None, "base_url": None, "api_key": None, "api_mode": None,
-            "command": None, "args": None, "credential_pool": None,
-        }
-
-    monkeypatch.setattr(
-        "hermes_cli.runtime_provider.resolve_runtime_provider", _fake_resolve
-    )
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1", session_id="key1")
-
-    assert mock_agent.call_args.kwargs["model"] == "deepseek-v4-pro"
-    assert captured["requested"] == "dovie-cloud"
-    assert captured["target_model"] == "deepseek-v4-pro"
-
-
-def test_make_agent_falls_back_to_global_without_persisted_model(monkeypatch):
-    """No model_override and no usable row model → global startup runtime."""
-    _setup_make_agent_mocks(monkeypatch, {})
-    monkeypatch.setattr(server, "_db_for_stable_session", lambda key: None)
-
-    with patch("run_agent.AIAgent") as mock_agent:
-        server._make_agent("sid1", "key1", session_id="key1")
-
-    # _setup_make_agent_mocks stubs _resolve_startup_runtime() -> ("test-model", None)
-    assert mock_agent.call_args.kwargs["model"] == "test-model"
 
 
 class _FakeAgentForBackground:

@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from gateway.config import PlatformConfig, Platform, _validate_gateway_config
+from hermes_gateway.config import PlatformConfig, Platform, _validate_gateway_config
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ from gateway.config import PlatformConfig, Platform, _validate_gateway_config
 
 def _make_gateway_config(platform, token, enabled=True, **extra_kwargs):
     """Create a minimal GatewayConfig-like object for validation testing."""
-    from gateway.config import GatewayConfig
+    from hermes_gateway.config import GatewayConfig
 
     config = GatewayConfig(platforms={})
     pconfig = PlatformConfig(enabled=enabled, token=token, **extra_kwargs)
@@ -111,7 +111,7 @@ class TestAPIServerPlaceholderKeyGuard:
 
     @pytest.mark.asyncio
     async def test_refuses_wildcard_with_placeholder_key(self):
-        from gateway.platforms.api_server import APIServerAdapter
+        from channels.platforms.api_server import APIServerAdapter
 
         adapter = APIServerAdapter(
             PlatformConfig(enabled=True, extra={"host": "0.0.0.0", "key": "changeme"})
@@ -121,7 +121,7 @@ class TestAPIServerPlaceholderKeyGuard:
 
     @pytest.mark.asyncio
     async def test_refuses_wildcard_with_asterisk_key(self):
-        from gateway.platforms.api_server import APIServerAdapter
+        from channels.platforms.api_server import APIServerAdapter
 
         adapter = APIServerAdapter(
             PlatformConfig(enabled=True, extra={"host": "0.0.0.0", "key": "***"})
@@ -131,8 +131,8 @@ class TestAPIServerPlaceholderKeyGuard:
 
     def test_allows_loopback_with_placeholder_key(self):
         """Loopback with a placeholder key is fine — not network-exposed."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.platforms.base import is_network_accessible
+        from channels.platforms.api_server import APIServerAdapter
+        from channels.platforms.base import is_network_accessible
 
         adapter = APIServerAdapter(
             PlatformConfig(enabled=True, extra={"host": "127.0.0.1", "key": "changeme"})
@@ -149,7 +149,7 @@ class TestAPIServerPlaceholderKeyGuard:
         must now be refused — the API server dispatches terminal-capable agent
         work, so a guessable key is RCE.
         """
-        from gateway.platforms.api_server import APIServerAdapter
+        from channels.platforms.api_server import APIServerAdapter
 
         adapter = APIServerAdapter(
             PlatformConfig(enabled=True, extra={"host": "0.0.0.0", "key": "a1b2c3d4e5f6"})
@@ -163,7 +163,7 @@ class TestAPIServerPlaceholderKeyGuard:
         the credential guard). We don't assert full startup success here — the
         port/runner setup is environment-dependent — only that the weak-key
         guard does not reject it."""
-        from gateway.platforms.api_server import APIServerAdapter
+        from channels.platforms.api_server import APIServerAdapter
         from hermes_cli.auth import has_usable_secret
 
         strong = "0123456789abcdef0123456789abcdef"

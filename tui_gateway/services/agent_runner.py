@@ -33,6 +33,7 @@ Phase 5c.2 deliberately leaves several follow-ups for Phase 5d / 6:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import threading
 import time
@@ -40,6 +41,7 @@ import uuid
 from typing import Any, Optional
 
 from tui_gateway.run_worker import RunStartFrame
+from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services.profile_context import profile_context_for_params
 from tui_gateway.services.workspace import session_workspace_run_context
 
@@ -94,15 +96,15 @@ def setup_worker_environment() -> None:
         # it before the swap so any later reassign there is too late.
         # Replace the transport instance instead.
         _server._stdio_transport = _NoopTransport()  # type: ignore[assignment]
-        from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+        from hermes_agent.orchestration.worker_db_proxy import get_default_worker_db_proxy
 
         db_proxy = get_default_worker_db_proxy()
         if db_proxy is not None:
-            # The worker process must not materialize SessionDB. Keep the
+            # The worker process must not materialize the legacy state facade. Keep the
             # legacy resolver shape but return the IPC proxy everywhere the
             # prompt/run-control stack asks for a DB handle.
-            def _worker_db_for_stable_session(stable_session_id: str):
-                return db_proxy.scoped(stable_session_id)
+            def _worker_db_for_stable_session(conversation_session_id: str):
+                return db_proxy.scoped(conversation_session_id)
 
             _server._db = db_proxy
             _server._get_db = lambda: db_proxy  # type: ignore[assignment]
@@ -126,30 +128,27 @@ def _run_context_from_frame(frame: RunStartFrame) -> Any:
     except Exception as exc:
         _log.warning(
             "[agent-runner] run_context_json parse failed stored_session=%s: %s",
-            frame.stored_session_id,
+            frame.conversation_session_id,
             exc,
         )
         return None
 
 
-def _should_project_member_perspective(run_context: Any) -> bool:
+def _should_project_participant_transcript(run_context: Any) -> bool:
+    """Return whether an explicit participant-scoped projection is required.
+
+    The worker must never infer team ownership from identifier prefixes.  A
+    validated RunContext is the sole authority for actor identity and scope;
+    every team activity kind carries one by construction.
+    """
     if run_context is None:
         return False
-    activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
     participant_id = str(getattr(run_context, "participant_id", "") or "").strip()
-    conversation_session_id = str(getattr(run_context, "conversation_session_id", "") or "").strip()
-    execution_scope_key = str(getattr(run_context, "execution_scope_key", "") or "").strip()
-    if activity_kind == "member_chat":
-        return True
-    if activity_kind in {"mission", "team_dispatch"}:
-        return True
-    if participant_id.startswith(("leader:", "member:")):
-        return True
-    if conversation_session_id.startswith("team-session-team-conversation-"):
-        return True
-    if execution_scope_key.startswith(("team:", "member-chat:")):
-        return True
-    return False
+    conversation_session_id = str(
+        getattr(run_context, "conversation_session_id", "") or ""
+    ).strip()
+    activity_kind = str(getattr(run_context, "activity_kind", "") or "").strip()
+    return bool(participant_id and conversation_session_id and activity_kind)
 
 
 def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
@@ -159,7 +158,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     ``_sessions`` dict — the worker has no record. We build one inline
     with the same field shape ``methods/session.py:780-819`` produces,
     keyed by a fresh runtime sid, with ``session_key`` bound to the
-    frame's ``stored_session_id`` (the stable id the agent uses for
+    frame's ``conversation_session_id`` (the stable id the agent uses for
     DB row lookups).
 
     The AIAgent build is intentionally NOT started here. The prompt
@@ -180,7 +179,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     except Exception:
         activity_event_bus = None
 
-    workspace_context = session_workspace_run_context(frame.stored_session_id, params)
+    workspace_context = session_workspace_run_context(frame.conversation_session_id, params)
     cwd = str(workspace_context.get("cwd") or "").strip() or None
     workspace = (
         workspace_context.get("workspace")
@@ -202,6 +201,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         or params.get("temporary")
         or params.get("ephemeral")
     )
+    requested_model = str(params.get("model") or "").strip()
     # BUG-1 fix: normalize the worker session's profile_context through
     # ``profile_context_for_params`` so downstream readers (notably
     # ``enter_profile_context`` at prompt.py:600 / server.py:368) see the
@@ -238,7 +238,17 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "history_version": 0,
         "image_counter": 0,
         "pending_title": None,
-        "model_override": None,
+        # A platform Codex model is a Dovie registry key, not the upstream
+        # provider model id. Preserve the turn-scoped key in the worker's live
+        # session record so _make_agent marks it explicit and turn/start sends
+        # it to Codex. Without this carry the worker builds on the persisted
+        # model but loses model_explicit, so Codex silently falls back to the
+        # profile config.toml model (for example gpt-5.5).
+        "model_override": (
+            {"model": requested_model, "model_explicit": True}
+            if requested_model
+            else None
+        ),
         "create_reasoning_override": None,
         "create_service_tier_override": None,
         "close_on_disconnect": False,
@@ -260,7 +270,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "interrupted_turn_id": "",
         "interrupt_seq": 0,
         "recalled_turn_ids": set(),
-        "session_key": frame.stored_session_id,
+        "session_key": frame.conversation_session_id,
         "show_reasoning": False,
         "slash_worker": None,
         "tool_progress_mode": None,
@@ -299,29 +309,75 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
     # sequence and the agent's ``repair_message_sequence`` would drop
     # the tool result anyway.
     try:
-        db = _server._db_for_stable_session(frame.stored_session_id)
+        db = _server._db_for_stable_session(frame.conversation_session_id)
     except Exception:
         db = None
-    history_reader = None
     if db is not None:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = getattr(db, "get_messages_as_conversation", None)
-    if callable(history_reader):
+        # RunStartFrame.params is a transport remainder: the main sidecar may
+        # lift model into named control-plane state before the frame reaches
+        # this worker. Restore the explicit model from the canonical session
+        # row so platform Codex turns retain the Dovie registry key all the way
+        # to turn/start. BYO/default sessions keep model_explicit=false and
+        # therefore deliberately fall back to their CODEX_HOME default.
         try:
-            full_history = list(history_reader(frame.stored_session_id))
-            if _should_project_member_perspective(run_context):
+            persisted_session = db.sessions.get(frame.conversation_session_id)
+            persisted_config = (
+                persisted_session.get("model_config")
+                if isinstance(persisted_session, dict)
+                else None
+            )
+            if isinstance(persisted_config, str) and persisted_config.strip():
+                persisted_config = json.loads(persisted_config)
+            if isinstance(persisted_config, dict):
+                persisted_reasoning = persisted_config.get("reasoning_config")
+                if isinstance(persisted_reasoning, dict):
+                    session_record["create_reasoning_override"] = dict(
+                        persisted_reasoning
+                    )
+                persisted_tier = str(
+                    persisted_config.get("service_tier") or ""
+                ).strip()
+                if persisted_tier:
+                    session_record["create_service_tier_override"] = persisted_tier
+            persisted_model = str(
+                persisted_session.get("model")
+                if isinstance(persisted_session, dict)
+                else ""
+            ).strip()
+            if (
+                not requested_model
+                and persisted_model
+                and isinstance(persisted_config, dict)
+                and bool(persisted_config.get("model_explicit"))
+            ):
+                session_record["model_override"] = {
+                    "model": persisted_model,
+                    "model_explicit": True,
+                }
+        except Exception:
+            _log.warning(
+                "[agent-runner] explicit model hydration failed stored_session=%s",
+                frame.conversation_session_id,
+                exc_info=True,
+            )
+        try:
+            full_history = load_conversation_history(
+                db,
+                frame.conversation_session_id,
+                include_storage_metadata=True,
+            )
+            if _should_project_participant_transcript(run_context):
                 try:
-                    participants = db.list_conversation_participants(  # type: ignore[attr-defined]
-                        frame.stored_session_id
+                    participants = db.participants.list_conversation_participants(
+                        frame.conversation_session_id
                     )
                 except Exception:
                     participants = []
-                from hermes_team_mission.state.session_views import (
-                    transform_to_member_perspective,
+                from hermes_agent.domain.participant_transcript_projector import (
+                    project_participant_transcript,
                 )
 
-                full_history = transform_to_member_perspective(
+                full_history = project_participant_transcript(
                     full_history,
                     viewing_participant_id=run_context.participant_id,
                     participants=participants,
@@ -329,7 +385,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         except Exception:
             _log.warning(
                 "[agent-runner] history hydration failed stored_session=%s",
-                frame.stored_session_id, exc_info=True,
+                frame.conversation_session_id, exc_info=True,
             )
             full_history = []
         trimmed_history = _trim_history_to_window(full_history)
@@ -416,7 +472,7 @@ def run_agent(frame: RunStartFrame, cancel_event: threading.Event) -> None:
     prompt_params: dict[str, Any] = {
         **base_params,
         "session_id": sid,
-        "stored_session_id": frame.stored_session_id,
+        "conversation_session_id": frame.conversation_session_id,
         "text": frame.prompt,
         "run_id": frame.run_id,
         "client_run_id": frame.run_id,

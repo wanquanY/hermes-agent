@@ -1,7 +1,7 @@
 """Regression test for issue #22357 — gateway memory-nudge counter hydration.
 
 The gateway creates a fresh AIAgent for each inbound message in several
-common scenarios (cache miss, 1h idle eviction at gateway/run.py
+common scenarios (cache miss, 1h idle eviction at hermes_gateway/runner.py
 _AGENT_CACHE_IDLE_TTL_SECS, config-signature mismatch, process restart).
 A freshly built AIAgent has _turns_since_memory=0 and _user_turn_count=0.
 

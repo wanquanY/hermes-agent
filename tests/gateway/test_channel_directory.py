@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from gateway.channel_directory import (
+from hermes_gateway.channel_directory import (
     build_channel_directory,
     lookup_channel_type,
     resolve_channel_name,
@@ -29,7 +29,7 @@ def _write_directory(tmp_path, platforms):
 
 class TestLoadDirectory:
     def test_missing_file(self, tmp_path):
-        with patch("gateway.channel_directory.DIRECTORY_PATH", tmp_path / "nope.json"):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", tmp_path / "nope.json"):
             result = load_directory()
         assert result["updated_at"] is None
         assert result["platforms"] == {}
@@ -38,14 +38,14 @@ class TestLoadDirectory:
         cache_file = _write_directory(tmp_path, {
             "telegram": [{"id": "123", "name": "John", "type": "dm"}]
         })
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file):
             result = load_directory()
         assert result["platforms"]["telegram"][0]["name"] == "John"
 
     def test_corrupt_file(self, tmp_path):
         cache_file = tmp_path / "channel_directory.json"
         cache_file.write_text("{bad json")
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file):
             result = load_directory()
         assert result["updated_at"] is None
 
@@ -64,7 +64,7 @@ class TestBuildChannelDirectoryWrites:
 
         monkeypatch.setattr(json, "dump", broken_dump)
 
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file):
             asyncio.run(build_channel_directory({}))
             result = load_directory()
 
@@ -74,7 +74,7 @@ class TestBuildChannelDirectoryWrites:
 class TestResolveChannelName:
     def _setup(self, tmp_path, platforms):
         cache_file = _write_directory(tmp_path, platforms)
-        return patch("gateway.channel_directory.DIRECTORY_PATH", cache_file)
+        return patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file)
 
     def test_exact_match(self, tmp_path):
         platforms = {
@@ -270,7 +270,7 @@ class TestBuildFromSessions:
 
 class TestFormatDirectoryForDisplay:
     def test_empty_directory(self, tmp_path):
-        with patch("gateway.channel_directory.DIRECTORY_PATH", tmp_path / "nope.json"):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", tmp_path / "nope.json"):
             result = format_directory_for_display()
         assert "No messaging platforms" in result
 
@@ -282,7 +282,7 @@ class TestFormatDirectoryForDisplay:
                 {"id": "-1001:17585", "name": "Coaching Chat / topic 17585", "type": "group"},
             ]
         })
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file):
             result = format_directory_for_display()
 
         assert "Telegram:" in result
@@ -298,7 +298,7 @@ class TestFormatDirectoryForDisplay:
                 {"id": "3", "name": "chat", "guild": "Server2", "type": "channel"},
             ]
         })
-        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+        with patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file):
             result = format_directory_for_display()
 
         assert "Discord (Server1):" in result
@@ -309,7 +309,7 @@ class TestFormatDirectoryForDisplay:
 class TestLookupChannelType:
     def _setup(self, tmp_path, platforms):
         cache_file = _write_directory(tmp_path, platforms)
-        return patch("gateway.channel_directory.DIRECTORY_PATH", cache_file)
+        return patch("hermes_gateway.channel_directory.DIRECTORY_PATH", cache_file)
 
     def test_forum_channel(self, tmp_path):
         platforms = {

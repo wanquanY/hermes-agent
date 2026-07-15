@@ -15,7 +15,12 @@ def _member_id(member: dict[str, Any]) -> str:
 
 
 def _profile_id(member: dict[str, Any]) -> str:
-    return _text(member.get("agent_profile_id") or member.get("agentProfileId"))
+    return _text(
+        member.get("agent_profile_id")
+        or member.get("agentProfileId")
+        or member.get("profile_id")
+        or member.get("profileId")
+    )
 
 
 def _display_name(member: dict[str, Any]) -> str:
@@ -45,11 +50,10 @@ def _avatar(member: dict[str, Any]) -> str:
 
 
 def _profile(db: Any, profile_id: str) -> dict[str, Any]:
-    getter = getattr(db, "get_agent_profile", None)
-    if not callable(getter) or not profile_id:
+    if not profile_id:
         return {}
     try:
-        profile = getter(profile_id) or {}
+        profile = db.profiles.get_agent_profile(profile_id) or {}
     except Exception:
         return {}
     return profile if isinstance(profile, dict) else {}
@@ -75,17 +79,20 @@ def _leader_member(members: Iterable[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
-def _team_members(db: Any, team_id: str, members: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _team_members(
+    db: Any, team_id: str, members: Iterable[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
     if members is not None:
         return [item for item in members if isinstance(item, dict)]
-    lister = getattr(db, "list_agent_team_members", None)
-    if callable(lister) and team_id:
-        loaded = lister(team_id) or []
+    if team_id:
+        loaded = db.teams.list_agent_team_members(team_id) or []
         return [item for item in loaded if isinstance(item, dict)]
     return []
 
 
-def _warn(source: str, conversation_session_id: str, participant: str, exc: Exception) -> None:
+def _warn(
+    source: str, conversation_session_id: str, participant: str, exc: Exception
+) -> None:
     _log.warning(
         "%s participant auto-create skipped conversation_session_id=%s participant=%s: %s",
         source,
@@ -114,21 +121,25 @@ def ensure_team_conversation_participants(
         _warn(source, conversation_session_id, "team-registry", exc)
         resolved_members = []
 
-    ensure_user = getattr(db, "ensure_user_participant", None)
-    if callable(ensure_user):
-        try:
-            ensure_user(conversation_session_id, user_id="default")
-        except Exception as exc:
-            _warn(source, conversation_session_id, "user", exc)
+    try:
+        db.participants.ensure_user_participant(
+            conversation_session_id,
+            user_id="default",
+        )
+    except Exception as exc:
+        _warn(source, conversation_session_id, "user", exc)
 
     leader = _leader_member(resolved_members)
-    leader_profile_params = leader_profile_params if isinstance(leader_profile_params, dict) else {}
-    ensure_leader = getattr(db, "ensure_leader_participant", None)
-    if callable(ensure_leader) and team_id:
+    leader_profile_params = (
+        leader_profile_params if isinstance(leader_profile_params, dict) else {}
+    )
+    if team_id:
         try:
-            leader_profile_id = _text(leader_profile_params.get("agent_profile_id")) or _profile_id(leader)
+            leader_profile_id = _text(
+                leader_profile_params.get("agent_profile_id")
+            ) or _profile_id(leader)
             leader_profile = _profile(db, leader_profile_id)
-            ensure_leader(
+            db.participants.ensure_leader_participant(
                 conversation_session_id,
                 team_id=team_id,
                 leader_profile_id=leader_profile_id,
@@ -138,9 +149,6 @@ def ensure_team_conversation_participants(
         except Exception as exc:
             _warn(source, conversation_session_id, f"leader:{team_id}", exc)
 
-    ensure_member = getattr(db, "ensure_member_participant", None)
-    if not callable(ensure_member):
-        return
     for member in resolved_members:
         if _role(member) in {"lead", "leader"}:
             continue
@@ -150,7 +158,7 @@ def ensure_team_conversation_participants(
         try:
             profile_id = _profile_id(member)
             profile = _profile(db, profile_id)
-            ensure_member(
+            db.participants.ensure_member_participant(
                 conversation_session_id,
                 member_id=member_id,
                 agent_profile_id=profile_id,
@@ -169,13 +177,10 @@ def ensure_member_chat_participant(
     member_id: str,
     source: str,
 ) -> None:
-    ensure_member = getattr(db, "ensure_member_participant", None)
-    if not callable(ensure_member):
-        return
     try:
         profile_id = _profile_id(member)
         profile = _profile(db, profile_id)
-        ensure_member(
+        db.participants.ensure_member_participant(
             _text(conversation_session_id),
             member_id=_text(member_id),
             agent_profile_id=profile_id,
@@ -184,3 +189,43 @@ def ensure_member_chat_participant(
         )
     except Exception as exc:
         _warn(source, _text(conversation_session_id), f"member:{member_id}", exc)
+
+
+def resolve_participant_display_identity(
+    db: Any,
+    *,
+    conversation_session_id: str,
+    participant_id: str,
+    profile_id: str,
+    fallback_name: str = "",
+    fallback_avatar: str = "",
+) -> tuple[str, str]:
+    """Resolve display data from participant truth, profile, then request data."""
+    try:
+        participant = (
+            db.participants.get_participant(
+                _text(conversation_session_id),
+                _text(participant_id),
+            )
+            or {}
+        )
+    except Exception:
+        participant = {}
+    profile = _profile(db, _text(profile_id))
+    display_name = _text(
+        participant.get("display_name")
+        or profile.get("name")
+        or fallback_name
+        or "Team Member"
+    )
+    display_avatar = _text(
+        participant.get("avatar") or profile.get("avatar") or fallback_avatar
+    )
+    return display_name, display_avatar
+
+
+__all__ = [
+    "ensure_member_chat_participant",
+    "ensure_team_conversation_participants",
+    "resolve_participant_display_identity",
+]

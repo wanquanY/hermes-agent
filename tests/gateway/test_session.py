@@ -3,9 +3,9 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import (
+from hermes_gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import (
     SessionSource,
     SessionStore,
     build_session_context,
@@ -13,11 +13,25 @@ from gateway.session import (
     build_session_key,
     canonical_whatsapp_identifier,
 )
+from hermes_agent.repositories.session_repo import SessionSpec
 
 # Legacy name preserved for these tests; product renamed the function to
 # canonical_whatsapp_identifier.  Keep the tests referencing the old name
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
+
+
+def _session_store_with_storage(tmp_path):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl
+    from hermes_agent.storage.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=SessionRepoImpl(conn),
+        storage_conn=conn,
+    )
 
 
 class TestSessionSourceRoundtrip:
@@ -440,7 +454,7 @@ class TestSenderPrefixWithBackfill:
 
     @pytest.fixture()
     def runner(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         r = GatewayRunner.__new__(GatewayRunner)
         r.config = GatewayConfig(group_sessions_per_user=False)
@@ -504,16 +518,12 @@ class TestSessionStoreRewriteTranscript:
     """Regression: /retry and /undo must persist truncated history to DB."""
 
     @pytest.fixture()
-    def store(self, tmp_path, monkeypatch):
-        import hermes_state
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        s = SessionStore(sessions_dir=tmp_path, config=config)
-        return s
+    def store(self, tmp_path):
+        return _session_store_with_storage(tmp_path)
 
     def test_rewrite_replaces_transcript(self, store, tmp_path):
         session_id = "test_session_1"
-        store._db.create_session(session_id=session_id, source="test")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         # Write initial transcript
         for msg in [
             {"role": "user", "content": "hello"},
@@ -536,7 +546,7 @@ class TestSessionStoreRewriteTranscript:
 
     def test_rewrite_with_empty_list(self, store):
         session_id = "test_session_2"
-        store._db.create_session(session_id=session_id, source="test")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         store.append_to_transcript(session_id, {"role": "user", "content": "hi"})
 
         store.rewrite_transcript(session_id, [])
@@ -549,22 +559,16 @@ class TestLoadTranscriptDBOnly:
     """After spec 002, load_transcript reads only from state.db."""
 
     def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
-        import hermes_state
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store = _session_store_with_storage(tmp_path)
         result = store.load_transcript("nonexistent")
         assert result == []
 
     def test_db_only_returns_messages(self, tmp_path, monkeypatch):
-        import hermes_state
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-        config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store = _session_store_with_storage(tmp_path)
         sid = "db_only_session"
-        store._db.create_session(session_id=sid, source="gateway", model="m")
-        store._db.append_message(session_id=sid, role="user", content="db-q")
-        store._db.append_message(session_id=sid, role="assistant", content="db-a")
+        store._session_repo.create(SessionSpec(session_id=sid, source="gateway", model="m"))
+        store.append_to_transcript(sid, {"role": "user", "content": "db-q"})
+        store.append_to_transcript(sid, {"role": "assistant", "content": "db-a"})
 
         result = store.load_transcript(sid)
         assert len(result) == 2
@@ -576,13 +580,18 @@ class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
-        from hermes_state import SessionDB
+        from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+        from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
-        db = SessionDB(db_path=tmp_path / "state.db")
-        store._db = db
+        conn = connect_session_repository_db(tmp_path / "state.db")
+        repo = SessionRepoImpl(conn)
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(
+                sessions_dir=tmp_path / "sessions",
+                config=config,
+                session_repo=repo,
+            )
         store._loaded = True
 
         source = SessionSource(
@@ -596,19 +605,27 @@ class TestSessionStoreSwitchSession:
         current_session_id = current_entry.session_id
 
         target_session_id = "old_session_abc"
-        db.create_session(target_session_id, source="feishu", user_id="user-1")
-        db.end_session(target_session_id, end_reason="user_exit")
-        assert db.get_session(target_session_id)["ended_at"] is not None
+        repo.create(SessionSpec(session_id=target_session_id, source="feishu"))
+        repo.close(target_session_id, reason="user_exit")
+        assert repo.get(target_session_id).ended_at is not None
 
         switched = store.switch_session(current_entry.session_key, target_session_id)
 
         assert switched is not None
         assert switched.session_id == target_session_id
-        assert db.get_session(current_session_id)["end_reason"] == "session_switch"
-        resumed = db.get_session(target_session_id)
-        assert resumed["ended_at"] is None
-        assert resumed["end_reason"] is None
-        db.close()
+        current = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (current_session_id,),
+        ).fetchone()
+        assert current["end_reason"] == "session_switch"
+        resumed = repo.get(target_session_id)
+        assert resumed.ended_at is None
+        resumed_row = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (target_session_id,),
+        ).fetchone()
+        assert resumed_row["end_reason"] is None
+        conn.close()
 
 
 class TestWhatsAppSessionKeyConsistency:
@@ -618,7 +635,7 @@ class TestWhatsAppSessionKeyConsistency:
     @pytest.fixture()
     def store(self, tmp_path):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = None
         s._loaded = True
@@ -980,7 +997,7 @@ class TestSessionStoreEntriesAttribute:
 
     def test_entries_attribute_exists(self):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=Path("/tmp"), config=config)
         store._loaded = True
         assert hasattr(store, "_entries")
@@ -991,43 +1008,44 @@ class TestHasAnySessions:
     """Tests for has_any_sessions() fix (issue #351)."""
 
     @pytest.fixture
-    def store_with_mock_db(self, tmp_path):
-        """SessionStore with a mocked database."""
+    def store_with_mock_repo(self, tmp_path):
+        """SessionStore with a mocked session repository."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
+        repo = MagicMock()
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         s._loaded = True
         s._entries = {}
-        s._db = MagicMock()
+        s._session_repo = repo
         return s
 
-    def test_uses_database_count_when_available(self, store_with_mock_db):
-        """has_any_sessions should use database session_count, not len(_entries)."""
-        store = store_with_mock_db
+    def test_uses_repository_count_when_available(self, store_with_mock_repo):
+        """has_any_sessions should use repository rows, not len(_entries)."""
+        store = store_with_mock_repo
         # Simulate single-platform user with only 1 entry in memory
         store._entries = {"telegram:12345": MagicMock()}
-        # But database has 3 sessions (current + 2 previous resets)
-        store._db.session_count.return_value = 3
+        # But repository has historical rows (current + previous resets)
+        store._session_repo.list.return_value = [MagicMock(), MagicMock()]
 
         assert store.has_any_sessions() is True
-        store._db.session_count.assert_called_once()
+        store._session_repo.list.assert_called_once()
 
-    def test_first_session_ever_returns_false(self, store_with_mock_db):
-        """First session ever should return False (only current session in DB)."""
-        store = store_with_mock_db
+    def test_first_session_ever_returns_false(self, store_with_mock_repo):
+        """First session ever should return False (only current session in repo)."""
+        store = store_with_mock_repo
         store._entries = {"telegram:12345": MagicMock()}
-        # Database has exactly 1 session (the current one just created)
-        store._db.session_count.return_value = 1
+        store._session_repo.list.return_value = [MagicMock()]
 
         assert store.has_any_sessions() is False
 
-    def test_fallback_without_database(self, tmp_path):
-        """Should fall back to len(_entries) when DB is not available."""
+    def test_fallback_without_repository(self, tmp_path):
+        """Should fall back to len(_entries) when repository is not available."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
+        repo = MagicMock()
+        repo.list.side_effect = RuntimeError("unavailable")
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         store._loaded = True
-        store._db = None
         store._entries = {"key1": MagicMock(), "key2": MagicMock()}
 
         # > 1 entries means has sessions
@@ -1042,7 +1060,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_default(self):
         """New sessions should have last_prompt_tokens=0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1054,7 +1072,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_roundtrip(self):
         """last_prompt_tokens should survive serialization/deserialization."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1070,7 +1088,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_from_old_data(self):
         """Old session data without last_prompt_tokens should default to 0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         data = {
             "session_key": "test",
             "session_id": "s1",
@@ -1087,13 +1105,13 @@ class TestLastPromptTokens:
     def test_update_session_sets_last_prompt_tokens(self, tmp_path):
         """update_session should store the actual prompt token count."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1109,13 +1127,13 @@ class TestLastPromptTokens:
     def test_update_session_none_does_not_change(self, tmp_path):
         """update_session with default (None) should not change last_prompt_tokens."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1132,13 +1150,13 @@ class TestLastPromptTokens:
     def test_update_session_zero_resets(self, tmp_path):
         """update_session with last_prompt_tokens=0 should reset the field."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1156,84 +1174,67 @@ class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 
     def test_reasoning_survives_rewrite(self, tmp_path):
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "reasoning-test"
-        db.create_session(session_id=session_id, source="cli")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
 
         # Insert a message WITH all three reasoning fields
-        db.append_message(
-            session_id=session_id,
-            role="assistant",
-            content="The answer is 42.",
-            reasoning="I need to think step by step.",
-            reasoning_content="provider scratchpad",
-            reasoning_details=[{"type": "summary", "text": "step by step"}],
-            codex_reasoning_items=[{"id": "r1", "type": "reasoning"}],
-        )
+        store.append_to_transcript(session_id, {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I need to think step by step.",
+            "reasoning_content": "provider scratchpad",
+            "reasoning_details": [{"type": "summary", "text": "step by step"}],
+            "codex_reasoning_items": [{"id": "r1", "type": "reasoning"}],
+        })
 
         # Verify all three were stored
-        before = db.get_messages_as_conversation(session_id)
+        before = store.load_transcript(session_id)
         assert before[0].get("reasoning") == "I need to think step by step."
         assert before[0].get("reasoning_content") == "provider scratchpad"
         assert before[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert before[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-        # Now simulate /retry: build the SessionStore and call rewrite_transcript
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
         # rewrite_transcript receives the messages that load_transcript returned
         store.rewrite_transcript(session_id, before)
 
         # Load again — all three reasoning fields must survive
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_content") == "provider scratchpad"
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
-        from hermes_state import SessionDB
+    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path):
+        from hermes_agent.repositories.message_repo import MessageRepository
 
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "atomic-rewrite-test"
-        db.create_session(session_id=session_id, source="cli")
-        db.append_message(session_id=session_id, role="user", content="before user")
-        db.append_message(session_id=session_id, role="assistant", content="before assistant")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
+        store.append_to_transcript(session_id, {"role": "user", "content": "before user"})
+        store.append_to_transcript(session_id, {"role": "assistant", "content": "before assistant"})
 
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
-        # Force the second insert inside replace_messages to fail, simulating
+        # Force the second insert inside replace_conversation to fail, simulating
         # any storage-layer error that might abort a multi-row rewrite.
-        real_encode = SessionDB._encode_content
         calls = {"n": 0}
+        original_insert = MessageRepository._insert_message
 
-        def flaky_encode(cls, content):
+        def flaky_insert(self, session_id, message, timestamp):
             calls["n"] += 1
             if calls["n"] == 2:
                 raise RuntimeError("simulated storage failure")
-            return real_encode.__func__(cls, content)
+            return original_insert(self, session_id, message, timestamp)
 
-        monkeypatch.setattr(SessionDB, "_encode_content", classmethod(flaky_encode))
+        with patch.object(MessageRepository, "_insert_message", flaky_insert):
+            replacement = [
+                {"role": "user", "content": "after user"},
+                {"role": "assistant", "content": "after assistant"},
+            ]
 
-        replacement = [
-            {"role": "user", "content": "after user"},
-            {"role": "assistant", "content": "after assistant"},
-        ]
-
-        store.rewrite_transcript(session_id, replacement)
+            store.rewrite_transcript(session_id, replacement)
 
         # The rewrite must roll back atomically — original messages preserved.
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert [msg["content"] for msg in after] == [
             "before user",
             "before assistant",

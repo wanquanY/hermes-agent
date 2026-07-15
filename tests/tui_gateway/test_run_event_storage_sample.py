@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services.run_event_storage_sample import (
     collect_run_event_storage_sample,
     format_run_event_storage_sample,
@@ -8,38 +8,38 @@ from tui_gateway.services.run_event_storage_sample import (
 
 
 def test_collect_run_event_storage_sample_groups_payload_bytes_by_event_type(tmp_path):
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     try:
-        db.append_run_event(
+        db.runs.append_event(
             "stored-1",
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 1,
                 "payload": {"delta": "A"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "stored-1",
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 2,
                 "payload": {"delta": "longer text"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "stored-1",
             {
                 "type": "tool.complete",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-1",
+                "conversation_session_id": "stored-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "seq": 3,

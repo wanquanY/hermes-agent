@@ -4,7 +4,7 @@ Tests for cross-platform audio/voice media routing.
 These tests pin the expected delivery path for audio media files across
 Telegram (where Bot-API sendAudio only accepts MP3/M4A and .ogg/.opus
 only renders as a voice bubble when explicitly flagged) and via
-``GatewayRunner._deliver_media_from_response``.
+``GatewayMediaDeliveryService.deliver_media_from_response``.
 """
 
 from types import SimpleNamespace
@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.media_delivery import media_delivery_for
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class _MediaRoutingAdapter(BasePlatformAdapter):
@@ -56,7 +57,7 @@ def _allowed_media_path(tmp_path, monkeypatch, name):
     media_file.parent.mkdir(parents=True, exist_ok=True)
     media_file.write_bytes(b"media")
     monkeypatch.setattr(
-        "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+        "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
         (root,),
     )
     return media_file.resolve()
@@ -123,7 +124,7 @@ async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_
 
 def _fake_runner(thread_meta):
     """Build a fake GatewayRunner-like object with the helper methods needed by
-    _deliver_media_from_response."""
+    GatewayMediaDeliveryService.deliver_media_from_response."""
     runner = SimpleNamespace(
         _thread_metadata_for_source=lambda source, anchor=None: thread_meta,
         _reply_anchor_for_event=lambda event: None,
@@ -146,8 +147,7 @@ async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sen
         send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
     )
 
-    await GatewayRunner._deliver_media_from_response(
-        _fake_runner({"thread_id": "topic-1"}),
+    await media_delivery_for(_fake_runner({"thread_id": "topic-1"})).deliver_media_from_response(
         f"MEDIA:{media_file}",
         event,
         adapter,
@@ -176,8 +176,7 @@ async def test_streaming_delivery_routes_non_voice_telegram_ogg_media_tag_to_doc
         send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
     )
 
-    await GatewayRunner._deliver_media_from_response(
-        _fake_runner({"thread_id": "topic-1"}),
+    await media_delivery_for(_fake_runner({"thread_id": "topic-1"})).deliver_media_from_response(
         f"MEDIA:{media_file}",
         event,
         adapter,
@@ -208,8 +207,7 @@ async def test_streaming_delivery_routes_telegram_mp3_media_tag_to_voice_sender(
         send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
     )
 
-    await GatewayRunner._deliver_media_from_response(
-        _fake_runner({"thread_id": "topic-1"}),
+    await media_delivery_for(_fake_runner({"thread_id": "topic-1"})).deliver_media_from_response(
         f"MEDIA:{media_file}",
         event,
         adapter,
@@ -231,7 +229,7 @@ async def test_streaming_delivery_blocks_media_path_outside_allowed_roots(tmp_pa
     secret = tmp_path / "outside.pdf"
     secret.write_bytes(b"%PDF secret")
     monkeypatch.setattr(
-        "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+        "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
         (allowed_root,),
     )
     adapter = SimpleNamespace(
@@ -245,8 +243,7 @@ async def test_streaming_delivery_blocks_media_path_outside_allowed_roots(tmp_pa
         send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
     )
 
-    await GatewayRunner._deliver_media_from_response(
-        _fake_runner({"thread_id": "topic-1"}),
+    await media_delivery_for(_fake_runner({"thread_id": "topic-1"})).deliver_media_from_response(
         f"MEDIA:{secret}",
         event,
         adapter,

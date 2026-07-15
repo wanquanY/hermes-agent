@@ -132,6 +132,53 @@ def test_make_agent_restores_persisted_session_toolsets():
     assert mock_agent.call_args.kwargs["disabled_toolsets"] == ["delegation"]
 
 
+def test_make_agent_forwards_descriptor_context_window_before_agent_init():
+    """Dovie catalog metadata must bypass remote /models discovery at init."""
+
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+        "api_key": "token-a",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {"agent": {"system_prompt": ""}}
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=None),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="off"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway import server
+
+        server._sessions["sid-context-window"] = {
+            "model_descriptor": {
+                "id": "deepseek-v4-pro",
+                "context_window": 200_000,
+            },
+        }
+        try:
+            server._make_agent(
+                "sid-context-window",
+                "stored-context-window",
+                model_override={
+                    "model": "deepseek-v4-pro",
+                    "model_explicit": True,
+                },
+            )
+        finally:
+            server._sessions.pop("sid-context-window", None)
+
+    assert mock_agent.call_args.kwargs["model_context_window"] == 200_000
+
+
 def test_ensure_agent_runtime_current_rebinds_stale_session_credentials():
     from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 
@@ -487,6 +534,363 @@ def test_make_agent_honors_per_session_model_override():
         assert kwargs["api_key"] == "sk-glm"
 
 
+def test_make_agent_honors_codex_runtime_override():
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/codex-home",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "anthropic"},
+    }
+    override = {
+        "model": "gpt-5.5-codex",
+        "provider": "openai-codex",
+        "runtime_executor": "codex_app_server",
+        "codex_home": "/tmp/dovie/codex-home",
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent("sid-codex", "key-codex", model_override=override)
+
+    mock_resolve.assert_called_once_with(
+        requested="openai-codex",
+        target_model="gpt-5.5-codex",
+        runtime_executor="codex_app_server",
+        codex_home="/tmp/dovie/codex-home",
+    )
+    kwargs = mock_agent.call_args.kwargs
+    assert kwargs["provider"] == "openai-codex"
+    assert kwargs["api_mode"] == "codex_app_server"
+    assert agent.codex_home == "/tmp/dovie/codex-home"
+
+
+def test_make_agent_carries_codex_extra_env_from_override():
+    """Dovie ships the platform runtime token via `codex_extra_env`; the
+    agent must remember it so `run_codex_app_server_turn` merges it into
+    the codex subprocess spawn env.
+    """
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/codex-home",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "anthropic"},
+    }
+    override = {
+        "model": "gpt-5.5-codex",
+        "provider": "openai-codex",
+        "runtime_executor": "codex_app_server",
+        "codex_home": "/tmp/dovie/codex-home",
+        "codex_extra_env": {"DOXIE_PLATFORM_API_KEY": "rt-token-abc"},
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent("sid-extra-env", "key-extra-env", model_override=override)
+
+    assert agent.codex_extra_env == {"DOXIE_PLATFORM_API_KEY": "rt-token-abc"}
+    # Sanity: still forwards codex_home + api_mode
+    assert agent.codex_home == "/tmp/dovie/codex-home"
+    assert mock_agent.call_args.kwargs["api_mode"] == "codex_app_server"
+
+
+def test_make_agent_codex_extra_env_absent_when_byo():
+    """BYO mode: dovie sends nothing here. Agent should not carry an env
+    bag, so the codex subprocess falls back to its own auth.json.
+    """
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/byo-home",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "anthropic"},
+    }
+    override = {
+        "model": "gpt-5.5-codex",
+        "provider": "openai-codex",
+        "runtime_executor": "codex_app_server",
+        "codex_home": "/tmp/dovie/byo-home",
+        # no codex_extra_env
+    }
+
+    from types import SimpleNamespace
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime),
+        # SimpleNamespace makes hasattr honest (MagicMock always returns True)
+        patch("run_agent.AIAgent", return_value=SimpleNamespace()),
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent("sid-byo", "key-byo", model_override=override)
+
+    assert not hasattr(agent, "codex_extra_env")
+
+
+def test_make_agent_codex_runtime_profile_defaults_provider():
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/profile-codex",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "claude-opus-4-6", "provider": "anthropic"},
+    }
+    profile_context = {
+        "runtime_executor": "codex_app_server",
+        "codex_home": "/tmp/dovie/profile-codex",
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent("sid-codex-profile", "key-codex-profile", profile_context=profile_context)
+
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args.kwargs["requested"] == "openai-codex"
+    assert mock_resolve.call_args.kwargs["runtime_executor"] == "codex_app_server"
+    assert mock_agent.call_args.kwargs["provider"] == "openai-codex"
+
+
+def test_make_agent_hermes_executor_keeps_configured_cloud_provider():
+    """The ordinary Dovie executor must not be mistaken for Codex.
+
+    Dovie profile context always carries ``runtime_executor=hermes`` for the
+    native Hermes runtime.  Treating every non-empty executor as Codex routes a
+    managed cloud model into the Codex OAuth adapter and fails before the first
+    provider request when the user has no local Codex credentials.
+    """
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
+        "api_key": "runtime-token",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
+    }
+    override = {
+        "model": "deepseek-v4-pro",
+        "runtime_executor": "hermes",
+        "model_explicit": True,
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ) as mock_resolve,
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent("sid-hermes", "key-hermes", model_override=override)
+
+    mock_resolve.assert_called_once_with(
+        requested=None,
+        target_model="deepseek-v4-pro",
+        runtime_executor="hermes",
+    )
+    kwargs = mock_agent.call_args.kwargs
+    assert kwargs["model"] == "deepseek-v4-pro"
+    assert kwargs["provider"] == "custom"
+    assert kwargs["api_mode"] == "chat_completions"
+
+
+def test_member_chat_profile_context_builds_byo_codex_agent_without_turn_model():
+    from types import SimpleNamespace
+
+    from agent.codex_runtime import codex_app_server_turn_model
+    from tui_gateway import server
+
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "codex_app_server",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+        "codex_home": "/tmp/dovie/member-codex-home",
+    }
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "dovie-cloud"},
+    }
+    params = {
+        "conversation_session_id": "team-session-1",
+        "session_id": "team-session-1",
+        "agent_context_mode": "member_chat",
+        "runtime_scope_key": "member-chat:conv-1:codex-member",
+        "run_context_json": (
+            '{"conversation_session_id":"team-session-1",'
+            '"participant_id":"member:codex-member",'
+            '"activity_id":"act-member_chat:team-session-1:codex-member",'
+            '"activity_kind":"member_chat",'
+            '"execution_scope_key":"member-chat:conv-1:codex-member",'
+            '"control_home":"/tmp/dovie/control",'
+            '"execution_home":"/tmp/dovie/member"}'
+        ),
+        "dovie_profile": {
+            "id": "agent-codex-member",
+            "runtimeExecutor": "codex",
+            "runtime_executor": "codex",
+            "codexHome": "/tmp/dovie/member-codex-home",
+            "codex_home": "/tmp/dovie/member-codex-home",
+            "codexAccountMode": "byo",
+            "codex_account_mode": "byo",
+            "codexExtraEnv": {
+                "CODEX_TRACE": "1",
+                "DROP_ME": None,
+            },
+            "codex_extra_env": {
+                "CODEX_TRACE": "1",
+                "DROP_ME": None,
+            },
+        },
+    }
+    profile_context = server._profile_context_for_params(params)
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._persisted_session_runtime", return_value=("", None)),
+        patch("tui_gateway.server._resolve_startup_runtime", return_value=("gpt-5.5", "dovie-cloud")),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve,
+        patch("run_agent.AIAgent", side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
+    ):
+        agent = server._make_agent(
+            "sid-member-codex",
+            "team-session-1",
+            session_id="team-session-1",
+            agent_context_mode="member_chat",
+            profile_context=profile_context,
+        )
+
+    mock_resolve.assert_called_once_with(
+        requested="openai-codex",
+        target_model="gpt-5.5",
+        runtime_executor="codex",
+        codex_home="/tmp/dovie/member-codex-home",
+    )
+    assert agent.api_mode == "codex_app_server"
+    assert agent.codex_home == "/tmp/dovie/member-codex-home"
+    assert agent.codex_account_mode == "byo"
+    assert agent.codex_extra_env == {"CODEX_TRACE": "1"}
+    assert codex_app_server_turn_model(agent) == ""
+
+
+def test_make_agent_rejects_forced_codex_runtime_without_codex_home():
+    """Guard: refusing to fall back to ~/.codex is a load-bearing invariant.
+
+    If the desktop drives runtime_executor=codex_app_server but forgets to
+    pass codex_home, the codex CLI would happily spawn against the user's
+    personal ~/.codex — bleeding platform employee state into the user's
+    ChatGPT account. _make_agent must refuse loudly.
+    """
+    import pytest
+
+    fake_cfg = {
+        "agent": {"system_prompt": ""},
+        "model": {"default": "gpt-5.5", "provider": "openai"},
+    }
+    profile_context = {"runtime_executor": "codex_app_server"}  # no codex_home
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider") as mock_resolve,
+        patch("run_agent.AIAgent"),
+    ):
+        from tui_gateway.server import _make_agent
+
+        with pytest.raises(ValueError, match="codex_home"):
+            _make_agent("sid-forced-no-home", "key-forced-no-home", profile_context=profile_context)
+
+    mock_resolve.assert_not_called()
+
+
 def test_apply_model_switch_does_not_leak_process_env():
     """Core fix for cross-session contamination: an in-session /model switch
     must mutate only the target session (record a per-session override + switch
@@ -554,3 +958,84 @@ def test_apply_model_switch_does_not_leak_process_env():
     # Sibling session is completely untouched.
     assert sess_a["model_override"] is None
     assert sess_a["agent"].model == "minimax/m3"
+
+
+def test_apply_model_switch_records_platform_codex_explicit_model():
+    from tui_gateway import server
+
+    class _FakeAgent:
+        api_mode = "codex_app_server"
+        model = "glm-5.2-polluted"
+        provider = "openai-codex"
+        base_url = "https://should-not-change.invalid"
+        api_key = "should-not-change"
+        codex_home = "/tmp/dovie/platform-codex"
+        codex_account_mode = "platform"
+        codex_extra_env = {"DOXIE_PLATFORM_API_KEY": "rt-token"}
+
+    agent = _FakeAgent()
+    session = {
+        "agent": agent,
+        "session_key": "k-platform",
+        "model_override": {
+            "runtime_executor": "codex_app_server",
+            "codex_home": "/tmp/dovie/platform-codex",
+            "codex_account_mode": "platform",
+            "codex_extra_env": {"DOXIE_PLATFORM_API_KEY": "rt-token"},
+        },
+    }
+
+    with (
+        patch("hermes_cli.model_switch.parse_model_flags",
+              return_value=("glm-5.2", None, False, False, True)),
+        patch("hermes_cli.model_switch.resolve_persist_behavior",
+              return_value=False),
+        patch("hermes_cli.model_switch.switch_model") as mock_switch,
+    ):
+        result = server._apply_model_switch("sid-platform", session, "glm-5.2")
+
+    assert result["value"] == "glm-5.2"
+    assert session["model_override"]["model"] == "glm-5.2"
+    assert session["model_override"]["model_explicit"] is True
+    assert session["model_override"]["codex_account_mode"] == "platform"
+    assert agent.codex_explicit_model == "glm-5.2"
+    assert agent.provider == "openai-codex"
+    assert agent.base_url == "https://should-not-change.invalid"
+    assert agent.api_key == "should-not-change"
+    mock_switch.assert_not_called()
+
+
+def test_apply_model_switch_byo_codex_remains_noop():
+    from tui_gateway import server
+
+    class _FakeAgent:
+        api_mode = "codex_app_server"
+        model = "glm-5.2-polluted"
+        provider = "openai-codex"
+        base_url = ""
+        api_key = ""
+        codex_account_mode = "byo"
+
+    session = {
+        "agent": _FakeAgent(),
+        "session_key": "k-byo",
+        "model_override": {
+            "runtime_executor": "codex_app_server",
+            "codex_home": "/tmp/dovie/byo-codex",
+            "codex_account_mode": "byo",
+        },
+    }
+
+    with (
+        patch("hermes_cli.model_switch.parse_model_flags",
+              return_value=("glm-5.2", None, False, False, True)),
+        patch("hermes_cli.model_switch.resolve_persist_behavior",
+              return_value=False),
+        patch("hermes_cli.model_switch.switch_model") as mock_switch,
+    ):
+        result = server._apply_model_switch("sid-byo", session, "glm-5.2")
+
+    assert result["no_op"] is True
+    assert "model" not in session["model_override"]
+    assert not hasattr(session["agent"], "codex_explicit_model")
+    mock_switch.assert_not_called()

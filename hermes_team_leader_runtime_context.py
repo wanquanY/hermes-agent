@@ -59,14 +59,14 @@ def _conversation_session_id_from_params(params: dict[str, Any]) -> str:
     return _text(
         params.get("conversation_session_id")
         or params.get("conversationSessionId")
-        or params.get("stable_team_session_id")
-        or params.get("stableTeamSessionId")
+        or params.get("conversation_team_session_id")
+        or params.get("conversationTeamSessionId")
         or params.get("team_session_id")
         or params.get("teamSessionId")
-        or params.get("stableSessionId")
-        or params.get("stable_session_id")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
+        or params.get("conversationSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
     )
@@ -100,10 +100,10 @@ def _db_from_arg(db: Any | None) -> Any:
 
 
 def _mission_from_db(db: Any, mission_id: str) -> dict[str, Any]:
-    if not db or not mission_id or not hasattr(db, "get_team_mission_graph"):
+    if not db or not mission_id:
         return {}
     try:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     except Exception:
         return {}
     if not isinstance(graph, dict):
@@ -240,9 +240,9 @@ def _resolve_profile(db: Any, member: dict[str, Any]) -> dict[str, Any]:
     profile_id = _profile_id_from_member(member)
     if not profile_id:
         raise ValueError("team leader profile required")
-    if not hasattr(db, "get_agent_profile"):
+    if not hasattr(db, "profiles"):
         raise ValueError("team leader profile registry unavailable")
-    profile = db.get_agent_profile(profile_id)
+    profile = db.profiles.get_agent_profile(profile_id)
     if not isinstance(profile, dict) or not profile:
         raise ValueError(f"team leader profile not found: {profile_id}")
 
@@ -399,9 +399,9 @@ def resolve_team_runtime_members(
     team_id = _team_id_from_state(resolved_db, seed)
     if not team_id:
         raise ValueError("team_id required for team runtime members")
-    if resolved_db is None or not hasattr(resolved_db, "get_agent_team_with_members"):
+    if resolved_db is None or not hasattr(resolved_db, "teams"):
         raise ValueError("team registry unavailable for team runtime members")
-    team = resolved_db.get_agent_team_with_members(team_id)
+    team = resolved_db.teams.get_agent_team_with_members(team_id)
     if not isinstance(team, dict) or not team:
         raise ValueError(f"team not found: {team_id}")
     members = _active_members(team)
@@ -432,10 +432,10 @@ def resolve_team_leader_runtime_params(
     team_id = _team_id_from_state(resolved_db, params)
     if not team_id:
         raise ValueError("team_id required for team leader runtime context")
-    if resolved_db is None or not hasattr(resolved_db, "get_agent_team_with_members"):
+    if resolved_db is None or not hasattr(resolved_db, "teams"):
         raise ValueError("team registry unavailable for team leader runtime context")
 
-    team = resolved_db.get_agent_team_with_members(team_id)
+    team = resolved_db.teams.get_agent_team_with_members(team_id)
     if not isinstance(team, dict) or not team:
         raise ValueError(f"team not found: {team_id}")
     leader_member = _leader_member(team)

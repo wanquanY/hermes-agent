@@ -5,7 +5,7 @@ team leader, @member) is:
 
     A run's user-visible ``message.complete`` event MUST land in the
     conversation's ``run_events`` table, addressable via
-    ``stored_session_id == conversation_session_id``.
+    ``conversation_session_id == conversation_session_id``.
 
 Regular, leader, and @member workers now publish user-visible events
 to the conversation session through RunContext + conversation-session
@@ -23,10 +23,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.run_context import RunContext
 from hermes_team_mission.gateway import runtime_methods
-from hermes_state_participants import member_participant_id
+from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 from tui_gateway.services.run_control import record_event
 
 
@@ -46,11 +46,11 @@ def _member_run_context() -> RunContext:
     )
 
 
-def _new_db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _new_db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _events_for_session(db: SessionDB, session_id: str) -> list[dict]:
+def _events_for_session(db: CliSessionStore, session_id: str) -> list[dict]:
     rows = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT seq, event_type, run_id, runtime_scope_key, payload_json, event_json "
         "FROM run_events WHERE session_id = ? ORDER BY seq",
@@ -69,14 +69,14 @@ def _events_for_session(db: SessionDB, session_id: str) -> list[dict]:
     ]
 
 
-def _memberchat_run_events(db: SessionDB) -> list[dict]:
+def _memberchat_run_events(db: CliSessionStore) -> list[dict]:
     rows = db._conn.execute(  # noqa: SLF001 - test introspection
         "SELECT event_json FROM run_events WHERE session_id LIKE 'memberchat:%' ORDER BY seq"
     ).fetchall()
     return [json.loads(r["event_json"] or "{}") for r in rows]
 
 
-def _submit_member_once(monkeypatch, tmp_path: Path, db: SessionDB) -> dict:
+def _submit_member_once(monkeypatch, tmp_path: Path, db: CliSessionStore) -> dict:
     captured: dict = {}
 
     def fake_proxy_run_submit(params: dict) -> dict:
@@ -133,17 +133,17 @@ def _submit_member_once(monkeypatch, tmp_path: Path, db: SessionDB) -> dict:
 
 def test_regular_chat_message_complete_persists_on_conversation_session(tmp_path: Path):
     """Regular run.submit: worker publishes directly to the conversation
-    session. message.complete lands in run_events[stored_session_id=conv].
+    session. message.complete lands in run_events[conversation_session_id=conv].
     """
     db = _new_db(tmp_path)
-    db.create_session(CONV_SESSION, source="user", transient=False)
-    db.upsert_run(run_id="run-direct-1", session_id=CONV_SESSION, status="running")
+    db.sessions.create(CONV_SESSION, source="user", transient=False)
+    db.runs.upsert(run_id="run-direct-1", session_id=CONV_SESSION, status="running")
 
     record_event(
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-direct-1",
             "turn_id": "t1",
             "seq": 1,
@@ -163,14 +163,14 @@ def test_regular_chat_message_complete_persists_on_conversation_session(tmp_path
 def test_team_leader_message_complete_persists_on_conversation_session(tmp_path: Path):
     """Team leader run: same shape as regular but with team_mission
     conversation registration. Invariant identical: the leader run's
-    stored_session_id IS the conversation session.
+    conversation_session_id IS the conversation session.
     """
     db = _new_db(tmp_path)
-    db.create_session(CONV_SESSION, source="team_mission", transient=False)
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="leader chat smoke",
         workspace_id="ws-1",
@@ -179,13 +179,13 @@ def test_team_leader_message_complete_persists_on_conversation_session(tmp_path:
         created_at=100,
         updated_at=200,
     )
-    db.upsert_run(run_id="run-leader-1", session_id=CONV_SESSION, status="running")
+    db.runs.upsert(run_id="run-leader-1", session_id=CONV_SESSION, status="running")
 
     record_event(
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-leader-1",
             "turn_id": "t1",
             "seq": 1,
@@ -210,12 +210,12 @@ def test_member_chat_with_legacy_session_hints_routes_by_run_context(tmp_path: P
     even if an old worker frame still carries memberchat session ids.
     """
     db = _new_db(tmp_path)
-    db.create_session(CONV_SESSION, source="team_mission", transient=False)
-    db.create_session(MEMBER_SESSION, source="team_mission", transient=False)
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
+    db.sessions.create(MEMBER_SESSION, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat smoke",
         workspace_id="ws-1",
@@ -224,13 +224,13 @@ def test_member_chat_with_legacy_session_hints_routes_by_run_context(tmp_path: P
         created_at=100,
         updated_at=200,
     )
-    db.upsert_run(run_id="run-member-1", session_id=MEMBER_SESSION, status="running")
+    db.runs.upsert(run_id="run-member-1", session_id=MEMBER_SESSION, status="running")
 
     record_event(
         {
             "type": "message.complete",
             "session_id": MEMBER_SESSION,
-            "stored_session_id": MEMBER_SESSION,
+            "conversation_session_id": MEMBER_SESSION,
             "run_id": "run-member-1",
             "turn_id": "t1",
             "seq": 1,
@@ -273,11 +273,11 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
       conversation session's run_events.
     """
     db = _new_db(tmp_path)
-    db.create_session(CONV_SESSION, source="team_mission", transient=False)
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id="conv-1",
         team_id="team-1",
-        stable_session_id=CONV_SESSION,
+        conversation_session_id=CONV_SESSION,
         title="Team Conversation",
         objective="member chat unregistered race",
         workspace_id="ws-1",
@@ -288,13 +288,13 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     )
     # NOTE: intentionally NOT calling register_member_chat_run. PR-C routes by
     # RunContext + conversation-session storage, so there is no registry row.
-    db.upsert_run(run_id="run-member-orphan", session_id=CONV_SESSION, status="running")
+    db.runs.upsert(run_id="run-member-orphan", session_id=CONV_SESSION, status="running")
 
     record_event(
         {
             "type": "message.complete",
             "session_id": CONV_SESSION,
-            "stored_session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
             "run_id": "run-member-orphan",
             "turn_id": "t1",
             "seq": 1,
@@ -320,7 +320,7 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     assert matching, (
         "INVARIANT VIOLATED: an @member worker's message.complete event with "
         "member_id + conversation_session_id in its payload reached "
-        "run_events[stored_session_id=conv]. The conversation timeline will "
+        "run_events[conversation_session_id=conv]. The conversation timeline will "
         "show no member reply. PR-C expects RunContext direct routing, not "
         "member_chat_runs or memberchat:* mirror state. Current conversation "
         "events seen: "
@@ -328,12 +328,115 @@ def test_member_chat_without_registration_still_reaches_conversation(tmp_path: P
     )
 
 
+def test_member_reply_leading_known_speaker_prefix_is_stripped_before_canonical_write(
+    tmp_path: Path,
+):
+    db = _new_db(tmp_path)
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        conversation_session_id=CONV_SESSION,
+        title="Team Conversation",
+        objective="member chat prefix stripping",
+        workspace_id="ws-1",
+        workspace_path="/tmp/ws",
+        active_mission_id="",
+        created_at=100,
+        updated_at=200,
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="leader:conv-1",
+        role="leader",
+        display_name="小多",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id=member_participant_id("member-alice"),
+        role="member",
+        display_name="Alice",
+    )
+    db.runs.upsert(run_id="run-member-prefix", session_id=CONV_SESSION, status="running")
+
+    record_event(
+        {
+            "type": "message.complete",
+            "session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
+            "run_id": "run-member-prefix",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {"text": "[小多] 你好", "status": "complete"},
+        },
+        db=db,
+        run_context=_member_run_context(),
+    )
+
+    messages = db.messages.list(CONV_SESSION)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "你好"
+    assert messages[0]["metadata"]["stripped_speaker_prefix"] == "小多"
+    events = _events_for_session(db, CONV_SESSION)
+    assert events[-1]["payload"]["text"] == "你好"
+    assert events[-1]["payload"]["stripped_speaker_prefix"] == "小多"
+
+
+def test_member_reply_non_leading_known_speaker_prefix_is_not_stripped(tmp_path: Path):
+    db = _new_db(tmp_path)
+    db.sessions.create(CONV_SESSION, source="team_mission", transient=False)
+    db.upsert_team_mission_conversation(
+        conversation_id="conv-1",
+        team_id="team-1",
+        conversation_session_id=CONV_SESSION,
+        title="Team Conversation",
+        objective="member chat prefix non-leading",
+        workspace_id="ws-1",
+        workspace_path="/tmp/ws",
+        active_mission_id="",
+        created_at=100,
+        updated_at=200,
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id="leader:conv-1",
+        role="leader",
+        display_name="小多",
+    )
+    db.participants.upsert_conversation_participant(
+        conversation_session_id=CONV_SESSION,
+        participant_id=member_participant_id("member-alice"),
+        role="member",
+        display_name="Alice",
+    )
+    db.runs.upsert(run_id="run-member-prefix-mid", session_id=CONV_SESSION, status="running")
+
+    record_event(
+        {
+            "type": "message.complete",
+            "session_id": CONV_SESSION,
+            "conversation_session_id": CONV_SESSION,
+            "run_id": "run-member-prefix-mid",
+            "turn_id": "t1",
+            "seq": 1,
+            "payload": {"text": "他说 [小多] 你好", "status": "complete"},
+        },
+        db=db,
+        run_context=_member_run_context(),
+    )
+
+    messages = db.messages.list(CONV_SESSION)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "他说 [小多] 你好"
+    assert "stripped_speaker_prefix" not in messages[0]["metadata"]
+
+
 # ── case 5: invariant — no visible events ever land in memberchat-only ─
 
 
 def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path: Path):
     """Reverse invariant: ``memberchat:*`` is an implementation detail.
-    No code path should treat run_events[stored_session_id=memberchat:*]
+    No code path should treat run_events[conversation_session_id=memberchat:*]
     as the source of truth for what the user sees in the conversation
     timeline.
 
@@ -362,7 +465,7 @@ def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path
             {
                 **frame,
                 "session_id": captured["session_id"],
-                "stored_session_id": captured["stored_session_id"],
+                "conversation_session_id": captured["conversation_session_id"],
                 "run_id": captured["run_id"],
                 "turn_id": captured["turn_id"],
                 "seq": seq,
@@ -373,6 +476,9 @@ def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path
 
     assert _memberchat_run_events(db) == []
     conv_events = _events_for_session(db, CONV_SESSION)
-    assert [event["type"] for event in conv_events] == ["message.delta", "message.complete"]
-    assert {event["frame"]["stored_session_id"] for event in conv_events} == {CONV_SESSION}
+    # Terminal retention archives stream deltas after message.complete has
+    # projected the durable transcript. The surviving fact must still belong
+    # to the canonical conversation, never the internal memberchat session.
+    assert [event["type"] for event in conv_events] == ["message.complete"]
+    assert {event["frame"]["conversation_session_id"] for event in conv_events} == {CONV_SESSION}
     assert conv_events[-1]["payload"]["text"] == "member reply from PR-C path"

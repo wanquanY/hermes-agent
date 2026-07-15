@@ -16,15 +16,15 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.run_worker import (
     EventFrame,
     LogFrame,
     RunStartFrame,
     RunTerminalFrame,
 )
-from tui_gateway.services.worker_pool import WorkerPool
-from tui_gateway.services.worker_supervisor import WorkerSupervisor
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
+from hermes_agent.orchestration.worker_supervisor import WorkerSupervisor
 
 
 _SITE_CUSTOMIZE = r'''
@@ -39,7 +39,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     WorkerRunBackend,
 )
-from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+from hermes_agent.orchestration.worker_db_proxy import get_default_worker_db_proxy
 
 
 class _Audit5Backend(WorkerRunBackend):
@@ -52,21 +52,21 @@ class _Audit5Backend(WorkerRunBackend):
         activity_id = str(frame.params.get("activity_id") or "audit-5-activity")
 
         def write_initial_state():
-            db.create_session(frame.stored_session_id, source="worker")
-            db.append_message(
-                frame.stored_session_id,
+            db.sessions.create(frame.conversation_session_id, source="worker")
+            db.messages.append(
+                frame.conversation_session_id,
                 role="user",
                 content=frame.prompt,
                 metadata={"source": "audit-5-subprocess"},
             )
-            db.create_activity(
+            db.activities.create(
                 activity_id=activity_id,
-                conversation_id=frame.stored_session_id,
+                conversation_id=frame.conversation_session_id,
                 kind="agent_dispatch",
                 target_profile_id=frame.params.get("agent_profile_id") or "audit-profile",
                 prompt_summary=frame.prompt,
             )
-            db.update_activity_status(activity_id, "running", started_at=101.0)
+            db.activities.update_status(activity_id, "running", started_at=101.0)
 
         await asyncio.to_thread(write_initial_state)
 
@@ -84,13 +84,13 @@ class _Audit5Backend(WorkerRunBackend):
         assistant_text = "worker pong"
 
         def write_terminal_state():
-            db.append_message(
-                frame.stored_session_id,
+            db.messages.append(
+                frame.conversation_session_id,
                 role="assistant",
                 content=assistant_text,
                 metadata={"usage": {"total_tokens": 2}},
             )
-            db.update_activity_status(
+            db.activities.update_status(
                 activity_id,
                 "completed",
                 result_summary=assistant_text,
@@ -117,7 +117,7 @@ class _Audit5Backend(WorkerRunBackend):
             RunTerminalFrame(
                 run_id=frame.run_id,
                 status="completed",
-                stored_session_id=frame.stored_session_id,
+                conversation_session_id=frame.conversation_session_id,
                 turn_id=frame.turn_id,
             )
         )
@@ -182,7 +182,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
     profile_home = tmp_path / "profile-home"
     control_home.mkdir()
     profile_home.mkdir()
-    db = SessionDB(control_home / "state.db")
+    db = open_cli_session_store(control_home / "state.db")
 
     _install_child_backend(tmp_path / "child-site", monkeypatch)
     monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
@@ -204,7 +204,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
         on_run_terminal=collector.on_run_terminal,
         on_log=collector.on_log,
     )
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
 
     conversation_id = "audit-5-conversation"
     run_id = "audit-5-run"
@@ -227,7 +227,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
         await pool.record_run_start(
             conversation_id=conversation_id,
             run_id=run_id,
-            stored_session_id=conversation_id,
+            conversation_session_id=conversation_id,
             turn_id=turn_id,
         )
         ok = await supervisor.send(
@@ -236,7 +236,7 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
             RunStartFrame(
                 run_id=run_id,
                 turn_id=turn_id,
-                stored_session_id=conversation_id,
+                conversation_session_id=conversation_id,
                 prompt="ping from audit-5",
                 params={
                     "activity_id": activity_id,
@@ -275,16 +275,16 @@ async def test_real_run_worker_subprocess_roundtrip_writes_db_via_ipc(
     assert terminal_conversation == conversation_id
     assert terminal.run_id == run_id
     assert terminal.turn_id == turn_id
-    assert terminal.stored_session_id == conversation_id
+    assert terminal.conversation_session_id == conversation_id
     assert terminal.status == "completed"
 
-    messages = db.get_messages_as_conversation(conversation_id)
+    messages = db.messages.all_as_conversation(conversation_id)
     assert [(message["role"], message["content"]) for message in messages] == [
         ("user", "ping from audit-5"),
         ("assistant", "worker pong"),
     ]
 
-    activity = db.get_activity(activity_id)
+    activity = db.activities.get(activity_id)
     assert activity is not None
     assert activity["conversation_id"] == conversation_id
     assert activity["kind"] == "agent_dispatch"

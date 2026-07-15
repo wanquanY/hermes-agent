@@ -678,12 +678,12 @@ def test_oneshot_distinguishes_disabled_mcp_from_unknown(monkeypatch, capsys):
     assert "mcp-off" in err
 
 
-def test_oneshot_wires_session_db_for_recall(monkeypatch):
-    """hermes -z bypasses HermesCLI, but recall still needs SessionDB."""
+def test_oneshot_wires_session_store_for_recall(monkeypatch):
+    """hermes -z bypasses HermesCLI, but recall still needs storage."""
     from hermes_cli.oneshot import _run_agent
 
     captured = {}
-    sentinel_db = object()
+    sentinel_store = object()
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -696,10 +696,6 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
             captured["prompt"] = prompt
             return "ok"
 
-    class FakeSessionDB:
-        def __new__(cls):
-            return sentinel_db
-
     def mod(name, **attrs):
         module = types.ModuleType(name)
         for key, value in attrs.items():
@@ -707,7 +703,14 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
         return module
 
     monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
-    monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=FakeSessionDB))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_agent.storage.cli_session_store",
+        mod(
+            "hermes_agent.storage.cli_session_store",
+            open_cli_session_store=lambda: sentinel_store,
+        ),
+    )
     monkeypatch.setitem(
         sys.modules,
         "hermes_cli.config",
@@ -739,7 +742,7 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     )
 
     assert _run_agent("recall this") == "ok"
-    assert captured["session_db"] is sentinel_db
+    assert captured["session_db"] is sentinel_store
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
 
@@ -874,7 +877,12 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
     import hermes_cli.main as main_mod
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             assert session_id == "20260409_000001_abc123"
             return {
                 "message_count": 2,
@@ -885,15 +893,13 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
                 "reasoning_tokens": 1,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "demo title"
 
         def close(self):
             return None
 
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("20260409_000001_abc123")
     out = capsys.readouterr().out
@@ -912,7 +918,12 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
     seen = []
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             seen.append(session_id)
             return {
                 "message_count": 1,
@@ -923,7 +934,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
                 "reasoning_tokens": 0,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "actual"
 
         def close(self):
@@ -931,9 +942,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
 
     active = tmp_path / "active.json"
     active.write_text('{"session_id":"actual_session"}', encoding="utf-8")
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("startup_resume", str(active))
     out = capsys.readouterr().out

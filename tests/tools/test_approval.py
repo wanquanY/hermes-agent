@@ -173,7 +173,7 @@ class TestSessionKeyContext:
                 run_sync = node
                 break
 
-        assert run_sync is not None, "gateway.run.run_sync not found"
+        assert run_sync is not None, "hermes_gateway.runner.run_sync not found"
 
         called_names = set()
         for node in ast.walk(run_sync):

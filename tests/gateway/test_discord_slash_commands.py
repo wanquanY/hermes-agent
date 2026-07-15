@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_discord_mock():
@@ -75,7 +75,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
 
 class FakeTree:
@@ -772,7 +772,7 @@ def test_discord_auto_thread_config_bridge(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
     load_gateway_config()
 
     import os

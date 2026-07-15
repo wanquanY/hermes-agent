@@ -1,9 +1,9 @@
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _create_team_session(db: SessionDB, session_id: str) -> None:
-    db.create_session(session_id=session_id, source="team_mission")
-    db.upsert_session_index(
+def _create_team_session(db: CliSessionStore, session_id: str) -> None:
+    db.sessions.create(session_id=session_id, source="team_mission")
+    db.session_index.upsert(
         session_id=session_id,
         source="team_mission",
         session_kind="team_mission",
@@ -14,11 +14,11 @@ def _create_team_session(db: SessionDB, session_id: str) -> None:
 
 
 def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows(tmp_path):
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     session_id = "team-session-team-conversation-read-model"
     try:
         _create_team_session(db, session_id)
-        db.append_message(
+        db.messages.append(
             session_id,
             role="user",
             content="请执行一个团队任务",
@@ -27,20 +27,20 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
                 "transcript_activity_kind": "mission_start",
             },
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="leader 工具调用前的规划消息应进入主历史",
             metadata={"transcript_activity_kind": "mission_start"},
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="tool",
             content='{"ok": true}',
             tool_name="team_mission_node_create",
             metadata={"transcript_activity_kind": "mission_start"},
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="误标为聊天的团队任务启动工具调用",
@@ -57,7 +57,7 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
                 "transcript_activity_kind": "leader_chat",
             },
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="tool",
             content='{"success": true}',
@@ -69,7 +69,7 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
                 "transcript_activity_kind": "leader_chat",
             },
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="团队任务已进入运行态",
@@ -80,19 +80,19 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
                 "transcript_activity_kind": "leader_chat",
             },
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="正常 leader 聊天应保留",
             metadata={"transcript_activity_kind": "leader_chat"},
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="节点内部执行细节",
             metadata={"transcript_activity_kind": "mission_node"},
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="最终汇总",
@@ -102,7 +102,7 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
             },
         )
 
-        messages = db.get_conversation_message_read_model(
+        messages = db.messages.all_as_conversation(
             session_id,
             include_storage_metadata=True,
         )
@@ -123,11 +123,11 @@ def test_team_conversation_read_model_keeps_main_messages_and_excludes_node_rows
 
 
 def test_team_conversation_pages_after_visible_transcript_filter(tmp_path):
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     session_id = "team-session-team-conversation-page"
     try:
         _create_team_session(db, session_id)
-        db.append_message(
+        db.messages.append(
             session_id,
             role="user",
             content="用户发起任务不能被运行期尾部挤掉",
@@ -137,13 +137,13 @@ def test_team_conversation_pages_after_visible_transcript_filter(tmp_path):
             },
         )
         for index in range(80):
-            db.append_message(
+            db.messages.append(
                 session_id,
                 role="assistant",
                 content=f"节点运行日志 {index}",
                 metadata={"transcript_activity_kind": "mission_node"},
             )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="任务完成摘要",
@@ -153,7 +153,7 @@ def test_team_conversation_pages_after_visible_transcript_filter(tmp_path):
             },
         )
 
-        page = db.get_messages_page_as_conversation(session_id, limit=2)
+        page = db.messages.page_as_conversation(session_id, limit=2)
 
         assert [message["content"] for message in page["messages"]] == [
             "用户发起任务不能被运行期尾部挤掉",
@@ -166,12 +166,12 @@ def test_team_conversation_pages_after_visible_transcript_filter(tmp_path):
 
 
 def test_team_conversation_read_model_dedupes_projected_summary_shadow_rows(tmp_path):
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     session_id = "team-session-team-conversation-summary-dedupe"
     try:
         _create_team_session(db, session_id)
         stable_id = "team-mission-summary:mission-1:completed"
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="最终汇总",
@@ -182,13 +182,13 @@ def test_team_conversation_read_model_dedupes_projected_summary_shadow_rows(tmp_
                 "team_mission": {"kind": "mission_summary", "mission_id": "mission-1"},
             },
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="user",
             content="下一轮用户消息",
             metadata={"transcript_activity_kind": "leader_chat"},
         )
-        db.append_message(
+        db.messages.append(
             session_id,
             role="assistant",
             content="最终汇总",
@@ -199,7 +199,7 @@ def test_team_conversation_read_model_dedupes_projected_summary_shadow_rows(tmp_
             },
         )
 
-        messages = db.get_conversation_message_read_model(
+        messages = db.messages.all_as_conversation(
             session_id,
             include_storage_metadata=True,
         )
@@ -214,7 +214,7 @@ def test_team_conversation_read_model_dedupes_projected_summary_shadow_rows(tmp_
 
 
 def test_team_transcript_classifier_keeps_legacy_rows_out_of_node_history():
-    from hermes_team_mission.runtime.team_transcript_writer import (
+    from hermes_team_mission.domain.transcript_visibility import (
         is_main_transcript_message,
         is_node_transcript_message,
     )

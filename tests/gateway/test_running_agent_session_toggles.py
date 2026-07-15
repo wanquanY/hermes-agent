@@ -25,9 +25,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -46,7 +47,7 @@ def _make_event(text: str) -> MessageEvent:
 
 def _make_runner():
     """Minimal GatewayRunner with an active running agent for this session."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -85,8 +86,8 @@ def _make_runner():
     runner._service_tier = None
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
 
@@ -112,12 +113,17 @@ def _make_runner():
 @pytest.mark.asyncio
 async def test_yolo_dispatches_mid_run(monkeypatch):
     """/yolo mid-run must dispatch to its handler, not hit the catch-all."""
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
+
     runner = _make_runner()
-    runner._handle_yolo_command = AsyncMock(return_value="⚡ YOLO mode **ON** for this session")
+    yolo_service = SimpleNamespace(
+        handle_yolo_command=AsyncMock(return_value="⚡ YOLO mode **ON** for this session")
+    )
+    monkeypatch.setattr(busy_message_runtime, "yolo_command_for", lambda _runner: yolo_service)
 
     result = await runner._handle_message(_make_event("/yolo"))
 
-    runner._handle_yolo_command.assert_awaited_once()
+    yolo_service.handle_yolo_command.assert_awaited_once()
     assert result == "⚡ YOLO mode **ON** for this session"
     assert "can't run mid-turn" not in (result or "")
 
@@ -125,27 +131,64 @@ async def test_yolo_dispatches_mid_run(monkeypatch):
 @pytest.mark.asyncio
 async def test_verbose_dispatches_mid_run(monkeypatch):
     """/verbose mid-run must dispatch to its handler, not hit the catch-all."""
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
+
     runner = _make_runner()
-    runner._handle_verbose_command = AsyncMock(return_value="tool progress: new")
+    verbose_service = SimpleNamespace(
+        handle_verbose_command=AsyncMock(return_value="tool progress: new")
+    )
+    monkeypatch.setattr(busy_message_runtime, "verbose_command_for", lambda _runner: verbose_service)
 
     result = await runner._handle_message(_make_event("/verbose"))
 
-    runner._handle_verbose_command.assert_awaited_once()
+    verbose_service.handle_verbose_command.assert_awaited_once()
     assert result == "tool progress: new"
+    assert "can't run mid-turn" not in (result or "")
+
+
+@pytest.mark.asyncio
+async def test_footer_dispatches_mid_run(monkeypatch):
+    """/footer mid-run must dispatch to its session-level handler."""
+    import hermes_gateway.busy_message_runtime as busy_message_runtime
+
+    runner = _make_runner()
+    footer_service = SimpleNamespace(
+        handle_footer_command=AsyncMock(return_value="footer: off")
+    )
+    monkeypatch.setattr(busy_message_runtime, "footer_command_for", lambda _runner: footer_service)
+
+    result = await runner._handle_message(_make_event("/footer"))
+
+    footer_service.handle_footer_command.assert_awaited_once()
+    assert result == "footer: off"
     assert "can't run mid-turn" not in (result or "")
 
 
 @pytest.mark.asyncio
 async def test_fast_rejected_mid_run():
     """/fast mid-run must hit the busy catch-all — config-only, next message."""
+    import hermes_gateway.message_command_runtime as message_commands
+
     runner = _make_runner()
-    runner._handle_fast_command = AsyncMock(
-        side_effect=AssertionError("/fast should not dispatch mid-run")
+    called = False
+
+    def _fail_fast_factory(_runner):
+        nonlocal called
+        called = True
+        raise AssertionError("/fast should not dispatch mid-run")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        message_commands,
+        "fast_command_for",
+        _fail_fast_factory,
     )
+    try:
+        result = await runner._handle_message(_make_event("/fast"))
+    finally:
+        monkeypatch.undo()
 
-    result = await runner._handle_message(_make_event("/fast"))
-
-    runner._handle_fast_command.assert_not_awaited()
+    assert called is False
     assert result is not None
     assert "can't run mid-turn" in result
     assert "/fast" in result
@@ -154,14 +197,29 @@ async def test_fast_rejected_mid_run():
 @pytest.mark.asyncio
 async def test_reasoning_rejected_mid_run():
     """/reasoning mid-run must hit the busy catch-all — config-only, next message."""
+    import hermes_gateway.message_command_runtime as message_commands
+
     runner = _make_runner()
-    runner._handle_reasoning_command = AsyncMock(
-        side_effect=AssertionError("/reasoning should not dispatch mid-run")
+    called = False
+
+    def _fail_reasoning_factory(_runner):
+        nonlocal called
+        called = True
+        raise AssertionError("/reasoning should not dispatch mid-run")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        message_commands,
+        "reasoning_command_for",
+        _fail_reasoning_factory,
     )
 
-    result = await runner._handle_message(_make_event("/reasoning high"))
+    try:
+        result = await runner._handle_message(_make_event("/reasoning high"))
+    finally:
+        monkeypatch.undo()
 
-    runner._handle_reasoning_command.assert_not_awaited()
+    assert called is False
     assert result is not None
     assert "can't run mid-turn" in result
     assert "/reasoning" in result

@@ -63,6 +63,7 @@ THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # maps to low on every model.  See:
 # https://platform.claude.com/docs/en/about-claude/models/migration-guide
 ADAPTIVE_EFFORT_MAP = {
+    "ultra":   "max",
     "max":     "max",
     "xhigh":   "xhigh",
     "high":    "high",
@@ -609,6 +610,12 @@ def _build_anthropic_client_with_bearer_hook(
         normalized_base_url = _re.sub(r"/v1/?$", "", normalized_base_url.rstrip("/"))
 
     http_client = build_bearer_http_client(token_provider, timeout=timeout_obj)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(http_client)
+    except Exception:
+        pass
 
     kwargs = {
         "timeout": timeout_obj,
@@ -634,7 +641,14 @@ def _build_anthropic_client_with_bearer_hook(
     if common_betas:
         kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
-    return _anthropic_sdk.Anthropic(**kwargs)
+    client = _anthropic_sdk.Anthropic(**kwargs)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(client)
+    except Exception:
+        pass
+    return client
 
 
 def build_anthropic_client(
@@ -754,7 +768,14 @@ def build_anthropic_client(
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
 
-    return _anthropic_sdk.Anthropic(**kwargs)
+    client = _anthropic_sdk.Anthropic(**kwargs)
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        attach_dovie_attribution_request_hook(client)
+    except Exception:
+        pass
+    return client
 
 
 def build_anthropic_bedrock_client(region: str):

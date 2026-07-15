@@ -23,8 +23,8 @@ def session_db(tmp_path):
     """Create a real SessionDB for testing."""
     os.environ["HERMES_HOME"] = str(tmp_path / ".hermes")
     os.makedirs(tmp_path / ".hermes", exist_ok=True)
-    from hermes_state import SessionDB
-    db = SessionDB(db_path=tmp_path / ".hermes" / "test_sessions.db")
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    db = open_cli_session_store(tmp_path / ".hermes" / "test_sessions.db")
     yield db
     db.close()
 
@@ -53,12 +53,18 @@ def cli_instance(tmp_path, session_db):
     ]
 
     # Create the original session in the DB
-    session_db.create_session(
+    session_db.sessions.create(
         session_id=cli.session_id,
         source="cli",
         model=cli.model,
     )
-    session_db.set_session_title(cli.session_id, "My Coding Session")
+    session_db.sessions.set_title(cli.session_id, "My Coding Session")
+    for message in cli.conversation_history:
+        session_db.messages.append(
+            cli.session_id,
+            message["role"],
+            message["content"],
+        )
 
     return cli
 
@@ -75,7 +81,7 @@ class TestBranchCommandCLI:
 
         # Verify a new session was created
         assert cli_instance.session_id != "20260403_120000_abc123"
-        new_session = session_db.get_session(cli_instance.session_id)
+        new_session = session_db.sessions.get(cli_instance.session_id)
         assert new_session is not None
 
     def test_branch_copies_history(self, cli_instance, session_db):
@@ -84,7 +90,7 @@ class TestBranchCommandCLI:
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
-        messages = session_db.get_messages_as_conversation(cli_instance.session_id)
+        messages = session_db.messages.all_as_conversation(cli_instance.session_id)
         assert len(messages) == 4  # All 4 messages copied
 
     def test_branch_preserves_parent_link(self, cli_instance, session_db):
@@ -94,18 +100,18 @@ class TestBranchCommandCLI:
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
-        new_session = session_db.get_session(cli_instance.session_id)
-        assert new_session["parent_session_id"] == original_id
+        branch_info = session_db.branches.get_session_branch_info(cli_instance.session_id)
+        assert branch_info["parent_session_id"] == original_id
 
-    def test_branch_ends_original_session(self, cli_instance, session_db):
-        """The original session should be marked as ended with 'branched' reason."""
+    def test_branch_preserves_original_session(self, cli_instance, session_db):
+        """Branching is non-destructive and leaves the original session active."""
         from cli import HermesCLI
         original_id = cli_instance.session_id
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
-        original = session_db.get_session(original_id)
-        assert original["end_reason"] == "branched"
+        original = session_db.sessions.get(original_id)
+        assert original["ended_at"] is None
 
     def test_branch_with_custom_name(self, cli_instance, session_db):
         """Custom branch name should be used as the title."""
@@ -113,7 +119,7 @@ class TestBranchCommandCLI:
 
         HermesCLI._handle_branch_command(cli_instance, "/branch refactor approach")
 
-        title = session_db.get_session_title(cli_instance.session_id)
+        title = session_db.sessions.get_title(cli_instance.session_id)
         assert title == "refactor approach"
 
     def test_branch_default_title_lineage(self, cli_instance, session_db):
@@ -122,7 +128,7 @@ class TestBranchCommandCLI:
 
         HermesCLI._handle_branch_command(cli_instance, "/branch")
 
-        title = session_db.get_session_title(cli_instance.session_id)
+        title = session_db.sessions.get_title(cli_instance.session_id)
         assert title == "My Coding Session #2"
 
     def test_branch_empty_conversation(self, cli_instance, session_db):

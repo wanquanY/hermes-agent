@@ -39,6 +39,22 @@ def test_normalize_usage_openai_subtracts_cached_prompt_tokens():
     assert normalized.output_tokens == 700
 
 
+def test_normalize_usage_chat_completions_reads_reasoning_tokens():
+    usage = SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=40,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=25),
+    )
+
+    normalized = normalize_usage(
+        usage,
+        provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert normalized.reasoning_tokens == 25
+
+
 def test_normalize_usage_openai_reads_top_level_anthropic_cache_fields():
     """Some OpenAI-compatible proxies (OpenRouter, Vercel AI Gateway, Cline) expose
     Anthropic-style cache token counts at the top level of the usage object when

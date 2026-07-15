@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -20,7 +21,7 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-06-15"
+    assert manifest["protocolVersion"] == "2026-07-12"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -31,11 +32,37 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     assert "state:run_event_log" in manifest["stateFeatures"]
     assert "state:team_mission_graph" in manifest["stateFeatures"]
     assert "state:team_mission_conversation" in manifest["stateFeatures"]
-    assert "state:team_mission_memory" in manifest["stateFeatures"]
+    assert "state:conversation_memory" in manifest["stateFeatures"]
     assert "state:team_capability_snapshot" in manifest["stateFeatures"]
     assert "state:runtime_scope_key" in manifest["stateFeatures"]
     assert "state:transient_session" in manifest["stateFeatures"]
+    assert manifest["timelineContract"] == {
+        "contractVersion": "3.1",
+        "capabilities": {
+            "cursor": {
+                "afterSeq": True,
+                "afterId": True,
+                "beforeSeq": True,
+                "beforeId": True,
+            },
+            "history": {"canonical": False},
+            "toolEvents": {"canonical": True},
+        },
+        "deprecations": [],
+    }
+    assert "interaction.persistent" not in json.dumps(manifest["timelineContract"])
+    assert "runStateMachine.singleEntrypoint" not in json.dumps(manifest["timelineContract"])
+    assert "runtimeSourceSeq" not in manifest["timelineContract"]["deprecations"]
     assert manifest["missingCapabilities"] == []
+
+
+def test_dovie_gateway_manifest_does_not_probe_legacy_sessiondb():
+    source = (Path(__file__).resolve().parents[1] / "dovie_extension" / "manifest.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "hermes_state" not in source
+    assert "SessionDB" not in source
 
 
 def test_dovie_gateway_contract_is_served_by_extension_manifest():
@@ -43,7 +70,7 @@ def test_dovie_gateway_contract_is_served_by_extension_manifest():
     extension = load_extension()
     assert isinstance(extension, DovieHermesExtension)
     assert extension.register_capabilities()["extensionVersion"] == extension.version
-    assert "run.events" in extension.gateway_method_overrides()
+    assert extension.gateway_method_overrides() == frozenset()
     assert extension.gateway_method_overrides() == dovie_gateway_method_overrides()
 
 
@@ -55,9 +82,15 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-06-15"
+    assert response["result"]["protocolVersion"] == "2026-07-12"
+    assert response["result"]["timelineContract"]["contractVersion"] == "3.1"
+    assert response["result"]["timelineContract"]["capabilities"]["cursor"]["afterSeq"] is True
+    assert response["result"]["timelineContract"]["capabilities"]["history"]["canonical"] is False
+    assert response["result"]["timelineContract"]["capabilities"]["toolEvents"]["canonical"] is True
+    assert response["result"]["timelineContract"]["deprecations"] == []
     assert "run.submit" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
+    assert "session.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
     assert "conversation.render_snapshot" in response["result"]["methods"]
     assert "team_mission.create" in response["result"]["methods"]
@@ -75,7 +108,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in response["result"]["methods"]
     assert "team_mission.conversation.list" in response["result"]["methods"]
     assert "team_mission.conversation.participants" in response["result"]["methods"]
-    assert "team_mission.conversation.runtime_session_ids" in response["result"]["methods"]
+    assert "team_mission.conversation.execution_session_ids" in response["result"]["methods"]
     assert "team_mission.conversation.rename" in response["result"]["methods"]
     assert "team_mission.conversation.delete" in response["result"]["methods"]
     assert "team_mission.message.submit" in response["result"]["methods"]
@@ -89,13 +122,12 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.plan.complete" in response["result"]["methods"]
     assert "team_mission.plan.approve" in response["result"]["methods"]
     assert "team_mission.schedule.ready" in response["result"]["methods"]
-    assert "team_mission.memory.compile" in response["result"]["methods"]
-    assert "team_mission.memory.pack" in response["result"]["methods"]
-    assert "team_mission.memory.slice" in response["result"]["methods"]
-    assert "team_mission.memory.list" in response["result"]["methods"]
-    assert "team_mission.memory.update" in response["result"]["methods"]
-    assert "team_mission.memory.delete" in response["result"]["methods"]
-    assert "team_mission.memory.events" in response["result"]["methods"]
+    assert "conversation.memory.propose" in response["result"]["methods"]
+    assert "conversation.memory.commit" in response["result"]["methods"]
+    assert "conversation.memory.invalidate" in response["result"]["methods"]
+    assert "conversation.memory.list" in response["result"]["methods"]
+    assert "conversation.activity.context.change" in response["result"]["methods"]
+    assert "conversation.context.summary.list" in response["result"]["methods"]
     assert "session.usage" in response["result"]["methods"]
     assert "session.status" in response["result"]["methods"]
     assert "session.message_metadata.merge" in response["result"]["methods"]
@@ -131,7 +163,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.conversation.render" in server._methods
     assert "team_mission.conversation.list" in server._methods
     assert "team_mission.conversation.participants" in server._methods
-    assert "team_mission.conversation.runtime_session_ids" in server._methods
+    assert "team_mission.conversation.execution_session_ids" in server._methods
     assert "team_mission.conversation.rename" in server._methods
     assert "team_mission.conversation.delete" in server._methods
     assert "team_mission.message.submit" in server._methods
@@ -145,13 +177,12 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "team_mission.plan.complete" in server._methods
     assert "team_mission.plan.approve" in server._methods
     assert "team_mission.schedule.ready" in server._methods
-    assert "team_mission.memory.compile" in server._methods
-    assert "team_mission.memory.pack" in server._methods
-    assert "team_mission.memory.slice" in server._methods
-    assert "team_mission.memory.list" in server._methods
-    assert "team_mission.memory.update" in server._methods
-    assert "team_mission.memory.delete" in server._methods
-    assert "team_mission.memory.events" in server._methods
+    assert "conversation.memory.propose" in server._methods
+    assert "conversation.memory.commit" in server._methods
+    assert "conversation.memory.invalidate" in server._methods
+    assert "conversation.memory.list" in server._methods
+    assert "conversation.activity.context.change" in server._methods
+    assert "conversation.context.summary.list" in server._methods
     assert "session.usage" in server._methods
     assert "session.status" in server._methods
     assert "session.branch" in server._methods
@@ -193,7 +224,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.conversation.render": "tui_gateway.methods.conversation_render_snapshot",
         "team_mission.conversation.list": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.participants": "hermes_team_mission.gateway.conversation_methods",
-        "team_mission.conversation.runtime_session_ids": "hermes_team_mission.gateway.conversation_methods",
+        "team_mission.conversation.execution_session_ids": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.rename": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.conversation.delete": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.graph": "hermes_team_mission.gateway.runtime_methods",
@@ -212,13 +243,12 @@ def test_extracted_gateway_methods_own_registered_handlers():
         "team_mission.plan.approve": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.schedule.ready": "hermes_team_mission.gateway.runtime_methods",
         "team_mission.node.history": "hermes_team_mission.gateway.history_methods",
-        "team_mission.memory.compile": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.pack": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.slice": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.list": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.update": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.delete": "hermes_team_mission.gateway.memory_methods",
-        "team_mission.memory.events": "hermes_team_mission.gateway.memory_methods",
+        "conversation.memory.propose": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.commit": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.invalidate": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.memory.list": "hermes_team_mission.gateway.conversation_memory_methods",
+        "conversation.activity.context.change": "tui_gateway.methods.conversation_activity",
+        "conversation.context.summary.list": "hermes_team_mission.gateway.conversation_memory_methods",
     }
     for method_name, owner_module in expected_team_mission_owners.items():
         assert server._methods[method_name].__module__ == owner_module
@@ -244,14 +274,14 @@ def test_extracted_gateway_methods_own_registered_handlers():
 def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    db = SessionDB(db_path=tmp_path / "state.db")
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
     try:
-        db.create_session(session_id="stored-1", source="tui")
-        message_id = db.append_message(
+        db.sessions.create(session_id="stored-1", source="tui")
+        message_id = db.messages.append(
             "stored-1",
             role="assistant",
             content="已创建分身草案",
@@ -276,7 +306,7 @@ def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tm
         assert response["result"]["message"]["metadata"]["agentProfileDrafts"] == [
             {"draftId": "draft-1", "name": "产品经理分身"},
         ]
-        messages = db.get_messages_as_conversation("stored-1", include_storage_metadata=True)
+        messages = db.messages.all_as_conversation("stored-1", include_storage_metadata=True)
         assert messages[0]["metadata"]["agentProfileDrafts"] == [
             {"draftId": "draft-1", "name": "产品经理分身"},
         ]
@@ -287,26 +317,26 @@ def test_session_message_metadata_merge_json_rpc_persists_transcript_metadata(tm
 def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="stored-ordinary-1", source="tui")
-        db.append_message(
+        db.sessions.create(session_id="stored-ordinary-1", source="tui")
+        db.messages.append(
             "stored-ordinary-1",
             role="assistant",
             content="我会读取文件。",
             metadata={"run_id": "run-1", "turn_id": "turn-1"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "stored-ordinary-1",
             {
                 "type": "tool.complete",
                 "session_id": "runtime-1",
-                "stored_session_id": "stored-ordinary-1",
+                "conversation_session_id": "stored-ordinary-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "payload": {
@@ -314,6 +344,20 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
                     "name": "read_file",
                     "arguments": {"path": "README.md"},
                     "result_text": "ok",
+                },
+            },
+        )
+        db.runs.append_event(
+            "stored-ordinary-1",
+            {
+                "type": "message.delta",
+                "session_id": "runtime-1",
+                "conversation_session_id": "stored-ordinary-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {
+                    "mode": "replace",
+                    "text": "正在输出但尚未收到终结帧",
                 },
             },
         )
@@ -327,40 +371,57 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
 
         assert response["result"]["kind"] == "ordinary"
         assert response["result"]["renderReady"] is True
-        assert response["result"]["stored_session_id"] == "stored-ordinary-1"
+        assert response["result"]["conversation_session_id"] == "stored-ordinary-1"
         assert response["result"]["messages"][0]["text"] == "我会读取文件。"
-        assert response["result"]["runEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-read-1"
+        run_events = response["result"]["runEvents"]
+        assert [event["type"] for event in run_events] == ["tool.complete", "message.delta"]
+        assert run_events[0]["payload"]["tool_id"] == "tool-read-1"
+        assert run_events[1]["payload"]["text"] == "正在输出但尚未收到终结帧"
         assert response["result"]["projection"]["source"] == "conversation.render_snapshot"
+
+        db.runs.terminate(
+            run_id="run-1",
+            session_id="stored-ordinary-1",
+            target_status="completed",
+            cause="worker_emitted",
+        )
+        completed_response = server._methods["conversation.render_snapshot"](
+            2,
+            {"session_id": "stored-ordinary-1", "limit": 50},
+        )
+        assert all(
+            event["type"] != "message.delta"
+            for event in completed_response["result"]["runEvents"]
+        )
     finally:
         db.close()
 
 
-def test_conversation_render_snapshot_returns_completed_team_projection_without_historical_runtime_events(tmp_path, monkeypatch):
+def test_conversation_render_snapshot_returns_completed_team_projection_without_runtime_replay_events(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
-        db.append_message(
+        db.sessions.create(session_id="team-session-1", source="team_mission")
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="团队任务完成。",
             metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "tool.complete",
                 "seq": 3,
                 "session_id": "runtime-team-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-run-1",
                 "turn_id": "team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -373,7 +434,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
         )
@@ -394,14 +455,11 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["renderReady"] is True
         assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
-        assert response["result"]["stored_session_id"] == "team-session-1"
+        assert response["result"]["conversation_session_id"] == "team-session-1"
         assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["runEvents"] == []
-        assert len(response["result"]["toolEvents"]) == 1
-        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
-        assert response["result"]["toolEvents"][0]["payload"]["name"] == "team_mission_start_task"
+        assert response["result"]["toolEvents"] == []
     finally:
         db.close()
 
@@ -409,28 +467,28 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
 def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
-        db.append_message(
+        db.sessions.create(session_id="team-session-1", source="team_mission")
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="团队房间首屏消息。",
             metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "tool.complete",
                 "seq": 5,
                 "session_id": "runtime-team-1",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-run-1",
                 "turn_id": "team-turn-1",
                 "payload": {
@@ -442,7 +500,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -454,7 +512,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         db.upsert_team_mission_result(
             mission_id="mission-1",
@@ -483,7 +541,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["renderReady"] is True
         assert response["result"]["projection"]["source"] == "team_mission.conversation.render"
-        assert response["result"]["stable_session_id"] == "team-session-1"
+        assert response["result"]["conversation_session_id"] == "team-session-1"
         assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
         assert response["result"]["mission"]["mission_id"] == "mission-1"
         assert response["result"]["projection"]["leaderReportStatus"] == "pending"
@@ -491,9 +549,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["projection"]["activeResult"]["status"] == "completed"
         assert response["result"]["messages"][0]["text"] == "团队房间首屏消息。"
         assert response["result"]["runEvents"] == []
-        assert len(response["result"]["toolEvents"]) == 1
-        assert response["result"]["toolEvents"][0]["type"] == "tool.complete"
-        assert response["result"]["toolEvents"][0]["payload"]["tool_id"] == "team-tool-1"
+        assert response["result"]["toolEvents"] == []
         watermarks = response["result"]["projection"]["activityWatermarks"]
         assert {item["activity_id"] for item in watermarks} >= {
             "chat:team-session-1",
@@ -511,59 +567,59 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
 def test_conversation_render_snapshot_returns_active_team_structural_runtime_events(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
-        db.append_message(
+        db.sessions.create(session_id="team-session-1", source="team_mission")
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="团队任务进行中。",
             metadata={"run_id": "completed-run-1", "turn_id": "completed-turn-1"},
         )
-        db.upsert_run(
+        db.runs.upsert(
             run_id="active-team-run-1",
             session_id="team-session-1",
             runtime_scope_key="team:conversation-1:leader",
             turn_id="active-team-turn-1",
-            runtime_session_id="runtime-team-active",
+            execution_session_id="runtime-team-active",
             status="running",
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "message.delta",
                 "session_id": "runtime-team-old",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "completed-run-1",
                 "turn_id": "completed-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
                 "payload": {"text": "old"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "message.delta",
                 "session_id": "runtime-team-active",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "active-team-run-1",
                 "turn_id": "active-team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
                 "payload": {"text": "active"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "tool.start",
                 "session_id": "runtime-team-active",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "active-team-run-1",
                 "turn_id": "active-team-turn-1",
                 "runtime_scope_key": "team:conversation-1:leader",
@@ -572,7 +628,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-active",
@@ -593,9 +649,15 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["conversation"]["running"] is True
         assert response["result"]["conversation"]["active_run_id"] == "active-team-run-1"
-        assert [event["run_id"] for event in response["result"]["runEvents"]] == ["active-team-run-1"]
-        assert [event["type"] for event in response["result"]["runEvents"]] == ["tool.start"]
-        assert response["result"]["runEvents"][0]["payload"]["tool_id"] == "tool-1"
+        assert [event["run_id"] for event in response["result"]["runEvents"]] == [
+            "active-team-run-1",
+            "active-team-run-1",
+        ]
+        assert [event["type"] for event in response["result"]["runEvents"]] == [
+            "message.delta",
+            "tool.start",
+        ]
+        assert response["result"]["runEvents"][1]["payload"]["tool_id"] == "tool-1"
     finally:
         db.close()
 
@@ -627,17 +689,17 @@ def test_conversation_render_snapshot_cap_drops_oversized_single_items():
 def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
+        db.sessions.create(session_id="team-session-1", source="team_mission")
         shared_run_id = "team-mission:mission-1:conversation:run-synthesis"
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="第一轮汇总。",
@@ -650,12 +712,12 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
                 },
             },
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="user",
             content="继续。",
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="第二轮汇总。",
@@ -670,7 +732,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -682,7 +744,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -715,28 +777,28 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
 def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_summary(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
-        db.append_message(
+        db.sessions.create(session_id="team-session-1", source="team_mission")
+        db.messages.append(
             "team-session-1",
             role="user",
             content="开始团队任务。",
             metadata={"transcript_activity_kind": "mission_start"},
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="节点内部细节。",
             metadata={"transcript_activity_kind": "mission_node"},
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="最终汇总。",
@@ -750,7 +812,7 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -762,7 +824,7 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -794,36 +856,36 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
 def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_messages(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session(session_id="team-session-1", source="team_mission")
+        db.sessions.create(session_id="team-session-1", source="team_mission")
         shared_run_id = "team-leader-run-1"
         shared_turn_id = "team-leader-turn-1"
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="user",
             content="创建团队任务。",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="好的，开始创建。",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="tool",
             content='{"success": true}',
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="团队任务已接受。",
@@ -831,7 +893,7 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
         )
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-1",
+            conversation_session_id="team-session-1",
             team_id="team-1",
             title="团队会话",
             active_mission_id="mission-1",
@@ -843,7 +905,7 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
             title="团队任务",
             objective="测试",
             status="completed",
-            metadata={"stableTeamSessionId": "team-session-1"},
+            metadata={"conversationTeamSessionId": "team-session-1"},
         )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -877,7 +939,7 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
 
     from tui_gateway import server
 
-    agent = SimpleNamespace()
+    agent = SimpleNamespace(reasoning_config=None)
     session = {"running": False, "agent": agent}
     monkeypatch.setitem(server._sessions, "runtime-1", session)
     calls = []
@@ -896,6 +958,9 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
                 "id": "gpt-5",
                 "catalog_source": "dovie_model_registry",
                 "provider": "openai",
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["low", "medium", "high"],
+                "reasoning_effort": "high",
             },
         },
     )
@@ -914,8 +979,13 @@ def test_model_set_gateway_method_uses_stable_params(monkeypatch):
         "id": "gpt-5",
         "catalog_source": "dovie_model_registry",
         "provider": "openai",
+        "reasoning_enabled": True,
+        "reasoning_efforts": ["low", "medium", "high"],
+        "reasoning_effort": "high",
     }
     assert agent.model_descriptor == session["model_descriptor"]
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+    assert agent.request_overrides["reasoning_effort"] == "high"
 
 
 def test_model_set_rejects_mismatched_catalog_descriptor(monkeypatch):
@@ -953,6 +1023,7 @@ def test_model_set_same_session_model_is_network_free(monkeypatch):
         base_url="https://api.doviemate.com/api/v1/llm-proxy/v1",
         api_key="runtime-token",
         api_mode="chat_completions",
+        reasoning_config=None,
     )
     session = {"running": False, "agent": agent}
     monkeypatch.setitem(server._sessions, "runtime-same-model", session)
@@ -986,6 +1057,124 @@ def test_model_set_same_session_model_is_network_free(monkeypatch):
         "base_url": "https://api.doviemate.com/api/v1/llm-proxy/v1",
         "api_mode": "chat_completions",
     }
+
+
+def test_worker_prompt_uses_preselected_control_plane_model_without_switch_probe(
+    monkeypatch,
+):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+    switch_calls = []
+
+    def unexpected_switch(*args, **kwargs):
+        switch_calls.append((args, kwargs))
+        raise AssertionError("worker bootstrap must not enter remote model validation")
+
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(server, "_apply_model_switch", unexpected_switch)
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-worker",
+        session,
+        "glm-5.2",
+        {
+            "id": "glm-5.2",
+            "reasoning_enabled": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert switch_calls == []
+    assert session["model_override"] == {
+        "model": "glm-5.2",
+        "model_explicit": True,
+    }
+    assert session["model_descriptor"] == {
+        "id": "glm-5.2",
+        "reasoning_enabled": True,
+        "reasoning_effort": "high",
+    }
+
+
+def test_worker_prompt_does_not_probe_models_when_optional_descriptor_is_absent(
+    monkeypatch,
+):
+    """Internal worker routing already selected the model in RunStartFrame."""
+
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+
+    def unexpected_switch(*_args, **_kwargs):
+        raise AssertionError("worker bootstrap must not probe relay /models")
+
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(server, "_apply_model_switch", unexpected_switch)
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-worker",
+        session,
+        "glm-5.2",
+        {},
+    )
+
+    assert session["model_override"] == {
+        "model": "glm-5.2",
+        "model_explicit": True,
+    }
+    assert "model_descriptor" not in session
+
+
+def test_direct_prompt_still_uses_canonical_model_switch(monkeypatch):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    session = {
+        "agent": None,
+        "model_override": {
+            "model": "glm-5.2",
+            "model_explicit": True,
+        },
+    }
+    switch_calls = []
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", False)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda sid, active_session, model, **kwargs: switch_calls.append(
+            (sid, active_session, model, kwargs)
+        ),
+    )
+
+    prompt_methods._apply_prompt_model_selection(
+        "runtime-direct",
+        session,
+        "glm-5.2",
+        {"id": "glm-5.2"},
+    )
+
+    assert switch_calls == [(
+        "runtime-direct",
+        session,
+        "glm-5.2",
+        {"parsed_flags": ("glm-5.2", "", False, False, True)},
+    )]
+    assert session["model_descriptor"] == {"id": "glm-5.2"}
 
 
 def test_prompt_model_selection_is_session_scoped(monkeypatch):
@@ -1023,6 +1212,155 @@ def test_prompt_model_selection_is_session_scoped(monkeypatch):
         "id": "gpt-5",
         "catalog_source": "dovie_model_registry",
     }
+
+
+def test_worker_prompt_failure_defers_terminal_transition_to_main(monkeypatch):
+    from tui_gateway import process_role, server
+    from tui_gateway.methods import prompt as prompt_methods
+
+    db_lookups = []
+    monkeypatch.setattr(process_role, "IS_WORKER_PROCESS", True)
+    monkeypatch.setattr(
+        server,
+        "_db_for_stable_session",
+        lambda session_id: db_lookups.append(session_id),
+    )
+
+    prompt_methods._mark_prompt_run_failed(
+        run_id="run-worker-failure",
+        conversation_session_id="conversation-worker-failure",
+        runtime_scope_key="profile:test",
+        turn_id="turn-worker-failure",
+        message="preflight failed",
+    )
+
+    assert db_lookups == []
+
+
+def test_pending_model_descriptor_is_replayed_when_agent_is_bound():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import (
+        bind_session_agent,
+        set_session_model_descriptor,
+    )
+
+    session = {"agent": None}
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "gpt-5.6-luna",
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+            "reasoning_effort": "xhigh",
+            "request_params": {"reasoning_effort": "medium"},
+        },
+    )
+    agent = SimpleNamespace(
+        reasoning_config=None,
+        request_overrides={"service_tier": "priority"},
+    )
+
+    bind_session_agent(session, agent)
+
+    assert session["agent"] is agent
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+    assert agent.request_overrides == {
+        "service_tier": "priority",
+        "reasoning_effort": "xhigh",
+    }
+
+
+def test_clearing_model_descriptor_restores_shadowed_request_override():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+    agent = SimpleNamespace(
+        reasoning_config=None,
+        request_overrides={"reasoning_effort": "low", "service_tier": "priority"},
+    )
+    session = {"agent": agent}
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "gpt-5.6-luna",
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+            "reasoning_effort": "xhigh",
+            "request_params": {"reasoning_effort": "medium"},
+        },
+    )
+    assert agent.request_overrides["reasoning_effort"] == "xhigh"
+
+    set_session_model_descriptor(session, {}, clear_if_empty=True)
+
+    assert agent.request_overrides == {
+        "reasoning_effort": "low",
+        "service_tier": "priority",
+    }
+
+
+def test_model_set_clears_previous_reasoning_override_for_model_default(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    agent = SimpleNamespace(reasoning_config={"enabled": True, "effort": "max"})
+    session = {"running": False, "agent": agent}
+    monkeypatch.setitem(server._sessions, "runtime-default", session)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda _session_id, _session, model, **_kwargs: {"value": model, "warning": ""},
+    )
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "custom-reasoner",
+            "session_id": "runtime-default",
+            "model_descriptor": {
+                "id": "custom-reasoner",
+                "reasoning_enabled": True,
+            },
+        },
+    )
+
+    assert "error" not in response
+    assert agent.reasoning_config is None
+
+
+def test_model_set_applies_binary_reasoning_selection(monkeypatch):
+    from types import SimpleNamespace
+
+    from tui_gateway import server
+
+    agent = SimpleNamespace(reasoning_config=None)
+    session = {"running": False, "agent": agent}
+    monkeypatch.setitem(server._sessions, "runtime-binary", session)
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda _session_id, _session, model, **_kwargs: {"value": model, "warning": ""},
+    )
+
+    response = server._methods["model.set"](
+        1,
+        {
+            "model": "qwen3.6-plus",
+            "session_id": "runtime-binary",
+            "model_descriptor": {
+                "id": "qwen3.6-plus",
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["none", "enabled"],
+                "reasoning_effort": "enabled",
+            },
+        },
+    )
+
+    assert "error" not in response
+    assert agent.reasoning_config == {"enabled": True}
 
 
 def test_model_set_gateway_method_rejects_running_session(monkeypatch):
@@ -1083,11 +1421,8 @@ def test_profile_prepare_runtime_preserves_draft_scope():
     assert response["result"]["transient"] is True
 
 
-def test_runtime_ensure_is_no_op_after_phase6():
-    """Phase 6: runtime.ensure no longer pre-warms a sub-sidecar
-    (``WorkerSupervisor`` spawns workers lazily on the first
-    ``run.submit``). It's kept as a frontend-compat stub that just
-    echoes the scope + reports ready."""
+def test_runtime_ensure_never_reports_false_readiness_outside_async_dispatch():
+    """The registry fallback must not resurrect the old fake-ready ABI."""
     from tui_gateway import server
 
     response = server._methods["runtime.ensure"](
@@ -1103,19 +1438,16 @@ def test_runtime_ensure_is_no_op_after_phase6():
         },
     )
 
-    assert response["result"]["ready"] is True
-    assert response["result"]["status"] == "ready"
-    assert response["result"]["runtime_scope_key"] == "profile:agent-a"
-    # No worker spawned in-band — the supervisor-spawn happens on
-    # run.submit, not here.
-    assert "worker" not in response["result"]
+    assert response["error"]["code"] == 5024
+    assert response["error"]["data"]["ready"] is False
+    assert response["error"]["data"]["runtime_scope_key"] == "profile:agent-a"
 
 
 def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):
     from tui_gateway import server
 
     monkeypatch.setattr(
-        "gateway.status.read_runtime_status",
+        "channels.runtime_status.read_runtime_status",
         lambda: {"gateway_state": "running", "pid": 1234},
     )
     response = server._methods["runtime.status"](1, {})
@@ -1126,18 +1458,18 @@ def test_runtime_status_returns_lightweight_diagnostics(monkeypatch):
 
 
 def test_session_db_persists_run_registry_and_event_log(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "tui", transient=True)
+        db.sessions.create("session-1", "tui", transient=True)
 
-        reservation = db.create_run_if_session_idle(
+        reservation = db.runs.reserve_if_idle(
             run_id="run-1",
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-1",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="queued",
             metadata={"source": "test"},
         )
@@ -1145,23 +1477,23 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
         assert reservation["conflict"] is None
         assert reservation["run"]["runtime_scope_key"] == "profile:agent-default"
 
-        conflict = db.create_run_if_session_idle(
+        conflict = db.runs.reserve_if_idle(
             run_id="run-2",
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-2",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="queued",
         )
         assert conflict["created"] is False
         assert conflict["conflict"]["run_id"] == "run-1"
 
-        event = db.append_run_event(
+        event = db.runs.append_event(
             "session-1",
             {
                 "type": "message.delta",
                 "session_id": "runtime-1",
-                "stored_session_id": "session-1",
+                "conversation_session_id": "session-1",
                 "run_id": "run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "profile:agent-default",
@@ -1175,13 +1507,13 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
         )
         assert event["seq"] == 1
 
-        events = db.list_run_events(
+        events = db.runs.list_events(
             "session-1",
             runtime_scope_key="profile:agent-default",
         )
         assert [item["seq"] for item in events] == [1]
 
-        run = db.get_run("run-1")
+        run = db.runs.get("run-1")
         assert run["last_seq"] == 1
         assert run["metadata"]["source"] == "test"
         assert run["metadata"]["gateway_pid"] == 4321
@@ -1194,22 +1526,22 @@ def test_session_db_persists_run_registry_and_event_log(tmp_path):
 
 
 def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "tui")
-        first = db.create_run_if_session_idle(
+        db.sessions.create("session-1", "tui")
+        first = db.runs.reserve_if_idle(
             run_id="run-1",
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-1",
-            runtime_session_id="runtime-1",
+            execution_session_id="runtime-1",
             status="running",
         )
         assert first["created"] is True
 
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             {
                 "type": "message.complete",
@@ -1221,9 +1553,10 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
                 "payload": {"status": "complete"},
             },
         )
-        assert db.get_run("run-1")["status"] == "completed"
+        assert db.runs.get("run-1")["status"] == "completed"
+        terminal_seq = db.runs.list_events("session-1")[-1]["seq"]
 
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             {
                 "type": "message.delta",
@@ -1236,22 +1569,25 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
             },
         )
 
-        terminal = db.get_run("run-1")
+        terminal = db.runs.get("run-1")
         assert terminal["status"] == "completed"
-        assert terminal["last_seq"] == 2
+        assert terminal["last_seq"] == terminal_seq
         assert terminal["completed_at"] is not None
-        assert db.list_run_events(
+        events = db.runs.list_events("session-1", include_internal=True)
+        assert [event["seq"] for event in events] == [terminal_seq]
+        assert [event["type"] for event in events] == ["message.complete"]
+        assert db.runs.list_events(
             "session-1",
             active_only=True,
             runtime_scope_key="profile:agent-default",
         ) == []
 
-        second = db.create_run_if_session_idle(
+        second = db.runs.reserve_if_idle(
             run_id="run-2",
             session_id="session-1",
             runtime_scope_key="profile:agent-default",
             turn_id="turn-2",
-            runtime_session_id="runtime-2",
+            execution_session_id="runtime-2",
             status="queued",
         )
         assert second["created"] is True
@@ -1261,18 +1597,18 @@ def test_session_db_keeps_terminal_run_closed_after_late_delta(tmp_path):
 
 
 def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, caplog):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-recovered", "tui")
+        db.sessions.create("team-session-recovered", "tui")
         stale_time = time.time() - 301
-        db.upsert_run(
+        db.runs.upsert(
             run_id="stale-run",
             session_id="team-session-recovered",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1282,7 +1618,7 @@ def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, c
             },
         )
 
-        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+        with caplog.at_level(logging.WARNING, logger="tui_gateway.services.run_control"):
             status = run_control.session_status(
                 "team-session-recovered",
                 db=db,
@@ -1290,27 +1626,32 @@ def test_run_control_session_status_recovers_dead_gateway_active_run(tmp_path, c
             )
 
         assert status["running"] is False
-        assert "[dovie-run-recovery] active-run-scan" in caplog.text
-        stale = db.get_run("stale-run")
+        assert "[dovie-run-control] orphaned-active-runs-recovered" in caplog.text
+        stale = db.runs.get("stale-run")
         assert stale["status"] == "failed"
         assert stale["error"] == "gateway process restarted before run reached terminal state"
-        assert db.list_run_events("team-session-recovered")[-1]["type"] == "message.complete"
+        assert stale["metadata"]["recovery_decision"] == (
+            "same-pid-different-gateway-instance"
+        )
+        assert stale["terminal_seq"] > 0
+        assert stale["terminal_cause"] == "worker_crashed"
+        assert db.runs.list_events("team-session-recovered")[-1]["type"] == "error"
     finally:
         db.close()
 
 
 def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, caplog):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-live", "tui")
-        db.upsert_run(
+        db.sessions.create("team-session-live", "tui")
+        db.runs.upsert(
             run_id="live-run",
             session_id="team-session-live",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-live",
+            execution_session_id="runtime-live",
             status="running",
             metadata={
                 "gateway_pid": os.getpid(),
@@ -1318,7 +1659,7 @@ def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, c
             },
         )
 
-        with caplog.at_level(logging.WARNING, logger="hermes_state_runs"):
+        with caplog.at_level(logging.WARNING, logger="tui_gateway.services.run_control"):
             status = run_control.session_status(
                 "team-session-live",
                 db=db,
@@ -1326,24 +1667,24 @@ def test_run_control_session_status_does_not_warn_for_live_owner_run(tmp_path, c
             )
 
         assert status["running"] is True
-        assert db.get_run("live-run")["status"] == "running"
+        assert db.runs.get("live-run")["status"] == "running"
         assert "[dovie-run-recovery] active-run-scan" not in caplog.text
     finally:
         db.close()
 
 
 def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path, caplog):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-fresh", "tui")
-        db.upsert_run(
+        db.sessions.create("team-session-fresh", "tui")
+        db.runs.upsert(
             run_id="fresh-run",
             session_id="team-session-fresh",
             runtime_scope_key="profile:agent-default:version:v1",
-            runtime_session_id="runtime-fresh",
+            execution_session_id="runtime-fresh",
             status="running",
             metadata={
                 "gateway_pid": 999_999_998,
@@ -1359,25 +1700,25 @@ def test_run_control_session_status_does_not_fail_fresh_dead_owner_run(tmp_path,
             )
 
         assert status["running"] is True
-        assert db.get_run("fresh-run")["status"] == "running"
+        assert db.runs.get("fresh-run")["status"] == "running"
         assert "owner-pid-dead-fresh" in caplog.text or "[dovie-run-recovery] active-run-scan" not in caplog.text
     finally:
         db.close()
 
 
 def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, caplog):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-recent", "tui")
+        db.sessions.create("team-session-recent", "tui")
         recent_time = time.time() - 30
-        db.upsert_run(
+        db.runs.upsert(
             run_id="recent-run",
             session_id="team-session-recent",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-recent",
+            execution_session_id="runtime-recent",
             status="running",
             started_at=recent_time,
             updated_at=recent_time,
@@ -1395,24 +1736,26 @@ def test_run_control_session_status_recovers_recent_dead_owner_run(tmp_path, cap
             )
 
         assert status["running"] is False
-        assert db.get_run("recent-run")["status"] == "failed"
-        assert "owner-pid-dead" in caplog.text
+        recovered = db.runs.get("recent-run")
+        assert recovered["status"] == "failed"
+        assert recovered["metadata"]["recovery_decision"] == "owner-pid-dead"
+        assert "[dovie-run-control] orphaned-active-runs-recovered" in caplog.text
     finally:
         db.close()
 
 
 def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-stale-live", "tui")
+        db.sessions.create("team-session-stale-live", "tui")
         recent_time = time.time() - 30
-        db.upsert_run(
+        db.runs.upsert(
             run_id="dead-owner-run",
             session_id="team-session-stale-live",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale-live",
+            execution_session_id="runtime-stale-live",
             status="running",
             started_at=recent_time,
             updated_at=recent_time,
@@ -1422,8 +1765,8 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
             },
         )
 
-        failed = db.fail_orphaned_active_runs(
-            live_runtime_session_ids={"runtime-stale-live"},
+        failed = db.runs.fail_orphaned(
+            live_execution_session_ids={"runtime-stale-live"},
             current_pid=os.getpid(),
             current_gateway_instance_id="current-gateway",
             stale_after_seconds=300,
@@ -1431,7 +1774,7 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
         )
 
         assert failed == 1
-        recovered = db.get_run("dead-owner-run")
+        recovered = db.runs.get("dead-owner-run")
         assert recovered["status"] == "failed"
         assert recovered["error"] == "runtime owner is no longer available"
     finally:
@@ -1439,18 +1782,18 @@ def test_dead_owner_metadata_wins_over_stale_live_runtime_session_snapshot(tmp_p
 
 
 def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-submit", "tui")
+        db.sessions.create("team-session-submit", "tui")
         stale_time = time.time() - 301
-        db.upsert_run(
+        db.runs.upsert(
             run_id="stale-run",
             session_id="team-session-submit",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1461,11 +1804,11 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
         )
 
         reservation = run_control.create_run_if_session_idle(
-            stored_session_id="team-session-submit",
+            conversation_session_id="team-session-submit",
             run_id="next-run",
             turn_id="next-turn",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-current",
+            execution_session_id="runtime-current",
             metadata={
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": "current-gateway",
@@ -1476,7 +1819,7 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
         assert reservation["created"] is True
         assert reservation["conflict"] is None
         assert reservation["run"]["run_id"] == "next-run"
-        assert db.get_run("stale-run")["status"] == "failed"
+        assert db.runs.get("stale-run")["status"] == "failed"
     finally:
         db.close()
 
@@ -1484,19 +1827,19 @@ def test_run_control_reservation_recovers_dead_gateway_active_run(tmp_path):
 def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     run_methods = importlib.import_module("tui_gateway.methods.run")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-submit", "tui")
+        db.sessions.create("team-session-submit", "tui")
         stale_time = time.time() - 301
-        db.upsert_run(
+        db.runs.upsert(
             run_id="stale-run",
             session_id="team-session-submit",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1524,7 +1867,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
                     "status": "running",
                     "run_id": params["run_id"],
                     "turn_id": params["turn_id"],
-                    "stored_session_id": params["stored_session_id"],
+                    "conversation_session_id": params["conversation_session_id"],
                 },
             }
 
@@ -1533,7 +1876,7 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
         response = server._methods["run.submit"](
             1,
             {
-                "stored_session_id": "team-session-submit",
+                "conversation_session_id": "team-session-submit",
                 "client_run_id": "next-run",
                 "turn_id": "next-turn",
                 "runtime_scope_key": "team:conversation:leader",
@@ -1544,24 +1887,24 @@ def test_run_submit_recovers_dead_gateway_active_run_before_busy_check(tmp_path,
 
         assert "error" not in response
         assert response["result"]["run_id"] == "next-run"
-        assert db.get_run("stale-run")["status"] == "failed"
-        assert db.get_run("next-run")["status"] == "running"
+        assert db.runs.get("stale-run")["status"] == "failed"
+        assert db.runs.get("next-run")["status"] == "running"
     finally:
         db.close()
 
 
 def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-shutdown", "tui")
-        db.upsert_run(
+        db.sessions.create("team-session-shutdown", "tui")
+        db.runs.upsert(
             run_id="active-run",
             session_id="team-session-shutdown",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-live",
+            execution_session_id="runtime-live",
             turn_id="turn-1",
             status="running",
             metadata={
@@ -1587,11 +1930,11 @@ def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
             runtime_sid="runtime-live",
         )
 
-        run = db.get_run("active-run")
+        run = db.runs.get("active-run")
         assert run["status"] == "interrupted"
-        assert run["error"] == ""
-        assert db.list_run_events("team-session-shutdown")[-1]["type"] == "message.complete"
-        assert db.list_run_events("team-session-shutdown")[-1]["payload"]["status"] == "interrupted"
+        assert run["error"] == "gateway test_shutdown before run reached terminal state"
+        assert db.runs.list_events("team-session-shutdown")[-1]["type"] == "message.complete"
+        assert db.runs.list_events("team-session-shutdown")[-1]["payload"]["status"] == "interrupted"
     finally:
         db.close()
 
@@ -1599,24 +1942,24 @@ def test_gateway_shutdown_terminalizes_active_run(tmp_path, monkeypatch):
 def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, monkeypatch):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
         db.upsert_team_mission_conversation(
             conversation_id="conversation-1",
-            stable_session_id="team-session-resolve",
+            conversation_session_id="team-session-resolve",
             team_id="team-1",
             title="团队会话",
         )
         stale_time = time.time() - 301
-        db.upsert_run(
+        db.runs.upsert(
             run_id="stale-run",
             session_id="team-session-resolve",
             runtime_scope_key="team:conversation:leader",
-            runtime_session_id="runtime-stale",
+            execution_session_id="runtime-stale",
             status="running",
             started_at=stale_time,
             updated_at=stale_time,
@@ -1632,19 +1975,19 @@ def test_team_conversation_resolve_recovers_dead_gateway_active_run(tmp_path, mo
             {"identifier": "conversation-1"},
         )
 
-        assert response["result"]["conversation"]["stable_session_id"] == "team-session-resolve"
-        assert db.get_run("stale-run")["status"] == "failed"
+        assert response["result"]["conversation"]["conversation_session_id"] == "team-session-resolve"
+        assert db.runs.get("stale-run")["status"] == "failed"
     finally:
         db.close()
 
 
 def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-1", "tui")
-        db.append_run_event(
+        db.sessions.create("team-session-1", "tui")
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "mission.approval.requested",
@@ -1655,7 +1998,7 @@ def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp
                 "payload": {"mission_id": "mission-1"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "mission.strategy.actions",
@@ -1667,65 +2010,15 @@ def test_session_db_does_not_open_active_run_for_team_mission_control_events(tmp
             },
         )
 
-        assert db.get_run("team-mission:mission-1:conversation:plan") is None
-        assert db.get_session_run_status("team-session-1")["running"] is False
+        assert db.runs.get("team-mission:mission-1:conversation:plan") is None
+        assert db.runs.session_status("team-session-1")["running"] is False
 
-        next_run = db.create_run_if_session_idle(
+        next_run = db.runs.reserve_if_idle(
             run_id="leader-run-2",
             session_id="team-session-1",
             runtime_scope_key="team:conversation-1:leader-conversation",
             turn_id="leader-turn-2",
-            runtime_session_id="runtime-2",
-        )
-        assert next_run["created"] is True
-        assert next_run["conflict"] is None
-    finally:
-        db.close()
-
-
-def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
-    from hermes_state import SessionDB
-
-    db = SessionDB(tmp_path / "state.db")
-    try:
-        db.create_session("team-session-1", "tui")
-        stale_time = time.time() - 120
-        db.upsert_run(
-            run_id="team-mission:mission-1:conversation:legacy",
-            session_id="team-session-1",
-            runtime_scope_key="team_mission:mission-1",
-            runtime_session_id="runtime-control",
-            status="running",
-            started_at=stale_time,
-            updated_at=stale_time,
-        )
-        db.append_run_event(
-            "team-session-1",
-            {
-                "type": "mission.approval.requested",
-                "session_id": "runtime-control",
-                "run_id": "team-mission:mission-1:conversation:legacy",
-                "runtime_scope_key": "team_mission:mission-1",
-                "seq": 1,
-                "timestamp": stale_time,
-                "payload": {"mission_id": "mission-1"},
-            },
-        )
-        assert db.get_run("team-mission:mission-1:conversation:legacy")["status"] == "running"
-
-        status = db.get_session_run_status("team-session-1")
-
-        assert status["running"] is False
-        repaired = db.get_run("team-mission:mission-1:conversation:legacy")
-        assert repaired["status"] == "completed"
-        assert repaired["metadata"]["recovery_reason"] == "control-only run events are not active runtime runs"
-
-        next_run = db.create_run_if_session_idle(
-            run_id="leader-run-2",
-            session_id="team-session-1",
-            runtime_scope_key="team:conversation-1:leader-conversation",
-            turn_id="leader-turn-2",
-            runtime_session_id="runtime-2",
+            execution_session_id="runtime-2",
         )
         assert next_run["created"] is True
         assert next_run["conflict"] is None
@@ -1734,29 +2027,29 @@ def test_session_db_repairs_legacy_control_only_active_runs(tmp_path):
 
 
 def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("team-session-1", "tui")
-        db.upsert_run(
+        db.sessions.create("team-session-1", "tui")
+        db.runs.upsert(
             run_id="team-leader-run-1",
             session_id="team-session-1",
             runtime_scope_key="team:team-conversation-1:leader-conversation",
             turn_id="turn-1",
-            runtime_session_id="runtime-leader",
+            execution_session_id="runtime-leader",
             status="running",
             metadata={
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": "test-live-worker",
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             {
                 "type": "session.info",
                 "session_id": "runtime-leader",
-                "stored_session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
                 "run_id": "team-leader-run-1",
                 "turn_id": "turn-1",
                 "runtime_scope_key": "team:team-conversation-1:leader-conversation",
@@ -1765,8 +2058,8 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
             },
         )
 
-        status = db.get_session_run_status("team-session-1")
-        run = db.get_run("team-leader-run-1")
+        status = db.runs.session_status("team-session-1")
+        run = db.runs.get("team-leader-run-1")
 
         assert status["running"] is True
         assert status["active_run_id"] == "team-leader-run-1"
@@ -1774,12 +2067,12 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
         assert run["status"] == "running"
         assert "recovery_reason" not in run["metadata"]
 
-        next_run = db.create_run_if_session_idle(
+        next_run = db.runs.reserve_if_idle(
             run_id="team-leader-run-2",
             session_id="team-session-1",
             runtime_scope_key="team:team-conversation-1:leader-conversation",
             turn_id="turn-2",
-            runtime_session_id="runtime-leader-2",
+            execution_session_id="runtime-leader-2",
         )
         assert next_run["created"] is False
         assert next_run["run"] is None
@@ -1789,17 +2082,17 @@ def test_session_db_does_not_repair_live_control_only_team_leader_run(tmp_path):
 
 
 def test_session_db_replays_run_events_by_runtime_scope(tmp_path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "tui")
+        db.sessions.create("session-1", "tui")
         for run_id, scope, seq, text in (
             ("run-v1", "profile:agent-a:version:v1", 1, "v1"),
             ("run-v2", "profile:agent-a:version:v2", 2, "v2"),
             ("run-default", "profile:agent-default", 3, "default"),
         ):
-            db.append_run_event(
+            db.runs.append_event(
                 "session-1",
                 {
                     "type": "message.delta",
@@ -1812,31 +2105,31 @@ def test_session_db_replays_run_events_by_runtime_scope(tmp_path):
                 },
             )
 
-        v1_events = db.list_run_events(
+        v1_events = db.runs.list_events(
             "session-1",
             runtime_scope_key="profile:agent-a:version:v1",
         )
         assert [item["run_id"] for item in v1_events] == ["run-v1"]
         assert [item["payload"]["text"] for item in v1_events] == ["v1"]
 
-        v2_events = db.list_run_events(
+        v2_events = db.runs.list_events(
             "session-1",
             runtime_scope_key="profile:agent-a:version:v2",
         )
         assert [item["run_id"] for item in v2_events] == ["run-v2"]
         assert [
             item["payload"]["text"]
-            for item in db.list_run_events("session-1", run_id="run-v2")
+            for item in db.runs.list_events("session-1", run_id="run-v2")
         ] == ["v2"]
 
-        assert db.list_run_events(
+        assert db.runs.list_events(
             "session-1",
             after_seq=2,
             runtime_scope_key="profile:agent-a:version:v1",
         ) == []
         assert [
             item["run_id"]
-            for item in db.list_run_events("session-1", after_seq=2)
+            for item in db.runs.list_events("session-1", after_seq=2)
         ] == ["run-default"]
     finally:
         db.close()

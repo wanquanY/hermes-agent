@@ -27,17 +27,17 @@ import pytest
 
 @pytest.fixture
 def hermes_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME so SessionDB.state_meta writes stay hermetic."""
+    """Isolated HERMES_HOME so goal state_meta writes stay hermetic."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    # Bust the goal module's DB cache so it re-resolves HERMES_HOME each test.
+    # Bust the goal module's store cache so it re-resolves HERMES_HOME each test.
     from hermes_cli import goals
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 def _make_cli_with_goal(session_id: str, goal_text: str = "build a thing"):

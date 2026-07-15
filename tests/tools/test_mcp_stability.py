@@ -131,10 +131,10 @@ class TestStdioPidTracking:
         monkeypatch.setattr(signal, "SIGKILL", fake_sigkill, raising=False)
 
         # Post-#21561 the alive check routes through
-        # ``gateway.status._pid_exists`` (so it's safe on Windows — see
+        # ``channels.runtime_status._pid_exists`` (so it's safe on Windows — see
         # bpo-14484). Return True so the SIGKILL escalation fires.
         with patch("tools.mcp_tool.os.kill") as mock_kill, \
-             patch("gateway.status._pid_exists", return_value=True), \
+             patch("channels.runtime_status._pid_exists", return_value=True), \
              patch("tools.mcp_tool.time.sleep") as mock_sleep:
             _kill_orphaned_mcp_children()
 

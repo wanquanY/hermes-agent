@@ -1,4 +1,4 @@
-"""Tests for the gateway's destructive-slash-confirm wrapper.
+"""Tests for the slash-command destructive-confirm runtime.
 
 When ``approvals.destructive_slash_confirm`` is True (default), /new,
 /reset, and /undo route through the slash-confirm primitive — native
@@ -15,9 +15,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from channels.slash_commands.confirmation import (
+    SlashConfirmationRuntime,
+    counter_id_factory,
+    maybe_confirm_destructive_slash,
+)
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -36,7 +41,7 @@ def _make_event(text: str) -> MessageEvent:
 
 def _make_runner():
     """Mirror tests/gateway/test_unknown_command.py::_make_runner."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -45,7 +50,7 @@ def _make_runner():
     adapter = MagicMock()
     adapter.send = AsyncMock()
     # No send_slash_confirm override -> button render returns None,
-    # _request_slash_confirm falls back to text path.
+    # request_slash_confirm falls back to text path.
     adapter.send_slash_confirm = AsyncMock(return_value=None)
     runner.adapters = {Platform.TELEGRAM: adapter}
 
@@ -77,6 +82,18 @@ def _make_runner():
     return runner
 
 
+def _runtime(runner) -> SlashConfirmationRuntime:
+    return SlashConfirmationRuntime(
+        adapters=runner.adapters,
+        session_key_for_source=runner._session_key_for_source,
+        read_user_config=runner._read_user_config,
+        save_config_value=getattr(runner, "_save_config_value", lambda *_args: True),
+        thread_metadata_for_source=runner._thread_metadata_for_source,
+        reply_anchor_for_event=runner._reply_anchor_for_event,
+        confirm_id_factory=counter_id_factory(runner._slash_confirm_counter),
+    )
+
+
 @pytest.mark.asyncio
 async def test_gate_off_runs_execute_immediately(monkeypatch):
     """When approvals.destructive_slash_confirm is False, the destructive
@@ -88,7 +105,8 @@ async def test_gate_off_runs_execute_immediately(monkeypatch):
     sentinel = "✨ Session reset!"
     execute = AsyncMock(return_value=sentinel)
 
-    result = await runner._maybe_confirm_destructive_slash(
+    result = await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",
@@ -110,7 +128,8 @@ async def test_gate_on_text_fallback_returns_prompt_without_executing(monkeypatc
 
     execute = AsyncMock(return_value="should not run yet")
 
-    result = await runner._maybe_confirm_destructive_slash(
+    result = await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",
@@ -138,7 +157,8 @@ async def test_gate_on_pending_confirm_registered(monkeypatch):
 
     execute = AsyncMock(return_value="reset done")
 
-    await runner._maybe_confirm_destructive_slash(
+    await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",
@@ -165,7 +185,8 @@ async def test_resolve_once_runs_execute_and_returns_result():
 
     execute = AsyncMock(return_value="✨ fresh session")
 
-    await runner._maybe_confirm_destructive_slash(
+    await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",
@@ -198,7 +219,8 @@ async def test_resolve_cancel_does_not_run_execute():
 
     execute = AsyncMock(side_effect=AssertionError("execute must NOT run on cancel"))
 
-    await runner._maybe_confirm_destructive_slash(
+    await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",
@@ -235,12 +257,12 @@ async def test_resolve_always_persists_opt_out_and_runs_execute(monkeypatch):
         saved[path] = value
         return True
 
-    import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "save_config_value", _fake_save)
+    runner._save_config_value = _fake_save
 
     execute = AsyncMock(return_value="✨ fresh")
 
-    await runner._maybe_confirm_destructive_slash(
+    await maybe_confirm_destructive_slash(
+        runtime=_runtime(runner),
         event=_make_event("/new"),
         command="new",
         title="/new",

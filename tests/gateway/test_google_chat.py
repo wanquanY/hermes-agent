@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
+from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
 
 # Platform uses _missing_() for dynamic members, so "google_chat" is
 # resolvable via Platform("google_chat") even without a static
@@ -129,7 +129,7 @@ import plugins.platforms.google_chat.adapter as _gc_mod  # noqa: E402
 
 _gc_mod.GOOGLE_CHAT_AVAILABLE = True
 
-from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome  # noqa: E402
+from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome  # noqa: E402
 from plugins.platforms.google_chat.adapter import (  # noqa: E402
     GoogleChatAdapter,
     _is_google_owned_host,
@@ -1288,12 +1288,12 @@ class TestEditMessage:
 
     @pytest.mark.asyncio
     async def test_edit_message_overrides_base_so_progress_pipeline_runs(self, adapter):
-        """The gateway tool-progress flow at gateway/run.py:10199 gates on
+        """The gateway tool-progress flow at hermes_gateway/runner.py:10199 gates on
         ``type(adapter).edit_message is BasePlatformAdapter.edit_message``.
         If our subclass doesn't override edit_message, no tool progress is
         ever shown to the user — so this test guards against a future
         accidental removal."""
-        from gateway.platforms.base import BasePlatformAdapter
+        from channels.platforms.base import BasePlatformAdapter
         from plugins.platforms.google_chat.adapter import GoogleChatAdapter
         assert GoogleChatAdapter.edit_message is not BasePlatformAdapter.edit_message
 
@@ -2577,9 +2577,9 @@ class TestAuthorizationEmailMatch:
         The adapter assigns ``user_id = sender_email`` so the generic
         check_ids path picks it up. No platform-specific bridge needed.
         """
-        from gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.config import GatewayConfig
+        from hermes_gateway.runner import GatewayRunner
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
         cfg = GatewayConfig()
@@ -2598,9 +2598,9 @@ class TestAuthorizationEmailMatch:
         assert runner._is_user_authorized(source) is True
 
     def test_allowlist_denies_wrong_email(self, monkeypatch):
-        from gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.config import GatewayConfig
+        from hermes_gateway.runner import GatewayRunner
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "alice@example.com")
         cfg = GatewayConfig()
@@ -2624,9 +2624,9 @@ class TestAuthorizationEmailMatch:
         """If sender has no email, ``user_id`` falls back to the resource
         name. Operators who allowlist by ``users/{id}`` still match.
         """
-        from gateway.config import GatewayConfig
-        from gateway.run import GatewayRunner
-        from gateway.session import SessionSource
+        from hermes_gateway.config import GatewayConfig
+        from hermes_gateway.runner import GatewayRunner
+        from hermes_gateway.session import SessionSource
 
         monkeypatch.setenv("GOOGLE_CHAT_ALLOWED_USERS", "users/77777")
         cfg = GatewayConfig()
@@ -2666,7 +2666,7 @@ class TestCronSchedulerRegistry:
         discover + manually invoke the register hook so the resolver sees
         ``cron_deliver_env_var``.
         """
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         if platform_registry.get("google_chat") is not None:
             return
         # Discover first so the plugin is loaded at all.
@@ -2685,7 +2685,7 @@ class TestCronSchedulerRegistry:
             manifest = _M()
             _manager = type("_Mgr", (), {"_plugin_platform_names": set()})()
             def register_platform(self, **kwargs):
-                from gateway.platform_registry import PlatformEntry
+                from channels.platform_registry import PlatformEntry
                 entry = PlatformEntry(source="plugin", **kwargs)
                 platform_registry.register(entry)
         _register(_Ctx())

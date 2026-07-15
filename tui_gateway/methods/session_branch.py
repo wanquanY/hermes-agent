@@ -69,11 +69,11 @@ def _branch_source_session(params: dict) -> tuple[str, str, dict | None]:
     requested_source = str(
         params.get("source_session_id")
         or params.get("sourceSessionId")
-        or params.get("stored_session_id")
-        or params.get("storedSessionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or ""
     ).strip()
-    requested_runtime = str(params.get("runtime_session_id") or params.get("runtimeSessionId") or "").strip()
+    requested_runtime = str(params.get("execution_session_id") or params.get("executionSessionId") or "").strip()
     requested_session = str(params.get("session_id") or params.get("sessionId") or "").strip()
     runtime_sid, live_session = _resolve_runtime_session(requested_runtime or requested_source or requested_session)
     source_key = requested_source
@@ -92,9 +92,9 @@ def _(rid, params: dict) -> dict:
     source_key = str(source_key or "").strip()
     if not source_key:
         return _err(rid, 4006, "source_session_id required")
-    found = db.get_session(source_key)
+    found = db.sessions.get(source_key)
     if not found:
-        by_title = db.get_session_by_title(source_key)
+        by_title = db.sessions.get_by_title(source_key)
         if by_title:
             source_key = by_title["id"]
             found = by_title
@@ -122,7 +122,7 @@ def _(rid, params: dict) -> dict:
     ).strip()
     new_key = str(params.get("new_session_id") or params.get("newSessionId") or "").strip() or _new_session_key()
     try:
-        branch_result = db.branch_session(
+        branch_result = db.branches.branch_session(
             source_session_id=source_key,
             new_session_id=new_key,
             branch_point=branch_point,
@@ -145,7 +145,7 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         return _err(rid, 5008, f"branch failed: {exc}")
 
-    stored_session_id = str(branch_result.get("stored_session_id") or new_key)
+    conversation_session_id = str(branch_result.get("conversation_session_id") or new_key)
     workspace = None
     cwd = ""
     try:
@@ -164,36 +164,36 @@ def _(rid, params: dict) -> dict:
                 cwd,
             )
         workspace = _bind_session_workspace(
-            session_id=stored_session_id,
+            session_id=conversation_session_id,
             cwd=cwd,
             workspace=workspace,
         )
     except Exception:
         workspace = workspace or None
 
-    runtime_session_id = ""
+    execution_session_id = ""
     activate = bool(params.get("activate", True))
     if activate:
-        runtime_session_id = uuid.uuid4().hex[:8]
+        execution_session_id = uuid.uuid4().hex[:8]
         try:
-            history = db.get_messages_as_conversation(
-                stored_session_id,
+            history = db.messages.all_as_conversation(
+                conversation_session_id,
                 include_ancestors=False,
                 include_storage_metadata=False,
             )
-            tokens = _set_session_context(stored_session_id, terminal_cwd=cwd)
+            tokens = _set_session_context(conversation_session_id, terminal_cwd=cwd)
             try:
                 agent = _make_agent(
-                    runtime_session_id,
-                    stored_session_id,
-                    session_id=stored_session_id,
+                    execution_session_id,
+                    conversation_session_id,
+                    session_id=conversation_session_id,
                     cwd=cwd,
                 )
             finally:
                 _clear_session_context(tokens)
             _init_session(
-                runtime_session_id,
-                stored_session_id,
+                execution_session_id,
+                conversation_session_id,
                 agent,
                 list(history),
                 cols=int(params.get("cols") or (live_session or {}).get("cols") or 80),
@@ -208,8 +208,8 @@ def _(rid, params: dict) -> dict:
     page_info = {}
     if hydrate == "tail":
         try:
-            page = db.get_messages_page_as_conversation(
-                stored_session_id,
+            page = db.messages.page_as_conversation(
+                conversation_session_id,
                 direction="tail",
                 limit=_bounded_page_limit(
                     params.get("message_limit", params.get("messageLimit")),
@@ -225,13 +225,13 @@ def _(rid, params: dict) -> dict:
 
     payload = {
         **branch_result,
-        "session_id": runtime_session_id,
-        "runtime_session_id": runtime_session_id,
-        "stored_session_id": stored_session_id,
+        "session_id": execution_session_id,
+        "execution_session_id": execution_session_id,
+        "conversation_session_id": conversation_session_id,
         "parent_session_id": source_key,
         "workspace": workspace,
         "messages": messages,
         "pageInfo": page_info,
     }
-    _emit("session.branched", runtime_session_id or stored_session_id, payload)
+    _emit("session.branched", execution_session_id or conversation_session_id, payload)
     return _ok(rid, payload)

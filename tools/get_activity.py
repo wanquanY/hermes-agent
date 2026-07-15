@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.registry import registry, tool_error, tool_result
-from tui_gateway.services.worker_db_proxy import get_default_worker_db_proxy
+from hermes_agent.orchestration.worker_db_proxy import get_default_worker_db_proxy
 
 
 GET_ACTIVITY_SCHEMA = {
@@ -35,7 +35,7 @@ def get_activity_tool(args: dict, **kwargs) -> dict[str, Any]:
     proxy = get_default_worker_db_proxy()
     if proxy is None:
         raise RuntimeError("get_activity requires worker DB IPC")
-    row = proxy.get_activity(activity_id)
+    row = proxy.activities.get(activity_id)
     if not row:
         return {"activity_id": activity_id, "found": False}
     result = dict(row)

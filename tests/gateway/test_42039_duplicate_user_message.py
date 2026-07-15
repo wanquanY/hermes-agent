@@ -21,10 +21,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource
+import hermes_gateway.runner as gateway_run
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
+from hermes_gateway.config import GatewayConfig, Platform
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource
+from hermes_gateway.session_navigation_commands import session_navigation_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 def _bootstrap(monkeypatch, tmp_path):
@@ -42,15 +46,18 @@ def _bootstrap(monkeypatch, tmp_path):
     runner._pending_approvals = {}
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._handle_active_session_busy_message = AsyncMock(return_value=False)
+    busy_session_runtime_for(runner).handle_active_session_busy_message = AsyncMock(
+        return_value=False
+    )
     runner._session_db = MagicMock()
-    runner._recover_telegram_topic_thread_id = lambda _source: None
+    session_navigation_for(runner).recover_telegram_topic_thread_id = lambda _source: None
     runner._cache_session_source = lambda _key, _source: None
-    runner._is_session_run_current = lambda _key, _gen: True
-    runner._begin_session_run_generation = lambda _key: 1
+    runtime_state = session_runtime_state_for(runner)
+    runtime_state.is_session_run_current = lambda _key, _gen: True
+    runtime_state.begin_session_run_generation = lambda _key: 1
     runner._reply_anchor_for_event = lambda _event: None
-    runner._get_guild_id = lambda _event: None
-    runner._should_send_voice_reply = lambda *_a, **_kw: False
+    voice_runtime_for(runner).get_guild_id = lambda _event: None
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
 

@@ -9,10 +9,10 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import cron.scheduler as cron_scheduler
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import run_agent
-from gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.session import SessionSource
 
 
 def _patch_agent_bootstrap(monkeypatch):

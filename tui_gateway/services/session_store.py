@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.services.storage_maintenance import run_startup_storage_maintenance
 
 
@@ -36,9 +37,7 @@ def get_session_db_for_home(
     create_if_missing: bool = True,
 ) -> SessionStoreResult:
     if session_db_factory is None:
-        from hermes_state import SessionDB
-
-        session_db_factory = SessionDB
+        session_db_factory = open_cli_session_store
 
     if active_home == default_home:
         if default_db is not None:

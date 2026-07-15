@@ -24,11 +24,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from hermes_gateway.reload_skills_command import reload_skills_command_for
+
 
 def _make_adapter():
     """Construct a DiscordAdapter without going through __init__ / token checks."""
-    from gateway.platforms.discord import DiscordAdapter
-    from gateway.platforms.base import Platform
+    from channels.platforms.discord import DiscordAdapter
+    from channels.platforms.base import Platform
     adapter = object.__new__(DiscordAdapter)
     adapter.config = MagicMock()
     adapter.config.extra = {}
@@ -198,7 +200,7 @@ class TestHandleReloadSkillsCallsRefreshSkillGroup:
 
         # Import without constructing a real runner — test the method
         # directly against an ``object.__new__`` instance.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = object.__new__(GatewayRunner)
 
         sync_refresh = MagicMock(return_value=(5, 0))
@@ -236,7 +238,7 @@ class TestHandleReloadSkillsCallsRefreshSkillGroup:
             runner._pending_skills_reload_notes = {}
 
             result = asyncio.get_event_loop().run_until_complete(
-                runner._handle_reload_skills_command(event)
+                reload_skills_command_for(runner).handle_reload_skills_command(event)
             )
 
         assert "Skills Reloaded" in result

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
-def _db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def _db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
-def _row(db: SessionDB, session_id: str) -> dict:
+def _row(db: CliSessionStore, session_id: str) -> dict:
     row = db._conn.execute(  # noqa: SLF001 - storage-level heal contract.
         "SELECT * FROM session_index WHERE session_id = ?",
         (session_id,),
@@ -19,7 +19,7 @@ def _row(db: SessionDB, session_id: str) -> dict:
 
 
 def _force_running_index(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     session_id: str,
     active_run_id: str,
@@ -28,7 +28,7 @@ def _force_running_index(
     conversation_id: str = "",
     mission_id: str = "",
 ) -> None:
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id=session_id,
         title=f"Conversation {session_id}",
         preview="preview",
@@ -39,7 +39,7 @@ def _force_running_index(
         running=True,
         status="running",
         active_run_id=active_run_id,
-        active_runtime_session_id=f"rt-{active_run_id}",
+        active_execution_session_id=f"rt-{active_run_id}",
         pending_approval_count=1,
         started_at=1.0,
         updated_at=2.0,
@@ -51,16 +51,16 @@ def _assert_idle(row: dict) -> None:
     assert row["status"] == "idle"
     assert row["waiting_approval"] == 0
     assert row["active_run_id"] == ""
-    assert row["active_runtime_session_id"] == ""
+    assert row["active_execution_session_id"] == ""
     assert row["pending_approval_count"] == 0
 
 
 def test_heal_clears_conversation_with_no_active_run(tmp_path: Path) -> None:
     db = _db(tmp_path)
-    db.upsert_run(run_id="run-terminal", session_id="conv-1", status="completed")
+    db.runs.upsert(run_id="run-terminal", session_id="conv-1", status="completed")
     _force_running_index(db, session_id="conv-1", active_run_id="run-terminal")
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     _assert_idle(_row(db, "conv-1"))
 
@@ -68,11 +68,11 @@ def test_heal_clears_conversation_with_no_active_run(tmp_path: Path) -> None:
 def test_heal_does_not_clear_conversation_with_active_member_chat_run(tmp_path: Path) -> None:
     db = _db(tmp_path)
     session_id = "memberchat:worker-1"
-    db.upsert_run(run_id="run-terminal", session_id=session_id, status="completed")
-    db.upsert_run(run_id="run-member-chat", session_id=session_id, status="running")
+    db.runs.upsert(run_id="run-terminal", session_id=session_id, status="completed")
+    db.runs.upsert(run_id="run-member-chat", session_id=session_id, status="running")
     _force_running_index(db, session_id=session_id, active_run_id="run-terminal")
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     row = _row(db, session_id)
     assert row["running"] == 1
@@ -91,8 +91,8 @@ def test_heal_does_not_clear_conversation_with_mission_terminal_but_chat_run_act
         title="Mission",
         status="cancelled",
     )
-    db.upsert_run(run_id="run-terminal", session_id="team-session", status="completed")
-    db.upsert_run(run_id="run-member-chat", session_id="team-session", status="running")
+    db.runs.upsert(run_id="run-terminal", session_id="team-session", status="completed")
+    db.runs.upsert(run_id="run-member-chat", session_id="team-session", status="running")
     _force_running_index(
         db,
         session_id="team-session",
@@ -103,7 +103,7 @@ def test_heal_does_not_clear_conversation_with_mission_terminal_but_chat_run_act
         mission_id="mission-terminal",
     )
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     row = _row(db, "team-session")
     assert row["running"] == 1
@@ -130,7 +130,7 @@ def test_heal_handles_team_mission_run_correctly(tmp_path: Path) -> None:
             title=node_id,
             status="completed",
         )
-        db.upsert_run(run_id=run_id, session_id=session_id, status="completed")
+        db.runs.upsert(run_id=run_id, session_id=session_id, status="completed")
         db.bind_team_mission_run(
             mission_id="mission-active",
             node_id=node_id,
@@ -148,7 +148,7 @@ def test_heal_handles_team_mission_run_correctly(tmp_path: Path) -> None:
         mission_id="mission-active",
     )
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     active_row = _row(db, "team-session")
     assert active_row["running"] == 1
@@ -161,7 +161,7 @@ def test_heal_handles_team_mission_run_correctly(tmp_path: Path) -> None:
         title="Mission",
         status="cancelled",
     )
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     _assert_idle(_row(db, "team-session"))
 
@@ -169,10 +169,10 @@ def test_heal_handles_team_mission_run_correctly(tmp_path: Path) -> None:
 def test_no_memberchat_prefix_purge_hack(tmp_path: Path) -> None:
     db = _db(tmp_path)
     session_id = "memberchat:first-class"
-    db.create_session(session_id, source="team_mission")
-    db.append_message(session_id=session_id, role="user", content="hello")
+    db.sessions.create(session_id, source="team_mission")
+    db.messages.append(session_id=session_id, role="user", content="hello")
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     row = _row(db, session_id)
     assert row["session_id"] == session_id
@@ -182,7 +182,7 @@ def test_no_memberchat_prefix_purge_hack(tmp_path: Path) -> None:
 
 def test_legacy_session_index_row_not_corrupted_by_new_heal(tmp_path: Path) -> None:
     db = _db(tmp_path)
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="legacy-row",
         title="Legacy",
         preview="keep me",
@@ -195,7 +195,7 @@ def test_legacy_session_index_row_not_corrupted_by_new_heal(tmp_path: Path) -> N
         message_count=7,
     )
 
-    db.reconcile_session_index()
+    db.session_index.reconcile()
 
     row = _row(db, "legacy-row")
     assert row["title"] == "Legacy"

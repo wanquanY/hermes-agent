@@ -9,10 +9,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-import gateway.run as gateway_run
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+import hermes_gateway.runner as gateway_run
+import hermes_gateway.gateway_runtime_config as gateway_runtime_config
+import hermes_gateway.reasoning_command as reasoning_command
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
+
+
+def _patch_hermes_home(monkeypatch, hermes_home):
+    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", hermes_home)
 
 
 def _make_event(text="/reasoning", platform=Platform.TELEGRAM, user_id="12345", chat_id="67890"):
@@ -74,12 +81,14 @@ class TestReasoningCommand:
         assert "/reasoning [level|show|hide]" in result
 
     def test_reasoning_is_known_command(self):
-        source = inspect.getsource(gateway_run.GatewayRunner._handle_message)
+        from hermes_gateway.message_command_runtime import GatewayMessageCommandService
+
+        source = inspect.getsource(GatewayMessageCommandService.dispatch)
         assert '"reasoning"' in source
 
     def test_parse_reasoning_command_args_accepts_ascii_and_smart_global_flags(self):
-        assert gateway_run.GatewayRunner._parse_reasoning_command_args("high --global") == ("high", True)
-        assert gateway_run.GatewayRunner._parse_reasoning_command_args("—global xhigh") == ("xhigh", True)
+        assert reasoning_command.GatewayReasoningCommandService.parse_reasoning_command_args("high --global") == ("high", True)
+        assert reasoning_command.GatewayReasoningCommandService.parse_reasoning_command_args("—global xhigh") == ("xhigh", True)
 
     @pytest.mark.asyncio
     async def test_reasoning_command_reloads_current_state_from_config(self, tmp_path, monkeypatch):
@@ -91,13 +100,14 @@ class TestReasoningCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         runner._reasoning_config = {"enabled": True, "effort": "xhigh"}
         runner._show_reasoning = False
 
-        result = await runner._handle_reasoning_command(_make_event("/reasoning"))
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(_make_event("/reasoning"))
 
         assert "**Effort:** `none (disabled)`" in result
         assert "**Display:** on ✓" in result
@@ -111,12 +121,13 @@ class TestReasoningCommand:
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         runner._reasoning_config = {"enabled": True, "effort": "medium"}
 
-        result = await runner._handle_reasoning_command(_make_event("/reasoning low --global"))
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(_make_event("/reasoning low --global"))
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "low"
@@ -130,13 +141,14 @@ class TestReasoningCommand:
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         event = _make_event("/reasoning high")
         session_key = runner._session_key_for_source(event.source)
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "medium"
@@ -151,14 +163,15 @@ class TestReasoningCommand:
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         event = _make_event("/reasoning low --global")
         session_key = runner._session_key_for_source(event.source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "low"
@@ -172,14 +185,15 @@ class TestReasoningCommand:
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         event = _make_event("/reasoning reset")
         session_key = runner._session_key_for_source(event.source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        result = await runner._handle_reasoning_command(event)
+        result = await reasoning_command.reasoning_command_for(runner).handle_reasoning_command(event)
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "medium"
@@ -191,27 +205,29 @@ class TestReasoningCommand:
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
         source = _make_event("/reasoning").source
         session_key = runner._session_key_for_source(source)
         runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "xhigh"}
 
-        assert runner._resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
+        assert gateway_runtime_config.runtime_config_for(runner).resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
 
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
         monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
         monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            gateway_run,
-            "_resolve_runtime_agent_kwargs",
-            lambda: {
+            gateway_runtime_config,
+            "resolve_runtime_agent_kwargs",
+            lambda _home: {
                 "provider": "openrouter",
                 "api_mode": "chat_completions",
                 "base_url": "https://openrouter.ai/api/v1",
@@ -254,13 +270,14 @@ class TestReasoningCommand:
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
         monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
         monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            gateway_run,
-            "_resolve_runtime_agent_kwargs",
-            lambda: {
+            gateway_runtime_config,
+            "resolve_runtime_agent_kwargs",
+            lambda _home: {
                 "provider": "openrouter",
                 "api_mode": "chat_completions",
                 "base_url": "https://openrouter.ai/api/v1",
@@ -313,13 +330,14 @@ class TestReasoningCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
         monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
         monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            gateway_run,
-            "_resolve_runtime_agent_kwargs",
-            lambda: {
+            gateway_runtime_config,
+            "resolve_runtime_agent_kwargs",
+            lambda _home: {
                 "provider": "openrouter",
                 "api_mode": "chat_completions",
                 "base_url": "https://openrouter.ai/api/v1",
@@ -365,13 +383,14 @@ class TestReasoningCommand:
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
         monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
         monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            gateway_run,
-            "_resolve_runtime_agent_kwargs",
-            lambda: {
+            gateway_runtime_config,
+            "resolve_runtime_agent_kwargs",
+            lambda _home: {
                 "provider": "openrouter",
                 "api_mode": "chat_completions",
                 "base_url": "https://openrouter.ai/api/v1",
@@ -416,8 +435,9 @@ class TestLoadShowReasoningCoercion:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(yaml_body, encoding="utf-8")
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-        return gateway_run.GatewayRunner._load_show_reasoning()
+        _patch_hermes_home(monkeypatch, hermes_home)
+        monkeypatch.setattr(reasoning_command, "GATEWAY_HOME", hermes_home)
+        return reasoning_command.GatewayReasoningCommandService.load_show_reasoning()
 
     def test_quoted_false_is_false(self, tmp_path, monkeypatch):
         assert self._load_with_config(

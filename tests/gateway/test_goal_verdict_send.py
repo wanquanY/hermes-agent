@@ -16,8 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.goal_commands import goal_command_for
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 @pytest.fixture()
@@ -29,9 +30,9 @@ def hermes_home(tmp_path, monkeypatch):
 
     from hermes_cli import goals
 
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 def _make_source() -> SessionSource:
@@ -62,7 +63,7 @@ class _RecordingAdapter:
 
 
 def _make_runner_with_adapter(session_id: str = None):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import uuid
 
     runner = object.__new__(GatewayRunner)
@@ -108,7 +109,7 @@ async def test_goal_verdict_done_sent_via_adapter_send(hermes_home):
     mgr.set("ship the feature")
 
     with patch("hermes_cli.goals.judge_goal", return_value=("done", "the feature shipped", False)):
-        await runner._post_turn_goal_continuation(
+        await goal_command_for(runner).post_turn_goal_continuation(
             session_entry=session_entry,
             source=src,
             final_response="I shipped the feature.",
@@ -137,7 +138,7 @@ async def test_goal_verdict_continue_enqueues_continuation(hermes_home):
     mgr.set("polish the docs")
 
     with patch("hermes_cli.goals.judge_goal", return_value=("continue", "still needs work", False)):
-        await runner._post_turn_goal_continuation(
+        await goal_command_for(runner).post_turn_goal_continuation(
             session_entry=session_entry,
             source=src,
             final_response="here's a partial edit",
@@ -165,7 +166,7 @@ async def test_goal_verdict_budget_exhausted_sends_pause(hermes_home):
     save_goal(session_entry.session_id, state)
 
     with patch("hermes_cli.goals.judge_goal", return_value=("continue", "keep going", False)):
-        await runner._post_turn_goal_continuation(
+        await goal_command_for(runner).post_turn_goal_continuation(
             session_entry=session_entry,
             source=src,
             final_response="still partial",
@@ -185,7 +186,7 @@ async def test_goal_verdict_skipped_when_no_active_goal(hermes_home):
     """No goal set → the hook is a no-op. Nothing is sent, nothing enqueued."""
     runner, adapter, session_entry, src = _make_runner_with_adapter()
 
-    await runner._post_turn_goal_continuation(
+    await goal_command_for(runner).post_turn_goal_continuation(
         session_entry=session_entry,
         source=src,
         final_response="anything",
@@ -213,7 +214,7 @@ async def test_goal_verdict_survives_adapter_without_send(hermes_home):
 
     with patch("hermes_cli.goals.judge_goal", return_value=("done", "ok", False)):
         # must not raise
-        await runner._post_turn_goal_continuation(
+        await goal_command_for(runner).post_turn_goal_continuation(
             session_entry=session_entry,
             source=src,
             final_response="whatever",

@@ -70,7 +70,7 @@ class TestMediaExtraction:
 
     def test_gateway_auto_append_ignores_media_examples_in_skill_docs(self):
         """Skill/documentation examples must not be appended as real attachments."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         messages = [
             {"role": "user", "content": "How should I format gateway media?"},
@@ -97,13 +97,13 @@ caption
             {"role": "assistant", "content": "Use a standalone media message."},
         ]
 
-        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        tags, voice = collect_auto_append_media_tags(messages, history_offset=0)
         assert tags == []
         assert voice is False
 
     def test_gateway_auto_append_keeps_real_tts_media_tag(self):
         """TTS tool media tags are still auto-appended when the model omits them."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         messages = [
             {"role": "user", "content": "Say this as audio"},
@@ -121,14 +121,14 @@ caption
             {"role": "assistant", "content": "Done."},
         ]
 
-        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        tags, voice = collect_auto_append_media_tags(messages, history_offset=0)
         assert tags == ["MEDIA:/tmp/voice.ogg"]
         assert voice is True
 
     def test_gateway_auto_append_image_generate_json_path(self):
         """image_generate returns a local path in JSON (no MEDIA: tag); it is
         auto-appended so delivery doesn't depend on the model restating it."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         messages = [
             {"role": "user", "content": "Make me a cat"},
@@ -146,13 +146,13 @@ caption
             {"role": "assistant", "content": "Here's your cat."},
         ]
 
-        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        tags, voice = collect_auto_append_media_tags(messages, history_offset=0)
         assert tags == ["MEDIA:/tmp/gen/cat.png"]
         assert voice is False
 
     def test_gateway_auto_append_image_generate_prefers_host_path(self):
         """When host and sandbox paths differ, the host-deliverable path wins."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         messages = [
             {"role": "user", "content": "Make me a dog"},
@@ -169,12 +169,12 @@ caption
             },
         ]
 
-        tags, _ = _collect_auto_append_media_tags(messages, history_offset=0)
+        tags, _ = collect_auto_append_media_tags(messages, history_offset=0)
         assert tags == ["MEDIA:/host/dog.jpg"]
 
     def test_gateway_auto_append_image_generate_failure_and_url_ignored(self):
         """Failed generations and remote URLs are not auto-delivered."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         def _img_msgs(content):
             return [
@@ -188,14 +188,14 @@ caption
             ]
 
         # Failed generation
-        tags, _ = _collect_auto_append_media_tags(
+        tags, _ = collect_auto_append_media_tags(
             _img_msgs('{"success": false, "image": null, "error": "boom"}'),
             history_offset=0,
         )
         assert tags == []
 
         # Remote URL is not a local file path
-        tags, _ = _collect_auto_append_media_tags(
+        tags, _ = collect_auto_append_media_tags(
             _img_msgs('{"success": true, "image": "https://fal.media/x/cat.png"}'),
             history_offset=0,
         )
@@ -203,7 +203,7 @@ caption
 
     def test_gateway_auto_append_image_generate_dedupes_history(self):
         """A generated image path already in history is not re-sent."""
-        from gateway.run import _collect_auto_append_media_tags
+        from hermes_gateway.media import collect_auto_append_media_tags
 
         messages = [
             {
@@ -219,7 +219,7 @@ caption
             },
         ]
 
-        tags, _ = _collect_auto_append_media_tags(
+        tags, _ = collect_auto_append_media_tags(
             messages, history_offset=0, history_media_paths={"/tmp/gen/cat.png"}
         )
         assert tags == []
@@ -231,7 +231,7 @@ caption
         fallback rescans full history, finds the generated path absent from
         the dedup set, and re-emits the same MEDIA tag every turn.
         """
-        from gateway.run import _collect_history_media_paths
+        from hermes_gateway.media import collect_history_media_paths
 
         history = [
             {"role": "user", "content": "make a cat"},
@@ -251,7 +251,7 @@ caption
                 "content": "Saved MEDIA:/tmp/voice/note.ogg done",
             },
         ]
-        paths = _collect_history_media_paths(history)
+        paths = collect_history_media_paths(history)
         assert "/tmp/gen/cat.png" in paths  # JSON-payload path (the bug)
         assert "/tmp/voice/note.ogg" in paths  # MEDIA: text path (already worked)
 
@@ -259,9 +259,9 @@ caption
         """End-to-end of the #46627 fix: collect history paths, then the
         compression-fallback rescan (history_offset stale) must dedup the
         generated image against them — no re-emission."""
-        from gateway.run import (
-            _collect_auto_append_media_tags,
-            _collect_history_media_paths,
+        from hermes_gateway.media import (
+            collect_auto_append_media_tags,
+            collect_history_media_paths,
         )
 
         history = [
@@ -275,13 +275,13 @@ caption
                 "content": '{"success": true, "image": "/tmp/gen/dog.png"}',
             },
         ]
-        history_paths = _collect_history_media_paths(history)
+        history_paths = collect_history_media_paths(history)
 
         # Simulate the post-compression fallback: history_offset is stale
         # (larger than the shrunken message list), so the collector rescans
         # the full list. With the dedup set populated, the already-delivered
         # image must NOT be re-emitted.
-        tags, _ = _collect_auto_append_media_tags(
+        tags, _ = collect_auto_append_media_tags(
             history, history_offset=9999, history_media_paths=history_paths
         )
         assert tags == [], f"generated image re-emitted after compression: {tags}"

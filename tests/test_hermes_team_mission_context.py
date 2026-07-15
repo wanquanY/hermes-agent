@@ -8,7 +8,7 @@ from hermes_team_mission.context.worker_context import build_team_mission_worker
 from hermes_team_mission.context.worker_context import prior_node_attempts
 from hermes_team_mission.context.worker_context import recent_node_events
 from hermes_team_mission.context.worker_context import team_mission_graph_summary
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def test_team_mission_worker_context_is_bounded_and_keeps_refs():
@@ -235,7 +235,7 @@ def test_worker_context_includes_upstream_handoff_deliverables_and_protocol():
 
 
 def test_worker_context_includes_prior_attempts_and_recent_events(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -253,7 +253,7 @@ def test_worker_context_includes_prior_attempts_and_recent_events(tmp_path):
         status="running",
         output_contract={"format": "structured_deliverable"},
     )
-    db.upsert_run(run_id="run-old", session_id="session-old", status="running")
+    db.runs.upsert(run_id="run-old", session_id="session-old", status="running")
     db.bind_team_mission_run(
         mission_id="mission-1",
         node_id="node-worker",
@@ -292,7 +292,7 @@ def test_worker_context_includes_prior_attempts_and_recent_events(tmp_path):
         status="ready",
         output_contract={"format": "structured_deliverable"},
     )
-    graph = db.get_team_mission_graph("mission-1")
+    graph = db.team_mission_graphs.get_team_mission_graph("mission-1")
     node = next(item for item in graph["nodes"] if item["node_id"] == "node-worker")
 
     context = build_team_mission_worker_context(
@@ -310,7 +310,7 @@ def test_worker_context_includes_prior_attempts_and_recent_events(tmp_path):
 
 
 def test_worker_context_prior_attempts_and_recent_events_have_per_item_caps(monkeypatch, tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     long_attempt_summary = "attempt-" + ("a" * (PRIOR_ATTEMPT_MAX_CHARS + 500))
     db.upsert_team_mission(
         mission_id="mission-1",
@@ -328,7 +328,7 @@ def test_worker_context_prior_attempts_and_recent_events_have_per_item_caps(monk
         objective="Complete the worker task.",
         status="running",
     )
-    db.upsert_run(run_id="run-old", session_id="session-old", status="running")
+    db.runs.upsert(run_id="run-old", session_id="session-old", status="running")
     db.bind_team_mission_run(
         mission_id="mission-1",
         node_id="node-worker",

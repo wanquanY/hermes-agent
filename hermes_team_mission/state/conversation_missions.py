@@ -16,7 +16,7 @@ def _conversation_mission_status(value: str | None) -> str:
     return "active"
 
 
-class SessionDBConversationMissionMixin:
+class TeamMissionConversationMissionMixin:
     def _activity_conversation_id_for_mission_on_conn(
         self,
         conn: sqlite3.Connection,
@@ -27,14 +27,14 @@ class SessionDBConversationMissionMixin:
             return ""
         row = conn.execute(
             """
-            SELECT stable_session_id
+            SELECT conversation_session_id
             FROM team_mission_conversations
             WHERE conversation_id = ?
             """,
             (conversation_id,),
         ).fetchone()
-        stable_session_id = _text(_row_value(row, "stable_session_id", ""))
-        return stable_session_id or conversation_id
+        conversation_session_id = _text(_row_value(row, "conversation_session_id", ""))
+        return conversation_session_id or conversation_id
 
     def _sync_mission_activity_for_conversation_mission_on_conn(
         self,
@@ -52,8 +52,7 @@ class SessionDBConversationMissionMixin:
         normalized_status = _conversation_mission_status(status)
         activity_conversation_id = self._activity_conversation_id_for_mission_on_conn(conn, conversation_id)
         if normalized_status == "active":
-            self._ensure_mission_activity_on_conn(
-                conn,
+            self.activities.ensure_mission(
                 conversation_id=activity_conversation_id,
                 mission_id=mission_id,
                 status="running",
@@ -61,8 +60,7 @@ class SessionDBConversationMissionMixin:
             )
             return
         activity_status = "cancelled" if normalized_status == "cancelled" else normalized_status
-        self._mark_mission_activity_terminal_on_conn(
-            conn,
+        self.activities.mark_mission_terminal(
             mission_id=mission_id,
             status=activity_status,
             result_summary=f"Mission {activity_status}",

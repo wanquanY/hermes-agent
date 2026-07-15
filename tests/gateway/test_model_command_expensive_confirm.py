@@ -18,10 +18,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.model_command import model_command_for
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner():
@@ -67,7 +68,7 @@ def _fake_warning():
 
 
 def _setup_isolated_home(tmp_path, monkeypatch, *, warn):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -77,7 +78,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, *, warn):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
         "hermes_cli.model_switch.switch_model",
@@ -106,7 +107,7 @@ async def test_typed_model_expensive_prompts_instead_of_switching(tmp_path, monk
 
     runner._request_slash_confirm = _fake_request_slash_confirm
 
-    result = await runner._handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
+    result = await model_command_for(runner).handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
 
     assert result is not None
     assert "EXPENSIVE MODEL WARNING" in result
@@ -130,7 +131,7 @@ async def test_typed_model_expensive_confirm_once_applies_switch(tmp_path, monke
 
     runner._request_slash_confirm = _fake_request_slash_confirm
 
-    await runner._handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
+    await model_command_for(runner).handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
     assert runner._session_model_overrides == {}
 
     reply = await captured["handler"]("once")
@@ -155,7 +156,7 @@ async def test_typed_model_expensive_cancel_keeps_current_model(tmp_path, monkey
 
     runner._request_slash_confirm = _fake_request_slash_confirm
 
-    await runner._handle_model_command(_make_event("/model openai/gpt-5.5-pro --global"))
+    await model_command_for(runner).handle_model_command(_make_event("/model openai/gpt-5.5-pro --global"))
 
     reply = await captured["handler"]("cancel")
 
@@ -178,7 +179,7 @@ async def test_typed_model_cheap_switches_without_prompt(tmp_path, monkeypatch):
 
     runner._request_slash_confirm = _fail_request_slash_confirm
 
-    result = await runner._handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
+    result = await model_command_for(runner).handle_model_command(_make_event("/model openai/gpt-5.5-pro"))
 
     assert result is not None
     assert "gpt-5.5-pro" in result

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import display_hermes_home
-from gateway.config import Platform, load_gateway_config
+from hermes_gateway.config import Platform, load_gateway_config
 from plugins.teams_pipeline.meetings import (
     enrich_meeting_with_call_record,
     fetch_preferred_transcript_text,

@@ -56,7 +56,53 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         or profile.get("runtime_scope_key")
         or ""
     ).strip()
-    if not any((profile_id, version_id, draft_id, hermes_home, runtime_scope_key)):
+    runtime_executor = str(
+        params.get("runtime_executor")
+        or params.get("runtimeExecutor")
+        or profile.get("runtimeExecutor")
+        or profile.get("runtime_executor")
+        or ""
+    ).strip()
+    codex_home = str(
+        params.get("codex_home")
+        or params.get("codexHome")
+        or params.get("codexHomePath")
+        or profile.get("codexHomePath")
+        or profile.get("codexHome")
+        or profile.get("codex_home")
+        or ""
+    ).strip()
+    codex_account_mode = str(
+        params.get("codex_account_mode")
+        or params.get("codexAccountMode")
+        or profile.get("codexAccountMode")
+        or profile.get("codex_account_mode")
+        or ""
+    ).strip()
+    codex_extra_env = {}
+    for candidate in (
+        params.get("codex_extra_env"),
+        params.get("codexExtraEnv"),
+        profile.get("codexExtraEnv"),
+        profile.get("codex_extra_env"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            codex_extra_env = {
+                str(k): str(v)
+                for k, v in candidate.items()
+                if v is not None
+            }
+            break
+    provider = str(
+        params.get("provider")
+        or params.get("model_provider")
+        or params.get("modelProvider")
+        or profile.get("provider")
+        or profile.get("model_provider")
+        or profile.get("modelProvider")
+        or ""
+    ).strip()
+    if not any((profile_id, version_id, draft_id, hermes_home, runtime_scope_key, runtime_executor, codex_home)):
         return None
     if not runtime_scope_key:
         if draft_id:
@@ -69,7 +115,17 @@ def profile_context_for_params(params: dict | None = None) -> dict | None:
         "agent_profile_draft_id": draft_id,
         "hermes_home": hermes_home,
         "runtime_scope_key": runtime_scope_key,
+        "runtime_executor": runtime_executor,
+        "codex_home": codex_home,
+        "codex_account_mode": codex_account_mode,
+        "codex_extra_env": codex_extra_env,
+        "provider": provider,
     }
+
+
+def active_profile_context() -> dict | None:
+    profile_context = _active_profile_context.get()
+    return dict(profile_context) if isinstance(profile_context, dict) else None
 
 
 def enter_profile_context(profile_context: dict | None, *, apply_env: bool = True) -> Any:
@@ -118,12 +174,12 @@ def active_hermes_home(*, fallback: str, default_home: str | None = None) -> str
 # Sub-sidecar deprecation: ProfileContext class + ProfileRegistry.
 #
 # Below is scaffolding for the refactor that removes the per-profile
-# sub-sidecar process (the duplicate ``dovie_sidecar`` child spawned
-# by ``RuntimeWorkerPool``). The sub-sidecar relied on PROCESS-LEVEL
-# isolation to keep one profile's module-level state (approval queue,
-# clarify pending, etc.) from leaking into another's. After removal
-# the main sidecar hosts every profile at once, so each of those
-# module-level dicts must be keyed by ``scope_key``.
+# sub-sidecar process (the duplicate per-profile ``dovie_sidecar``
+# child). That design relied on PROCESS-LEVEL isolation to keep one
+# profile's module-level state (approval queue, clarify pending, etc.)
+# from leaking into another's. After removal the main sidecar hosts
+# every profile at once, so each of those module-level dicts must be
+# keyed by ``scope_key``.
 #
 # This block defines that bucket type (``ProfileContext``), a
 # process-wide ``scope_key → ProfileContext`` registry, a
@@ -206,7 +262,7 @@ class _ProfileRegistry:
                 return ctx
             # Backfill identity fields on a context first created with
             # only the scope_key (e.g. when the very first call into a
-            # profile was by stable_session_id, before the profile
+            # profile was by conversation_session_id, before the profile
             # resolver attached the agent_profile_id).
             if agent_profile_id and not ctx.agent_profile_id:
                 ctx.agent_profile_id = str(agent_profile_id)
@@ -392,11 +448,11 @@ class _PerProfileDict:
         return f"_PerProfileDict(attr={self._attr_name!r})"
 
 
-# ── stable_session_id → scope_key resolver cache ─────────────────
+# ── conversation_session_id → scope_key resolver cache ─────────────────
 # The @method dispatch wrapper (Phase 2) needs to map a request to a
 # ProfileContext as fast as possible. Some methods carry the scope
 # directly (``runtime_scope_key`` in params), but many only carry a
-# ``stored_session_id`` — for those we need to look up which profile
+# ``conversation_session_id`` — for those we need to look up which profile
 # the session belongs to. Hitting the DB on every method call would
 # blow latency, so cache the mapping here.
 #
@@ -411,11 +467,11 @@ _stable_to_scope_cache: Dict[str, str] = {}
 _stable_to_scope_lock = _threading.RLock()
 
 
-def cache_stable_session_scope(stable_session_id: str, scope_key: str) -> None:
-    """Record the ``stable_session_id → scope_key`` mapping. Called
+def cache_stable_session_scope(conversation_session_id: str, scope_key: str) -> None:
+    """Record the ``conversation_session_id → scope_key`` mapping. Called
     by any code path that just resolved the binding (typically the
     runtime-scope routing layer)."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     scope = str(scope_key or "").strip()
     if not stable or not scope:
         return
@@ -423,21 +479,21 @@ def cache_stable_session_scope(stable_session_id: str, scope_key: str) -> None:
         _stable_to_scope_cache[stable] = scope
 
 
-def lookup_stable_session_scope(stable_session_id: str) -> Optional[str]:
-    """Return the cached scope_key for a stable_session_id, or
+def lookup_stable_session_scope(conversation_session_id: str) -> Optional[str]:
+    """Return the cached scope_key for a conversation_session_id, or
     ``None`` if it's never been seen. Phase 2 dispatch wrapper falls
     through to a DB lookup on miss."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return None
     with _stable_to_scope_lock:
         return _stable_to_scope_cache.get(stable)
 
 
-def forget_stable_session_scope(stable_session_id: str) -> None:
+def forget_stable_session_scope(conversation_session_id: str) -> None:
     """Drop the cache entry when a session is deleted / its scope
     changes. Currently unused — Phase 2 wires up the call site."""
-    stable = str(stable_session_id or "").strip()
+    stable = str(conversation_session_id or "").strip()
     if not stable:
         return
     with _stable_to_scope_lock:

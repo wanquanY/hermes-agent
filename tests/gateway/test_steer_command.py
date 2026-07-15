@@ -18,9 +18,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -42,7 +43,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner(session_entry: SessionEntry):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -70,8 +71,8 @@ def _make_runner(session_entry: SessionEntry):
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
     return runner, adapter
@@ -134,7 +135,7 @@ async def test_steer_without_payload_returns_usage():
 async def test_steer_with_pending_sentinel_falls_back_to_queue():
     """When the agent hasn't finished booting (sentinel), /steer should
     queue as a turn-boundary follow-up instead of crashing."""
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
     runner, adapter = _make_runner(_session_entry())
     sk = build_session_key(_make_source())

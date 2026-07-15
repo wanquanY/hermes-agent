@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 
-from gateway.config import GatewayConfig, Platform, load_gateway_config
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform, load_gateway_config
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.session import SessionSource
 
 
 def test_gateway_config_stt_disabled_from_dict_nested():
@@ -34,7 +34,7 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=False)
@@ -44,7 +44,7 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
         "tools.transcription_tools.transcribe_audio",
         side_effect=AssertionError("transcribe_audio should not be called when STT is disabled"),
     ), patch(
-        "gateway.run._probe_audio_duration",
+        "hermes_gateway.inbound_media.probe_audio_duration",
         new=AsyncMock(return_value="0:12"),
     ):
         result = await runner._enrich_message_with_transcription(
@@ -60,13 +60,13 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_omits_duration_on_probe_failure():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=False)
 
     with patch(
-        "gateway.run._probe_audio_duration",
+        "hermes_gateway.inbound_media.probe_audio_duration",
         new=AsyncMock(return_value=None),
     ):
         result = await runner._enrich_message_with_transcription(
@@ -80,7 +80,7 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
 
 @pytest.mark.asyncio
 async def test_enrich_message_with_transcription_avoids_bogus_no_provider_message_for_backend_key_errors():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
@@ -100,19 +100,16 @@ async def test_enrich_message_with_transcription_avoids_bogus_no_provider_messag
 
 
 @pytest.mark.asyncio
-async def test_enrich_message_with_transcription_returns_tuple_for_empty_content_placeholder():
+async def test_enrich_message_with_transcription_strips_empty_content_placeholder():
     """A successful transcription whose caption is the empty-content placeholder
-    must still return the ``(text, transcripts)`` tuple.
+    must strip that redundant placeholder while preserving the text contract.
 
     The Discord adapter delivers a captionless voice note as the literal
     ``"(The user sent a message with no text content)"`` placeholder. When STT
-    succeeds we strip that redundant placeholder and return just the transcript
-    prefix — but the method's contract (and every caller, which unpacks the
-    result as ``text, transcripts = ...``) requires a 2-tuple. Returning a bare
-    string here raised ``ValueError: too many values to unpack`` and dropped the
-    whole voice message on the floor.
+    succeeds, the gateway should return just the transcript prefix as the
+    enriched message text.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
@@ -126,7 +123,7 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
             "provider": "local_command",
         },
     ):
-        result, transcripts = await runner._enrich_message_with_transcription(
+        result = await runner._enrich_message_with_transcription(
             "(The user sent a message with no text content)",
             ["/tmp/voice.ogg"],
         )
@@ -134,13 +131,11 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
     # The redundant placeholder is stripped, leaving only the transcript prefix.
     assert "hello from a captionless voice note" in result
     assert "(The user sent a message with no text content)" not in result
-    # Crucially, the transcripts are still surfaced so callers can echo them.
-    assert transcripts == ["hello from a captionless voice note"]
 
 
 @pytest.mark.asyncio
 async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)

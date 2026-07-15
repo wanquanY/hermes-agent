@@ -98,7 +98,9 @@ def test_codex_picker_uses_live_codex_catalog(hermes_auth_only_env, tmp_path, mo
 
     providers = list_authenticated_providers(
         current_provider="openai-codex",
-        max_models=10,
+        # Keep the model-count assertion valid as new GPT-5.x families grow
+        # the curated forward-compatible catalog.
+        max_models=100,
     )
 
     codex = next(p for p in providers if p["slug"] == "openai-codex")

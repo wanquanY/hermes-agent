@@ -21,8 +21,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gateway.platforms.webhook import WebhookAdapter
-from gateway.config import PlatformConfig
+from channels.platforms.webhook import WebhookAdapter
+from hermes_gateway.config import PlatformConfig
 
 
 def _make_adapter(routes, rate_limit=5, **extra_kw) -> WebhookAdapter:

@@ -13,7 +13,6 @@ import hashlib
 from collections.abc import Mapping
 from typing import Any
 
-from hermes_state import SessionDB
 from hermes_team_mission.context.worker_context import NODE_BRIEF_BACKGROUND_MAX_CHARS
 from hermes_team_mission.context.worker_context import NODE_BRIEF_GOAL_MAX_CHARS
 from hermes_team_mission.context.worker_context import NODE_BRIEF_ITEM_MAX_CHARS
@@ -343,10 +342,7 @@ def _number(value: Any, default: float = 0) -> float:
 
 
 def _get_db(parent_agent=None):
-    try:
-        return _team_mission_control_db(parent_agent)
-    except Exception:
-        return SessionDB()
+    return _team_mission_control_db(parent_agent)
 
 
 def _active_run_id(args: dict[str, Any], parent_agent=None) -> str:
@@ -400,7 +396,7 @@ def _approval_summary(approval_requests: Any) -> list[dict[str, Any]]:
 def _existing_node_by_idempotency(db: Any, mission_id: str, idempotency_key: str) -> dict[str, Any]:
     if not idempotency_key:
         return {}
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     for node in graph.get("nodes") if isinstance(graph, dict) and isinstance(graph.get("nodes"), list) else []:
         if not isinstance(node, Mapping):
             continue
@@ -413,7 +409,7 @@ def _existing_node_by_idempotency(db: Any, mission_id: str, idempotency_key: str
 def _existing_edge_by_idempotency(db: Any, mission_id: str, idempotency_key: str) -> dict[str, Any]:
     if not idempotency_key:
         return {}
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     for edge in graph.get("edges") if isinstance(graph, dict) and isinstance(graph.get("edges"), list) else []:
         if not isinstance(edge, Mapping):
             continue
@@ -534,7 +530,7 @@ def _authorized_context(args: dict[str, Any], parent_agent=None) -> tuple[Any, s
         return "Current run is not bound to a Team Mission node."
     mission_id = _text(binding.get("mission_id"))
     node_id = _text(binding.get("node_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict) or not mission:
         return "Bound Team Mission was not found."
@@ -703,7 +699,7 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         conflict = _idempotency_conflict(existing_idempotent_node, idempotency_fingerprint)
         if conflict:
             return tool_error(conflict)
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         return tool_result(
             dovie_event="team_mission_node_created",
             success=True,
@@ -786,7 +782,7 @@ def _handle_node_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         event={"type": "mission.node.created", "payload": {"node": node}},
     )
     reduced = db.reduce_team_mission_graph(mission_id)
-    graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.get_team_mission_graph(mission_id)
+    graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         dovie_event="team_mission_node_created",
         success=True,
@@ -838,7 +834,7 @@ def _handle_edge_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         conflict = _idempotency_conflict(existing_idempotent_edge, idempotency_fingerprint)
         if conflict:
             return tool_error(conflict)
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         return tool_result(
             dovie_event="team_mission_edge_created",
             success=True,
@@ -878,7 +874,7 @@ def _handle_edge_create(args: dict[str, Any], parent_agent=None, **_kwargs) -> s
         event={"type": "mission.edge.created", "payload": {"edge": edge}},
     )
     reduced = db.reduce_team_mission_graph(mission_id)
-    graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.get_team_mission_graph(mission_id)
+    graph = reduced.get("graph") if isinstance(reduced, dict) and reduced.get("graph") else db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         dovie_event="team_mission_edge_created",
         success=True,
@@ -957,7 +953,7 @@ def _handle_node_brief_append(args: dict[str, Any], parent_agent=None, **_kwargs
             },
         },
     )
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         dovie_event="team_mission_node_updated",
         success=True,
@@ -988,7 +984,7 @@ def _handle_plan_complete(args: dict[str, Any], parent_agent=None, **_kwargs) ->
     )
     if not result:
         return tool_error("Team Mission plan completion failed.")
-    graph = result.get("graph") if isinstance(result.get("graph"), dict) else db.get_team_mission_graph(mission_id)
+    graph = result.get("graph") if isinstance(result.get("graph"), dict) else db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         dovie_event="team_mission_plan_completed",
         success=True,

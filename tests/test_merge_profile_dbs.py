@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hermes_state.migrations.merge_profile_dbs import merge_profile_dbs
+from hermes_agent.storage.profile_db_merge import merge_profile_dbs
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -273,7 +273,7 @@ def test_cli_outputs_valid_json_to_stdout(tmp_path: Path):
         [
             sys.executable,
             "-m",
-            "hermes_state.migrations.merge_profile_dbs",
+            "hermes_agent.storage.profile_db_merge",
             "--root",
             str(tmp_path),
             "--dry-run",

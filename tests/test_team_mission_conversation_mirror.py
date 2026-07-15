@@ -18,12 +18,12 @@ class _MemoryTransport:
 
 
 def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_report_once(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from hermes_team_mission.runtime import leader_report_dispatch
     from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     submitted: list[dict] = []
 
     def fake_submit_leader_report(**kwargs):
@@ -54,7 +54,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -69,7 +69,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -78,7 +78,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
     ]
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -87,13 +87,21 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         for seq, event_type, payload in (
             (1, "message.start", {}),
             (2, "message.delta", {"delta": "最终汇总", "text": "最终汇总"}),
-            (3, "message.complete", {"status": "complete", "artifact_refs": artifact_refs}),
+            (
+                3,
+                "message.complete",
+                {
+                    "status": "complete",
+                    "text": "最终汇总",
+                    "artifact_refs": artifact_refs,
+                },
+            ),
         ):
             run_control.record_event(
                 {
                     "type": event_type,
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -105,7 +113,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
     finally:
         run_control.unsubscribe_session(subscription_id=subscription_id)
 
-    mirrored_events = db.list_run_events("team-session-1")
+    mirrored_events = db.runs.list_events("team-session-1")
     assert mirrored_events == []
 
     streamed = [
@@ -114,7 +122,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         if frame.get("method") == "event"
     ]
     assert streamed == []
-    assert db.get_messages("team-session-1") == []
+    assert db.messages.list("team-session-1") == []
 
     summary = MissionSummaryWriter.emit_mission_summary(
         db,
@@ -127,7 +135,7 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
     assert len(submitted) == 1
     assert submitted[0]["summary_text"] == "最终汇总"
     assert submitted[0]["artifact_refs"][0]["path"] == "/tmp/final-report.md"
-    assert db.get_messages("team-session-1") == []
+    assert db.messages.list("team-session-1") == []
 
     MissionSummaryWriter.emit_mission_summary(
         db,
@@ -135,18 +143,18 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         conversation_session_id="team-session-1",
         outcome="completed",
     )
-    messages = db.get_messages("team-session-1")
+    messages = db.messages.list("team-session-1")
     assert messages == []
     assert len(submitted) == 1
 
 
 def test_leader_report_completion_uses_canonical_result_and_records_message_id(monkeypatch, tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from hermes_team_mission.runtime import leader_report_dispatch
     from hermes_team_mission.runtime.team_transcript_writer import MissionSummaryWriter
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-report",
         conversation_id="conversation-1",
@@ -155,11 +163,11 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         mode="autonomous_mission",
         status="completed",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         mission_id="mission-report",
         title="生成市场报告",
         objective="生成市场报告",
@@ -185,7 +193,7 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
             node_id="",
             run_id=run_id,
             session_id=kwargs["conversation_session_id"],
-            runtime_session_id="",
+            execution_session_id="",
             runtime_scope_key="team:conversation-1:leader-conversation",
             role="leader",
             metadata={
@@ -222,13 +230,13 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         outcome="completed",
     )
     assert message["status"] == "queued"
-    assert db.get_messages("team-session-1") == []
+    assert db.messages.list("team-session-1") == []
 
     run_control.record_event(
         {
             "type": "message.complete",
             "session_id": "runtime-leader-report",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "leader-report-run-1",
             "turn_id": "turn-leader-report",
             "runtime_scope_key": "team:conversation-1:leader-conversation",
@@ -241,7 +249,7 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
         },
         db=db,
     )
-    [projected] = db.get_messages("team-session-1")
+    [projected] = db.messages.list("team-session-1")
     saved_result = db.get_team_mission_result("mission-report")
 
     assert projected["content"] == "市场报告已经完成，结论为 PASS。"
@@ -269,10 +277,10 @@ def test_leader_report_completion_uses_canonical_result_and_records_message_id(m
 
 
 def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -280,7 +288,7 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -295,14 +303,14 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
 
     transport = _MemoryTransport()
     subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -319,7 +327,7 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
                 {
                     "type": event_type,
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -338,16 +346,16 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
     ]
     assert streamed == []
 
-    mirrored_events = db.list_run_events("team-session-1")
+    mirrored_events = db.runs.list_events("team-session-1")
     assert mirrored_events == []
-    assert db.get_messages("team-session-1") == []
+    assert db.messages.list("team-session-1") == []
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_stream_tail(tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -355,7 +363,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -370,7 +378,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="member",
     )
@@ -378,7 +386,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
     transport = _MemoryTransport()
     mission_transport = _MemoryTransport()
     node_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="synthesis-session-1",
+        conversation_session_id="synthesis-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -398,7 +406,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
                 {
                     "type": "message.delta",
                     "session_id": "runtime-synthesis",
-                    "stored_session_id": "synthesis-session-1",
+                    "conversation_session_id": "synthesis-session-1",
                     "run_id": "run-synthesis",
                     "turn_id": "turn-synthesis",
                     "runtime_scope_key": "team:mission-1:synthesis",
@@ -426,19 +434,26 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         ]
         assert immediate_raw_deltas == []
 
-        mission_deltas = [
-            event
-            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
+        live_projected_deltas = [
+            frame.get("params") or {}
+            for frame in mission_transport.frames
             if (
-                event["type"] == "team_mission.runtime.event"
-                and event["payload"]["source_event_type"] == "message.delta"
+                frame.get("method") == "event"
+                and (frame.get("params") or {}).get("type") == "team_mission.runtime.event"
+                and ((frame.get("params") or {}).get("payload") or {}).get("source_event_type") == "message.delta"
             )
         ]
-        assert mission_deltas
-        assert all(event.get("mission_id") == "mission-1" for event in mission_deltas)
-        assert all(event["payload"]["source_event"]["type"] == "message.delta" for event in mission_deltas)
-        assert [event["payload"]["text_stream"]["delta"] for event in mission_deltas] == ["最终", "交付", "完成"]
-        assert all(event["payload"]["subject"]["type"] == "node" for event in mission_deltas)
+        assert [event["payload"]["text_stream"]["delta"] for event in live_projected_deltas] == [
+            "最终",
+            "交付",
+            "完成",
+        ]
+        assert all(event.get("transient") is True for event in live_projected_deltas)
+        assert not any(
+            event.get("type") == "team_mission.runtime.event"
+            and (event.get("payload") or {}).get("source_event_type") == "message.delta"
+            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
+        )
 
         _, replay_events = run_control.subscribe_activity(
             activity_id="mission:mission-1",
@@ -450,7 +465,10 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             if event["type"] == "team_mission.runtime.event"
             and event["payload"]["source_event_type"] == "message.delta"
         ]
-        assert [event["payload"]["text_stream"]["delta"] for event in replay_deltas] == ["最终", "交付", "完成"]
+        assert len(replay_deltas) == 1
+        assert replay_deltas[0]["transient"] is True
+        assert replay_deltas[0]["payload"]["text_stream"]["mode"] == "snapshot"
+        assert replay_deltas[0]["payload"]["text_stream"]["delta"] == "最终交付完成"
 
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)
@@ -458,10 +476,10 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal(tmp_path: Path):
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -469,7 +487,7 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         objective="规划审批后执行",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -484,14 +502,14 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         node_id="team-mission:mission-1:root",
         run_id="run-root",
         session_id="root-session-1",
-        runtime_session_id="runtime-root",
+        execution_session_id="runtime-root",
         runtime_scope_key="team:mission-1:root",
         role="leader",
     )
 
     transport = _MemoryTransport()
     node_subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="root-session-1",
+        conversation_session_id="root-session-1",
         transport=transport,
         active_only=False,
         db=db,
@@ -500,447 +518,42 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
         direct_event = {
             "type": "message.complete",
             "session_id": "runtime-root",
-            "stored_session_id": "root-session-1",
+            "conversation_session_id": "root-session-1",
             "run_id": "run-root",
             "turn_id": "turn-root",
             "runtime_scope_key": "team:mission-1:root",
+            "activity_id": "mission:mission-1",
             "seq": 1168,
-            "payload": {"status": "complete", "text": "规划完成"},
+            "payload": {
+                "status": "complete",
+                "text": "规划完成",
+                "activity_id": "mission:mission-1",
+            },
         }
         run_control.remember_transport_delivery(transport, direct_event)
-        db.append_run_event("root-session-1", direct_event)
+        persisted_event = db.runs.append_event("root-session-1", direct_event)
 
-        mission_terminals = [
-            event
-            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
-            if (
-                event["type"] == "team_mission.runtime.event"
-                and event["payload"]["source_event_type"] == "message.complete"
-            )
-        ]
+        activity_subscription_id, mission_terminals = run_control.subscribe_activity(
+            activity_id="mission:mission-1",
+            transport=None,
+            db=db,
+        )
         assert mission_terminals
-        assert mission_terminals[0]["seq"] != direct_event["seq"]
-        assert mission_terminals[0]["source_seq"] == direct_event["seq"]
-        assert mission_terminals[0]["payload"]["source_event"]["type"] == "message.complete"
+        assert persisted_event["seq"] != direct_event["seq"]
+        assert persisted_event["runtime_source_seq"] == direct_event["seq"]
+        assert mission_terminals[0]["seq"] == persisted_event["runtime_source_seq"]
+        assert mission_terminals[0]["source_seq"] == persisted_event["runtime_source_seq"]
+        assert mission_terminals[0]["payload"]["source_event_type"] == "message.complete"
+        run_control.unsubscribe_activity(subscription_id=activity_subscription_id)
 
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)
 
 
-def test_conversation_resolve_recovers_legacy_final_deliverable_state(
-    monkeypatch,
-    tmp_path: Path,
-):
-    import importlib
+def test_legacy_mirror_runtime_api_is_fully_retired() -> None:
+    from hermes_team_mission.runtime import conversation_transcript
 
-    from hermes_state import SessionDB
-    from tui_gateway import server
-
-    team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission_conversation(
-        conversation_id="conversation-1",
-        stable_session_id="team-session-1",
-        team_id="team-1",
-        title="团队会话",
-        active_mission_id="mission-1",
-    )
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        conversation_id="conversation-1",
-        team_id="team-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        status="completed",
-        metadata={"stableTeamSessionId": "team-session-1"},
-    )
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        kind="synthesis",
-        title="汇总交付",
-        status="done",
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        run_id="run-synthesis",
-        session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
-        runtime_scope_key="team:mission-1:synthesis",
-        role="member",
-    )
-    mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
-    common_payload = {
-        "team_mission_conversation_mirror": True,
-        "team_mission_final_deliverable": True,
-        "mission_id": "mission-1",
-        "node_id": "team-mission:mission-1:synthesis",
-        "source_run_id": "run-synthesis",
-        "source_session_id": "synthesis-session-1",
-        "source_seq": "42",
-    }
-    db.append_run_event("team-session-1", {
-        "type": "message.delta",
-        "stored_session_id": "team-session-1",
-        "run_id": mirror_run_id,
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team_mission:mission-1",
-        "payload": {
-            **common_payload,
-            "mode": "snapshot",
-            "text": "旧任务最终汇总",
-        },
-    })
-    db.append_run_event("team-session-1", {
-        "type": "message.complete",
-        "stored_session_id": "team-session-1",
-        "run_id": mirror_run_id,
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team_mission:mission-1",
-        "payload": {
-            **common_payload,
-            "status": "complete",
-        },
-    })
-    assert db.get_messages("team-session-1") == []
-
-    response = server._methods["team_mission.conversation.resolve"](
-        1,
-        {"identifier": "conversation-1"},
-    )
-    assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
-    assert response["result"]["messages"] == []
-    assert db.get_messages("team-session-1") == []
-    deliverable = db.latest_team_mission_deliverable_for_run("run-synthesis")
-    assert deliverable["source"] == "legacy_imported"
-    assert deliverable["summary"] == "旧任务最终汇总"
-
-    server._methods["team_mission.conversation.resolve"](
-        2,
-        {"identifier": "conversation-1"},
-    )
-    assert db.get_messages("team-session-1") == []
-
-
-def test_final_deliverable_complete_noops_and_preserves_existing_transcript(
-    tmp_path: Path,
-):
-    from hermes_state import SessionDB
-    from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
-
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        conversation_id="conversation-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
-    )
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        kind="synthesis",
-        title="汇总交付",
-        status="running",
-        metadata={"task_id": "task-1"},
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        run_id="run-synthesis",
-        session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
-        runtime_scope_key="team:mission-1:synthesis",
-        role="member",
-    )
-    source_markdown = (
-        "## ✅ 团队任务执行结果整合\n\n"
-        "本次团队任务目标：**创建一个测试文件。**\n\n"
-        "---\n\n"
-        "## 一、执行结果\n\n"
-        "```text\n"
-        "创建测试文件 → 验证测试文件\n"
-        "```\n"
-    )
-    polluted_mirror_text = (
-        "##✅团队任务执行结果整合本"
-        "## ✅ 团队任务执行结果整合\n\n"
-        "本次团队任务目标：**创建一个测试文件。**---##一、执行结果"
-    )
-    db.append_run_event("synthesis-session-1", {
-        "type": "message.delta",
-        "stored_session_id": "synthesis-session-1",
-        "run_id": "run-synthesis",
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team:mission-1:synthesis",
-        "seq": 7,
-        "payload": {"mode": "append", "text": source_markdown, "delta": source_markdown},
-    })
-    mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
-    db.append_run_event("team-session-1", {
-        "type": "message.delta",
-        "stored_session_id": "team-session-1",
-        "run_id": mirror_run_id,
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team_mission:mission-1",
-        "seq": 8,
-        "payload": {
-            "mode": "append",
-            "text": polluted_mirror_text,
-            "delta": polluted_mirror_text,
-            "mission_id": "mission-1",
-            "node_id": "team-mission:mission-1:synthesis",
-            "source_run_id": "run-synthesis",
-            "source_session_id": "synthesis-session-1",
-            "team_mission_conversation_mirror": True,
-            "team_mission_final_deliverable": True,
-        },
-    })
-    bad_message_id = db.append_message(
-        "team-session-1",
-        "assistant",
-        polluted_mirror_text,
-        metadata={
-            "team_mission": {
-                "kind": "final_deliverable",
-                "mission_id": "mission-1",
-                "node_id": "team-mission:mission-1:synthesis",
-                "source_run_id": "run-synthesis",
-                "source_session_id": "synthesis-session-1",
-            }
-        },
-    )
-
-    saved = mirror_event_to_conversation(
-        db,
-        mission_id="mission-1",
-        event={
-            "type": "message.complete",
-            "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
-            "run_id": "run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team:mission-1:synthesis",
-            "seq": 42,
-            "payload": {"status": "complete"},
-        },
-    )
-
-    assert saved == {}
-    messages = db.get_messages("team-session-1")
-    assert len(messages) == 1
-    assert messages[0]["id"] == bad_message_id
-    assert messages[0]["content"] == polluted_mirror_text
-
-
-def test_final_deliverable_complete_noops_after_repeated_markdown_chunks(tmp_path: Path):
-    from hermes_state import SessionDB
-    from hermes_team_mission.runtime.conversation_mirror import mirror_event_to_conversation
-
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        conversation_id="conversation-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
-    )
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        kind="synthesis",
-        title="汇总交付",
-        status="running",
-        metadata={"task_id": "task-1"},
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        run_id="run-synthesis",
-        session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
-        runtime_scope_key="team:mission-1:synthesis",
-        role="member",
-    )
-    chunks = [
-        "## 整合报告\n\n",
-        "| 项目 | 内容 |\n",
-        "|---|---|\n",
-        "| **任务名称** | team_stream_refactor_check.txt |\n",
-        "|---|---|\n",
-        "✅ 验证通过\n",
-    ]
-    for seq, chunk in enumerate(chunks, start=1):
-        db.append_run_event(
-            "synthesis-session-1",
-            {
-                "type": "message.delta",
-                "stored_session_id": "synthesis-session-1",
-                "run_id": "run-synthesis",
-                "turn_id": "turn-synthesis",
-                "runtime_scope_key": "team:mission-1:synthesis",
-                "seq": seq,
-                "payload": {"mode": "append", "text": chunk, "delta": chunk},
-            },
-        )
-
-    saved = mirror_event_to_conversation(
-        db,
-        mission_id="mission-1",
-        event={
-            "type": "message.complete",
-            "session_id": "runtime-synthesis",
-            "stored_session_id": "synthesis-session-1",
-            "run_id": "run-synthesis",
-            "turn_id": "turn-synthesis",
-            "runtime_scope_key": "team:mission-1:synthesis",
-            "seq": 42,
-            "payload": {"status": "complete"},
-        },
-    )
-
-    assert saved == {}
-    assert db.get_messages("team-session-1") == []
-
-
-def test_conversation_resolve_hides_legacy_final_message_without_rewriting_stream_history(
-    monkeypatch,
-    tmp_path: Path,
-):
-    import importlib
-
-    from hermes_state import SessionDB
-    from tui_gateway import server
-
-    team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission_conversation(
-        conversation_id="conversation-1",
-        stable_session_id="team-session-1",
-        team_id="team-1",
-        title="团队会话",
-        active_mission_id="mission-1",
-    )
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        conversation_id="conversation-1",
-        team_id="team-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        status="completed",
-        leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
-    )
-    db.upsert_team_mission_node(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        kind="synthesis",
-        title="汇总交付",
-        status="done",
-        metadata={"task_id": "task-1"},
-    )
-    db.bind_team_mission_run(
-        mission_id="mission-1",
-        node_id="team-mission:mission-1:synthesis",
-        run_id="run-synthesis",
-        session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
-        runtime_scope_key="team:mission-1:synthesis",
-        role="member",
-    )
-    source_markdown = (
-        "## ✅ 团队任务执行结果整合\n\n"
-        "本次团队任务目标：**创建一个测试文件。**\n\n"
-        "---\n\n"
-        "## 一、执行结果\n\n"
-        "| 节点 | 状态 |\n"
-        "|---|---|\n"
-        "| 创建测试文件 | ✅ 已完成 |\n"
-    )
-    polluted_text = (
-        "##✅团队任务执行结果整合本## ✅ 团队任务执行结果整合\n\n"
-        "本次团队任务目标：**创建一个测试文件。**---##一、执行结果|节点|状态|"
-    )
-    db.append_run_event("synthesis-session-1", {
-        "type": "message.delta",
-        "stored_session_id": "synthesis-session-1",
-        "run_id": "run-synthesis",
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team:mission-1:synthesis",
-        "seq": 7,
-        "payload": {"mode": "append", "text": source_markdown, "delta": source_markdown},
-    })
-    mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
-    common_payload = {
-        "team_mission_conversation_mirror": True,
-        "team_mission_final_deliverable": True,
-        "mission_id": "mission-1",
-        "node_id": "team-mission:mission-1:synthesis",
-        "source_run_id": "run-synthesis",
-        "source_session_id": "synthesis-session-1",
-        "source_seq": "42",
-    }
-    db.append_run_event("team-session-1", {
-        "type": "message.delta",
-        "stored_session_id": "team-session-1",
-        "run_id": mirror_run_id,
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team_mission:mission-1",
-        "seq": 7,
-        "payload": {
-            **common_payload,
-            "mode": "append",
-            "text": polluted_text,
-            "delta": polluted_text,
-        },
-    })
-    db.append_run_event("team-session-1", {
-        "type": "message.complete",
-        "stored_session_id": "team-session-1",
-        "run_id": mirror_run_id,
-        "turn_id": "turn-synthesis",
-        "runtime_scope_key": "team_mission:mission-1",
-        "seq": 8,
-        "payload": {
-            **common_payload,
-            "status": "complete",
-            "text": polluted_text,
-        },
-    })
-    bad_message_id = db.append_message(
-        "team-session-1",
-        "assistant",
-        polluted_text,
-        metadata={"team_mission": {"kind": "final_deliverable", **common_payload}},
-    )
-
-    response = server._methods["team_mission.conversation.resolve"](
-        1,
-        {"identifier": "conversation-1"},
-    )
-
-    assert response["result"]["messages"] == []
-    messages = db.get_messages("team-session-1")
-    assert len(messages) == 1
-    assert messages[0]["id"] == bad_message_id
-    assert messages[0]["content"] == polluted_text
-    events = db.list_run_events("team-session-1", run_id=mirror_run_id)
-    delta_event = next(event for event in events if event["type"] == "message.delta")
-    complete_event = next(event for event in events if event["type"] == "message.complete")
-    assert delta_event["payload"]["mode"] == "append"
-    assert delta_event["payload"]["text"] == polluted_text
-    assert delta_event["payload"]["delta"] == polluted_text
-    assert complete_event["payload"]["text"] == polluted_text
-
+    assert hasattr(conversation_transcript, "append_user_task_message")
 
 def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and_resolve(
     monkeypatch,
@@ -948,11 +561,11 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
 ):
     import importlib
 
-    from hermes_state import SessionDB
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
     from tui_gateway import server
 
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
     artifact_refs = [
         {"path": "/tmp/final.md", "title": "final.md", "kind": "file"},
@@ -960,13 +573,13 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
     ]
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
-    user_message_id = db.append_message("team-session-1", "user", "请生成最终报告")
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    user_message_id = db.messages.append("team-session-1", "user", "请生成最终报告")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -976,7 +589,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
         mode="supervised_mission",
         status="completed",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -986,7 +599,7 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
         status="completed",
         metadata={"task_id": "task-1"},
     )
-    message_id = db.append_message(
+    message_id = db.messages.append(
         "team-session-1",
         "assistant",
         "最终交付内容",
@@ -1049,105 +662,12 @@ def test_conversation_projection_exposes_final_deliverable_artifacts_to_list_and
     assert graph["task_frames"][0]["artifactRefs"] == artifact_refs
 
 
-@pytest.mark.parametrize(
-    ("mission_status", "expected_run_status", "expected_run_state"),
-    [
-        ("completed", "completed", "completed"),
-        ("failed", "failed", "failed"),
-        ("cancelled", "cancelled", "cancelled"),
-        ("canceled", "cancelled", "cancelled"),
-        ("interrupted", "interrupted", "interrupted"),
-        ("blocked", "failed", "blocked"),
-    ],
-)
-def test_conversation_list_recovers_terminal_mission_with_active_mirror_run(
-    monkeypatch,
-    tmp_path: Path,
-    mission_status: str,
-    expected_run_status: str,
-    expected_run_state: str,
-):
-    import importlib
-
-    from hermes_state import SessionDB
-    from tui_gateway import server
-    from tui_gateway.services import run_control
-
-    team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
-    monkeypatch.setattr(team_mission, "_get_db", lambda: db)
-    db.upsert_team_mission_conversation(
-        conversation_id="conversation-1",
-        stable_session_id="team-session-1",
-        team_id="team-1",
-        title="团队会话",
-        active_mission_id="mission-1",
-    )
-    db.upsert_team_mission(
-        mission_id="mission-1",
-        conversation_id="conversation-1",
-        team_id="team-1",
-        title="监督执行",
-        objective="规划审批后执行",
-        mode="supervised_mission",
-        status=mission_status,
-        metadata={"stableTeamSessionId": "team-session-1"},
-    )
-    mirror_run_id = "team-mission:mission-1:conversation:run-synthesis"
-    db.upsert_run(
-        run_id=mirror_run_id,
-        session_id="team-session-1",
-        runtime_scope_key="team_mission:mission-1",
-        turn_id="turn-synthesis",
-        runtime_session_id="runtime-synthesis",
-        status="running",
-    )
-    transport = _MemoryTransport()
-    subscription_id, _ = run_control.subscribe_session_with_id(
-        stored_session_id="team-session-1",
-        transport=transport,
-        active_only=False,
-        db=db,
-    )
-    try:
-        response = server._methods["team_mission.conversation.list"](
-            1,
-            {"team_id": "team-1"},
-        )
-    finally:
-        run_control.unsubscribe_session(subscription_id=subscription_id)
-
-    conversation = response["result"]["conversations"][0]
-    assert conversation["conversation_id"] == "conversation-1"
-    assert conversation["running"] is False
-    assert conversation["active_run_id"] == ""
-    assert conversation["run_state"] == expected_run_state
-    assert db.get_run(mirror_run_id)["status"] == expected_run_status
-    streamed = [
-        frame.get("params") or {}
-        for frame in transport.frames
-        if frame.get("method") == "event"
-    ]
-    assert [event["type"] for event in streamed] == ["message.complete"]
-    assert streamed[0]["run_id"] == mirror_run_id
-    assert streamed[0]["runtime_scope_key"] == "team_mission:mission-1"
-
-    resolved = server._methods["team_mission.conversation.resolve"](
-        2,
-        {"identifier": "conversation-1"},
-    )
-    resolved_conversation = resolved["result"]["conversation"]
-    assert resolved_conversation["running"] is False
-    assert resolved_conversation["active_run_id"] == ""
-    assert resolved_conversation["run_state"] == expected_run_state
-
-
 def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp_path: Path):
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-progress"
     session_id = f"team-session-{conversation_id}"
     activity_id = f"chat:{session_id}"
@@ -1155,10 +675,10 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
     run_id = "team-leader-run-progress"
     turn_id = "team-leader-turn-progress"
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-progress",
@@ -1168,7 +688,7 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
         {
             "type": "message.complete",
             "session_id": "runtime-leader-progress",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1191,7 +711,7 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
         db=db,
     )
 
-    [message] = db.get_messages(session_id)
+    [message] = db.messages.list(session_id)
     assert message["role"] == "assistant"
     assert message["content"] == "当前任务进度：Worker 正在执行，验证节点等待中。"
     assert message["participant_id"] == participant_id
@@ -1212,25 +732,25 @@ def test_leader_chat_complete_with_team_chat_activity_projects_to_transcript(tmp
 
 
 def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path):
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
-    from hermes_state_participants import member_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
+    from hermes_agent.repositories.conversation_participant_repo import member_participant_id
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-participant-only"
     session_id = f"team-session-{conversation_id}"
     leader_pid = leader_participant_id(conversation_id)
     member_pid = member_participant_id("member-builder")
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
 
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": "message.complete",
@@ -1246,7 +766,7 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
             },
         },
     )
-    db.append_run_event(
+    db.runs.append_event(
         session_id,
         {
             "type": "message.complete",
@@ -1263,7 +783,7 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
         },
     )
 
-    messages = db.get_messages(session_id)
+    messages = db.messages.list(session_id)
     assert [message["content"] for message in messages] == [
         "leader reply without activity kind",
         "member reply without activity kind",
@@ -1276,11 +796,11 @@ def test_participant_only_team_chat_events_project_to_transcript(tmp_path: Path)
 
 
 def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_path: Path):
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-artifacts"
     session_id = f"team-session-{conversation_id}"
     activity_id = f"chat:{session_id}"
@@ -1288,10 +808,10 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
     run_id = "team-leader-run-artifacts"
     turn_id = "team-leader-turn-artifacts"
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1300,7 +820,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-artifacts",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1321,7 +841,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
         {
             "type": "message.complete",
             "session_id": "runtime-leader-artifacts",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1339,7 +859,7 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
         db=db,
     )
 
-    [message] = db.get_messages(session_id)
+    [message] = db.messages.list(session_id)
     assert message["content"] == "Created report.md"
     assert message["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/report.md"
     assert message["metadata"]["artifacts"][0]["mimeType"] == "text/markdown"
@@ -1347,11 +867,11 @@ def test_leader_chat_projection_persists_run_artifacts_on_assistant_message(tmp_
 
 
 def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path: Path):
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-late-artifact"
     session_id = f"team-session-{conversation_id}"
     activity_id = f"chat:{session_id}"
@@ -1359,10 +879,10 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
     run_id = "team-leader-run-late-artifact"
     turn_id = "team-leader-turn-late-artifact"
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1371,7 +891,7 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
         {
             "type": "message.complete",
             "session_id": "runtime-leader-late-artifact",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1388,14 +908,14 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
         },
         db=db,
     )
-    [message_before] = db.get_messages(session_id)
+    [message_before] = db.messages.list(session_id)
     assert "artifacts" not in message_before["metadata"]
 
     run_control.record_event(
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-late-artifact",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1413,7 +933,9 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
         db=db,
     )
 
-    [message_after] = db.get_messages(session_id)
+    repair = db.team_transcript_projections.backfill([session_id])
+    assert repair["merged_artifacts"] == 1
+    [message_after] = db.messages.list(session_id)
     assert message_after["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/report.md"
     assert message_after["metadata"]["team_mission"]["artifactRefs"][0]["path"] == "/tmp/workspace/report.md"
 
@@ -1421,10 +943,10 @@ def test_late_artifact_event_merges_into_projected_leader_chat_message(tmp_path:
 def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path: Path):
     import json
 
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-backfill"
     session_id = f"team-session-{conversation_id}"
     activity_id = f"chat:{session_id}"
@@ -1433,7 +955,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
     event = {
         "type": "message.complete",
         "session_id": "runtime-leader-backfill",
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": "team-leader-turn-backfill",
         "runtime_scope_key": "profile:leader",
@@ -1455,10 +977,10 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
         },
     }
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
         active_mission_id="mission-backfill",
@@ -1468,7 +990,7 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
         conn.execute(
             """
             INSERT INTO run_events (
-                session_id, run_id, turn_id, runtime_session_id, runtime_scope_key,
+                session_id, run_id, turn_id, execution_session_id, runtime_scope_key,
                 activity_id, event_type, seq, timestamp, payload_json, event_json,
                 status, participant_id, projection_state, runtime_source_seq
             )
@@ -1494,9 +1016,11 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
         )
 
     db._execute_write(insert_raw_event)  # noqa: SLF001 - regression seeds a legacy raw row.
-    assert db.get_messages(session_id) == []
+    assert db.messages.list(session_id) == []
 
-    messages = db.get_conversation_message_read_model(
+    repair = db.team_transcript_projections.backfill([session_id])
+    assert repair["projected_messages"] == 1
+    messages = db.messages.all_as_conversation(
         session_id,
         include_storage_metadata=True,
     )
@@ -1518,11 +1042,11 @@ def test_team_conversation_read_model_backfills_unprojected_leader_chat(tmp_path
 def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_path: Path):
     import json
 
-    from hermes_state import SessionDB
-    from hermes_state_participants import leader_participant_id
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from hermes_agent.repositories.conversation_participant_repo import leader_participant_id
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     conversation_id = "team-conversation-projected-artifact-backfill"
     session_id = f"team-session-{conversation_id}"
     activity_id = f"chat:{session_id}"
@@ -1530,10 +1054,10 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
     run_id = "team-leader-run-projected-artifact-backfill"
     turn_id = "team-leader-turn-projected-artifact-backfill"
 
-    db.create_session(session_id, source="team_mission", transient=False)
+    db.sessions.create(session_id, source="team_mission", transient=False)
     db.upsert_team_mission_conversation(
         conversation_id=conversation_id,
-        stable_session_id=session_id,
+        conversation_session_id=session_id,
         team_id="team-1",
         title="团队会话",
     )
@@ -1542,7 +1066,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         {
             "type": "artifact.created",
             "session_id": "runtime-leader-projected-artifact-backfill",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1563,7 +1087,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         {
             "type": "message.complete",
             "session_id": "runtime-leader-projected-artifact-backfill",
-            "stored_session_id": session_id,
+            "conversation_session_id": session_id,
             "run_id": run_id,
             "turn_id": turn_id,
             "runtime_scope_key": "profile:leader",
@@ -1581,7 +1105,7 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         db=db,
     )
 
-    [projected_message] = db.get_messages(session_id)
+    [projected_message] = db.messages.list(session_id)
     assert projected_message["metadata"]["artifacts"][0]["path"] == "/tmp/workspace/test_file_3.json"
 
     def strip_persisted_artifacts(conn):
@@ -1606,11 +1130,13 @@ def test_team_conversation_read_model_backfills_projected_leader_artifacts(tmp_p
         )
 
     db._execute_write(strip_persisted_artifacts)  # noqa: SLF001 - regression seeds a legacy projected row.
-    [legacy_message] = db.get_messages(session_id)
+    [legacy_message] = db.messages.list(session_id)
     assert "artifacts" not in legacy_message["metadata"]
     assert "artifactRefs" not in legacy_message["metadata"]["team_mission"]
 
-    messages = db.get_conversation_message_read_model(
+    repair = db.team_transcript_projections.backfill([session_id])
+    assert repair["merged_artifacts"] == 1
+    messages = db.messages.all_as_conversation(
         session_id,
         include_storage_metadata=True,
     )

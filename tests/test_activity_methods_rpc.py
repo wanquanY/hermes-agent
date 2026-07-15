@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway import server
 
 
@@ -19,13 +19,13 @@ def _call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 @pytest.fixture()
-def gateway_db(tmp_path: Path) -> SessionDB:
+def gateway_db(tmp_path: Path) -> CliSessionStore:
     previous_db = server._db
     previous_db_error = server._db_error
     previous_db_by_home = dict(server._db_by_home)
     previous_db_error_by_home = dict(server._db_error_by_home)
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     server._db = db
     server._db_error = None
     server._db_by_home = {}
@@ -60,13 +60,13 @@ def _assert_validation(response: dict[str, Any], message: str) -> None:
     assert response["error"]["message"] == message
 
 
-def _command(db: SessionDB, command_id: str) -> dict[str, Any]:
-    row = db.get_activity_command(command_id)
+def _command(db: CliSessionStore, command_id: str) -> dict[str, Any]:
+    row = db.activities.get_command(command_id)
     assert row
     return row
 
 
-def _run_event_count(db: SessionDB) -> int:
+def _run_event_count(db: CliSessionStore) -> int:
     with db._lock:
         row = db._conn.execute("SELECT COUNT(*) AS count FROM run_events").fetchone()
     assert row is not None
@@ -104,7 +104,7 @@ def _assert_no_forbidden_symbols(forbidden: set[str]) -> None:
 
 
 def test_activity_create_returns_activity_id_and_command_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     result = _assert_ok(_call("activity.create", _base_create_params()))
 
@@ -114,7 +114,7 @@ def test_activity_create_returns_activity_id_and_command_id(
 
 
 def test_activity_create_uses_caller_supplied_activity_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     result = _assert_ok(
         _call("activity.create", _base_create_params(activity_id="act-caller"))
@@ -124,7 +124,7 @@ def test_activity_create_uses_caller_supplied_activity_id(
 
 
 def test_activity_create_persists_into_activity_commands_table(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     result = _assert_ok(
         _call(
@@ -140,7 +140,7 @@ def test_activity_create_persists_into_activity_commands_table(
     assert row["metadata"] == {"source": "activity.create"}
 
 
-def test_activity_create_preserves_full_payload(gateway_db: SessionDB) -> None:
+def test_activity_create_preserves_full_payload(gateway_db: CliSessionStore) -> None:
     params = _base_create_params(
         activity_id="act-create-payload",
         command_id="cmd-create-payload",
@@ -152,7 +152,7 @@ def test_activity_create_preserves_full_payload(gateway_db: SessionDB) -> None:
     assert _command(gateway_db, "cmd-create-payload")["payload"] == params
 
 
-def test_activity_start_returns_command_id(gateway_db: SessionDB) -> None:
+def test_activity_start_returns_command_id(gateway_db: CliSessionStore) -> None:
     result = _assert_ok(_call("activity.start", {"activity_id": "act-start"}))
 
     assert result["command_id"].startswith("cmd-")
@@ -160,7 +160,7 @@ def test_activity_start_returns_command_id(gateway_db: SessionDB) -> None:
     assert "activity_id" not in result
 
 
-def test_activity_start_persists_command(gateway_db: SessionDB) -> None:
+def test_activity_start_persists_command(gateway_db: CliSessionStore) -> None:
     _assert_ok(
         _call(
             "activity.start",
@@ -174,7 +174,7 @@ def test_activity_start_persists_command(gateway_db: SessionDB) -> None:
     assert row["metadata"] == {"source": "activity.start"}
 
 
-def test_activity_cancel_returns_command_id(gateway_db: SessionDB) -> None:
+def test_activity_cancel_returns_command_id(gateway_db: CliSessionStore) -> None:
     result = _assert_ok(
         _call("activity.command.cancel", {"activity_id": "act-mission-cancel"})
     )
@@ -183,7 +183,7 @@ def test_activity_cancel_returns_command_id(gateway_db: SessionDB) -> None:
     assert result["status"] == "accepted"
 
 
-def test_activity_cancel_preserves_reason_in_payload(gateway_db: SessionDB) -> None:
+def test_activity_cancel_preserves_reason_in_payload(gateway_db: CliSessionStore) -> None:
     _assert_ok(
         _call(
             "activity.command.cancel",
@@ -201,14 +201,14 @@ def test_activity_cancel_preserves_reason_in_payload(gateway_db: SessionDB) -> N
     assert row["metadata"] == {"source": "activity.command.cancel"}
 
 
-def test_activity_complete_returns_command_id(gateway_db: SessionDB) -> None:
+def test_activity_complete_returns_command_id(gateway_db: CliSessionStore) -> None:
     result = _assert_ok(_call("activity.complete", {"activity_id": "act-complete"}))
 
     assert result["command_id"].startswith("cmd-")
     assert result["status"] == "accepted"
 
 
-def test_activity_complete_preserves_result_in_payload(gateway_db: SessionDB) -> None:
+def test_activity_complete_preserves_result_in_payload(gateway_db: CliSessionStore) -> None:
     result_payload = {"summary": "done", "ok": True}
     _assert_ok(
         _call(
@@ -228,7 +228,7 @@ def test_activity_complete_preserves_result_in_payload(gateway_db: SessionDB) ->
 
 
 def test_activity_create_rerun_same_command_id_returns_already_existed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     params = _base_create_params(
         activity_id="act-idem-create", command_id="cmd-idem-create"
@@ -242,7 +242,7 @@ def test_activity_create_rerun_same_command_id_returns_already_existed(
 
 
 def test_activity_start_rerun_same_command_id_returns_already_existed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     params = {"activity_id": "act-idem-start", "command_id": "cmd-idem-start"}
     first = _assert_ok(_call("activity.start", params))
@@ -253,7 +253,7 @@ def test_activity_start_rerun_same_command_id_returns_already_existed(
 
 
 def test_activity_cancel_rerun_same_command_id_returns_already_existed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     params = {
         "activity_id": "act-mission-idem-cancel",
@@ -267,7 +267,7 @@ def test_activity_cancel_rerun_same_command_id_returns_already_existed(
 
 
 def test_activity_complete_rerun_same_command_id_returns_already_existed(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     params = {"activity_id": "act-idem-complete", "command_id": "cmd-idem-complete"}
     first = _assert_ok(_call("activity.complete", params))
@@ -277,7 +277,7 @@ def test_activity_complete_rerun_same_command_id_returns_already_existed(
     assert second["already_existed"] is True
 
 
-def test_activity_create_rejects_missing_kind(gateway_db: SessionDB) -> None:
+def test_activity_create_rejects_missing_kind(gateway_db: CliSessionStore) -> None:
     _assert_validation(
         _call(
             "activity.create",
@@ -290,7 +290,7 @@ def test_activity_create_rejects_missing_kind(gateway_db: SessionDB) -> None:
     )
 
 
-def test_activity_create_rejects_unknown_kind(gateway_db: SessionDB) -> None:
+def test_activity_create_rejects_unknown_kind(gateway_db: CliSessionStore) -> None:
     response = _call("activity.create", _base_create_params(kind="unknown"))
 
     assert response["error"]["code"] == 4006
@@ -298,7 +298,7 @@ def test_activity_create_rejects_unknown_kind(gateway_db: SessionDB) -> None:
 
 
 def test_activity_create_rejects_missing_conversation_session_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     _assert_validation(
         _call(
@@ -309,7 +309,7 @@ def test_activity_create_rejects_missing_conversation_session_id(
     )
 
 
-def test_activity_create_rejects_missing_conversation_id(gateway_db: SessionDB) -> None:
+def test_activity_create_rejects_missing_conversation_id(gateway_db: CliSessionStore) -> None:
     _assert_validation(
         _call(
             "activity.create",
@@ -319,23 +319,23 @@ def test_activity_create_rejects_missing_conversation_id(gateway_db: SessionDB) 
     )
 
 
-def test_activity_start_rejects_missing_activity_id(gateway_db: SessionDB) -> None:
+def test_activity_start_rejects_missing_activity_id(gateway_db: CliSessionStore) -> None:
     _assert_validation(_call("activity.start", {}), "activity_id required")
 
 
-def test_activity_start_rejects_empty_activity_id(gateway_db: SessionDB) -> None:
+def test_activity_start_rejects_empty_activity_id(gateway_db: CliSessionStore) -> None:
     _assert_validation(
         _call("activity.start", {"activity_id": ""}),
         "activity_id required",
     )
 
 
-def test_activity_cancel_rejects_missing_activity_id(gateway_db: SessionDB) -> None:
+def test_activity_cancel_rejects_missing_activity_id(gateway_db: CliSessionStore) -> None:
     _assert_validation(_call("activity.command.cancel", {}), "activity_id required")
 
 
 def test_activity_command_cancel_rejects_unprefixed_activity_id(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     response = _call(
         "activity.command.cancel",
@@ -347,14 +347,14 @@ def test_activity_command_cancel_rejects_unprefixed_activity_id(
 
 
 def test_legacy_activity_cancel_keeps_unprefixed_activity_id_compatibility(
-    gateway_db: SessionDB,
+    gateway_db: CliSessionStore,
 ) -> None:
     response = _call("activity.cancel", {"activity_id": "conversation-id-without-prefix"})
 
     assert response["result"] == {"ok": False, "reason": "already_terminal"}
 
 
-def test_activity_complete_rejects_missing_activity_id(gateway_db: SessionDB) -> None:
+def test_activity_complete_rejects_missing_activity_id(gateway_db: CliSessionStore) -> None:
     _assert_validation(_call("activity.complete", {}), "activity_id required")
 
 
@@ -369,7 +369,7 @@ def test_activity_create_returns_5008_when_db_missing() -> None:
     assert response["error"] == {"code": 5008, "message": "state.db unavailable"}
 
 
-def test_activity_create_does_not_emit_run_events(gateway_db: SessionDB) -> None:
+def test_activity_create_does_not_emit_run_events(gateway_db: CliSessionStore) -> None:
     before = _run_event_count(gateway_db)
     _assert_ok(
         _call("activity.create", _base_create_params(activity_id="act-no-events"))
@@ -379,7 +379,7 @@ def test_activity_create_does_not_emit_run_events(gateway_db: SessionDB) -> None
     _assert_no_forbidden_symbols({"record_event", "append_run_event"})
 
 
-def test_activity_start_does_not_spawn_worker(gateway_db: SessionDB) -> None:
+def test_activity_start_does_not_spawn_worker(gateway_db: CliSessionStore) -> None:
     _assert_ok(_call("activity.start", {"activity_id": "act-no-spawn"}))
 
     _assert_no_forbidden_symbols({
@@ -391,13 +391,13 @@ def test_activity_start_does_not_spawn_worker(gateway_db: SessionDB) -> None:
     })
 
 
-def test_activity_cancel_does_not_kill_workers(gateway_db: SessionDB) -> None:
-    gateway_db.create_activity(
+def test_activity_cancel_does_not_kill_workers(gateway_db: CliSessionStore) -> None:
+    gateway_db.activities.create(
         activity_id="act-mission-stays-running",
         conversation_id="conversation-activity-rpc",
         kind="agent_dispatch",
     )
-    gateway_db.update_activity_status(
+    gateway_db.activities.update_status(
         "act-mission-stays-running",
         "running",
         started_at=1.0,
@@ -413,7 +413,7 @@ def test_activity_cancel_does_not_kill_workers(gateway_db: SessionDB) -> None:
         )
     )
 
-    assert gateway_db.get_activity("act-mission-stays-running")["status"] == "running"
+    assert gateway_db.activities.get("act-mission-stays-running")["status"] == "running"
     _assert_no_forbidden_symbols({
         "cancel_run",
         "RunCancelFrame",

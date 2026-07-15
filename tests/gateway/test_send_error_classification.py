@@ -8,7 +8,7 @@ of substring-matching the raw provider message.
 
 import pytest
 
-from gateway.platforms.base import (
+from channels.platforms.base_models import (
     SEND_ERROR_KINDS,
     SendResult,
     classify_send_error,
@@ -88,8 +88,8 @@ def test_telegram_send_failure_populates_error_kind():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
-    from gateway.config import PlatformConfig
-    from plugins.platforms.telegram.adapter import TelegramAdapter
+    from hermes_gateway.config import PlatformConfig
+    from channels.platforms.telegram import TelegramAdapter
 
     cfg = PlatformConfig(enabled=True, token="fake-token", extra={})
     adapter = TelegramAdapter(cfg)
@@ -116,8 +116,8 @@ def test_telegram_too_long_sets_too_long_kind():
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
-    from gateway.config import PlatformConfig
-    from plugins.platforms.telegram.adapter import TelegramAdapter
+    from hermes_gateway.config import PlatformConfig
+    from channels.platforms.telegram import TelegramAdapter
 
     cfg = PlatformConfig(enabled=True, token="fake-token", extra={})
     adapter = TelegramAdapter(cfg)

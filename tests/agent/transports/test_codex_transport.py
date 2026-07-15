@@ -246,6 +246,29 @@ class TestCodexBuildKwargs:
         # "minimal" should be clamped to "low"
         assert kw.get("reasoning", {}).get("effort") == "low"
 
+    @pytest.mark.parametrize("model", ("gpt-5.6-sol", "gpt-5.6-luna-pro"))
+    def test_gpt56_ultra_effort_clamps_to_max(self, transport, model):
+        kw = transport.build_kwargs(
+            model=model,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            reasoning_config={"effort": "ultra"},
+        )
+
+        assert kw.get("reasoning", {}).get("effort") == "max"
+
+    @pytest.mark.parametrize("effort", ("xhigh", "max", "ultra"))
+    def test_xai_strong_efforts_clamp_to_high(self, transport, effort):
+        kw = transport.build_kwargs(
+            model="grok-4.5",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            is_xai_responses=True,
+            reasoning_config={"effort": effort},
+        )
+
+        assert kw.get("reasoning", {}).get("effort") == "high"
+
     def test_xai_reasoning_effort_passed(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(

@@ -1544,7 +1544,11 @@ def run_curator_review(
     if synchronous:
         _llm_pass()
     else:
-        t = threading.Thread(target=_llm_pass, daemon=True, name="curator-review")
+        t = threading.Thread(
+            target=_llm_pass,
+            daemon=True,
+            name="curator-review",
+        )
         t.start()
 
     return {

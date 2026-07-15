@@ -414,7 +414,13 @@ class GatewayToolEventBridge:
         **kwargs,
     ) -> None:
         session = self._sessions.get(sid)
-        if session_interrupted(session) or not self._tool_progress_enabled(sid):
+        if not self._tool_progress_enabled(sid):
+            return
+        # Cancellation closes the content stream, but the terminal lifecycle
+        # fact must still cross the worker boundary so history and status can
+        # converge. Dropping subagent.complete here leaves the child running
+        # forever in every downstream read model.
+        if session_interrupted(session) and event_type != "subagent.complete":
             return
         if event_type == "tool.started" and name:
             self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
@@ -462,6 +468,15 @@ class GatewayToolEventBridge:
         ):
             if kwargs.get(field):
                 payload[field] = str(kwargs[field])
+        if event_type in {"subagent.output_delta", "subagent.reasoning_delta"}:
+            mode = str(kwargs.get("mode") or "append").strip().lower()
+            payload["mode"] = mode if mode in {"append", "snapshot", "replace", "cumulative"} else "append"
+            payload["delta"] = str(kwargs.get("delta") if kwargs.get("delta") is not None else preview or "")
+            if kwargs.get("offset") is not None:
+                try:
+                    payload["offset"] = max(0, int(kwargs["offset"]))
+                except (TypeError, ValueError):
+                    pass
         if kwargs.get("depth") is not None:
             payload["depth"] = int(kwargs["depth"])
         if kwargs.get("tool_count") is not None:

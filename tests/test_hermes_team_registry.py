@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
-    profile = db.upsert_agent_profile(
+    db = open_cli_session_store(tmp_path / "state.db")
+    profile = db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader v1",
@@ -19,7 +19,7 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
         current_version_number=1,
     )
 
-    team = db.upsert_agent_team(
+    team = db.teams.upsert_agent_team(
         team_id="team-1",
         name="Research Team",
         description="Research and verify.",
@@ -27,7 +27,7 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
         default_mode="supervised_mission",
         policy={"planApproval": "always"},
     )
-    member = db.upsert_agent_team_member(
+    member = db.teams.upsert_agent_team_member(
         member_id="member-leader",
         team_id="team-1",
         agent_profile_id="profile-leader",
@@ -36,7 +36,7 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
         capability_tags=["planning", "quality"],
     )
 
-    resolved = db.get_agent_team_with_members("team-1")
+    resolved = db.teams.get_agent_team_with_members("team-1")
 
     assert team["id"] == "team-1"
     assert member["team_id"] == "team-1"
@@ -44,8 +44,8 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
     assert "default_workspace_id" not in resolved
     assert resolved["members"][0]["id"] == "member-leader"
     assert resolved["members"][0]["capability_tags"] == ["planning", "quality"]
-    assert [item["id"] for item in db.list_agent_teams()] == ["team-1"]
-    summaries = db.list_agent_team_summaries()
+    assert [item["id"] for item in db.teams.list_agent_teams()] == ["team-1"]
+    summaries = db.teams.list_agent_team_summaries()
     assert summaries[0]["id"] == "team-1"
     assert summaries[0]["member_count"] == 1
     assert summaries[0]["leader_member"]["agent_profile_id"] == "profile-leader"
@@ -54,39 +54,39 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
     assert summaries[0]["display_members"][0]["profile_avatar"] == "https://example.test/leader-v1.png"
     assert "members" not in summaries[0]
 
-    updated_member = db.upsert_agent_team_member(
+    updated_member = db.teams.upsert_agent_team_member(
         member_id="member-leader-v2",
         team_id="team-1",
         agent_profile_id="profile-leader",
         role="lead",
         capability_tags=["planning", "review"],
     )
-    updated_members = db.list_agent_team_members("team-1")
+    updated_members = db.teams.list_agent_team_members("team-1")
     assert updated_member["id"] == "member-leader-v2"
     assert len(updated_members) == 1
     assert updated_members[0]["capability_tags"] == ["planning", "review"]
     assert updated_members[0]["profile_name"] == "Leader v1"
     assert updated_members[0]["profile_avatar"] == "https://example.test/leader-v1.png"
 
-    archived = db.archive_agent_team("team-1")
+    archived = db.teams.archive_agent_team("team-1")
     assert archived["status"] == "archived"
-    assert db.list_agent_teams() == []
-    assert [item["id"] for item in db.list_agent_teams(include_archived=True)] == ["team-1"]
+    assert db.teams.list_agent_teams() == []
+    assert [item["id"] for item in db.teams.list_agent_teams(include_archived=True)] == ["team-1"]
     with pytest.raises(ValueError, match="team archived: team-1"):
-        db.upsert_agent_team(
+        db.teams.upsert_agent_team(
             team_id="team-1",
             name="Research Team v2",
             status="active",
         )
     with pytest.raises(ValueError, match="team archived: team-1"):
-        db.upsert_agent_team_member(
+        db.teams.upsert_agent_team_member(
             member_id="member-writer",
             team_id="team-1",
             agent_profile_id="profile-writer",
             role="writer",
         )
     with pytest.raises(ValueError, match="team archived: team-1"):
-        db.delete_agent_team_member("member-leader-v2")
+        db.teams.delete_agent_team_member("member-leader-v2")
 
 
 def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
@@ -95,9 +95,9 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     from tui_gateway import server
 
     team_registry = importlib.import_module("tui_gateway.methods.team_registry")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_registry, "_get_db", lambda: db)
-    profile = db.upsert_agent_profile(
+    profile = db.profiles.upsert_agent_profile(
         profile_id="profile-leader",
         slug="leader",
         name="Leader v1",
@@ -132,14 +132,14 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     )
     get_response = server._methods["team_registry.team.get"](2, {"team_id": "team-1"})
     member_list_response = server._methods["team_registry.member.list"](3, {"team_id": "team-1"})
-    full_member_loader = db.list_agent_team_members
+    full_member_loader = db.teams.list_agent_team_members
 
     def fail_full_member_load(_team_id: str):
         raise AssertionError("summary team list must not hydrate full members")
 
-    monkeypatch.setattr(db, "list_agent_team_members", fail_full_member_load)
+    monkeypatch.setattr(db.teams, "list_agent_team_members", fail_full_member_load)
     list_response = server._methods["team_registry.team.list"](4, {})
-    monkeypatch.setattr(db, "list_agent_team_members", full_member_loader)
+    monkeypatch.setattr(db.teams, "list_agent_team_members", full_member_loader)
     member_response = server._methods["team_registry.member.upsert"](
         5,
         {
@@ -217,6 +217,52 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert archived_member_delete_response["error"]["message"] == "team archived: team-1"
 
 
+def test_team_registry_gateway_detail_list_works_with_cli_session_store(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+    from tui_gateway import server
+
+    team_registry = importlib.import_module("tui_gateway.methods.team_registry")
+    db = open_cli_session_store(tmp_path / "state.db")
+    monkeypatch.setattr(team_registry, "_get_db", lambda: db)
+    db.profiles.upsert_agent_profile(
+        profile_id="profile-leader",
+        slug="leader",
+        name="Leader v1",
+        avatar="https://example.test/leader-v1.png",
+        hermes_profile_name="leader",
+        hermes_home_path=str(tmp_path / "profiles" / "leader"),
+        current_version_id="snapshot-leader",
+        current_version_number=1,
+    )
+    db.teams.upsert_agent_team(
+        team_id="team-1",
+        name="Engineering Team",
+        description="Build and verify.",
+        default_mode="supervised_mission",
+        policy={"planApproval": "always"},
+    )
+    db.teams.upsert_agent_team_member(
+        member_id="member-leader",
+        team_id="team-1",
+        agent_profile_id="profile-leader",
+        role="lead",
+        capability_tags=["planning"],
+    )
+
+    response = server._methods["team_registry.team.list"](
+        1,
+        {"include_members": True, "projection": "detail"},
+    )
+
+    assert "error" not in response
+    assert [team["id"] for team in response["result"]["teams"]] == ["team-1"]
+    assert response["result"]["teams"][0]["projection"] == "detail"
+    assert response["result"]["teams"][0]["members"][0]["id"] == "member-leader"
+    assert response["result"]["teams"][0]["members"][0]["profileAvatar"] == "https://example.test/leader-v1.png"
+
+
 def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_path: Path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
@@ -260,7 +306,7 @@ def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_pa
     finally:
         conn.close()
 
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
 
     with db._lock:
         columns = {
@@ -270,13 +316,13 @@ def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_pa
     assert "profile_name" in columns
     assert "profile_avatar" in columns
 
-    db.upsert_agent_team(
+    db.teams.upsert_agent_team(
         team_id="team-legacy",
         name="Legacy Team",
         default_mode="supervised_mission",
         policy={},
     )
-    member = db.upsert_agent_team_member(
+    member = db.teams.upsert_agent_team_member(
         member_id="member-legacy",
         team_id="team-legacy",
         agent_profile_id="profile-legacy",

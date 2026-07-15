@@ -301,7 +301,7 @@ class TestGatewayMode:
         """gateway.log captures records from gateway.* loggers."""
         hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
 
-        gw_logger = logging.getLogger("gateway.platforms.telegram")
+        gw_logger = logging.getLogger("channels.platforms.telegram")
         gw_logger.info("telegram connected")
 
         for h in logging.getLogger().handlers:
@@ -506,7 +506,7 @@ class TestComponentFilter:
     def test_passes_nested_matching_prefix(self):
         f = hermes_logging._ComponentFilter(("gateway",))
         record = logging.LogRecord(
-            "gateway.platforms.telegram", logging.INFO, "", 0, "msg", (), None
+            "channels.platforms.telegram", logging.INFO, "", 0, "msg", (), None
         )
         assert f.filter(record) is True
 

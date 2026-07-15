@@ -37,7 +37,7 @@ from tui_gateway.run_worker import (
     RunTerminalFrame,
     WorkerRunBackend,
 )
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 _log = logging.getLogger(__name__)
 
@@ -135,10 +135,10 @@ class AgentRunBackend(WorkerRunBackend):
                         "agent-backend-refuse-active",
                         requested_run_id=frame.run_id,
                         requested_turn_id=frame.turn_id,
-                        requested_stored_session_id=frame.stored_session_id,
+                        requested_conversation_session_id=frame.conversation_session_id,
                         active_run_id=active_refusal.run_id,
                         active_turn_id=active_refusal.frame.turn_id,
-                        active_stored_session_id=active_refusal.frame.stored_session_id,
+                        active_conversation_session_id=active_refusal.frame.conversation_session_id,
                         active_thread_alive=active_refusal.thread.is_alive(),
                     ),
                 )
@@ -149,7 +149,7 @@ class AgentRunBackend(WorkerRunBackend):
                 RunTerminalFrame(
                     run_id=frame.run_id,
                     status="failed",
-                    stored_session_id=frame.stored_session_id,
+                    conversation_session_id=frame.conversation_session_id,
                     turn_id=frame.turn_id,
                     message="another run already active in this worker",
                 )
@@ -160,7 +160,7 @@ class AgentRunBackend(WorkerRunBackend):
             run_context = _run_context_from_frame(frame)
             bridge = WorkerPublishBridge(emit=emit, loop=loop)
             bridge.install(
-                stored_session_id=frame.stored_session_id,
+                conversation_session_id=frame.conversation_session_id,
                 run_context=run_context,
             )
 
@@ -168,14 +168,14 @@ class AgentRunBackend(WorkerRunBackend):
             # by the thread and read back here.
             result: dict[str, Any] = {"exc": None, "value": None}
 
-            def _wrap() -> None:
+            def _wrap_inner() -> None:
                 try:
                     result["value"] = self._runner(frame, cancel_event)
                 except BaseException as exc:  # noqa: BLE001 — capture & surface
                     result["exc"] = exc
 
             thread = threading.Thread(
-                target=_wrap,
+                target=_wrap_inner,
                 name=f"agent-run[{frame.run_id}]",
                 daemon=True,
             )
@@ -192,7 +192,7 @@ class AgentRunBackend(WorkerRunBackend):
             "agent-backend-started",
             run_id=frame.run_id,
             turn_id=frame.turn_id,
-            stored_session_id=frame.stored_session_id,
+            conversation_session_id=frame.conversation_session_id,
             thread_name=thread.name,
         )
 
@@ -202,6 +202,14 @@ class AgentRunBackend(WorkerRunBackend):
             # stays drained.
             await asyncio.get_running_loop().run_in_executor(None, thread.join)
         finally:
+            try:
+                # EventFrame writes are scheduled from the agent thread. Drain
+                # them before RunTerminalFrame becomes visible to the main
+                # process, otherwise terminal reconciliation can overtake the
+                # final subagent/message lifecycle facts.
+                await bridge.drain()
+            except Exception:
+                _log.exception("[agent-run-backend] bridge drain failed")
             cleared_active = False
             with self._lock:
                 if self._active is active:
@@ -212,7 +220,7 @@ class AgentRunBackend(WorkerRunBackend):
                     "agent-backend-cleared-active",
                     run_id=frame.run_id,
                     turn_id=frame.turn_id,
-                    stored_session_id=frame.stored_session_id,
+                    conversation_session_id=frame.conversation_session_id,
                     thread_alive=thread.is_alive(),
                 )
             try:
@@ -225,7 +233,7 @@ class AgentRunBackend(WorkerRunBackend):
             "agent-backend-terminal",
             run_id=frame.run_id,
             turn_id=frame.turn_id,
-            stored_session_id=frame.stored_session_id,
+            conversation_session_id=frame.conversation_session_id,
             status=status,
             message=message,
             cancelled=cancel_event.is_set(),
@@ -235,7 +243,7 @@ class AgentRunBackend(WorkerRunBackend):
             RunTerminalFrame(
                 run_id=frame.run_id,
                 status=status,
-                stored_session_id=frame.stored_session_id,
+                conversation_session_id=frame.conversation_session_id,
                 turn_id=frame.turn_id,
                 message=message,
             )
@@ -257,7 +265,7 @@ class AgentRunBackend(WorkerRunBackend):
             "agent-backend-cancel",
             run_id=run_id,
             turn_id=active.frame.turn_id,
-            stored_session_id=active.frame.stored_session_id,
+            conversation_session_id=active.frame.conversation_session_id,
         )
         active.cancel_event.set()
 

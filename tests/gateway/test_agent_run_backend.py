@@ -56,7 +56,7 @@ def _clean_run_control():
 
 def _start_frame(run_id: str = "r1") -> RunStartFrame:
     return RunStartFrame(
-        run_id=run_id, turn_id="t1", stored_session_id="s1", prompt="hi",
+        run_id=run_id, turn_id="t1", conversation_session_id="s1", prompt="hi",
     )
 
 
@@ -73,7 +73,35 @@ async def test_completes_emits_completed_terminal() -> None:
     assert len(terms) == 1
     assert terms[0].status == "completed"
     assert terms[0].run_id == "r1"
-    assert terms[0].stored_session_id == "s1"
+    assert terms[0].conversation_session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_terminal_frame_never_overtakes_thread_scheduled_event_frames() -> None:
+    from tui_gateway.services import run_control
+
+    class _SlowSink(_Sink):
+        async def emit(self, frame) -> None:
+            if isinstance(frame, EventFrame):
+                await asyncio.sleep(0.02)
+            self.frames.append(frame)
+
+    def runner(_frame: RunStartFrame, _cancel: threading.Event) -> None:
+        run_control.publish_recorded_event(
+            {
+                "type": "subagent.complete",
+                "conversation_session_id": "s1",
+                "run_id": "r-order",
+                "payload": {"subagent_id": "sa-1", "status": "completed"},
+            }
+        )
+
+    backend = AgentRunBackend(runner=runner)
+    sink = _SlowSink()
+    await backend.start(_start_frame("r-order"), sink.emit)
+
+    assert [type(frame) for frame in sink.frames] == [EventFrame, RunTerminalFrame]
+    assert sink.frames[0].params["type"] == "subagent.complete"
 
 
 @pytest.mark.asyncio
@@ -210,13 +238,13 @@ async def test_bridge_installs_and_uninstalls(monkeypatch) -> None:
 
     real_install_method = None
 
-    import tui_gateway.services.worker_publish_bridge as bridge_mod
+    import hermes_agent.orchestration.worker_publish_bridge as bridge_mod
     original_cls = bridge_mod.WorkerPublishBridge
 
     class _RecordingBridge(original_cls):
-        def install(self, *, stored_session_id: str = "", run_context=None):
-            install_calls.append(stored_session_id)
-            return super().install(stored_session_id=stored_session_id, run_context=run_context)
+        def install(self, *, conversation_session_id: str = "", run_context=None):
+            install_calls.append(conversation_session_id)
+            return super().install(conversation_session_id=conversation_session_id, run_context=run_context)
 
         def uninstall(self):
             uninstall_calls.append(1)

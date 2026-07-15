@@ -4,19 +4,19 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway import server
 
 
-def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
+def _install_db(monkeypatch: Any, tmp_path: Path) -> CliSessionStore:
     conversation_render_snapshot = importlib.import_module(
         "tui_gateway.methods.conversation_render_snapshot"
     )
     session_history = importlib.import_module("tui_gateway.methods.session_history")
     session_methods = importlib.import_module("tui_gateway.methods.session")
     team_mission = team_mission_gateway()
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
     monkeypatch.setattr(session_history, "_get_db", lambda: db)
     monkeypatch.setattr(session_methods, "_get_db", lambda: db)
@@ -24,11 +24,11 @@ def _install_db(monkeypatch: Any, tmp_path: Path) -> SessionDB:
     return db
 
 
-def _seed_team_conversation(db: SessionDB, *, mission_status: str = "running") -> None:
-    db.create_session(session_id="team-session-1", source="team_mission")
+def _seed_team_conversation(db: CliSessionStore, *, mission_status: str = "running") -> None:
+    db.sessions.create(session_id="team-session-1", source="team_mission")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team conversation",
         active_mission_id="mission-1",
@@ -62,7 +62,7 @@ def _message_complete(
     return {
         "type": "message.complete",
         "session_id": f"runtime-{run_id}",
-        "stored_session_id": "team-session-1",
+        "conversation_session_id": "team-session-1",
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "runtime_scope_key": "team:conversation-1",
@@ -88,31 +88,34 @@ def test_run_events_seq_monotonic_across_leader_and_member_runs_same_conv(
     try:
         _seed_team_conversation(db)
 
-        db.append_run_event("team-session-1", _message_complete("run-leader", "leader", seq=1))
-        db.append_run_event("team-session-1", _message_complete("run-member", "member", seq=1))
+        db.runs.append_event("team-session-1", _message_complete("run-leader", "leader", seq=1))
+        db.runs.append_event("team-session-1", _message_complete("run-member", "member", seq=1))
 
-        events = db.list_run_events("team-session-1")
+        events = db.runs.list_events("team-session-1")
         assert [event["seq"] for event in events] == [1, 2]
         assert [event["run_id"] for event in events] == ["run-leader", "run-member"]
     finally:
         db.close()
 
 
-def test_team_render_does_not_synthesize_messages_from_run_events(
+def test_team_render_reads_write_time_projected_messages_from_transcript(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     db = _install_db(monkeypatch, tmp_path)
     try:
         _seed_team_conversation(db)
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             _message_complete("run-member", "rendered from run_events", participant_id="member:builder"),
         )
 
         result = _render_team()
 
-        assert result["messages"] == []
+        assert [message["text"] for message in result["messages"]] == ["rendered from run_events"]
+        # A running background mission is not an active Leader chat response.
+        # Completed chat events stay in the transcript and never form a live tail.
+        assert result["runEvents"] == []
     finally:
         db.close()
 
@@ -182,17 +185,17 @@ def test_run_events_do_not_duplicate_explicit_transcript_messages_in_render(
     db = _install_db(monkeypatch, tmp_path)
     try:
         _seed_team_conversation(db)
-        db.append_message(
+        db.messages.append(
             "team-session-1",
             role="assistant",
             content="same final",
             metadata={"transcript_activity_kind": "mission_summary"},
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             _message_complete("run-a", "same final", message_id="msg-final"),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-1",
             _message_complete("run-b", "same final", message_id="msg-final"),
         )
@@ -212,7 +215,7 @@ def test_event_ordering_by_run_events_seq(
     try:
         _seed_team_conversation(db)
         for text in ("first", "second", "third"):
-            db.append_message(
+            db.messages.append(
                 "team-session-1",
                 role="assistant",
                 content=text,
@@ -223,9 +226,9 @@ def test_event_ordering_by_run_events_seq(
             ("run-member", "second"),
             ("run-verifier", "third"),
         ):
-            db.append_run_event("team-session-1", _message_complete(run_id, text))
+            db.runs.append_event("team-session-1", _message_complete(run_id, text))
 
-        events = db.list_run_events("team-session-1")
+        events = db.runs.list_events("team-session-1")
         result = _render_team()
 
         assert [event["seq"] for event in events] == [1, 2, 3]

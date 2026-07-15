@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     mission = db.upsert_team_mission(
         mission_id="mission-1",
@@ -30,7 +30,7 @@ def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Pa
         from_node_id="node-leader",
         to_node_id="node-worker",
     )
-    run = db.upsert_run(
+    run = db.runs.upsert(
         run_id="run-leader",
         session_id="session-leader",
         runtime_scope_key="team:mission-1:leader",
@@ -41,18 +41,18 @@ def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Pa
         node_id="node-leader",
         run_id="run-leader",
         session_id="session-leader",
-        runtime_session_id="runtime-leader",
+        execution_session_id="runtime-leader",
         runtime_scope_key="team:mission-1:leader",
         role="leader",
     )
 
-    graph = db.get_team_mission_graph("mission-1")
+    graph = db.team_mission_graphs.get_team_mission_graph("mission-1")
     graph_node = graph["nodes"][0]
     direct_node = db.get_team_mission_node("mission-1", "node-leader")
     durable_node = db._conn.execute(  # noqa: SLF001 - contract test for node-owned runtime identity.
         """
-        SELECT canonical_node_id, task_frame_id, runtime_stable_session_id,
-               runtime_session_id, runtime_scope_key
+        SELECT canonical_node_id, task_frame_id, runtime_conversation_session_id,
+               execution_session_id, runtime_scope_key
         FROM team_mission_nodes
         WHERE mission_id = ? AND node_id = ?
         """,
@@ -71,23 +71,23 @@ def test_team_mission_graph_and_run_binding_are_native_hermes_state(tmp_path: Pa
     assert [item["node_id"] for item in graph["nodes"]] == ["node-leader"]
     assert [item["run_id"] for item in graph["run_bindings"]] == ["run-leader"]
     assert graph_node["run_id"] == "run-leader"
-    assert graph_node["stored_session_id"] == "session-leader"
-    assert graph_node["actual_stable_session_id"] == "session-leader"
-    assert graph_node["runtime_session_id"] == "runtime-leader"
+    assert graph_node["conversation_session_id"] == "session-leader"
+    assert graph_node["actual_conversation_session_id"] == "session-leader"
+    assert graph_node["execution_session_id"] == "runtime-leader"
     assert graph_node["runtime_scope_key"] == "team:mission-1:leader"
     assert graph_node["runtime_binding"]["run_id"] == "run-leader"
     assert direct_node["run_id"] == "run-leader"
-    assert direct_node["stored_session_id"] == "session-leader"
-    assert direct_node["runtime_session_id"] == "runtime-leader"
+    assert direct_node["conversation_session_id"] == "session-leader"
+    assert direct_node["execution_session_id"] == "runtime-leader"
     assert durable_node["canonical_node_id"] == "mission-1:node-leader"
     assert durable_node["task_frame_id"] == "mission-frame:mission-1"
-    assert durable_node["runtime_stable_session_id"] == "session-leader"
-    assert durable_node["runtime_session_id"] == "runtime-leader"
+    assert durable_node["runtime_conversation_session_id"] == "session-leader"
+    assert durable_node["execution_session_id"] == "runtime-leader"
     assert durable_node["runtime_scope_key"] == "team:mission-1:leader"
 
 
 def test_team_mission_node_runtime_projection_uses_latest_run_binding(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -109,7 +109,7 @@ def test_team_mission_node_runtime_projection_uses_latest_run_binding(tmp_path: 
         node_id="node-worker",
         run_id="run-a-old",
         session_id="session-old",
-        runtime_session_id="runtime-old",
+        execution_session_id="runtime-old",
         runtime_scope_key="profile:worker",
         role="worker",
     )
@@ -118,21 +118,21 @@ def test_team_mission_node_runtime_projection_uses_latest_run_binding(tmp_path: 
         node_id="node-worker",
         run_id="run-z-new",
         session_id="session-new",
-        runtime_session_id="runtime-new",
+        execution_session_id="runtime-new",
         runtime_scope_key="profile:worker",
         role="worker",
     )
 
-    graph_node = db.get_team_mission_graph("mission-1")["nodes"][0]
+    graph_node = db.team_mission_graphs.get_team_mission_graph("mission-1")["nodes"][0]
 
     assert graph_node["run_id"] == "run-z-new"
-    assert graph_node["stored_session_id"] == "session-new"
-    assert graph_node["runtime_session_id"] == "runtime-new"
+    assert graph_node["conversation_session_id"] == "session-new"
+    assert graph_node["execution_session_id"] == "runtime-new"
     assert graph_node["runtime_binding"]["run_id"] == "run-z-new"
 
 
 def test_team_mission_conversation_is_canonical_and_resolvable(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission(
         mission_id="mission-1",
@@ -144,7 +144,7 @@ def test_team_mission_conversation_is_canonical_and_resolvable(tmp_path: Path):
         workspace_path="/tmp/workspace",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -153,14 +153,14 @@ def test_team_mission_conversation_is_canonical_and_resolvable(tmp_path: Path):
         title="Plan",
         status="completed",
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
-    user_message_id = db.append_message("team-session-1", "user", "请调研 AI 方向")
-    assistant_message_id = db.append_message("team-session-1", "assistant", "已完成调研计划")
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    user_message_id = db.messages.append("team-session-1", "user", "请调研 AI 方向")
+    assistant_message_id = db.messages.append("team-session-1", "assistant", "已完成调研计划")
 
     resolved = db.resolve_team_mission_conversation("conversation-1")
 
     assert resolved["conversation"]["conversation_id"] == "conversation-1"
-    assert resolved["conversation"]["stable_session_id"] == "team-session-1"
+    assert resolved["conversation"]["conversation_session_id"] == "team-session-1"
     assert resolved["mission"]["mission_id"] == "mission-1"
     assert resolved["graph"]["nodes"][0]["node_id"] == "mission-1:node-1"
     assert resolved["graph"]["nodes"][0]["metadata"]["hermes_node_id"] == "node-1"
@@ -179,11 +179,11 @@ def test_team_mission_conversation_is_canonical_and_resolvable(tmp_path: Path):
         "totalCount": 2,
     }
     assert resolved["graph"]["message_page_info"] == resolved["pageInfo"]
-    assert db.get_session("team-session-1")["source"] == "team_mission"
+    assert db.sessions.get("team-session-1")["source"] == "team_mission"
 
 
 def test_team_mission_conversation_resolve_returns_all_mission_frames(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     for mission_id, title, created_at in (
         ("mission-1", "第一次任务", 1.0),
@@ -201,7 +201,7 @@ def test_team_mission_conversation_resolve_returns_all_mission_frames(tmp_path: 
             leader_session_id="team-session-1",
             created_at=created_at,
             updated_at=created_at,
-            metadata={"stableTeamSessionId": "team-session-1", "task_id": f"task-{mission_id}"},
+            metadata={"conversationTeamSessionId": "team-session-1", "task_id": f"task-{mission_id}"},
         )
         db.upsert_team_mission_node(
             mission_id=mission_id,
@@ -249,12 +249,12 @@ def test_team_mission_conversation_resolve_returns_all_mission_frames(tmp_path: 
 
 
 def test_team_mission_conversation_runtime_summary_returns_frames_and_runtime_sessions(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-2",
     )
@@ -295,7 +295,7 @@ def test_team_mission_conversation_runtime_summary_returns_frames_and_runtime_se
         node_id="approval",
         run_id="run-approval",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         role="approval_gate",
     )
 
@@ -311,14 +311,14 @@ def test_team_mission_conversation_runtime_summary_returns_frames_and_runtime_se
     assert summary["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
 
 
-def test_team_mission_conversation_runtime_session_ids_are_lightweight(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+def test_team_mission_conversation_execution_session_ids_are_lightweight(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
         workspace_id="workspace-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
@@ -337,33 +337,33 @@ def test_team_mission_conversation_runtime_session_ids_are_lightweight(tmp_path:
         node_id="worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node:worker",
         role="worker",
     )
 
-    assert db.list_team_mission_conversation_runtime_session_ids(
+    assert db.list_team_mission_conversation_execution_session_ids(
         team_id="team-1",
         workspace_id="workspace-1",
         mission_id="mission-1",
     ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
 
-    assert db.list_team_mission_conversation_runtime_session_ids(
+    assert db.list_team_mission_conversation_execution_session_ids(
         mission_id="conversation-1",
     ) == ["team-session-1", "worker-session-1", "runtime-worker-1"]
 
 
 def test_team_mission_conversation_projection_returns_final_deliverable_and_artifacts(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -383,7 +383,7 @@ def test_team_mission_conversation_projection_returns_final_deliverable_and_arti
         status="completed",
         metadata={"task_id": "task-1"},
     )
-    message_id = db.append_message(
+    message_id = db.messages.append(
         "team-session-1",
         "assistant",
         "最终交付内容",
@@ -442,16 +442,16 @@ def test_team_mission_conversation_projection_returns_final_deliverable_and_arti
 
 
 def test_team_mission_conversation_projection_keeps_multi_round_deliverables_isolated(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-2",
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
     message_ids = {}
     for index, mission_id in enumerate(("mission-1", "mission-2"), start=1):
         task_id = f"task-{index}"
@@ -466,7 +466,7 @@ def test_team_mission_conversation_projection_keeps_multi_round_deliverables_iso
             leader_session_id="team-session-1",
             created_at=float(index),
             updated_at=float(index),
-            metadata={"stableTeamSessionId": "team-session-1", "task_id": task_id},
+            metadata={"conversationTeamSessionId": "team-session-1", "task_id": task_id},
         )
         db.upsert_team_mission_node(
             mission_id=mission_id,
@@ -476,8 +476,8 @@ def test_team_mission_conversation_projection_keeps_multi_round_deliverables_iso
             status="completed",
             metadata={"task_id": task_id},
         )
-        db.append_message("team-session-1", "user", f"第 {index} 轮用户请求")
-        message_ids[mission_id] = db.append_message(
+        db.messages.append("team-session-1", "user", f"第 {index} 轮用户请求")
+        message_ids[mission_id] = db.messages.append(
             "team-session-1",
             "assistant",
             f"第 {index} 轮最终交付",
@@ -537,7 +537,7 @@ def test_team_mission_conversation_projection_keeps_multi_round_deliverables_iso
 
 
 def test_team_mission_conversation_rename_updates_canonical_conversation_without_mutating_mission_or_session_title(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -548,26 +548,26 @@ def test_team_mission_conversation_rename_updates_canonical_conversation_without
         workspace_path="/tmp/workspace",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     result = db.rename_team_mission_conversation("conversation-1", "新团队任务")
 
     assert result["conversation_id"] == "conversation-1"
-    assert result["stable_session_id"] == "team-session-1"
+    assert result["conversation_session_id"] == "team-session-1"
     assert result["title"] == "新团队任务"
     assert result["conversation"]["title"] == "新团队任务"
     assert result["conversation"]["display_title"] == "新团队任务"
     assert result["conversation"]["display_title_source"] == "user"
-    assert db.get_team_mission_graph("mission-1")["mission"]["title"] == "旧标题"
-    assert db.get_session("team-session-1")["source"] == "team_mission"
-    assert db.get_session("team-session-1")["title"] is None
+    assert db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]["title"] == "旧标题"
+    assert db.sessions.get("team-session-1")["source"] == "team_mission"
+    assert db.sessions.get("team-session-1")["title"] is None
 
 
 def test_team_mission_task_binding_preserves_existing_conversation_title(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="正常生成的会话标题",
         objective="和 Leader 日常沟通",
@@ -581,7 +581,7 @@ def test_team_mission_task_binding_preserves_existing_conversation_title(tmp_pat
         objective="执行一个团队任务",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
 
     resolved = db.resolve_team_mission_conversation("conversation-1")
@@ -594,10 +594,10 @@ def test_team_mission_task_binding_preserves_existing_conversation_title(tmp_pat
 
 
 def test_team_mission_first_user_message_replaces_placeholder_conversation_title(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Mission",
         objective="占位会话",
@@ -605,7 +605,7 @@ def test_team_mission_first_user_message_replaces_placeholder_conversation_title
 
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="滴滴滴",
         objective="用户首条消息",
@@ -619,10 +619,10 @@ def test_team_mission_first_user_message_replaces_placeholder_conversation_title
 
 
 def test_team_mission_first_user_title_source_is_authoritative_even_when_text_matches_placeholder(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Mission",
         objective="用户首条消息就是这个文本",
@@ -631,7 +631,7 @@ def test_team_mission_first_user_title_source_is_authoritative_even_when_text_ma
 
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="后续任务标题不能覆盖首条消息标题",
         objective="后续任务",
@@ -644,10 +644,10 @@ def test_team_mission_first_user_title_source_is_authoritative_even_when_text_ma
 
 
 def test_team_mission_conversation_ensure_does_not_touch_activity_time(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="历史团队会话",
         created_at=100,
@@ -656,7 +656,7 @@ def test_team_mission_conversation_ensure_does_not_touch_activity_time(tmp_path:
 
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         mission_id="mission-1",
         title="打开历史时不应该触活",
@@ -670,10 +670,10 @@ def test_team_mission_conversation_ensure_does_not_touch_activity_time(tmp_path:
 
 
 def test_team_mission_conversation_list_uses_message_activity_like_normal_sessions(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="old-conversation",
-        stable_session_id="old-team-session",
+        conversation_session_id="old-team-session",
         team_id="team-1",
         title="旧团队会话",
         created_at=100,
@@ -681,7 +681,7 @@ def test_team_mission_conversation_list_uses_message_activity_like_normal_sessio
     )
     db.upsert_team_mission_conversation(
         conversation_id="newer-created-conversation",
-        stable_session_id="newer-team-session",
+        conversation_session_id="newer-team-session",
         team_id="team-1",
         title="创建时间较新的团队会话",
         created_at=200,
@@ -690,10 +690,10 @@ def test_team_mission_conversation_list_uses_message_activity_like_normal_sessio
 
     assert db.list_team_mission_conversations() == []
 
-    db.create_session("old-team-session", source="team_mission", transient=False)
-    db.append_message("old-team-session", role="user", content="旧消息")
-    db.create_session("newer-team-session", source="team_mission", transient=False)
-    db.append_message("newer-team-session", role="user", content="新消息")
+    db.sessions.create("old-team-session", source="team_mission", transient=False)
+    db.messages.append("old-team-session", role="user", content="旧消息")
+    db.sessions.create("newer-team-session", source="team_mission", transient=False)
+    db.messages.append("newer-team-session", role="user", content="新消息")
 
     resolved = db.resolve_team_mission_conversation("old-conversation")
     assert resolved["conversation"]["conversation_id"] == "old-conversation"
@@ -703,7 +703,7 @@ def test_team_mission_conversation_list_uses_message_activity_like_normal_sessio
         "old-conversation",
     ]
 
-    db.append_message("old-team-session", role="user", content="真实新消息")
+    db.messages.append("old-team-session", role="user", content="真实新消息")
 
     conversations = db.list_team_mission_conversations()
 
@@ -717,16 +717,16 @@ def test_team_mission_conversation_list_uses_message_activity_like_normal_sessio
 
 
 def test_team_mission_conversation_list_reads_session_summary_not_messages(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         created_at=100,
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
-    db.append_message("team-session-1", role="user", content="列表只需要摘要")
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
+    db.messages.append("team-session-1", role="user", content="列表只需要摘要")
     statements = []
     with db._lock:
         db._conn.set_trace_callback(statements.append)
@@ -744,29 +744,29 @@ def test_team_mission_conversation_list_reads_session_summary_not_messages(tmp_p
 
 
 def test_upsert_team_mission_conversation_materializes_canonical_session(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
 
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="团队会话",
         created_at=100,
     )
 
-    session = db.get_session("team-session-1")
+    session = db.sessions.get("team-session-1")
     assert session is not None
     assert session["id"] == "team-session-1"
     assert session["source"] == "team_mission"
-    db.append_message("team-session-1", role="user", content="直接 upsert 后可写消息")
+    db.messages.append("team-session-1", role="user", content="直接 upsert 后可写消息")
 
 
-def test_empty_team_mission_conversation_shells_are_not_history_and_are_pruned(tmp_path: Path):
+def test_empty_team_mission_conversation_shells_are_hidden_but_preserved(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.ensure_team_mission_conversation(
         conversation_id="empty-conversation",
-        stable_session_id="empty-team-session",
+        conversation_session_id="empty-team-session",
         team_id="team-1",
         workspace_id="workspace-1",
         workspace_path="/tmp/workspace",
@@ -796,52 +796,55 @@ def test_empty_team_mission_conversation_shells_are_not_history_and_are_pruned(t
     assert db.resolve_team_mission_conversation("empty-conversation") == {}
     db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
 
-    assert reopened.get_team_mission_conversation("empty-conversation") == {}
-    assert reopened.get_session("empty-team-session") is None
-    assert reopened.get_session_index("empty-team-session") is None
+    assert reopened.get_team_mission_conversation("empty-conversation")["conversation_id"] == "empty-conversation"
+    assert reopened.sessions.get("empty-team-session") is not None
+    assert reopened.resolve_team_mission_conversation("empty-conversation") == {}
+    assert [item["conversation_id"] for item in reopened.list_team_mission_conversations()] == [
+        "mission-conversation",
+    ]
     assert reopened.get_team_mission_conversation("mission-conversation")["conversation_id"] == "mission-conversation"
 
 
 def test_fresh_empty_team_mission_conversation_survives_startup_maintenance_until_first_message(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.ensure_team_mission_conversation(
         conversation_id="fresh-conversation",
-        stable_session_id="fresh-team-session",
+        conversation_session_id="fresh-team-session",
         team_id="team-1",
         workspace_id="workspace-1",
         workspace_path="/tmp/workspace",
     )
-    assert db.get_session("fresh-team-session") is not None
+    assert db.sessions.get("fresh-team-session") is not None
     db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
 
     assert reopened.get_team_mission_conversation("fresh-conversation")["conversation_id"] == "fresh-conversation"
-    assert reopened.get_session("fresh-team-session") is not None
-    reopened.append_message("fresh-team-session", role="user", content="首条消息不应被 GC 竞态破坏")
+    assert reopened.sessions.get("fresh-team-session") is not None
+    reopened.messages.append("fresh-team-session", role="user", content="首条消息不应被 GC 竞态破坏")
 
 
 def test_placeholder_team_mission_conversation_title_repairs_from_first_user_message(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         title="Team Mission",
         workspace_id="workspace-1",
         workspace_path="/tmp/workspace",
     )
-    db.append_message("team-session-1", role="user", content="你好啊")
-    db.append_message("team-session-1", role="assistant", content="你好")
+    db.messages.append("team-session-1", role="user", content="你好啊")
+    db.messages.append("team-session-1", role="assistant", content="你好")
     db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
     conversation = reopened.get_team_mission_conversation("conversation-1")
-    session = reopened.get_session("team-session-1")
+    session = reopened.sessions.get("team-session-1")
 
     assert conversation["title"] == "你好啊"
     assert conversation["display_title_source"] == "first_user_message"
@@ -851,34 +854,34 @@ def test_placeholder_team_mission_conversation_title_repairs_from_first_user_mes
 
 def test_placeholder_team_mission_conversation_title_repair_does_not_conflict_with_session_titles(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
-    db.create_session("ordinary-session", source="tui", transient=False)
-    db.set_session_title("ordinary-session", "重复标题")
+    db = open_cli_session_store(db_path)
+    db.sessions.create("ordinary-session", source="tui", transient=False)
+    db.sessions.set_title("ordinary-session", "重复标题")
     for suffix in ("1", "2"):
         db.ensure_team_mission_conversation(
             conversation_id=f"conversation-{suffix}",
-            stable_session_id=f"team-session-{suffix}",
+            conversation_session_id=f"team-session-{suffix}",
             team_id="team-1",
             title="Team Mission",
         )
-        db.append_message(f"team-session-{suffix}", role="user", content="重复标题")
+        db.messages.append(f"team-session-{suffix}", role="user", content="重复标题")
     db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
 
     assert reopened.get_team_mission_conversation("conversation-1")["title"] == "重复标题"
     assert reopened.get_team_mission_conversation("conversation-2")["title"] == "重复标题"
-    assert reopened.get_session("team-session-1")["title"] is None
-    assert reopened.get_session("team-session-2")["title"] is None
-    assert reopened.get_session("ordinary-session")["title"] == "重复标题"
+    assert reopened.sessions.get("team-session-1")["title"] is None
+    assert reopened.sessions.get("team-session-2")["title"] is None
+    assert reopened.sessions.get("ordinary-session")["title"] == "重复标题"
 
 
 def test_legacy_leader_prompt_session_reopens_as_team_conversation(tmp_path: Path):
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
-    db.create_session("team-session-1", source="tui", transient=False)
-    db.set_session_title("team-session-1", "历史团队会话")
-    db.append_message(
+    db = open_cli_session_store(db_path)
+    db.sessions.create("team-session-1", source="tui", transient=False)
+    db.sessions.set_title("team-session-1", "历史团队会话")
+    db.messages.append(
         "team-session-1",
         role="user",
         content="你好啊",
@@ -897,20 +900,20 @@ def test_legacy_leader_prompt_session_reopens_as_team_conversation(tmp_path: Pat
     )
     db.close()
 
-    reopened = SessionDB(db_path)
+    reopened = open_cli_session_store(db_path)
 
-    session = reopened.get_session("team-session-1")
+    session = reopened.sessions.get("team-session-1")
     conversation = reopened.resolve_team_mission_conversation("conversation-1")["conversation"]
 
     assert session["source"] == "team_mission"
     assert conversation["conversation_id"] == "conversation-1"
-    assert conversation["stable_session_id"] == "team-session-1"
+    assert conversation["conversation_session_id"] == "team-session-1"
     assert conversation["title"] == "历史团队会话"
     assert [item["conversation_id"] for item in reopened.list_team_mission_conversations()] == ["conversation-1"]
 
 
 def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_runtime_sessions(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -919,7 +922,7 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
         objective="Do research",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -928,19 +931,19 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
         title="Worker",
         status="completed",
     )
-    db.create_session("worker-session-1", source="team_mission", transient=False)
-    db.create_session("runtime-worker-1", source="team_mission", transient=False)
-    db.append_message("team-session-1", role="user", content="Start team mission")
-    db.append_message("worker-session-1", role="assistant", content="Worker result")
+    db.sessions.create("worker-session-1", source="team_mission", transient=False)
+    db.sessions.create("runtime-worker-1", source="team_mission", transient=False)
+    db.messages.append("team-session-1", role="user", content="Start team mission")
+    db.messages.append("worker-session-1", role="assistant", content="Worker result")
     db.upsert_team_mission_edge(
         mission_id="mission-1",
         from_node_id="node-leader",
         to_node_id="node-worker",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node-worker",
         status="completed",
     )
@@ -949,16 +952,16 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
         node_id="node-worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker-1",
+        execution_session_id="runtime-worker-1",
         runtime_scope_key="team:mission-1:node-worker",
         role="worker",
     )
-    db.append_run_event(
+    db.runs.append_event(
         "team-session-1",
         {
             "type": "message.delta",
             "session_id": "team-session-1",
-            "stored_session_id": "team-session-1",
+            "conversation_session_id": "team-session-1",
             "run_id": "run-leader",
             "turn_id": "turn-leader",
             "runtime_scope_key": "team:mission-1:leader-conversation",
@@ -966,12 +969,12 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
             "payload": {"text": "Planning"},
         },
     )
-    db.append_run_event(
+    db.runs.append_event(
         "worker-session-1",
         {
             "type": "message.complete",
             "session_id": "runtime-worker-1",
-            "stored_session_id": "worker-session-1",
+            "conversation_session_id": "worker-session-1",
             "run_id": "run-worker",
             "turn_id": "turn-worker",
             "runtime_scope_key": "team:mission-1:node-worker",
@@ -1001,7 +1004,7 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
 
     assert result["deleted"] is True
     assert result["conversation_id"] == "conversation-1"
-    assert result["stable_session_id"] == "team-session-1"
+    assert result["conversation_session_id"] == "team-session-1"
     assert result["mission_ids"] == ["mission-1"]
     assert result["run_session_ids"] == ["worker-session-1", "runtime-worker-1"]
     assert result["deleted_session_ids"] == [
@@ -1010,22 +1013,22 @@ def test_team_mission_conversation_delete_removes_canonical_graph_and_returns_ru
         "runtime-worker-1",
     ]
     assert db.resolve_team_mission_conversation("conversation-1") == {}
-    assert db.get_team_mission_graph("mission-1") == {}
+    assert db.team_mission_graphs.get_team_mission_graph("mission-1") == {}
     assert db.get_team_mission_node("mission-1", "node-worker") == {}
     assert db.list_team_mission_memory_items(conversation_session_id="team-session-1") == []
     assert db.list_team_mission_memory_edges(from_memory_id=memory_item["id"]) == []
-    assert db.get_session("team-session-1") is None
-    assert db.get_session("worker-session-1") is None
-    assert db.get_session("runtime-worker-1") is None
-    assert db.get_messages("team-session-1") == []
-    assert db.get_messages("worker-session-1") == []
-    assert db.get_run("run-worker") is None
-    assert db.list_run_events("team-session-1") == []
-    assert db.list_run_events("worker-session-1") == []
+    assert db.sessions.get("team-session-1") is None
+    assert db.sessions.get("worker-session-1") is None
+    assert db.sessions.get("runtime-worker-1") is None
+    assert db.messages.list("team-session-1") == []
+    assert db.messages.list("worker-session-1") == []
+    assert db.runs.get("run-worker") is None
+    assert db.runs.list_events("team-session-1") == []
+    assert db.runs.list_events("worker-session-1") == []
 
 
 def test_cancel_team_mission_marks_active_graph_and_returns_run_bindings(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -1047,13 +1050,13 @@ def test_cancel_team_mission_marks_active_graph_and_returns_run_bindings(tmp_pat
         title="Done node",
         status="completed",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-running",
         session_id="node-session-running",
         runtime_scope_key="team:mission-1:node-running",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-done",
         session_id="node-session-done",
         runtime_scope_key="team:mission-1:node-done",
@@ -1089,7 +1092,7 @@ def test_cancel_team_mission_marks_active_graph_and_returns_run_bindings(tmp_pat
 
 
 def test_cancel_team_mission_reaps_zombie_running_run(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -1106,7 +1109,7 @@ def test_cancel_team_mission_reaps_zombie_running_run(tmp_path: Path):
     )
     # A member-node run that was started by the scheduler around/after cancel and
     # is left 'running' in the control-plane runs table.
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verify",
         session_id="team:mission-1:node:verify-stats-report",
         runtime_scope_key="team:mission-1:node:verify-stats-report",
@@ -1125,11 +1128,11 @@ def test_cancel_team_mission_reaps_zombie_running_run(tmp_path: Path):
     assert result["mission_status"] == "cancelled"
     assert [b["run_id"] for b in result["cancel_run_bindings"]] == ["run-verify"]
     # The reaper must have forced the zombie run terminal in the runs table.
-    assert db.get_run("run-verify")["status"] == "cancelled"
+    assert db.runs.get("run-verify")["status"] == "cancelled"
 
 
 def test_cancel_already_terminal_mission_reaps_leftover_running_run(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     # Mission is ALREADY terminal (a prior cancel completed) but a member-node
     # worker run got scheduled after that and is still 'running'.
     db.upsert_team_mission(
@@ -1146,7 +1149,7 @@ def test_cancel_already_terminal_mission_reaps_leftover_running_run(tmp_path: Pa
         title="Verify",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verify",
         session_id="team:mission-1:node:verify-stats-report",
         runtime_scope_key="team:mission-1:node:verify-stats-report",
@@ -1165,11 +1168,11 @@ def test_cancel_already_terminal_mission_reaps_leftover_running_run(tmp_path: Pa
     # Even though the mission was already terminal, the leftover running run is
     # surfaced for worker termination AND reaped terminal in the DB.
     assert [b["run_id"] for b in result["cancel_run_bindings"]] == ["run-verify"]
-    assert db.get_run("run-verify")["status"] == "cancelled"
+    assert db.runs.get("run-verify")["status"] == "cancelled"
 
 
 def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     # Mission whose metadata members list is empty, but the leader/root node
     # already carries the real leader profile. The approval gate created on plan
     # completion must be owned by that leader, not the synthetic placeholder.
@@ -1201,7 +1204,7 @@ def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
 
     db.complete_team_mission_plan(mission_id="m1")
 
-    graph = db.get_team_mission_graph("m1")
+    graph = db.team_mission_graphs.get_team_mission_graph("m1")
     approval = [n for n in graph["nodes"] if n["kind"] == "approval_gate"]
     assert len(approval) == 1
     assert approval[0]["assignee_profile_id"] == "profile-leader"
@@ -1227,14 +1230,14 @@ def test_complete_plan_approval_gate_inherits_leader_owner(tmp_path: Path):
 
 
 def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
         title="Mission",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -1244,7 +1247,7 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
         status="running",
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-leader",
         session_id="session-leader",
         runtime_scope_key="team:mission-1:leader",
@@ -1314,7 +1317,7 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert events[0]["team_mission_event_seq"] == events[0]["seq"]
     assert events[0]["mission_id"] == "mission-1"
     assert events[0]["conversation_id"] == "conversation-1"
-    assert events[0]["stable_session_id"] == "team-session-1"
+    assert events[0]["conversation_session_id"] == "team-session-1"
     assert events[0]["node_id"] == "node-leader"
     assert events[0]["task_id"] == "task-1"
     assert events[0]["task_frame_id"] == "mission-frame:mission-1"
@@ -1330,7 +1333,7 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
     assert events[0]["payload"]["missionId"] == "mission-1"
     assert events[0]["payload"]["conversation_id"] == "conversation-1"
     assert events[0]["payload"]["conversationId"] == "conversation-1"
-    assert events[0]["payload"]["stable_session_id"] == "team-session-1"
+    assert events[0]["payload"]["conversation_session_id"] == "team-session-1"
     assert events[0]["payload"]["node_id"] == "node-leader"
     assert events[0]["payload"]["nodeId"] == "node-leader"
     assert events[0]["payload"]["task_id"] == "task-1"
@@ -1366,7 +1369,7 @@ def test_team_mission_runtime_events_reuse_ordinary_run_event_coalescing(tmp_pat
 
 
 def test_team_mission_runtime_log_dedupes_same_offset_append_delta(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -1382,7 +1385,7 @@ def test_team_mission_runtime_log_dedupes_same_offset_append_delta(tmp_path: Pat
         status="running",
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-leader",
         session_id="session-leader",
         runtime_scope_key="team:mission-1:leader",
@@ -1437,14 +1440,14 @@ def test_team_mission_runtime_log_dedupes_same_offset_append_delta(tmp_path: Pat
 
 
 def test_team_mission_structural_events_use_subject_node_identity_not_bound_runtime_node(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
         title="Mission",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -1454,7 +1457,7 @@ def test_team_mission_structural_events_use_subject_node_identity_not_bound_runt
         status="running",
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-root",
         session_id="session-root",
         runtime_scope_key="profile:leader",
@@ -1498,7 +1501,7 @@ def test_team_mission_structural_events_use_subject_node_identity_not_bound_runt
         },
     )
 
-    raw_events = db.list_run_events("session-root")
+    raw_events = db.runs.list_events("session-root")
     assert "node_id" not in raw_events[0]
     assert "node_id" not in raw_events[0]["payload"]
     assert raw_events[0]["payload"]["node"]["node_id"] == "node-worker"
@@ -1531,7 +1534,7 @@ def test_team_mission_structural_events_use_subject_node_identity_not_bound_runt
 
 
 def test_team_mission_run_events_include_conversation_status_projection(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -1542,12 +1545,12 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
         workspace_path="/tmp/workspace",
         mode="autonomous_mission",
         leader_session_id="team-session-1",
-        metadata={"task_id": "task-1", "stableTeamSessionId": "team-session-1"},
+        metadata={"task_id": "task-1", "conversationTeamSessionId": "team-session-1"},
     )
-    mission = db.get_team_mission_graph("mission-1")["mission"]
+    mission = db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]
     db.ensure_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         mission=mission,
         mission_id="mission-1",
         team_id="team-1",
@@ -1594,7 +1597,7 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
         kind="depends_on",
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -1634,7 +1637,7 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
     assert status_event["seq"] > complete_event["seq"]
     assert status_event["mission_id"] == "mission-1"
     assert status_event["conversation_id"] == "conversation-1"
-    assert status_event["stable_session_id"] == "team-session-1"
+    assert status_event["conversation_session_id"] == "team-session-1"
     assert status_event["payload"]["schemaVersion"] == 2
     assert status_event["payload"]["protocol"] == "team_mission.event.v1"
     assert status_event["payload"]["kind"] == "conversation.status.updated"
@@ -1646,7 +1649,7 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
     assert "final_deliverables" not in projection
     assert len(json.dumps(status_event, ensure_ascii=False)) < 8192
     assert projection["conversation_id"] == "conversation-1"
-    assert projection["stable_session_id"] == "team-session-1"
+    assert projection["conversation_session_id"] == "team-session-1"
     assert projection["active_mission_id"] == "mission-1"
     assert projection["mission_status"] == "ready"
     assert projection["running"] is False
@@ -1661,10 +1664,10 @@ def test_team_mission_run_events_include_conversation_status_projection(tmp_path
 
 
 def test_team_mission_conversation_status_projection_uses_active_member_run_binding(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         active_mission_id="mission-1",
         title="Mission",
@@ -1688,11 +1691,11 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
         status="ready",
         runtime_scope_key="team:mission-1:node:node-verify",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verify",
         session_id="team:mission-1:node:node-verify",
         runtime_scope_key="team:mission-1:node:node-verify",
-        runtime_session_id="runtime-verify",
+        execution_session_id="runtime-verify",
         turn_id="turn-verify",
         status="running",
         started_at=250,
@@ -1703,7 +1706,7 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
         node_id="node-verify",
         run_id="run-verify",
         session_id="team:mission-1:node:node-verify",
-        runtime_session_id="runtime-verify",
+        execution_session_id="runtime-verify",
         runtime_scope_key="team:mission-1:node:node-verify",
         role="verifier",
     )
@@ -1720,7 +1723,7 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
     # run pool, which locked the composer for the whole mission and left the
     # session stuck running (real-device regression 2026-07-03).
     assert projection["active_run_id"] == ""
-    assert projection["active_runtime_session_id"] == ""
+    assert projection["active_execution_session_id"] == ""
     assert projection["runtime_scope_key"] == ""
     assert projection["run_started_at"] == 0
     assert projection["run_updated_at"] == 300
@@ -1730,10 +1733,10 @@ def test_team_mission_conversation_status_projection_uses_active_member_run_bind
 
 
 def test_team_mission_conversation_status_projection_terminal_mission_never_running(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         active_mission_id="mission-1",
         title="Mission",
@@ -1757,14 +1760,14 @@ def test_team_mission_conversation_status_projection_terminal_mission_never_runn
         mission_id="mission-1", node_id="node-x", kind="worker", title="X",
         status="running", runtime_scope_key="team:mission-1:node:node-x",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-x", session_id="team:mission-1:node:node-x",
-        runtime_scope_key="team:mission-1:node:node-x", runtime_session_id="rt-x",
+        runtime_scope_key="team:mission-1:node:node-x", execution_session_id="rt-x",
         status="running", updated_at=300,
     )
     db.bind_team_mission_run(
         mission_id="mission-1", node_id="node-x", run_id="run-x",
-        session_id="team:mission-1:node:node-x", runtime_session_id="rt-x",
+        session_id="team:mission-1:node:node-x", execution_session_id="rt-x",
         runtime_scope_key="team:mission-1:node:node-x", role="worker",
     )
 
@@ -1780,10 +1783,10 @@ def test_team_mission_conversation_status_projection_terminal_mission_never_runn
 
 
 def test_team_mission_conversation_status_projection_marks_terminal_result_report_pending(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         active_mission_id="mission-1",
         title="Mission",
@@ -1827,10 +1830,10 @@ def test_team_mission_conversation_status_projection_marks_terminal_result_repor
 def test_team_mission_result_recorded_emits_pending_report_status_projection(tmp_path: Path):
     from hermes_team_mission.runtime.mission_result import finalize_team_mission_result
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         team_id="team-1",
         active_mission_id="mission-1",
         title="Mission",
@@ -1870,7 +1873,7 @@ def test_team_mission_result_recorded_emits_pending_report_status_projection(tmp
 
 
 def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -1881,7 +1884,7 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
         workspace_path="/tmp/workspace",
         mode="supervised_mission",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -1899,13 +1902,13 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
         status="running",
         output_contract={"format": "final_deliverable"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node-worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-synthesis",
         session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
@@ -1916,7 +1919,7 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
         node_id="node-worker",
         run_id="run-worker",
         session_id="worker-session-1",
-        runtime_session_id="runtime-worker",
+        execution_session_id="runtime-worker",
         runtime_scope_key="team:mission-1:node-worker",
         role="worker",
     )
@@ -1925,7 +1928,7 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
         node_id="team-mission:mission-1:synthesis",
         run_id="run-synthesis",
         session_id="synthesis-session-1",
-        runtime_session_id="runtime-synthesis",
+        execution_session_id="runtime-synthesis",
         runtime_scope_key="team:mission-1:synthesis",
         role="synthesis",
     )
@@ -1972,11 +1975,11 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
 
     assert worker_delta["payload"]["kind"] == "node.output.delta"
     assert worker_delta["payload"]["node_kind"] == "worker"
-    assert worker_delta["payload"]["subject"]["runtime_stable_session_id"] == "worker-session-1"
+    assert worker_delta["payload"]["subject"]["runtime_conversation_session_id"] == "worker-session-1"
     assert synthesis_delta["payload"]["kind"] == "final.output.delta"
     assert synthesis_delta["payload"]["node_kind"] == "synthesis"
     assert synthesis_delta["payload"]["output_contract_format"] == "final_deliverable"
-    assert synthesis_delta["payload"]["subject"]["runtime_stable_session_id"] == "synthesis-session-1"
+    assert synthesis_delta["payload"]["subject"]["runtime_conversation_session_id"] == "synthesis-session-1"
     assert synthesis_delta["payload"]["text_stream"]["mode"] == "append"
     assert synthesis_delta["payload"]["text_stream"]["delta"] == "final"
     assert synthesis_complete["payload"]["kind"] == "final.completed"
@@ -1985,7 +1988,7 @@ def test_team_mission_runtime_projection_uses_structured_final_node_contract(tmp
 
 
 def test_team_mission_terminal_reduce_records_canonical_result(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-result",
         team_id="team-1",
@@ -2049,7 +2052,7 @@ def test_team_mission_terminal_reduce_records_canonical_result(tmp_path: Path):
 
     reduced = db.reduce_team_mission_graph("mission-result")
     result = db.get_team_mission_result("mission-result")
-    graph = db.get_team_mission_graph("mission-result")
+    graph = db.team_mission_graphs.get_team_mission_graph("mission-result")
     result_events = [
         event for event in db.list_team_mission_events("mission-result")
         if event.get("payload", {}).get("source_event_type") == "mission.result.recorded"
@@ -2071,7 +2074,7 @@ def test_team_mission_terminal_reduce_records_canonical_result(tmp_path: Path):
 
 
 def test_team_mission_event_cursor_is_global_across_node_sessions(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="supervised_mission")
     for node_id, run_id, session_id in (
         ("node-leader-1", "run-leader-1", "session-leader-1"),
@@ -2112,7 +2115,7 @@ def test_team_mission_event_cursor_is_global_across_node_sessions(tmp_path: Path
 
 
 def test_team_mission_terminal_run_event_reduces_node_status(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2121,7 +2124,7 @@ def test_team_mission_terminal_run_event_reduces_node_status(tmp_path: Path):
         title="Worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2154,13 +2157,13 @@ def test_team_mission_terminal_run_event_reduces_node_status(tmp_path: Path):
 
 
 def test_team_mission_duplicate_terminal_event_does_not_reduce_or_compile_memory_again(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
         objective="Build",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2169,7 +2172,7 @@ def test_team_mission_duplicate_terminal_event_does_not_reduce_or_compile_memory
         title="Worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2226,13 +2229,13 @@ def test_team_mission_duplicate_terminal_event_does_not_reduce_or_compile_memory
 
 
 def test_team_mission_late_stream_event_after_terminal_does_not_reopen_node(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
         objective="Build",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1"},
+        metadata={"conversationTeamSessionId": "team-session-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2241,7 +2244,7 @@ def test_team_mission_late_stream_event_after_terminal_does_not_reopen_node(tmp_
         title="Worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2299,7 +2302,7 @@ def test_team_mission_late_stream_event_after_terminal_does_not_reopen_node(tmp_
 
 
 def test_team_mission_successful_terminal_event_is_not_overwritten_by_late_failure(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2308,7 +2311,7 @@ def test_team_mission_successful_terminal_event_is_not_overwritten_by_late_failu
         title="Worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2346,8 +2349,8 @@ def test_team_mission_successful_terminal_event_is_not_overwritten_by_late_failu
     )
 
     node = db.get_team_mission_node("mission-1", "node-worker")
-    mission = db.get_team_mission_graph("mission-1")["mission"]
-    run = db.get_run("run-worker")
+    mission = db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]
+    run = db.runs.get("run-worker")
     events = db.list_team_mission_run_events("mission-1")
 
     assert node["status"] == "completed"
@@ -2368,10 +2371,10 @@ def test_team_mission_successful_terminal_event_is_not_overwritten_by_late_failu
     ]
 
 
-def test_team_mission_error_terminal_with_deliverable_text_completes_node(tmp_path: Path):
+def test_team_mission_error_terminal_does_not_promote_prior_stream_delta(tmp_path: Path):
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2380,7 +2383,7 @@ def test_team_mission_error_terminal_with_deliverable_text_completes_node(tmp_pa
         title="Verifier",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verifier",
         session_id="session-verifier",
         runtime_scope_key="team:mission-1:node:node-verifier",
@@ -2399,7 +2402,7 @@ def test_team_mission_error_terminal_with_deliverable_text_completes_node(tmp_pa
         {
             "type": "subagent.output_delta",
             "session_id": "runtime-verifier",
-            "stored_session_id": "session-verifier",
+            "conversation_session_id": "session-verifier",
             "run_id": "run-verifier",
             "runtime_scope_key": "team:mission-1:node:node-verifier",
             "seq": 1,
@@ -2411,7 +2414,7 @@ def test_team_mission_error_terminal_with_deliverable_text_completes_node(tmp_pa
         {
             "type": "message.complete",
             "session_id": "runtime-verifier",
-            "stored_session_id": "session-verifier",
+            "conversation_session_id": "session-verifier",
             "run_id": "run-verifier",
             "runtime_scope_key": "team:mission-1:node:node-verifier",
             "seq": 2,
@@ -2421,14 +2424,14 @@ def test_team_mission_error_terminal_with_deliverable_text_completes_node(tmp_pa
     )
 
     node = db.get_team_mission_node("mission-1", "node-verifier")
-    assert node["status"] == "completed"
-    assert node["metadata"]["last_run_terminal_status"] == "completed"
+    assert node["status"] == "failed"
+    assert node["metadata"]["last_run_terminal_status"] == "failed"
 
 
 def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_run(tmp_path: Path):
     from tui_gateway.services import run_control
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2437,7 +2440,7 @@ def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_r
         title="Verifier",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verifier",
         session_id="session-verifier",
         runtime_scope_key="team:mission-1:node:node-verifier",
@@ -2456,7 +2459,7 @@ def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_r
         {
             "type": "message.complete",
             "session_id": "runtime-verifier",
-            "stored_session_id": "session-verifier",
+            "conversation_session_id": "session-verifier",
             "run_id": "run-verifier",
             "runtime_scope_key": "team:mission-1:node:node-verifier",
             "seq": 1,
@@ -2470,8 +2473,8 @@ def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_r
     )
 
     node = db.get_team_mission_node("mission-1", "node-verifier")
-    run = db.get_run("run-verifier")
-    event = db.list_run_events("session-verifier")[0]
+    run = db.runs.get("run-verifier")
+    event = db.runs.list_events("session-verifier")[0]
 
     assert node["status"] == "completed"
     assert node["metadata"]["last_run_terminal_status"] == "completed"
@@ -2483,7 +2486,7 @@ def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_r
 
 
 def test_team_mission_late_success_clears_stale_run_error(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2492,7 +2495,7 @@ def test_team_mission_late_success_clears_stale_run_error(tmp_path: Path):
         title="Worker",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2530,7 +2533,7 @@ def test_team_mission_late_success_clears_stale_run_error(tmp_path: Path):
     )
 
     node = db.get_team_mission_node("mission-1", "node-worker")
-    run = db.get_run("run-worker")
+    run = db.runs.get("run-worker")
 
     assert node["status"] == "completed"
     assert node["metadata"]["last_run_terminal_status"] == "completed"
@@ -2540,14 +2543,14 @@ def test_team_mission_late_success_clears_stale_run_error(tmp_path: Path):
 
 
 def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         objective="Create launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2557,7 +2560,7 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
         objective="Find launch market",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2572,12 +2575,12 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
         role="worker",
     )
 
-    db.append_team_mission_run_event(
-        mission_id="mission-1",
-        run_id="run-worker",
-        event={
+    db.runs.append_event(
+        "session-worker",
+        {
             "type": "message.delta",
-            "seq": 1,
+            "run_id": "run-worker",
+            "runtime_scope_key": "team:mission-1:node:node-worker",
             "payload": {"delta": "Launch market is Japan; use partner channel."},
         },
     )
@@ -2587,20 +2590,23 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
         event={
             "type": "message.complete",
             "seq": 2,
-            "payload": {"status": "complete"},
+            "payload": {
+                "status": "complete",
+                "text": "Launch market is Japan; use partner channel.",
+            },
         },
     )
 
     items = db.list_team_mission_memory_items(
         conversation_session_id="team-session-1",
-        statuses=["committed"],
+        statuses=["proposed"],
     )
     assert len(items) == 1
     assert items[0]["kind"] == "summary"
     assert "Japan" in items[0]["content"]
     assert items[0]["source_node_ids"] == ["node-worker"]
     assert items[0]["source_run_ids"] == ["run-worker"]
-    stored_run_events = db.list_run_events("session-worker", run_id="run-worker")
+    stored_run_events = db.runs.list_events("session-worker", run_id="run-worker")
     stored_run_event_types = [event["type"] for event in stored_run_events]
     assert "message.complete" in stored_run_event_types
     assert "mission.memory.compiled" in stored_run_event_types
@@ -2617,15 +2623,15 @@ def test_team_mission_terminal_run_event_compiles_structured_memory(tmp_path: Pa
     assert memory_event["payload"]["source_event"]["payload"]["memory_item_ids"] == [items[0]["id"]]
 
 
-def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+def test_team_mission_memory_pack_reuses_only_promoted_previous_task_memory(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="First task",
         objective="Create launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2635,7 +2641,7 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
         objective="Find launch market",
         status="completed",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="session-worker",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2651,6 +2657,17 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
     )
     compiled = db.compile_team_mission_memory(mission_id="mission-1", emit_event=False)
     assert compiled["memory_item_ids"]
+    compiled_item = compiled["items"][0]
+    promoted = db.conversation_memory.create_item(
+        conversation_session_id="team-session-1",
+        owner_kind="conversation",
+        owner_id="team-session-1",
+        kind="summary",
+        content=compiled_item["content"],
+        visibility={"kind": "conversation"},
+        provenance={"source_memory_ids": compiled["memory_item_ids"]},
+        status="committed",
+    )
 
     db.upsert_team_mission(
         mission_id="mission-2",
@@ -2658,7 +2675,7 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
         title="Second task",
         objective="Continue launch plan for Japan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-2"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-2"},
     )
 
     pack = db.build_team_mission_memory_pack(
@@ -2667,7 +2684,7 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
     )
 
     item_ids = pack["memory_pack"]["item_ids"]
-    assert item_ids == compiled["memory_item_ids"]
+    assert item_ids == [promoted["memory_id"]]
     assert "team-session-1" == pack["conversation_session_id"]
     edges = db.list_team_mission_memory_edges(
         from_memory_id=item_ids[0],
@@ -2678,14 +2695,14 @@ def test_team_mission_memory_pack_reuses_previous_task_in_same_conversation(tmp_
 
 
 def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         objective="Compile memory",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     for index in range(3):
         node_id = f"node-{index}"
@@ -2698,7 +2715,7 @@ def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: P
             title=f"Node {index}",
             status="completed",
         )
-        db.upsert_run(run_id=run_id, session_id=session_id, status="completed")
+        db.runs.upsert(run_id=run_id, session_id=session_id, status="completed")
         db.bind_team_mission_run(
             mission_id="mission-1",
             node_id=node_id,
@@ -2707,7 +2724,7 @@ def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: P
             runtime_scope_key=f"team:mission-1:node:{node_id}",
             role="worker",
         )
-        db.append_run_event(
+        db.runs.append_event(
             session_id,
             {
                 "type": "message.complete",
@@ -2720,7 +2737,7 @@ def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: P
     def fail_list_run_events(*_args, **_kwargs):
         raise AssertionError("compile_team_mission_memory should batch load run_events")
 
-    monkeypatch.setattr(db, "list_run_events", fail_list_run_events)
+    monkeypatch.setattr(db.runs, "list_events", fail_list_run_events)
     compiled = db.compile_team_mission_memory(mission_id="mission-1", emit_event=False)
 
     assert len(compiled["source_run_ids"]) == 3
@@ -2728,14 +2745,14 @@ def test_team_mission_memory_compile_batches_run_events(monkeypatch, tmp_path: P
 
 
 def test_team_mission_memory_pack_dedupes_similar_items(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         objective="Use Chinese output preference",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     first = db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -2772,16 +2789,55 @@ def test_team_mission_memory_pack_dedupes_similar_items(tmp_path: Path):
     assert len([item_id for item_id in pack["memory_pack"]["item_ids"] if item_id in {first["id"], second["id"]}]) == 1
 
 
+def test_team_mission_memory_pack_surfaces_explicit_conflicts(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        team_id="team-1",
+        title="Mission",
+        objective="Choose launch region",
+        mode="autonomous_mission",
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
+    )
+    items = []
+    for content in ("Launch region is Germany.", "Launch region is France."):
+        items.append(
+            db.upsert_team_mission_memory_item(
+                team_id="team-1",
+                mission_id="mission-1",
+                conversation_session_id="team-session-1",
+                task_id="task-1",
+                scope="conversation",
+                kind="decision",
+                content=content,
+                structured_payload={"conflict_key": "launch_region"},
+                source_run_ids=[f"run-{len(items) + 1}"],
+                visibility="team",
+                status="committed",
+            )
+        )
+
+    pack = db.build_team_mission_memory_pack(
+        mission_id="mission-1", objective="Choose launch region", limit=5
+    )["memory_pack"]
+
+    assert set(pack["item_ids"]) == {item["id"] for item in items}
+    assert pack["conflicts"][0]["conflict_key"] == "decision:launch_region"
+    assert set(pack["conflicts"][0]["memory_item_ids"]) == {
+        item["id"] for item in items
+    }
+
+
 def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
         team_id="team-1",
-        stable_session_id="team-session-1",
+        conversation_session_id="team-session-1",
         title="团队会话",
         active_mission_id="mission-1",
     )
-    db.create_session("team-session-1", source="team_mission", transient=False)
+    db.sessions.create("team-session-1", source="team_mission", transient=False)
     db.upsert_team_mission(
         mission_id="mission-1",
         conversation_id="conversation-1",
@@ -2791,7 +2847,7 @@ def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path:
         mode="supervised_mission",
         status="running",
         leader_session_id="team-session-1",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2801,7 +2857,7 @@ def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path:
         status="running",
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-worker",
         session_id="worker-session-1",
         runtime_scope_key="team:mission-1:node:node-worker",
@@ -2876,14 +2932,14 @@ def test_team_mission_memory_compile_collects_runtime_artifact_sources(tmp_path:
 
 
 def test_team_mission_memory_pack_isolates_different_conversations_by_default(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="First conversation",
         objective="Create launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     memory_item = db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -2904,7 +2960,7 @@ def test_team_mission_memory_pack_isolates_different_conversations_by_default(tm
         title="Fresh conversation",
         objective="你好",
         mode="supervised_mission",
-        metadata={"stableTeamSessionId": "team-session-2", "task_id": "task-2"},
+        metadata={"conversationTeamSessionId": "team-session-2", "task_id": "task-2"},
     )
 
     isolated_pack = db.build_team_mission_memory_pack(
@@ -2923,14 +2979,14 @@ def test_team_mission_memory_pack_isolates_different_conversations_by_default(tm
 
 
 def test_team_mission_memory_slice_filters_worker_visibility(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         objective="Build launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -2991,14 +3047,14 @@ def test_team_mission_memory_slice_filters_worker_visibility(tmp_path: Path):
 
 
 def test_deleted_team_mission_memory_is_excluded_from_pack(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
         title="Mission",
         objective="Build launch plan",
         mode="autonomous_mission",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     item = db.upsert_team_mission_memory_item(
         team_id="team-1",
@@ -3023,7 +3079,7 @@ def test_deleted_team_mission_memory_is_excluded_from_pack(tmp_path: Path):
 
 
 def test_team_mission_graph_reducer_unlocks_dependency_after_parent_completion(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3064,7 +3120,7 @@ def test_team_mission_graph_reducer_unlocks_dependency_after_parent_completion(t
 
 
 def test_team_mission_graph_reducer_requires_effective_handoff_before_unlocking_child(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3108,7 +3164,7 @@ def test_team_mission_graph_reducer_requires_effective_handoff_before_unlocking_
 
 
 def test_team_mission_graph_reducer_marks_dependency_waiting_mission_without_blocking(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3132,7 +3188,7 @@ def test_team_mission_graph_reducer_marks_dependency_waiting_mission_without_blo
 
 
 def test_team_mission_graph_reducer_does_not_complete_supervised_mission_after_approval_only(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3158,11 +3214,11 @@ def test_team_mission_graph_reducer_does_not_complete_supervised_mission_after_a
 
     assert reduced["mission_status"] == "running"
     assert reduced["ready_node_ids"] == []
-    assert db.get_team_mission_graph("mission-1")["mission"]["status"] == "running"
+    assert db.team_mission_graphs.get_team_mission_graph("mission-1")["mission"]["status"] == "running"
 
 
 def test_team_mission_node_start_claim_is_atomic(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3190,7 +3246,7 @@ def test_team_mission_node_start_claim_is_atomic(tmp_path: Path):
 
 
 def test_team_mission_graph_reducer_does_not_auto_create_finalizers_by_default(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3223,7 +3279,7 @@ def test_team_mission_graph_reducer_does_not_auto_create_finalizers_by_default(t
 
 
 def test_team_mission_graph_reducer_creates_legacy_auto_finalizers_when_enabled(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3327,7 +3383,7 @@ def test_team_mission_graph_reducer_creates_legacy_auto_finalizers_when_enabled(
 
 
 def test_team_mission_node_upsert_normalizes_kind_and_replaces_invalid_member_assignee(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3363,7 +3419,7 @@ def test_team_mission_node_upsert_normalizes_kind_and_replaces_invalid_member_as
 
 
 def test_team_mission_graph_read_resolves_legacy_invalid_member_assignee(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3410,7 +3466,7 @@ def test_team_mission_graph_read_resolves_legacy_invalid_member_assignee(tmp_pat
     db._execute_write(_corrupt_assignee)
 
     node = db.get_team_mission_node("mission-1", "node-summary")
-    graph_node = next(item for item in db.get_team_mission_graph("mission-1")["nodes"] if item["node_id"] == "node-summary")
+    graph_node = next(item for item in db.team_mission_graphs.get_team_mission_graph("mission-1")["nodes"] if item["node_id"] == "node-summary")
 
     assert node["assignee_member_id"] == "leader"
     assert node["assignee_profile_id"] == "profile-leader"
@@ -3420,7 +3476,7 @@ def test_team_mission_graph_read_resolves_legacy_invalid_member_assignee(tmp_pat
 
 
 def test_team_mission_graph_reducer_treats_verification_kind_as_worker_work_type(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="Mission",
@@ -3454,7 +3510,7 @@ def test_team_mission_graph_reducer_treats_verification_kind_as_worker_work_type
 
 
 def test_team_mission_graph_reducer_does_not_duplicate_legacy_synthesis_alias(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(mission_id="mission-1", title="Mission", mode="autonomous_mission")
     db.upsert_team_mission_node(
         mission_id="mission-1",
@@ -3485,7 +3541,7 @@ def test_team_mission_graph_reducer_does_not_duplicate_legacy_synthesis_alias(tm
 
 
 def test_team_mission_graph_reducer_scopes_finalizers_to_active_task(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         title="创建文件扫描工具",
@@ -3536,7 +3592,7 @@ def test_team_mission_graph_reducer_scopes_finalizers_to_active_task(tmp_path: P
 
 
 def test_reap_terminal_mission_runs_clears_zombie_running_run(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3544,7 +3600,7 @@ def test_reap_terminal_mission_runs_clears_zombie_running_run(tmp_path: Path):
         mode="supervised_mission",
         status="cancelled",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-verify",
         session_id="team:mission-1:node:verify-stats-report",
         runtime_scope_key="team:mission-1:node:verify-stats-report",
@@ -3561,11 +3617,11 @@ def test_reap_terminal_mission_runs_clears_zombie_running_run(tmp_path: Path):
     reaped = db.reap_terminal_mission_runs("mission-1")
 
     assert reaped == 1
-    assert db.get_run("run-verify")["status"] in {"interrupted", "cancelled", "canceled"}
+    assert db.runs.get("run-verify")["status"] in {"interrupted", "cancelled", "canceled"}
 
 
 def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3573,7 +3629,7 @@ def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
         mode="supervised_mission",
         status="running",
     )
-    db.upsert_run(
+    db.runs.upsert(
         run_id="run-impl",
         session_id="team:mission-1:node:impl",
         runtime_scope_key="team:mission-1:node:impl",
@@ -3590,11 +3646,11 @@ def test_reap_terminal_mission_runs_leaves_active_mission_runs(tmp_path: Path):
     reaped = db.reap_terminal_mission_runs("mission-1")
 
     assert reaped == 0
-    assert db.get_run("run-impl")["status"] == "running"
+    assert db.runs.get("run-impl")["status"] == "running"
 
 
 def test_upsert_team_mission_terminal_prunes_deltas_keeps_completes(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3648,7 +3704,7 @@ def test_upsert_team_mission_terminal_prunes_deltas_keeps_completes(tmp_path: Pa
 
 
 def test_team_mission_events_store_only_canonical_event_json(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3695,10 +3751,10 @@ def test_team_mission_events_store_only_canonical_event_json(tmp_path: Path):
 
 
 def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_path: Path):
-    from hermes_state import SCHEMA_VERSION
+    from hermes_agent.storage.migrations import CURRENT_SCHEMA_VERSION
 
     db_path = tmp_path / "state.db"
-    db = SessionDB(db_path)
+    db = open_cli_session_store(db_path)
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3737,13 +3793,14 @@ def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_p
         """,
         (json.dumps({"duplicated": "payload"}), json.dumps({"duplicated": "source"}), "mission-1"),
     )
-    # Anchor to the pre-compaction schema (23). Using SCHEMA_VERSION - 1
-    # silently skips the migration whenever SCHEMA_VERSION advances past 24.
-    db._conn.execute("UPDATE schema_version SET version = ?", (23,))  # noqa: SLF001
+    # Re-open from immediately before modular migration 0039 and remove its
+    # ledger entry. schema_version alone is no longer the migration authority.
+    db._conn.execute("DELETE FROM applied_migrations WHERE version = 39")  # noqa: SLF001
+    db._conn.execute("UPDATE schema_version SET version = ?", (38,))  # noqa: SLF001
     db._conn.commit()  # noqa: SLF001
     db.close()
 
-    migrated = SessionDB(db_path)
+    migrated = open_cli_session_store(db_path)
     try:
         row = migrated._conn.execute(  # noqa: SLF001 - migration contract assertion.
             "SELECT payload_json, source_event_json FROM team_mission_events WHERE mission_id = ?",
@@ -3752,7 +3809,7 @@ def test_team_mission_event_storage_migration_clears_legacy_duplicate_json(tmp_p
         assert row["payload_json"] in ("", None)
         assert row["source_event_json"] in ("", None)
         version = migrated._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]  # noqa: SLF001
-        assert version == SCHEMA_VERSION
+        assert version == CURRENT_SCHEMA_VERSION
     finally:
         migrated.close()
 
@@ -3763,7 +3820,7 @@ def test_prune_team_mission_events_drops_subagent_streaming_deltas(tmp_path: Pat
     mission) but were MISSING from the prunable set, so prune deleted ~nothing
     and team_mission_events grew into the GBs. They must be pruned for a terminal
     mission while subagent.complete / message.complete milestones are kept."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1", team_id="team-1", title="Mission",
         mode="supervised_mission", status="completed",
@@ -3802,7 +3859,7 @@ def test_prune_team_mission_events_drops_subagent_streaming_deltas(tmp_path: Pat
 
 
 def test_prune_team_mission_events_leaves_active_mission(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="mission-1",
         team_id="team-1",
@@ -3837,7 +3894,7 @@ def test_leader_planning_run_terminating_without_plan_complete_fails_mission(tmp
     # the clarify or team_mission_plan_complete tools. The lifecycle backstop in
     # reduce_team_mission_run_event must mark the mission failed so the
     # conversation list and input box stop showing "running" forever.
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="m1",
         team_id="t1",
@@ -3855,13 +3912,13 @@ def test_leader_planning_run_terminating_without_plan_complete_fails_mission(tmp
         assignee_profile_id="profile-leader",
         metadata={"role": "leader", "phase": "planning"},
     )
-    db.upsert_run(run_id="run-1", session_id="sess-1", status="running")
+    db.runs.upsert(run_id="run-1", session_id="sess-1", status="running")
     db.bind_team_mission_run(
         mission_id="m1",
         node_id="m1::root",
         run_id="run-1",
         session_id="sess-1",
-        runtime_session_id="rt-1",
+        execution_session_id="rt-1",
         runtime_scope_key="team:m1:leader",
         role="leader",
     )
@@ -3871,14 +3928,14 @@ def test_leader_planning_run_terminating_without_plan_complete_fails_mission(tmp
         event={"type": "message.complete", "payload": {"status": "completed"}, "seq": 1},
     )
 
-    mission = db.get_team_mission_graph("m1").get("mission") or {}
+    mission = db.team_mission_graphs.get_team_mission_graph("m1").get("mission") or {}
     assert mission.get("status") == "failed"
 
 
 def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_mission(tmp_path: Path):
     # With worker nodes in place (plan_complete was called), the same terminal
     # leader event must NOT downgrade the mission to failed.
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission(
         mission_id="m2",
         team_id="t1",
@@ -3894,10 +3951,10 @@ def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_missi
     db.upsert_team_mission_node(
         mission_id="m2", node_id="m2::w1", kind="worker", title="Work", status="todo",
     )
-    db.upsert_run(run_id="run-2", session_id="sess-2", status="running")
+    db.runs.upsert(run_id="run-2", session_id="sess-2", status="running")
     db.bind_team_mission_run(
         mission_id="m2", node_id="m2::root", run_id="run-2", session_id="sess-2",
-        runtime_session_id="rt-2", runtime_scope_key="team:m2:leader", role="leader",
+        execution_session_id="rt-2", runtime_scope_key="team:m2:leader", role="leader",
     )
 
     db.reduce_team_mission_run_event(
@@ -3905,12 +3962,12 @@ def test_leader_planning_run_terminating_after_plan_complete_does_not_fail_missi
         event={"type": "message.complete", "payload": {"status": "completed"}, "seq": 1},
     )
 
-    mission = db.get_team_mission_graph("m2").get("mission") or {}
+    mission = db.team_mission_graphs.get_team_mission_graph("m2").get("mission") or {}
     assert mission.get("status") != "failed"
 
 
 def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_submitted_one(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     output_contract = {
         "format": "structured_deliverable",
         "delivery_channel": "handoff",
@@ -3923,7 +3980,7 @@ def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_s
         objective="Separate visible output from downstream context.",
         mode="supervised_mission",
         status="running",
-        metadata={"stableTeamSessionId": "team-session-1", "task_id": "task-1"},
+        metadata={"conversationTeamSessionId": "team-session-1", "task_id": "task-1"},
     )
     db.upsert_team_mission_node(
         mission_id="mission-handoff",
@@ -3935,7 +3992,7 @@ def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_s
         output_contract=output_contract,
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(run_id="run-missing", session_id="session-missing", status="running")
+    db.runs.upsert(run_id="run-missing", session_id="session-missing", status="running")
     db.bind_team_mission_run(
         mission_id="mission-handoff",
         node_id="node-worker",
@@ -3970,7 +4027,7 @@ def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_s
         output_contract=output_contract,
         metadata={"task_id": "task-1"},
     )
-    db.upsert_run(run_id="run-submitted", session_id="session-submitted", status="running")
+    db.runs.upsert(run_id="run-submitted", session_id="session-submitted", status="running")
     db.bind_team_mission_run(
         mission_id="mission-handoff",
         node_id="node-worker",
@@ -3999,7 +4056,7 @@ def test_team_mission_required_handoff_blocks_missing_deliverable_and_persists_s
     )
 
     node = db.get_team_mission_node("mission-handoff", "node-worker")
-    graph = db.get_team_mission_graph("mission-handoff")
+    graph = db.team_mission_graphs.get_team_mission_graph("mission-handoff")
     graph_node = next(item for item in graph["nodes"] if item["node_id"] == "node-worker")
 
     assert db.team_mission_run_has_deliverable("run-submitted") is True
@@ -4018,11 +4075,11 @@ def test_conversation_runtime_summary_includes_in_process_tool_approval(tmp_path
     on a tool-approval prompt. The projection must surface those pendings too."""
     from tools import approval as _approval_module
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-tool",
         team_id="team-x",
-        stable_session_id="team-session-tool",
+        conversation_session_id="team-session-tool",
         title="工具审批",
         active_mission_id="mission-tool",
     )
@@ -4047,7 +4104,7 @@ def test_conversation_runtime_summary_includes_in_process_tool_approval(tmp_path
         node_id="worker",
         run_id="run-tool",
         session_id="team:mission-tool:node:worker",
-        runtime_session_id="rt-worker",
+        execution_session_id="rt-worker",
         role="member",
     )
 
@@ -4077,11 +4134,11 @@ def test_conversation_runtime_summary_includes_in_process_clarify(tmp_path: Path
     sidebar indicator to approval/waiting."""
     from tools import clarify_gateway as _clarify_module
 
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-clarify",
         team_id="team-y",
-        stable_session_id="team-session-clarify",
+        conversation_session_id="team-session-clarify",
         title="澄清请求",
         active_mission_id="mission-clarify",
     )
@@ -4123,8 +4180,8 @@ def test_approval_state_projection_public_api_sets_and_clears_pending_state(
         project_clarify_or_approval_state,
     )
 
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-A",
         title="approval projection",
         session_kind="hermes_session",
@@ -4147,8 +4204,8 @@ def test_clarify_state_projection_public_api_sets_and_clears_pending_state(
         project_clarify_or_approval_state,
     )
 
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-B",
         title="clarify projection",
         session_kind="hermes_session",
@@ -4169,7 +4226,7 @@ def test_clarify_state_projection_public_api_sets_and_clears_pending_state(
 # on the right session_index row, and asserts the projection lands.
 
 
-def _read_session_index_flags(db: SessionDB, session_id: str) -> dict:
+def _read_session_index_flags(db: CliSessionStore, session_id: str) -> dict:
     conn = db._conn
     row = conn.execute(
         "SELECT running, waiting_approval, active_run_id FROM session_index WHERE session_id = ?",
@@ -4185,8 +4242,8 @@ def _read_session_index_flags(db: SessionDB, session_id: str) -> dict:
 
 def test_pending_state_resolves_direct_session_id_match(tmp_path: Path):
     """Path 1: normal conversation — session_key IS the session_index row id."""
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-normal-1",
         title="普通会话",
         session_kind="hermes_session",
@@ -4204,8 +4261,8 @@ def test_pending_state_resolves_direct_session_id_match(tmp_path: Path):
 
 def test_pending_state_resolves_runtime_scope_key_match(tmp_path: Path):
     """Path 2: any agent whose runtime_scope_key was stamped on the row."""
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-scope-1",
         runtime_scope_key="profile:agent-default",
         title="按 scope 匹配",
@@ -4221,11 +4278,11 @@ def test_pending_state_resolves_runtime_scope_key_match(tmp_path: Path):
 def test_pending_state_resolves_member_node_via_bindings(tmp_path: Path):
     """Path 3: member node — session_key matches team_mission_run_bindings, the
     update lands on the session_index row keyed by the binding's mission_id."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-member",
         team_id="team-z",
-        stable_session_id="team-session-member",
+        conversation_session_id="team-session-member",
         title="成员节点会话",
         active_mission_id="mission-member",
     )
@@ -4237,7 +4294,7 @@ def test_pending_state_resolves_member_node_via_bindings(tmp_path: Path):
         mode="supervised_mission",
         status="running",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="team-session-member",
         session_kind="team_mission",
         mission_id="mission-member",
@@ -4248,7 +4305,7 @@ def test_pending_state_resolves_member_node_via_bindings(tmp_path: Path):
     db._conn.execute(
         """
         INSERT INTO team_mission_run_bindings (
-            run_id, mission_id, node_id, session_id, runtime_session_id,
+            run_id, mission_id, node_id, session_id, execution_session_id,
             runtime_scope_key, role, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -4267,13 +4324,13 @@ def test_pending_state_resolves_member_node_via_bindings(tmp_path: Path):
     assert _read_session_index_flags(db, "team-session-member")["waiting_approval"] == 1
 
 
-def test_pending_state_resolves_team_conv_via_stable_session_id(tmp_path: Path):
-    """Path 4: leader-level session_key == stable_session_id on the team conv."""
-    db = SessionDB(tmp_path / "state.db")
+def test_pending_state_resolves_team_conv_via_conversation_session_id(tmp_path: Path):
+    """Path 4: leader-level session_key == conversation_session_id on the team conv."""
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-stable",
         team_id="team-z",
-        stable_session_id="team-session-stable",
+        conversation_session_id="team-session-stable",
         title="团队会话",
         active_mission_id="mission-stable",
     )
@@ -4285,7 +4342,7 @@ def test_pending_state_resolves_team_conv_via_stable_session_id(tmp_path: Path):
         mode="supervised_mission",
         status="running",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="team-session-stable",
         session_kind="team_mission",
         mission_id="mission-stable",
@@ -4306,15 +4363,15 @@ def test_pending_state_resolves_leader_runtime_scope_key_pattern(tmp_path: Path)
     """Path 5: leader runtime scope ``team:<conv_id>:leader-conversation`` is
     parsed and matched by session_index.conversation_id. This is the path
     that was missing — leader clarify never reached the sidebar."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conv-leader",
         team_id="team-z",
-        stable_session_id="team-session-leader",
+        conversation_session_id="team-session-leader",
         title="leader scope 会话",
         active_mission_id="mission-leader",
     )
-    db.upsert_session_index(
+    db.session_index.upsert(
         session_id="team-session-leader",
         session_kind="team_mission",
         conversation_id="conv-leader",
@@ -4336,8 +4393,8 @@ def test_pending_state_clear_restores_running_when_active_run_id_present(tmp_pat
     while the user was answering), running must flip back to 1 immediately
     so the sidebar spinner reappears without waiting for the next run-state
     projection."""
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-clear-1",
         active_run_id="run-still-running",
         waiting_approval=True,
@@ -4356,8 +4413,8 @@ def test_pending_state_clear_restores_running_when_active_run_id_present(tmp_pat
 def test_pending_state_clear_leaves_running_zero_without_active_run_id(tmp_path: Path):
     """And the symmetric case: clear with no active_run_id leaves running=0
     (idle conversation that the user cancelled mid-clarify)."""
-    db = SessionDB(tmp_path / "state.db")
-    db.upsert_session_index(
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.session_index.upsert(
         session_id="sess-clear-2",
         active_run_id="",
         waiting_approval=True,
@@ -4375,7 +4432,7 @@ def test_pending_state_clear_leaves_running_zero_without_active_run_id(tmp_path:
 def test_pending_state_unknown_session_key_returns_zero(tmp_path: Path):
     """A session_key that does not resolve to any row must be a no-op (no
     spurious INSERT, no exception, return 0)."""
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     rows = db.update_session_index_pending_state_for_session_key(
         "nothing-anywhere", waiting_approval=True,
     )

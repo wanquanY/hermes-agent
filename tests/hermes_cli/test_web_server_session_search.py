@@ -1,10 +1,19 @@
 import asyncio
+from types import SimpleNamespace
 
 from hermes_cli import web_server
 
 
-class _FakeSessionDB:
+class _FakeSessionStore:
     closed = False
+
+    def __init__(self):
+        self.sessions = SimpleNamespace(
+            search_by_id=self.search_sessions_by_id,
+            get=self.get_session,
+            compression_tip=self.get_compression_tip,
+        )
+        self.messages = SimpleNamespace(search=self.search_messages)
 
     def search_sessions_by_id(self, query, limit=20):
         assert query == "20260603"
@@ -52,7 +61,7 @@ class _FakeSessionDB:
 
 
 def test_desktop_session_search_merges_id_matches_before_content_matches(monkeypatch):
-    monkeypatch.setattr("hermes_state.SessionDB", _FakeSessionDB)
+    monkeypatch.setattr("hermes_cli.web_server.open_cli_session_store", lambda: _FakeSessionStore())
 
     response = asyncio.run(web_server.search_sessions(q="20260603", limit=2))
 

@@ -231,12 +231,12 @@ def test_list_human_output(monkeypatch, capsys):
     import sys as _sys
     import types as _types
 
-    fake_dir = _types.ModuleType("gateway.channel_directory")
+    fake_dir = _types.ModuleType("hermes_gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: "Available messaging targets:\n\nTelegram:\n  telegram:-100123\n"
     fake_dir.load_directory = lambda: {
         "platforms": {"telegram": [{"id": "-100123", "name": "Test Group"}]}
     }
-    monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
+    monkeypatch.setitem(_sys.modules, "hermes_gateway.channel_directory", fake_dir)
 
     args = _parse(["--list"])
     with pytest.raises(SystemExit) as exc:
@@ -250,12 +250,12 @@ def test_list_json(monkeypatch, capsys):
     import sys as _sys
     import types as _types
 
-    fake_dir = _types.ModuleType("gateway.channel_directory")
+    fake_dir = _types.ModuleType("hermes_gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: "(ignored in json mode)"
     fake_dir.load_directory = lambda: {
         "platforms": {"telegram": [{"id": "-100123", "name": "Test Group"}]}
     }
-    monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
+    monkeypatch.setitem(_sys.modules, "hermes_gateway.channel_directory", fake_dir)
 
     args = _parse(["--list", "--json"])
     with pytest.raises(SystemExit) as exc:
@@ -270,7 +270,7 @@ def test_list_filter_platform(monkeypatch, capsys):
     import sys as _sys
     import types as _types
 
-    fake_dir = _types.ModuleType("gateway.channel_directory")
+    fake_dir = _types.ModuleType("hermes_gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: "(should not be called when filter set)"
     fake_dir.load_directory = lambda: {
         "platforms": {
@@ -278,7 +278,7 @@ def test_list_filter_platform(monkeypatch, capsys):
             "discord": [{"id": "555", "name": "bot-home"}],
         }
     }
-    monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
+    monkeypatch.setitem(_sys.modules, "hermes_gateway.channel_directory", fake_dir)
 
     # When --list is set, argparse puts the optional bareword in the
     # `message` positional slot (where the send-mode body would go).
@@ -295,10 +295,10 @@ def test_list_unknown_platform_fails(monkeypatch, capsys):
     import sys as _sys
     import types as _types
 
-    fake_dir = _types.ModuleType("gateway.channel_directory")
+    fake_dir = _types.ModuleType("hermes_gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: ""
     fake_dir.load_directory = lambda: {"platforms": {"telegram": []}}
-    monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
+    monkeypatch.setitem(_sys.modules, "hermes_gateway.channel_directory", fake_dir)
 
     args = _parse(["--list", "pigeon-post"])
     with pytest.raises(SystemExit) as exc:
@@ -335,7 +335,7 @@ def test_register_send_subparser_is_reusable():
 def test_load_hermes_env_bridges_config_yaml_scalars(tmp_path, monkeypatch):
     """Top-level config.yaml scalars should be bridged into os.environ.
 
-    This mirrors the gateway/run.py bootstrap behavior: without this, running
+    This mirrors the hermes_gateway/runner.py bootstrap behavior: without this, running
     ``hermes send`` from a fresh shell cannot resolve the home channel
     because ``TELEGRAM_HOME_CHANNEL`` (saved by ``hermes config set``) lives
     in config.yaml, not in .env — and the gateway's config loader reads via

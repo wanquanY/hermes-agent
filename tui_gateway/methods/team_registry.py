@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import uuid
 
-from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_registry_control_db
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
 
 
 def _get_db():
-    return _team_registry_control_db()
+    return _server._get_db()
 
 
 def _text(value) -> str:
@@ -186,17 +185,17 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     try:
-        team = db.upsert_agent_team(**_team_payload(params or {}))
+        team = db.teams.upsert_agent_team(**_team_payload(params or {}))
         members = []
         if isinstance((params or {}).get("members"), list):
             for raw_member in (params or {}).get("members") or []:
-                member = db.upsert_agent_team_member(**_member_payload(
+                member = db.teams.upsert_agent_team_member(**_member_payload(
                     {"member": raw_member},
                     fallback_team_id=team["id"],
                 ))
                 members.append(member)
         else:
-            members = db.list_agent_team_members(team["id"])
+            members = db.teams.list_agent_team_members(team["id"])
         return _ok(rid, {"team": {**team, "members": members}})
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
@@ -208,10 +207,10 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     team_id = _text((params or {}).get("team_id") or (params or {}).get("teamId") or (params or {}).get("id"))
-    team = db.get_agent_team_with_members(team_id) if hasattr(db, "get_agent_team_with_members") else db.get_agent_team(team_id)
+    team = db.teams.get_agent_team_with_members(team_id)
     if not team:
         return _err(rid, 4040, "team not found")
-    members = team.get("members") if isinstance(team.get("members"), list) else db.list_agent_team_members(team["id"])
+    members = team.get("members") if isinstance(team.get("members"), list) else db.teams.list_agent_team_members(team["id"])
     include_members = _bool((params or {}).get("include_members", (params or {}).get("includeMembers")), default=True)
     return _ok(rid, {
         "team": _team_for_projection(
@@ -231,14 +230,14 @@ def _(rid, params: dict) -> dict:
     include_archived = _bool((params or {}).get("include_archived", (params or {}).get("includeArchived")))
     projection = _projection(params)
     include_members = _bool((params or {}).get("include_members", (params or {}).get("includeMembers")), default=False)
-    if projection == "summary" and not include_members and hasattr(db, "list_agent_team_summaries"):
+    if projection == "summary" and not include_members:
         return _ok(rid, {"teams": [
             _team_for_projection(team, projection="summary", include_members=False)
-            for team in db.list_agent_team_summaries(include_archived=include_archived)
+            for team in db.teams.list_agent_team_summaries(include_archived=include_archived)
         ]})
     teams = []
-    for team in db.list_agent_teams(include_archived=include_archived):
-        members = db.list_agent_team_members(team.get("id", ""))
+    for team in db.teams.list_agent_teams(include_archived=include_archived):
+        members = db.teams.list_agent_team_members(team.get("id", ""))
         teams.append(_team_for_projection(
             team,
             members=members,
@@ -254,10 +253,10 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     team_id = _text((params or {}).get("team_id") or (params or {}).get("teamId") or (params or {}).get("id"))
-    team = db.archive_agent_team(team_id)
+    team = db.teams.archive_agent_team(team_id)
     if not team:
         return _err(rid, 4040, "team not found")
-    return _ok(rid, {"team": {**team, "members": db.list_agent_team_members(team["id"])}})
+    return _ok(rid, {"team": {**team, "members": db.teams.list_agent_team_members(team["id"])}})
 
 
 @method("team_registry.member.upsert")
@@ -266,7 +265,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     try:
-        member = db.upsert_agent_team_member(**_member_payload(params or {}))
+        member = db.teams.upsert_agent_team_member(**_member_payload(params or {}))
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
     return _ok(rid, {"member": member})
@@ -278,7 +277,7 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     member_id = _text((params or {}).get("member_id") or (params or {}).get("memberId") or (params or {}).get("id"))
-    member = db.get_agent_team_member(member_id)
+    member = db.teams.get_agent_team_member(member_id)
     if not member:
         return _err(rid, 4040, "team member not found")
     return _ok(rid, {"member": member})
@@ -292,9 +291,9 @@ def _(rid, params: dict) -> dict:
     team_id = _text((params or {}).get("team_id") or (params or {}).get("teamId") or (params or {}).get("id"))
     if not team_id:
         return _err(rid, 4006, "team_id required")
-    if not db.get_agent_team(team_id):
+    if not db.teams.get_agent_team(team_id):
         return _err(rid, 4040, "team not found")
-    return _ok(rid, {"members": db.list_agent_team_members(team_id)})
+    return _ok(rid, {"members": db.teams.list_agent_team_members(team_id)})
 
 
 @method("team_registry.member.delete")
@@ -304,7 +303,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, "Hermes team registry db unavailable")
     member_id = _text((params or {}).get("member_id") or (params or {}).get("memberId") or (params or {}).get("id"))
     try:
-        member = db.delete_agent_team_member(member_id)
+        member = db.teams.delete_agent_team_member(member_id)
     except ValueError as exc:
         return _err(rid, 4006, str(exc))
     if not member:

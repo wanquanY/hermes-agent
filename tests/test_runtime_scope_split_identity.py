@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from tui_gateway.run_worker import RunCancelFrame
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 class _FakeStdin:
@@ -48,13 +48,15 @@ def _supervisor() -> WorkerSupervisor:
 
 
 def _worker(scope: RuntimeScope) -> RunWorker:
-    return RunWorker(
+    worker = RunWorker(
         scope=scope,
         process=_FakeProcess(),
         inbound_queue=asyncio.Queue(),
         created_at=time.time(),
         last_used_at=time.time(),
     )
+    worker.ready_event.set()
+    return worker
 
 
 def test_runtime_scope_worker_identity_is_tuple_of_scope_and_conv() -> None:

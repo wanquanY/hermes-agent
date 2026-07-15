@@ -6,9 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.run import GatewayRunner
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.update_lifecycle import update_lifecycle_for
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.platform_command import platform_command_for
+from hermes_gateway.platform_runtime import platform_runtime_for
+from hermes_gateway.session import SessionSource
 
 
 class StubAdapter(BasePlatformAdapter):
@@ -90,11 +96,9 @@ class TestStartupPlatformIsolation:
         runner.hooks.loaded_hooks = []
         runner.hooks.emit = AsyncMock()
         runner._suspend_stuck_loop_sessions = MagicMock(return_value=0)
-        runner._update_runtime_status = MagicMock()
-        runner._update_platform_runtime_status = MagicMock()
-        runner._sync_voice_mode_state_to_adapter = MagicMock()
-        runner._send_update_notification = AsyncMock(return_value=True)
-        runner._send_restart_notification = AsyncMock()
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter = MagicMock()
+        update_lifecycle_for(runner).send_update_notification = AsyncMock(return_value=True)
+        restart_lifecycle_for(runner).send_restart_notification = AsyncMock()
 
         adapters = {
             Platform.TELEGRAM: StubAdapter(platform=Platform.TELEGRAM),
@@ -114,7 +118,7 @@ class TestStartupPlatformIsolation:
             coro.close()
             return MagicMock()
 
-        with patch("gateway.status.write_runtime_status"):
+        with patch("channels.runtime_status.write_runtime_status"):
             with patch("hermes_cli.plugins.discover_plugins"):
                 with patch("hermes_cli.config.load_config", return_value={}):
                     with patch("agent.shell_hooks.register_from_config"):
@@ -123,10 +127,10 @@ class TestStartupPlatformIsolation:
                             return_value=0,
                         ):
                             with patch(
-                                "gateway.channel_directory.build_channel_directory",
+                                "hermes_gateway.channel_directory.build_channel_directory",
                                 new=AsyncMock(return_value={"platforms": {}}),
                             ):
-                                with patch("gateway.run.asyncio.create_task", side_effect=fake_create_task):
+                                with patch("hermes_gateway.runner.asyncio.create_task", side_effect=fake_create_task):
                                     assert await runner.start() is True
 
         assert Platform.TELEGRAM in runner._failed_platforms
@@ -182,7 +186,7 @@ class TestPlatformReconnectWatcher:
     async def test_reconnect_succeeds_on_retry(self):
         """Watcher should reconnect a failed platform when connect() succeeds."""
         runner = _make_runner()
-        runner._sync_voice_mode_state_to_adapter = MagicMock()
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter = MagicMock()
 
         platform_config = PlatformConfig(enabled=True, token="test")
         runner._failed_platforms[Platform.TELEGRAM] = {
@@ -195,7 +199,7 @@ class TestPlatformReconnectWatcher:
         real_sleep = asyncio.sleep
 
         with patch.object(runner, "_create_adapter", return_value=succeed_adapter):
-            with patch("gateway.run.build_channel_directory", create=True):
+            with patch("hermes_gateway.runner.build_channel_directory", create=True):
                 # Run one iteration of the watcher then stop
                 async def run_one_iteration():
                     runner._running = True
@@ -210,7 +214,7 @@ class TestPlatformReconnectWatcher:
                         await real_sleep(0)
 
                     with patch("asyncio.sleep", side_effect=fake_sleep):
-                        await runner._platform_reconnect_watcher()
+                        await platform_runtime_for(runner).platform_reconnect_watcher()
 
                 await run_one_iteration()
 
@@ -248,7 +252,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -286,7 +290,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -328,7 +332,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -368,7 +372,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -404,7 +408,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -432,7 +436,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_briefly()
 
@@ -465,7 +469,7 @@ class TestPlatformReconnectWatcher:
                     await real_sleep(0)
 
                 with patch("asyncio.sleep", side_effect=fake_sleep):
-                    await runner._platform_reconnect_watcher()
+                    await platform_runtime_for(runner).platform_reconnect_watcher()
 
             await run_one_iteration()
 
@@ -487,7 +491,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         assert Platform.TELEGRAM in runner._failed_platforms
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 0
@@ -504,7 +508,7 @@ class TestRuntimeDisconnectQueuing:
         # Need to prevent stop() from running fully
         runner.stop = AsyncMock()
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         assert Platform.TELEGRAM not in runner._failed_platforms
 
@@ -523,7 +527,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("network_error", "DNS failure", retryable=True)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         # stop() should NOT be called — gateway stays alive for the watcher
         runner.stop.assert_not_called()
@@ -544,7 +548,7 @@ class TestRuntimeDisconnectQueuing:
         healthy_adapter = StubAdapter(succeed=True)
         runner.adapters[Platform.DISCORD] = healthy_adapter
 
-        await runner._handle_adapter_fatal_error(failing_adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(failing_adapter)
 
         # stop() should NOT have been called — Discord is still up
         runner.stop.assert_not_called()
@@ -560,7 +564,7 @@ class TestRuntimeDisconnectQueuing:
         adapter._set_fatal_error("auth_error", "bad token", retryable=False)
         runner.adapters[Platform.TELEGRAM] = adapter
 
-        await runner._handle_adapter_fatal_error(adapter)
+        await platform_runtime_for(runner).handle_adapter_fatal_error(adapter)
 
         runner.stop.assert_called_once()
 
@@ -578,7 +582,7 @@ class TestPauseResume:
             "attempts": 3,
             "next_retry": time.monotonic() + 30,
         }
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="manual")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="manual")
         info = runner._failed_platforms[Platform.TELEGRAM]
         assert info["paused"] is True
         assert info["pause_reason"] == "manual"
@@ -593,7 +597,7 @@ class TestPauseResume:
             "paused": True,
             "pause_reason": "first reason",
         }
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="second reason")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="second reason")
         # Reason should not be overwritten on a second pause call.
         assert (
             runner._failed_platforms[Platform.TELEGRAM]["pause_reason"]
@@ -603,7 +607,7 @@ class TestPauseResume:
     def test_pause_no_op_when_platform_not_queued(self):
         runner = _make_runner()
         # No exception even when the platform isn't in _failed_platforms.
-        runner._pause_failed_platform(Platform.TELEGRAM, reason="x")
+        platform_runtime_for(runner).pause_failed_platform(Platform.TELEGRAM, reason="x")
         assert Platform.TELEGRAM not in runner._failed_platforms
 
     def test_resume_clears_paused_and_resets_attempts(self):
@@ -615,7 +619,7 @@ class TestPauseResume:
             "paused": True,
             "pause_reason": "auto-paused",
         }
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is True
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is True
         info = runner._failed_platforms[Platform.TELEGRAM]
         assert info["paused"] is False
         assert info["attempts"] == 0
@@ -629,20 +633,27 @@ class TestPauseResume:
             "attempts": 1,
             "next_retry": time.monotonic() + 30,
         }
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is False
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is False
 
     def test_resume_returns_false_when_not_queued(self):
         runner = _make_runner()
-        assert runner._resume_paused_platform(Platform.TELEGRAM) is False
+        assert platform_runtime_for(runner).resume_paused_platform(Platform.TELEGRAM) is False
 
 
 class TestPlatformSlashCommand:
     """Test the /platform list|pause|resume slash command handler."""
 
-    def _make_event(self, content: str):
-        ev = MagicMock()
-        ev.content = content
-        return ev
+    def _make_event(self, text: str):
+        return MessageEvent(
+            text=text,
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                user_id="u1",
+                chat_id="c1",
+                user_name="tester",
+                chat_type="dm",
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_list_shows_connected_and_paused(self):
@@ -655,7 +666,7 @@ class TestPlatformSlashCommand:
             "paused": True,
             "pause_reason": "not paired",
         }
-        out = await runner._handle_platform_command(self._make_event("/platform list"))
+        out = await platform_command_for(runner).handle_platform_command(self._make_event("/platform list"))
         assert "discord" in out
         assert "whatsapp" in out
         assert "PAUSED" in out
@@ -669,7 +680,7 @@ class TestPlatformSlashCommand:
             "attempts": 2,
             "next_retry": time.monotonic() + 30,
         }
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause whatsapp")
         )
         assert "paused" in out.lower()
@@ -678,7 +689,7 @@ class TestPlatformSlashCommand:
     @pytest.mark.asyncio
     async def test_pause_rejects_unqueued_platform(self):
         runner = _make_runner()
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause whatsapp")
         )
         assert "not in the retry queue" in out
@@ -693,7 +704,7 @@ class TestPlatformSlashCommand:
             "paused": True,
             "pause_reason": "x",
         }
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform resume whatsapp")
         )
         assert "resumed" in out.lower()
@@ -702,7 +713,7 @@ class TestPlatformSlashCommand:
     @pytest.mark.asyncio
     async def test_unknown_platform_name(self):
         runner = _make_runner()
-        out = await runner._handle_platform_command(
+        out = await platform_command_for(runner).handle_platform_command(
             self._make_event("/platform pause notarealplatform")
         )
         assert "Unknown platform" in out
@@ -711,6 +722,5 @@ class TestPlatformSlashCommand:
     async def test_bare_platform_shows_usage_with_list(self):
         # An empty /platform call defaults to "list".
         runner = _make_runner()
-        out = await runner._handle_platform_command(self._make_event("/platform"))
+        out = await platform_command_for(runner).handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out
-

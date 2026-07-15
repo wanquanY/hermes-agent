@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from tui_gateway.services import worker_runtime
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_supervisor import RunWorker
+from hermes_agent.orchestration import worker_runtime
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_supervisor import RunWorker
 
 
 class _Transport:
@@ -93,7 +93,7 @@ async def test_run_submit_with_dovie_profile_id_propagates_to_worker_context(
         monkeypatch,
         {
             "text": "hello",
-            "stored_session_id": "conv-1",
+            "conversation_session_id": "conv-1",
             "runtime_scope_key": "conv-1",
             "dovie_profile": {
                 "id": "agent-a",
@@ -132,7 +132,7 @@ async def test_run_submit_with_agent_profile_id_propagates_to_worker_context(
         monkeypatch,
         {
             "text": "hello",
-            "stored_session_id": "conv-2",
+            "conversation_session_id": "conv-2",
             "agentProfileId": "agent-b",
         },
     )

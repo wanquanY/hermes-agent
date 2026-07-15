@@ -36,7 +36,6 @@ from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
-from agent.tool_handoff import format_tool_handoff_response, pop_tool_handoff
 from agent.turn_message_buffer import TurnMessageBuffer
 from agent.message_sanitization import (
     _repair_tool_call_arguments,
@@ -66,9 +65,13 @@ from agent.nous_rate_guard import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
+from agent.system_prompt_cache import system_prompt_cache_scope_key
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
-from hermes_constants import display_hermes_home as _dhh_fn, PARTIAL_STREAM_STUB_ID
+from hermes_constants import (
+    FINISH_REASON_STREAM_ERROR,
+    display_hermes_home as _dhh_fn,
+)
 from hermes_logging import set_session_context
 from tools.schema_sanitizer import strip_pattern_and_format
 from tools.skill_provenance import set_current_write_origin
@@ -115,25 +118,7 @@ def _system_prompt_execution_scope_key(agent) -> str:
     key; ordinary one-agent sessions keep the original byte-stable session
     prompt cache.
     """
-    session_id = str(getattr(agent, "session_id", "") or "").strip()
-    for context in (
-        getattr(agent, "run_context", None),
-        getattr(agent, "_run_context", None),
-    ):
-        conversation_session_id = str(
-            getattr(context, "conversation_session_id", "") or ""
-        ).strip()
-        execution_scope_key = str(
-            getattr(context, "execution_scope_key", "") or ""
-        ).strip()
-        if (
-            conversation_session_id
-            and execution_scope_key
-            and conversation_session_id == session_id
-            and execution_scope_key != session_id
-        ):
-            return execution_scope_key
-    return ""
+    return system_prompt_cache_scope_key(agent)
 
 
 _LEGACY_BRAND_PROMPT_MARKERS = (
@@ -209,7 +194,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                     else None
                 )
             else:
-                session_row = agent._session_db.get_session(agent.session_id)
+                session_row = agent._session_db.sessions.get(agent.session_id)
                 raw_prompt = session_row.get("system_prompt") if session_row is not None else None
             _log_dovie_turn_stage(
                 agent,
@@ -334,10 +319,10 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             if scoped_prompt_key:
                 update_scoped = getattr(agent._session_db, "update_scoped_system_prompt", None)
                 if not callable(update_scoped):
-                    raise AttributeError("SessionDB has no update_scoped_system_prompt")
+                    raise AttributeError("session store has no update_scoped_system_prompt")
                 update_scoped(agent.session_id, scoped_prompt_key, agent._cached_system_prompt)
             else:
-                agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+                agent._session_db.sessions.update_system_prompt(agent.session_id, agent._cached_system_prompt)
             _log_dovie_turn_stage(
                 agent,
                 "system-prompt-db-write-end",
@@ -353,35 +338,12 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
 
-def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List[str]] = None) -> str:
-    if is_partial_stub and dropped_tools:
-        tool_list = ", ".join(dropped_tools[:3])
-        return (
-            "[System: Your previous tool call "
-            f"({tool_list}) was too large and "
-            "the stream timed out before it "
-            "could be delivered. Do NOT retry "
-            "the same tool call with the same "
-            "large content. Instead, break the "
-            "content into multiple smaller tool "
-            "calls (e.g. use multiple patch calls "
-            "or write smaller files). Each tool "
-            "call's arguments must be under ~8K "
-            "tokens to avoid stream timeouts.]"
-        )
-    elif is_partial_stub:
-        return (
-            "[System: The previous response was cut off by a "
-            "network error mid-stream. Continue exactly where "
-            "you left off. Do not restart or repeat prior text. "
-            "Finish the answer directly.]"
-        )
-    else:
-        return (
-            "[System: Your previous response was truncated by the output "
-            "length limit. Continue exactly where you left off. Do not "
-            "restart or repeat prior text. Finish the answer directly.]"
-        )
+def _get_continuation_prompt() -> str:
+    return (
+        "[System: Your previous response was truncated by the output "
+        "length limit. Continue exactly where you left off. Do not "
+        "restart or repeat prior text. Finish the answer directly.]"
+    )
 
 
 def _get_large_tool_call_recovery_prompt(tool_names: Optional[List[str]] = None) -> str:
@@ -520,8 +482,8 @@ def _drain_activity_events_for_api(agent) -> list[dict[str, str]]:
             if activity_id in marker:
                 continue
             try:
-                if db is not None and callable(getattr(db, "mark_activity_read", None)):
-                    db.mark_activity_read(activity_id)
+                if db is not None:
+                    db.activities.mark_read(activity_id)
                 marker.add(activity_id)
             except Exception as exc:
                 logger.warning("activity mark_read failed activity_id=%s: %s", activity_id, exc)
@@ -537,6 +499,7 @@ def run_conversation(
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
     turn_metadata: Optional[Dict[str, Any]] = None,
+    current_input_conversation_message_id: str = "",
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -555,7 +518,10 @@ def run_conversation(
         turn_metadata: Optional metadata for the current user turn. Gateway
             callers use this to persist turn/run IDs and client message IDs
             alongside the transcript.
-                or queuing follow-up prefetch work.
+        current_input_conversation_message_id: Stable identity of a canonical
+            user row that was persisted before execution. When present in the
+            hydrated history, that row is bound as the current input instead
+            of appending a duplicate user message.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -752,12 +718,25 @@ def run_conversation(
             _should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message
-    user_msg = {"role": "user", "content": user_message}
-    if isinstance(turn_metadata, dict) and turn_metadata:
-        user_msg["metadata"] = dict(turn_metadata)
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
+    # Bind the canonical current input when the caller persisted it before
+    # execution (team conversations). Ordinary runtime-owned turns append one
+    # new user row at the explicit TurnMessageBuffer persistence boundary.
+    current_turn_user_message = messages.bind_persisted_current_input(
+        current_input_conversation_message_id
+    )
+    if current_input_conversation_message_id and current_turn_user_message is None:
+        raise RuntimeError(
+            "canonical current input is absent from hydrated conversation history: "
+            f"{current_input_conversation_message_id}"
+        )
+    if current_turn_user_message is None:
+        current_turn_user_message = messages.append_current_input(
+            user_message,
+            metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+        )
+    current_turn_user_idx = messages.current_input_index
+    if current_turn_user_idx is None:
+        raise RuntimeError("current input binding did not produce a message index")
     agent._persist_user_message_idx = current_turn_user_idx
     
     if not agent.quiet_mode:
@@ -785,6 +764,18 @@ def run_conversation(
         )
 
     active_system_prompt = agent._cached_system_prompt
+
+    # Crash-resilience: persist the inbound user turn as soon as the session row
+    # exists. The final turn flush below will append assistant/tool rows by using
+    # the same TurnMessageBuffer boundary and persist_message_key idempotency.
+    try:
+        agent._persist_session(messages, conversation_history)
+    except Exception:
+        logger.warning(
+            "Early turn-start session persistence failed for session=%s",
+            agent.session_id or "none",
+            exc_info=True,
+        )
 
     # ── Preflight context compression ──
     # Before entering the main loop, check if the loaded conversation
@@ -1109,31 +1100,23 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
-        # Defensive: repair malformed role-alternation before API call.
-        # Catches cases where the history got wedged into a
-        # ``tool → user`` or ``user → user`` tail (e.g. after empty-
-        # response scaffolding was stripped and a new user message
-        # landed after an orphan tool result). Most providers return
-        # empty content on malformed sequences, which would otherwise
-        # retrigger the empty-retry loop indefinitely.
-        repaired_seq = agent._repair_message_sequence(messages)
-        if repaired_seq > 0:
-            request_logger.info(
-                "Repaired %s message-alternation violations before request (session=%s)",
-                repaired_seq,
-                agent.session_id or "-",
-            )
-
         api_messages = []
-        for idx, msg in enumerate(messages):
+        for msg in messages:
             api_msg = msg.copy()
+
+            # The canonical current input may already be part of hydrated
+            # history. Its provider content is overlaid only on this API copy
+            # so attachment/context enrichment never rewrites the transcript.
+            is_current_input = msg is current_turn_user_message
+            if is_current_input and msg.get("role") == "user":
+                api_msg["content"] = user_message
 
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
-            if idx == current_turn_user_idx and msg.get("role") == "user":
+            if is_current_input and msg.get("role") == "user":
                 _injections = []
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
@@ -1168,6 +1151,17 @@ def run_conversation(
             # Keep 'reasoning_details' - OpenRouter uses this for multi-turn reasoning context
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
+
+        # Repair only the provider-bound copy. Canonical/live history keeps
+        # every utterance and its participant boundary; same-role messages are
+        # valid shared-conversation events and must not be flattened here.
+        repaired_seq = agent._repair_message_sequence(api_messages)
+        if repaired_seq > 0:
+            request_logger.info(
+                "Repaired %s provider message-sequence violation(s) (session=%s)",
+                repaired_seq,
+                agent.session_id or "-",
+            )
 
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
@@ -1222,14 +1216,14 @@ def run_conversation(
         api_messages = agent._sanitize_api_messages(api_messages)
 
         # Drop thinking-only assistant turns (reasoning but no visible
-        # output and no tool_calls) and merge any adjacent user messages
-        # left behind. Prevents Anthropic 400s ("The final block in an
+        # output and no tool_calls). Prevents Anthropic 400s ("The final block in an
         # assistant message cannot be `thinking`.") and equivalent errors
         # from third-party Anthropic-compatible gateways that can't replay
         # a thinking-only turn. Runs on the per-call copy only — the
         # stored conversation history keeps the reasoning block for the
-        # UI transcript and session persistence.
-        api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+        # UI transcript and session persistence. Newly-adjacent user events
+        # remain separate until a strict provider adapter prepares its wire copy.
+        api_messages = agent._drop_thinking_only_messages(api_messages)
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
@@ -1442,6 +1436,19 @@ def run_conversation(
 
                 if env_var_enabled("HERMES_DUMP_REQUESTS"):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
+
+                # Dovie team reconciliation boundary: api_kwargs is now the
+                # final provider body (including actor-scoped system context,
+                # projected shared transcript, tools and model parameters).
+                # Capture it before the SDK call so failed requests are also
+                # auditable. The helper is a no-op outside Leader/member runs.
+                from agent.team_request_audit import dump_team_inference_request_audit
+                dump_team_inference_request_audit(
+                    agent,
+                    api_kwargs,
+                    api_call_count=api_call_count,
+                    retry_count=retry_count,
+                )
 
                 # Always prefer the streaming path — even without stream
                 # consumers.  Streaming gives us fine-grained health
@@ -1872,19 +1879,41 @@ def run_conversation(
                         error_detail=_refusal_text or "model declined (content_filter)",
                     )
 
+                if finish_reason == FINISH_REASON_STREAM_ERROR:
+                    _stream_error_result = agent._get_transport().normalize_response(response)
+                    _stream_error_content = (
+                        getattr(_stream_error_result, "content", None)
+                        if _stream_error_result is not None
+                        else None
+                    )
+                    _partial_response = agent._strip_think_blocks(
+                        str(_stream_error_content or "")
+                    ).strip()
+                    if _stream_error_result is not None:
+                        messages.append(
+                            agent._build_assistant_message(
+                                _stream_error_result,
+                                FINISH_REASON_STREAM_ERROR,
+                            )
+                        )
+                    agent._cleanup_task_resources(effective_task_id)
+                    agent._persist_session(messages, conversation_history)
+                    return {
+                        "final_response": _partial_response or None,
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "partial": True,
+                        "stream_error": True,
+                        "error": "Provider stream ended before a completion frame",
+                    }
+
                 if finish_reason == "length":
-                    if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Stream interrupted by network error "
-                            f"(finish_reason='length' on partial-stream-stub)",
-                            force=True,
-                        )
-                    else:
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Response truncated "
-                            f"(finish_reason='length') - model hit max output tokens",
-                            force=True,
-                        )
+                    agent._vprint(
+                        f"{agent.log_prefix}⚠️  Response truncated "
+                        f"(finish_reason='length') - model hit max output tokens",
+                        force=True,
+                    )
 
                     # Normalize the truncated response to a single OpenAI-style
                     # message shape so text-continuation and tool-call retry
@@ -1977,39 +2006,13 @@ def run_conversation(
                                 truncated_response_parts.append(assistant_message.content)
 
                             if length_continue_retries < 3:
-                                _is_partial_stream_stub = (
-                                    getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                                )
-                                _dropped_tools = getattr(
-                                    response, "_dropped_tool_names", None
-                                )
-
-                                if _is_partial_stream_stub and _dropped_tools:
-                                    _tool_list = ", ".join(_dropped_tools[:3])
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Stream interrupted mid "
-                                        f"tool-call ({_tool_list}) — requesting "
-                                        f"chunked retry "
-                                        f"({length_continue_retries}/3)..."
-                                    )
-                                elif _is_partial_stream_stub:
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Stream interrupted — "
-                                        f"requesting continuation "
-                                        f"({length_continue_retries}/3)..."
-                                    )
-                                else:
-                                    agent._vprint(
-                                        f"{agent.log_prefix}↻ Requesting continuation "
-                                        f"({length_continue_retries}/3)..."
-                                    )
-
-                                _continue_content = _get_continuation_prompt(
-                                    _is_partial_stream_stub, _dropped_tools
+                                agent._vprint(
+                                    f"{agent.log_prefix}↻ Requesting continuation "
+                                    f"({length_continue_retries}/3)..."
                                 )
                                 continue_msg = {
                                     "role": "user",
-                                    "content": _continue_content,
+                                    "content": _get_continuation_prompt(),
                                     # In-memory trajectory only — the LLM needs to
                                     # see this to know it must continue, but it is
                                     # a private retry artifact, NOT something the
@@ -2197,7 +2200,7 @@ def run_conversation(
                             # affects 0 rows without error).
                             if not agent._session_db_created:
                                 agent._ensure_db_session()
-                            agent._session_db.update_token_counts(
+                            agent._session_db.sessions.update_token_counts(
                                 agent.session_id,
                                 input_tokens=canonical_usage.input_tokens,
                                 output_tokens=canonical_usage.output_tokens,
@@ -4061,18 +4064,6 @@ def run_conversation(
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
-                tool_handoff = pop_tool_handoff(agent)
-                if tool_handoff is not None and tool_handoff.get("end_current_turn") is True:
-                    _turn_exit_reason = f"tool_handoff({tool_handoff.get('kind') or 'unknown'})"
-                    final_response = format_tool_handoff_response(tool_handoff)
-                    messages.append({
-                        "role": "assistant",
-                        "content": final_response,
-                        "metadata": {"tool_handoff": tool_handoff},
-                    })
-                    agent._fire_stream_delta(final_response)
-                    break
-
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
                     _turn_exit_reason = "guardrail_halt"
@@ -4553,15 +4544,13 @@ def run_conversation(
             # Non-tool errors don't need a synthetic message injected.
             # The error is already printed to the user (line above), and
             # the retry loop continues.  Injecting a fake user/assistant
-            # message pollutes history, burns tokens, and risks violating
-            # role-alternation invariants.
+            # message pollutes history and burns tokens.
 
             # If we're near the limit, break to avoid infinite loops
             if api_call_count >= agent.max_iterations - 1:
                 _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                 final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
-                # Append as assistant so the history stays valid for
-                # session resume (avoids consecutive user messages).
+                # Persist the terminal error as the assistant's actual outcome.
                 messages.append({"role": "assistant", "content": final_response})
                 break
     

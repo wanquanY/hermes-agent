@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 
 
 def _tool_event(
@@ -15,7 +15,7 @@ def _tool_event(
     body = {
         "type": event_type,
         "session_id": "runtime-1",
-        "stored_session_id": "session-1",
+        "conversation_session_id": "session-1",
         "run_id": run_id,
         "turn_id": "turn-1",
         "participant_id": "agent:default",
@@ -32,10 +32,10 @@ def _tool_event(
 
 
 def test_append_run_event_projects_tool_events_index(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -43,7 +43,7 @@ def test_append_run_event_projects_tool_events_index(tmp_path):
                 payload={"arguments": {"command": "pwd"}, "context": "$ pwd"},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.progress",
@@ -51,7 +51,7 @@ def test_append_run_event_projects_tool_events_index(tmp_path):
                 payload={"preview": "running pwd"},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -65,8 +65,8 @@ def test_append_run_event_projects_tool_events_index(tmp_path):
             ),
         )
 
-        tool_events = db.list_tool_events("session-1")
-        run_events = db.list_run_events("session-1")
+        tool_events = db.tool_event_projection.list("session-1")
+        run_events = db.runs.list_events("session-1")
     finally:
         db.close()
 
@@ -91,10 +91,10 @@ def test_append_run_event_projects_tool_events_index(tmp_path):
 
 
 def test_list_tool_events_tail_returns_latest_events_in_chronological_order(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -104,7 +104,7 @@ def test_list_tool_events_tail_returns_latest_events_in_chronological_order(tmp_
                 payload={"result_text": "old"},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -115,7 +115,7 @@ def test_list_tool_events_tail_returns_latest_events_in_chronological_order(tmp_
             ),
         )
 
-        tool_events = db.list_tool_events("session-1", direction="tail", limit=1)
+        tool_events = db.tool_event_projection.list("session-1", direction="tail", limit=1)
     finally:
         db.close()
 
@@ -124,10 +124,10 @@ def test_list_tool_events_tail_returns_latest_events_in_chronological_order(tmp_
 
 
 def test_tool_progress_without_id_attaches_to_latest_open_tool(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -136,7 +136,7 @@ def test_tool_progress_without_id_attaches_to_latest_open_tool(tmp_path):
                 payload={"arguments": {"command": "ls"}},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.progress",
@@ -146,7 +146,7 @@ def test_tool_progress_without_id_attaches_to_latest_open_tool(tmp_path):
             ),
         )
 
-        tool_events = db.list_tool_events("session-1")
+        tool_events = db.tool_event_projection.list("session-1")
     finally:
         db.close()
 
@@ -157,10 +157,10 @@ def test_tool_progress_without_id_attaches_to_latest_open_tool(tmp_path):
 
 
 def test_tool_start_after_complete_does_not_regress_terminal_status(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -168,7 +168,7 @@ def test_tool_start_after_complete_does_not_regress_terminal_status(tmp_path):
                 payload={"result_text": "done"},
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -177,7 +177,7 @@ def test_tool_start_after_complete_does_not_regress_terminal_status(tmp_path):
             ),
         )
 
-        tool_events = db.list_tool_events("session-1")
+        tool_events = db.tool_event_projection.list("session-1")
     finally:
         db.close()
 
@@ -188,10 +188,10 @@ def test_tool_start_after_complete_does_not_regress_terminal_status(tmp_path):
 
 
 def test_tool_events_backfill_from_existing_run_events(tmp_path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     try:
-        db.create_session("session-1", "dovie")
-        db.append_run_event(
+        db.sessions.create("session-1", "dovie")
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.start",
@@ -200,7 +200,7 @@ def test_tool_events_backfill_from_existing_run_events(tmp_path):
                 name="read_file",
             ),
         )
-        db.append_run_event(
+        db.runs.append_event(
             "session-1",
             _tool_event(
                 "tool.complete",
@@ -211,9 +211,9 @@ def test_tool_events_backfill_from_existing_run_events(tmp_path):
         )
 
         db._execute_write(lambda conn: conn.execute("DELETE FROM tool_events"))
-        assert db.list_tool_events("session-1") == []
-        db._execute_write(lambda conn: db._backfill_tool_events(conn.cursor()))
-        tool_events = db.list_tool_events("session-1")
+        assert db.tool_event_projection.list("session-1") == []
+        db.run_event_maintenance.rebuild_tool_event_projection()
+        tool_events = db.tool_event_projection.list("session-1")
     finally:
         db.close()
 

@@ -1,26 +1,31 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from tui_gateway.services.session_store import get_session_db_for_home
 from tui_gateway.services.storage_maintenance import get_storage_maintenance_service
 
 
-class _FakeSessionDB:
+class _FakeSessionStore:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.maintenance_calls = 0
+        self.run_event_maintenance = SimpleNamespace(
+            maybe_auto_compact=self._maybe_auto_compact
+        )
 
-    def maybe_auto_compact_run_events(self):
+    def _maybe_auto_compact(self, *, vacuum: bool = True):
+        assert vacuum is False
         self.maintenance_calls += 1
         return {"skipped": False, "deleted_events": 2}
 
 
 def test_get_session_db_for_home_runs_startup_run_event_maintenance(tmp_path):
-    created: list[_FakeSessionDB] = []
+    created: list[_FakeSessionStore] = []
 
     def factory(**kwargs):
-        db = _FakeSessionDB(**kwargs)
+        db = _FakeSessionStore(**kwargs)
         created.append(db)
         return db
 

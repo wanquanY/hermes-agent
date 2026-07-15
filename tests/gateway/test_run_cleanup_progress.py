@@ -19,9 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, SendResult
+from hermes_gateway.session import SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ class NoDeleteAdapter(CleanupCaptureAdapter):
 
     async def delete_message(self, chat_id, message_id) -> bool:  # type: ignore[override]
         # Pretend to be an adapter whose platform doesn't support deletion:
-        # match the base class behavior exactly. gateway/run.py checks
+        # match the base class behavior exactly. hermes_gateway/runner.py checks
         # ``type(adapter).delete_message is BasePlatformAdapter.delete_message``
         # to detect this, so we re-assign at class body level below.
         raise AssertionError("should not be called — cleanup must skip this adapter")
@@ -120,7 +120,7 @@ class FailingAgent:
             cb("tool.started", "terminal", "pwd", {})
             time.sleep(0.25)
         # Empty final_response + failed=True is the shape the gateway
-        # actually returns on provider errors (see gateway/run.py where
+        # actually returns on provider errors (see hermes_gateway/runner.py where
         # failed keys are only propagated when final_response is empty).
         return {
             "final_response": "",
@@ -132,7 +132,7 @@ class FailingAgent:
 
 
 def _make_runner(adapter):
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {adapter.platform: adapter}
@@ -160,6 +160,7 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *a, **k: None
+    fake_dotenv.dotenv_values = lambda *a, **k: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -167,8 +168,20 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 — register tool emoji
 
-    gateway_run = importlib.import_module("gateway.run")
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    gateway_run = importlib.import_module("hermes_gateway.runner")
+    runtime = SimpleNamespace(
+        resolve_session_agent_runtime=lambda **_kwargs: (
+            "test-model",
+            {"api_key": "fake"},
+        ),
+        resolve_session_reasoning_config=lambda **_kwargs: None,
+        resolve_turn_agent_config=lambda _message, model, runtime_kwargs: {
+            "model": model,
+            "runtime": runtime_kwargs,
+            "request_overrides": {},
+        },
+    )
+    monkeypatch.setattr(gateway_run, "runtime_config_for", lambda _runner: runtime)
 
     # Wire the per-platform cleanup_progress flag via the config loader the
     # gateway actually reads (``_load_gateway_config`` returns user config).

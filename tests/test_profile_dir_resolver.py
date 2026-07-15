@@ -55,11 +55,11 @@ def test_resolver_does_not_mutate_when_both_dirs_exist(tmp_path: Path) -> None:
 
 
 def test_default_runtime_scope_uses_resolved_agent_home(monkeypatch, tmp_path: Path) -> None:
-    from tui_gateway.services import runtime_proxy
+    from tui_gateway.services import runtime_scope
 
-    monkeypatch.setattr(runtime_proxy, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime_scope, "get_hermes_home", lambda: tmp_path)
 
-    scope = runtime_proxy.runtime_scope_from_params(
+    scope = runtime_scope.runtime_scope_from_params(
         {
             "agentProfileId": "agent-default",
             "runtimeScopeKey": "profile:agent-default",

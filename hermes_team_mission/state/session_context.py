@@ -4,7 +4,7 @@ from __future__ import annotations
 from .session_common import *
 
 
-class SessionDBTeamMissionContextMixin:
+class TeamMissionContextMixin:
     def _team_mission_memory_context(self, mission: Dict[str, Any]) -> Dict[str, Any]:
         return _memory_state.team_mission_memory_context(self, mission)
 

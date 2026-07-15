@@ -233,7 +233,7 @@ def test_add_job_honors_explicit_new_session_result_binding(cron_env):
 
 
 def test_dovie_automation_tool_inherits_current_context(cron_env):
-    from gateway import session_context
+    from channels import session_context
     from tools.dovie_automation_task_tool import dovie_automation_task_create
     from tui_gateway.services.dovie_cron_jobs import list_cron_jobs
 
@@ -274,7 +274,7 @@ def test_dovie_automation_tool_inherits_current_context(cron_env):
 def test_dovie_automation_tool_defaults_to_current_session_binding(cron_env):
     import json
 
-    from gateway import session_context
+    from channels import session_context
     from tools.dovie_automation_task_tool import dovie_automation_task_create
 
     workspace = cron_env / "workspace"
@@ -373,7 +373,7 @@ def test_update_job_clears_capability_override_to_runtime_inheritance(cron_env):
 def test_dovie_automation_tools_manage_current_session_bound_tasks(cron_env):
     import json
 
-    from gateway import session_context
+    from channels import session_context
     from tools.dovie_automation_task_tool import (
         dovie_automation_task_create,
         dovie_automation_task_list,

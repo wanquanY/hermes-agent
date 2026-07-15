@@ -49,7 +49,7 @@ def _run_sync(coro, *, method_name: str):
 
 async def _signal_activity_cancel(activity_id: str, fallback_conversation_id: str) -> bool:
     """Legacy ``activity.cancel`` worker-signaling path. Retire in Phase 1.E."""
-    from tui_gateway.services import worker_runtime
+    from hermes_agent.orchestration import worker_runtime
 
     router = worker_runtime.worker_frame_router()
     lookup = getattr(router, "lookup_activity_run", None)
@@ -179,10 +179,7 @@ def _mission_id_from_activity_id(activity_id: str) -> str:
 
 
 def _is_terminal_mission(db, mission_id: str) -> bool:
-    get_graph = getattr(db, "get_team_mission_graph", None)
-    if not callable(get_graph):
-        return False
-    graph = get_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     if not isinstance(mission, dict):
         return False
@@ -226,7 +223,7 @@ def _insert_activity_command(
     if err:
         return None, err
     return (
-        db.insert_activity_command(
+        db.activities.insert_command(
             command_id=command_id,
             activity_id=activity_id,
             kind=kind,
@@ -263,9 +260,6 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
     db, err = _db_or_error(rid)
     if err:
         return err
-    list_by_activity = getattr(db, "list_run_events_by_activity", None)
-    if not callable(list_by_activity):
-        return _err(rid, 5008, "state.db unavailable")
 
     subscription_id, replay = run_control.subscribe_activity(
         activity_id=activity_id,
@@ -453,10 +447,10 @@ def activity_cancel(rid, params: dict) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    cancelled_ok = db.mark_activity_cancelled(activity_id)
+    cancelled_ok = db.activities.mark_cancelled(activity_id)
     if not cancelled_ok:
         return _ok(rid, {"ok": False, "reason": "already_terminal"})
-    activity = db.get_activity(activity_id) if callable(getattr(db, "get_activity", None)) else None
+    activity = db.activities.get(activity_id)
     conversation_id = str((activity or {}).get("conversation_id") or "").strip()
     worker_signaled = _run_sync(
         _signal_activity_cancel(activity_id, conversation_id),
@@ -548,7 +542,7 @@ def activity_list(rid, params: dict[str, Any]) -> dict:
     db = _get_db()
     return _ok(
         rid,
-        db.list_activities(
+        db.activities.list(
             conversation_id,
             status=params.get("status"),
             limit=params.get("limit"),
@@ -564,7 +558,7 @@ def activity_get(rid, params: dict[str, Any]) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    return _ok(rid, db.get_activity(activity_id))
+    return _ok(rid, db.activities.get(activity_id))
 
 
 @method("activity.mark_read")
@@ -575,4 +569,4 @@ def activity_mark_read(rid, params: dict[str, Any]) -> dict:
     except ValueError as exc:
         return _invalid_params(rid, str(exc))
     db = _get_db()
-    return _ok(rid, {"ok": db.mark_activity_read(activity_id)})
+    return _ok(rid, {"ok": db.activities.mark_read(activity_id)})

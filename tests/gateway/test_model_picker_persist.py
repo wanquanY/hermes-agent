@@ -23,10 +23,11 @@ import types
 import yaml
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.model_command import model_command_for
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 class _FakePickerAdapter:
@@ -82,7 +83,7 @@ def _fake_switch_result():
 
 def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     """Write a config.yaml with the given ``model:`` value and stub heavy bits."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -92,7 +93,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     # The picker-setup path calls list_picker_providers, which otherwise hits
     # the network (OpenRouter model catalog). Stub it to a minimal list — these
@@ -126,7 +127,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
 
 async def _drive_picker(runner, event):
     """Run the handler (which sends the picker) then fire the captured tap."""
-    sent = await runner._handle_model_command(event)
+    sent = await model_command_for(runner).handle_model_command(event)
     # Bare /model returns None (picker sent); the adapter captured the callback.
     assert sent is None
     adapter = runner.adapters[Platform.TELEGRAM]

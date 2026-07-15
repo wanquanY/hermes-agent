@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# Minimal telegram stub so importing gateway.platforms.base does not pull
+# Minimal telegram stub so importing channels.platforms.base does not pull
 # in the real python-telegram-bot dependency.
 _tg = sys.modules.get("telegram") or types.ModuleType("telegram")
 _tg.constants = sys.modules.get("telegram.constants") or types.ModuleType("telegram.constants")
@@ -39,13 +39,13 @@ sys.modules.setdefault("telegram", _tg)
 sys.modules.setdefault("telegram.constants", _tg.constants)
 sys.modules.setdefault("telegram.ext", types.ModuleType("telegram.ext"))
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import (
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
 )
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _make_event(text: str, chat_id: str = "12345") -> MessageEvent:

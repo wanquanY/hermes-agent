@@ -68,7 +68,7 @@ import os
 from gateway.platforms.base import (
     BasePlatformAdapter, SendResult, MessageEvent, MessageType,
 )
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 class MyPlatformAdapter(BasePlatformAdapter):
@@ -479,7 +479,7 @@ class Platform(str, Enum):
 Create `gateway/platforms/newplat.py`:
 
 ```python
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter, MessageEvent, MessageType, SendResult,
 )

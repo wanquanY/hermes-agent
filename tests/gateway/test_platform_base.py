@@ -1,11 +1,11 @@
-"""Tests for gateway/platforms/base.py — MessageEvent, media extraction, message truncation."""
+"""Tests for channels/platforms/base.py — MessageEvent, media extraction, message truncation."""
 
 import os
 from unittest.mock import patch
 
 import pytest
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
     MessageEvent,
@@ -16,7 +16,6 @@ from gateway.platforms.base import (
     safe_url_for_log,
     utf16_len,
     validate_inbound_media_size,
-    _log_safe_path,
     _prefix_within_utf16_limit,
 )
 
@@ -28,38 +27,38 @@ class TestInboundMediaSizeCap:
 
     def test_default_cap_is_128_mib(self, monkeypatch):
         # No config override -> default. Patch loader to return empty config.
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: base.DEFAULT_INBOUND_MEDIA_MAX_BYTES)
         assert base.DEFAULT_INBOUND_MEDIA_MAX_BYTES == 128 * 1024 * 1024
 
     def test_image_bytes_rejected_when_oversized(self, monkeypatch):
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 16)
         with pytest.raises(ValueError, match="Inbound image payload is too large"):
             cache_image_from_bytes(self._PNG, ext=".png")
 
     def test_audio_bytes_rejected_when_oversized(self, monkeypatch):
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 4)
         with pytest.raises(ValueError, match="Inbound audio payload is too large"):
             cache_audio_from_bytes(b"x" * 8, ext=".ogg")
 
     def test_video_bytes_rejected_when_oversized(self, monkeypatch):
         # Video was the gap in the original report — verify it's covered.
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 4)
         with pytest.raises(ValueError, match="Inbound video payload is too large"):
             cache_video_from_bytes(b"x" * 8, ext=".mp4")
 
     def test_legit_image_accepted_under_cap(self, monkeypatch):
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 128 * 1024 * 1024)
         path = cache_image_from_bytes(self._PNG, ext=".png")
         assert os.path.exists(path)
         assert os.path.getsize(path) == len(self._PNG)
 
     def test_cap_of_zero_disables_check(self, monkeypatch):
-        import gateway.platforms.base as base
+        import channels.platforms.base as base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 0)
         # A would-be-oversized video passes through when the cap is disabled.
         path = cache_video_from_bytes(b"x" * 5000, ext=".mp4")
@@ -420,7 +419,7 @@ class TestExtractMedia:
 class TestMediaDeliveryPathValidation:
     def _patch_roots(self, monkeypatch, *roots):
         monkeypatch.setattr(
-            "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
             tuple(roots),
         )
 
@@ -491,36 +490,36 @@ class TestShouldSendMediaAsAudio:
     """Audio-routing policy shared by gateway + scheduler + send_message."""
 
     def test_unknown_extension_returns_false(self):
-        from gateway.platforms.base import should_send_media_as_audio
+        from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio(None, ".png") is False
         assert should_send_media_as_audio("telegram", ".pdf") is False
 
     def test_non_telegram_platforms_route_all_audio(self):
-        from gateway.platforms.base import should_send_media_as_audio
+        from channels.platforms.base import should_send_media_as_audio
         for ext in (".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus"):
             assert should_send_media_as_audio("discord", ext) is True
             assert should_send_media_as_audio("slack", ext) is True
 
     def test_telegram_mp3_and_m4a_route_to_audio(self):
-        from gateway.platforms.base import should_send_media_as_audio
+        from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio("telegram", ".mp3") is True
         assert should_send_media_as_audio("telegram", ".m4a") is True
 
     def test_telegram_wav_and_flac_fall_through_to_document(self):
-        from gateway.platforms.base import should_send_media_as_audio
+        from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio("telegram", ".wav") is False
         assert should_send_media_as_audio("telegram", ".flac") is False
 
     def test_telegram_ogg_opus_only_when_voice_flagged(self):
-        from gateway.platforms.base import should_send_media_as_audio
+        from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio("telegram", ".ogg", is_voice=True) is True
         assert should_send_media_as_audio("telegram", ".opus", is_voice=True) is True
         assert should_send_media_as_audio("telegram", ".ogg") is False
         assert should_send_media_as_audio("telegram", ".opus") is False
 
     def test_accepts_platform_enum(self):
-        from gateway.config import Platform
-        from gateway.platforms.base import should_send_media_as_audio
+        from hermes_gateway.config import Platform
+        from channels.platforms.base import should_send_media_as_audio
         assert should_send_media_as_audio(Platform.TELEGRAM, ".mp3") is True
         assert should_send_media_as_audio(Platform.TELEGRAM, ".flac") is False
         assert should_send_media_as_audio(Platform.DISCORD, ".flac") is True
@@ -548,7 +547,7 @@ class TestTruncateMessage:
             async def get_chat_info(self, *a):
                 return {}
 
-        from gateway.config import Platform, PlatformConfig
+        from hermes_gateway.config import Platform, PlatformConfig
 
         config = PlatformConfig(enabled=True, token="test")
         return StubAdapter(config=config, platform=Platform.TELEGRAM)
@@ -812,7 +811,7 @@ class TestProxyKwargsForAiohttp:
     """Verify proxy_kwargs_for_aiohttp routes all schemes through ProxyConnector."""
 
     def test_none_returns_empty(self):
-        from gateway.platforms.base import proxy_kwargs_for_aiohttp
+        from channels.platforms.base import proxy_kwargs_for_aiohttp
 
         sess_kw, req_kw = proxy_kwargs_for_aiohttp(None)
         assert sess_kw == {}
@@ -821,7 +820,7 @@ class TestProxyKwargsForAiohttp:
     def test_http_proxy_uses_connector_when_aiohttp_socks_available(self):
         pytest.importorskip("aiohttp_socks")
         from unittest.mock import MagicMock
-        from gateway.platforms.base import proxy_kwargs_for_aiohttp
+        from channels.platforms.base import proxy_kwargs_for_aiohttp
 
         sentinel = MagicMock(name="ProxyConnector")
         with patch("aiohttp_socks.ProxyConnector.from_url", return_value=sentinel):
@@ -835,7 +834,7 @@ class TestProxyKwargsForAiohttp:
     def test_socks_proxy_uses_connector(self):
         pytest.importorskip("aiohttp_socks")
         from unittest.mock import MagicMock
-        from gateway.platforms.base import proxy_kwargs_for_aiohttp
+        from channels.platforms.base import proxy_kwargs_for_aiohttp
 
         sentinel = MagicMock(name="ProxyConnector")
         with patch("aiohttp_socks.ProxyConnector.from_url", return_value=sentinel):
@@ -844,7 +843,7 @@ class TestProxyKwargsForAiohttp:
         assert req_kw == {}
 
     def test_http_proxy_falls_back_without_aiohttp_socks(self):
-        from gateway.platforms.base import proxy_kwargs_for_aiohttp
+        from channels.platforms.base import proxy_kwargs_for_aiohttp
 
         with patch.dict("sys.modules", {"aiohttp_socks": None}):
             sess_kw, req_kw = proxy_kwargs_for_aiohttp("http://proxy:8080")

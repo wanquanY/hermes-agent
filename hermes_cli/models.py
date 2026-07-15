@@ -8,6 +8,7 @@ Add, remove, or reorder entries here — both `hermes setup` and
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.error
@@ -32,20 +33,28 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 # Fallback OpenRouter snapshot used when the live catalog is unavailable.
 # (model_id, display description shown in menus)
 OPENROUTER_MODELS: list[tuple[str, str]] = [
+    ("anthropic/claude-fable-5",               ""),
     ("anthropic/claude-opus-4.7",              ""),
     ("anthropic/claude-opus-4.6",              ""),
+    ("anthropic/claude-sonnet-5",              ""),
     ("anthropic/claude-sonnet-4.6",            ""),
     ("moonshotai/kimi-k2.6",                   "recommended"),
     ("openrouter/pareto-code",                 "auto-routes to cheapest coder meeting openrouter.min_coding_score"),
     ("qwen/qwen3.6-plus",                      ""),
     ("anthropic/claude-haiku-4.5",             ""),
+    ("openai/gpt-5.6-sol",                     ""),
+    ("openai/gpt-5.6-sol-pro",                 ""),
+    ("openai/gpt-5.6-terra",                   ""),
+    ("openai/gpt-5.6-terra-pro",               ""),
+    ("openai/gpt-5.6-luna",                    ""),
+    ("openai/gpt-5.6-luna-pro",                ""),
     ("openai/gpt-5.5",                         ""),
     ("openai/gpt-5.5-pro",                     ""),
     ("openai/gpt-5.4-mini",                    ""),
     ("openai/gpt-5.4-nano",                    ""),
     ("openai/gpt-5.3-codex",                   ""),
     ("xiaomi/mimo-v2.5-pro",                   ""),
-    ("tencent/hy3-preview",                    ""),
+    ("tencent/hy3",                            ""),
     ("google/gemini-3-pro-image-preview",      ""),
     ("google/gemini-3-flash-preview",          ""),
     ("google/gemini-3.1-pro-preview",          ""),
@@ -53,15 +62,16 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("qwen/qwen3.6-35b-a3b",                   ""),
     ("stepfun/step-3.5-flash",                 ""),
     ("minimax/minimax-m2.7",                   ""),
+    ("z-ai/glm-5.2",                           ""),
     ("z-ai/glm-5.1",                           ""),
     ("x-ai/grok-4.20",                         ""),
-    ("x-ai/grok-4.3",                          ""),
+    ("x-ai/grok-4.5",                          ""),
     ("nvidia/nemotron-3-super-120b-a12b",      ""),
     ("deepseek/deepseek-v4-pro",               ""),
+    ("sakana/fugu-ultra",                      ""),
     # Free tier
     ("openrouter/elephant-alpha",              "free"),
-    ("openrouter/owl-alpha",                   "free"),
-    ("tencent/hy3-preview:free",               "free"),
+    ("tencent/hy3:free",                       "free"),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
     ("inclusionai/ring-2.6-1t:free",           "free"),
 ]
@@ -116,6 +126,7 @@ def _codex_curated_models() -> list[str]:
 # (grok-4, grok-4-0709, grok-4-fast{,-reasoning,-non-reasoning},
 #  grok-4-1-fast{,-reasoning,-non-reasoning}, grok-code-fast-1 → grok-4.3).
 _XAI_STATIC_FALLBACK: list[str] = [
+    "grok-4.5",
     "grok-4.3",
     "grok-4.20-0309-reasoning",
     "grok-4.20-0309-non-reasoning",
@@ -162,19 +173,27 @@ def _xai_curated_models() -> list[str]:
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
     "nous": [
+        "anthropic/claude-fable-5",
         "anthropic/claude-opus-4.7",
         "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-5",
         "anthropic/claude-sonnet-4.6",
         "moonshotai/kimi-k2.6",
         "qwen/qwen3.6-plus",
         "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-sol-pro",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-terra-pro",
+        "openai/gpt-5.6-luna",
+        "openai/gpt-5.6-luna-pro",
         "openai/gpt-5.5",
         "openai/gpt-5.5-pro",
         "openai/gpt-5.4-mini",
         "openai/gpt-5.4-nano",
         "openai/gpt-5.3-codex",
         "xiaomi/mimo-v2.5-pro",
-        "tencent/hy3-preview",
+        "tencent/hy3",
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
         "google/gemini-3.1-pro-preview",
@@ -182,14 +201,24 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen/qwen3.6-35b-a3b",
         "stepfun/step-3.5-flash",
         "minimax/minimax-m2.7",
+        "z-ai/glm-5.2",
         "z-ai/glm-5.1",
-        "x-ai/grok-4.3",
+        "x-ai/grok-4.5",
         "nvidia/nemotron-3-super-120b-a12b",
         "deepseek/deepseek-v4-pro",
+        "sakana/fugu-ultra",
     ],
     # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
     # provider_model_ids fallback when /v1/models is unavailable.
     "openai": [
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-pro",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna-pro",
+        "gpt-5.5",
+        "gpt-5.5-pro",
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5-mini",
@@ -3285,6 +3314,7 @@ def probe_api_models(
             "resolved_base_url": "",
             "suggested_base_url": None,
             "used_fallback": False,
+            "errors": [],
         }
 
     if _is_github_models_base_url(normalized):
@@ -3295,6 +3325,7 @@ def probe_api_models(
             "resolved_base_url": COPILOT_BASE_URL,
             "suggested_base_url": None,
             "used_fallback": False,
+            "errors": [],
         }
 
     if normalized.endswith("/v1"):
@@ -3307,6 +3338,7 @@ def probe_api_models(
         candidates.append((alternate_base, True))
 
     tried: list[str] = []
+    errors: list[dict[str, str]] = []
     headers: dict[str, str] = {"User-Agent": _HERMES_USER_AGENT}
     if api_key and api_mode == "anthropic_messages":
         headers["x-api-key"] = api_key
@@ -3329,16 +3361,31 @@ def probe_api_models(
                     "resolved_base_url": candidate_base.rstrip("/"),
                     "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
                     "used_fallback": is_fallback,
+                    "errors": errors,
                 }
-        except Exception:
+        except Exception as exc:
+            errors.append(
+                {
+                    "url": url,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:500],
+                }
+            )
             continue
 
+    logging.getLogger(__name__).warning(
+        "model catalog probe exhausted base_url=%s attempts=%s errors=%s",
+        normalized,
+        len(tried),
+        errors,
+    )
     return {
         "models": None,
         "probed_url": tried[0] if tried else normalized.rstrip("/") + "/models",
         "resolved_base_url": normalized,
         "suggested_base_url": alternate_base if alternate_base != normalized else None,
         "used_fallback": False,
+        "errors": errors,
     }
 
 
@@ -3662,6 +3709,14 @@ def validate_requested_model(
             )
         if probe.get("suggested_base_url"):
             message += f"\n  If this server expects `/v1`, try base URL: `{probe.get('suggested_base_url')}`"
+        probe_errors = probe.get("errors")
+        if isinstance(probe_errors, list) and probe_errors:
+            last_error = probe_errors[-1]
+            if isinstance(last_error, dict):
+                error_type = str(last_error.get("error_type") or "error")
+                error_message = str(last_error.get("message") or "").strip()
+                if error_message:
+                    message += f"\n  Last verification error: {error_type}: {error_message}"
 
         return {
             "accepted": True,

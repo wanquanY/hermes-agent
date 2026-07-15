@@ -1,10 +1,10 @@
 """ACP session manager — maps ACP sessions to Hermes AIAgent instances.
 
-Sessions are persisted to the shared SessionDB (``~/.hermes/state.db``) so they
-survive process restarts and appear in ``session_search``.  When the editor
-reconnects after idle/restart, the ``load_session`` / ``resume_session`` calls
-find the persisted session in the database and restore the full conversation
-history.
+Sessions are persisted to the shared SQLite session store
+(``~/.hermes/state.db``) so they survive process restarts and appear in
+``session_search``.  When the editor reconnects after idle/restart, the
+``load_session`` / ``resume_session`` calls find the persisted session in the
+database and restore the full conversation history.
 """
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ class SessionManager:
     """Thread-safe manager for ACP sessions backed by Hermes AIAgent instances.
 
     Sessions are held in-memory for fast access **and** persisted to the
-    shared SessionDB so they survive process restarts and are searchable
+    shared SQLite session store so they survive process restarts and are searchable
     via ``session_search``.
     """
 
@@ -197,8 +197,8 @@ class SessionManager:
             agent_factory: Optional callable that creates an AIAgent-like object.
                            Used by tests. When omitted, a real AIAgent is created
                            using the current Hermes runtime provider configuration.
-            db:            Optional SessionDB instance. When omitted, the default
-                           SessionDB (``~/.hermes/state.db``) is lazily created.
+            db:            Optional session store. When omitted, the default
+                           SQLite store (``~/.hermes/state.db``) is lazily created.
         """
         self._sessions: Dict[str, SessionState] = {}
         self._lock = Lock()
@@ -251,7 +251,7 @@ class SessionManager:
         return existed or db_existed
 
     def fork_session(self, session_id: str, cwd: str = ".") -> Optional[SessionState]:
-        """Deep-copy a session's history into a new session."""
+        """Create a durable, non-destructive branch of an ACP session."""
         import threading
 
         cwd = _translate_acp_cwd(cwd)
@@ -273,10 +273,27 @@ class SessionManager:
             history=copy.deepcopy(original.history),
             cancel_event=threading.Event(),
         )
+        db = self._get_db()
+        if db is None or not self._persist(original):
+            logger.warning("Failed to persist ACP source session %s before fork", session_id)
+            return None
+        model_str, runtime_config = self._runtime_config(state)
+        try:
+            db.branches.branch_session(
+                source_session_id=original.session_id,
+                new_session_id=new_id,
+                scope="full_conversation",
+                branch_origin="acp_fork",
+                allow_empty=True,
+                target_model=model_str,
+                target_model_config=runtime_config,
+            )
+        except Exception:
+            logger.warning("Failed to persist ACP fork %s -> %s", session_id, new_id, exc_info=True)
+            return None
         with self._lock:
             self._sessions[new_id] = state
         _register_task_cwd(new_id, cwd)
-        self._persist(state)
         logger.info("Forked ACP session %s -> %s", session_id, new_id)
         return state
 
@@ -288,7 +305,7 @@ class SessionManager:
 
         if db is not None:
             try:
-                for row in db.list_sessions_rich(source="acp", limit=1000):
+                for row in db.sessions.list_rich(source="acp", limit=1000):
                     persisted_rows[str(row["id"])] = dict(row)
             except Exception:
                 logger.debug("Failed to load ACP sessions from DB", exc_info=True)
@@ -377,11 +394,11 @@ class SessionManager:
         db = self._get_db()
         if db is not None:
             try:
-                rows = db.search_sessions(source="acp", limit=10000)
+                rows = db.sessions.search(source="acp", limit=10000)
                 for row in rows:
                     sid = row["id"]
                     _clear_task_cwd(sid)
-                    db.delete_session(sid)
+                    db.sessions.delete(sid)
             except Exception:
                 logger.debug("Failed to cleanup ACP sessions from DB", exc_info=True)
 
@@ -396,12 +413,12 @@ class SessionManager:
         if state is not None:
             self._persist(state)
 
-    # ---- persistence via SessionDB ------------------------------------------
+    # ---- persistence via shared SQLite session store -------------------------
 
     def _get_db(self):
-        """Lazily initialise and return the SessionDB instance.
+        """Lazily initialise and return the shared session store.
 
-        Returns ``None`` if the DB is unavailable (e.g. import error in a
+        Returns ``None`` if the store is unavailable (e.g. import error in a
         minimal test environment).
 
         Note: we resolve ``HERMES_HOME`` dynamically rather than relying on
@@ -412,15 +429,26 @@ class SessionManager:
         if self._db_instance is not None:
             return self._db_instance
         try:
-            from hermes_state import SessionDB
+            from hermes_agent.storage.cli_session_store import open_cli_session_store
+
             hermes_home = get_hermes_home()
-            self._db_instance = SessionDB(db_path=hermes_home / "state.db")
+            self._db_instance = open_cli_session_store(hermes_home / "state.db")
             return self._db_instance
         except Exception:
-            logger.debug("SessionDB unavailable for ACP persistence", exc_info=True)
+            logger.debug("Session store unavailable for ACP persistence", exc_info=True)
             return None
 
-    def _persist(self, state: SessionState) -> None:
+    @staticmethod
+    def _runtime_config(state: SessionState) -> tuple[str | None, dict[str, str]]:
+        model = str(state.model) if state.model else None
+        config = {"cwd": state.cwd}
+        for field in ("provider", "base_url", "api_mode"):
+            value = getattr(state.agent, field, None)
+            if isinstance(value, str) and value.strip():
+                config[field] = value.strip()
+        return model, config
+
+    def _persist(self, state: SessionState) -> bool:
         """Write session state to the database.
 
         Creates the session record if it doesn't exist, then replaces all
@@ -428,50 +456,35 @@ class SessionManager:
         """
         db = self._get_db()
         if db is None:
-            return
+            return False
 
-        # Ensure model is a plain string (not a MagicMock or other proxy).
-        model_str = str(state.model) if state.model else None
-        session_meta = {"cwd": state.cwd}
-        provider = getattr(state.agent, "provider", None)
-        base_url = getattr(state.agent, "base_url", None)
-        api_mode = getattr(state.agent, "api_mode", None)
-        if isinstance(provider, str) and provider.strip():
-            session_meta["provider"] = provider.strip()
-        if isinstance(base_url, str) and base_url.strip():
-            session_meta["base_url"] = base_url.strip()
-        if isinstance(api_mode, str) and api_mode.strip():
-            session_meta["api_mode"] = api_mode.strip()
-        cwd_json = json.dumps(session_meta)
+        model_str, runtime_config = self._runtime_config(state)
 
         try:
             # Ensure the session record exists.
-            existing = db.get_session(state.session_id)
+            existing = db.sessions.get(state.session_id)
             if existing is None:
-                db.create_session(
+                db.sessions.create(
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=runtime_config,
                 )
             else:
-                # Update model_config (contains cwd) if changed.
-                try:
-                    with db._lock:
-                        db._conn.execute(
-                            "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
-                            (cwd_json, model_str, state.session_id),
-                        )
-                        db._conn.commit()
-                except Exception:
-                    logger.debug("Failed to update ACP session metadata", exc_info=True)
+                db.sessions.update_runtime_config(
+                    state.session_id,
+                    runtime_config,
+                    model=model_str,
+                )
 
             # Replace stored messages with current history atomically so a
             # mid-rewrite failure rolls back and the previously persisted
             # conversation is preserved (salvaged from #13675).
-            db.replace_messages(state.session_id, state.history)
+            db.messages.replace(state.session_id, state.history)
+            return True
         except Exception:
             logger.warning("Failed to persist ACP session %s", state.session_id, exc_info=True)
+            return False
 
     def _restore(self, session_id: str) -> Optional[SessionState]:
         """Load a session from the database into memory, recreating the AIAgent."""
@@ -482,7 +495,7 @@ class SessionManager:
             return None
 
         try:
-            row = db.get_session(session_id)
+            row = db.sessions.get(session_id)
         except Exception:
             logger.debug("Failed to query DB for ACP session %s", session_id, exc_info=True)
             return None
@@ -515,7 +528,7 @@ class SessionManager:
 
         # Load conversation history.
         try:
-            history = db.get_messages_as_conversation(session_id)
+            history = db.messages.all_as_conversation(session_id)
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []
@@ -553,7 +566,7 @@ class SessionManager:
         if db is None:
             return False
         try:
-            return db.delete_session(session_id)
+            return db.sessions.delete(session_id).session_deleted
         except Exception:
             logger.debug("Failed to delete ACP session %s from DB", session_id, exc_info=True)
             return False

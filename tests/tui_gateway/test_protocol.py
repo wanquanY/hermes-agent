@@ -21,9 +21,15 @@ def _restore_stdout():
 
 
 @pytest.fixture()
-def server():
+def server(tmp_path):
+    hermes_home = tmp_path / "hermes-home"
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        "hermes_constants": MagicMock(
+            get_hermes_home=MagicMock(return_value=hermes_home),
+            get_hermes_dir=MagicMock(
+                side_effect=lambda current, _legacy=None: hermes_home / current
+            ),
+        ),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),
@@ -44,6 +50,39 @@ def capture(server):
     buf = io.StringIO()
     server._real_stdout = buf
     return server, buf
+
+
+def _resume_gateway_db(tmp_path, rows=(), history_reader=None):
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    db = open_cli_session_store(tmp_path / "resume-state.db")
+    for session_id, title in rows:
+        db.sessions.create(session_id, source="tui", title=title)
+    _seed_resume_messages(db, rows, history_reader)
+    return db
+
+
+def _seed_resume_messages(db, rows=(), history_reader=None) -> None:
+    if not callable(history_reader):
+        return
+    for session_id, _title in rows:
+        messages = history_reader(session_id, include_ancestors=True)
+        for index, message in enumerate(messages or [], start=1):
+            db.messages.append(
+                session_id=session_id,
+                role=str((message or {}).get("role") or "user"),
+                content=(
+                    ""
+                    if (message or {}).get("content") is None
+                    else str((message or {}).get("content") or "")
+                ),
+                timestamp=float(index),
+                metadata=(
+                    (message or {}).get("metadata")
+                    if isinstance((message or {}).get("metadata"), dict)
+                    else None
+                ),
+            )
 
 
 # ── JSON-RPC envelope ────────────────────────────────────────────────
@@ -84,7 +123,7 @@ def test_write_json_broken_pipe(server):
     assert server.write_json({"x": 1}) is False
 
 
-def test_message_delta_normalizer_holds_trailing_newlines_until_more_text():
+def test_message_delta_normalizer_preserves_trailing_newlines_immediately():
     from tui_gateway.methods.prompt import _MessageDeltaNormalizer
 
     normalizer = _MessageDeltaNormalizer()
@@ -97,27 +136,27 @@ def test_message_delta_normalizer_holds_trailing_newlines_until_more_text():
     }
     assert normalizer.feed("。\n\n") == {
         "mode": "append",
-        "text": "。",
-        "delta": "。",
+        "text": "。\n\n",
+        "delta": "。\n\n",
         "offset": 6,
     }
     assert normalizer.feed("下一段") == {
         "mode": "append",
-        "text": "\n\n下一段",
-        "delta": "\n\n下一段",
-        "offset": 7,
+        "text": "下一段",
+        "delta": "下一段",
+        "offset": 9,
     }
 
 
-def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
+def test_message_delta_normalizer_keeps_newlines_before_tool_boundary():
     from tui_gateway.methods.prompt import _MessageDeltaNormalizer
 
     normalizer = _MessageDeltaNormalizer()
 
     assert normalizer.feed("让我继续读取。\n\n") == {
         "mode": "append",
-        "text": "让我继续读取。",
-        "delta": "让我继续读取。",
+        "text": "让我继续读取。\n\n",
+        "delta": "让我继续读取。\n\n",
         "offset": 0,
     }
     assert normalizer.feed(None) is None
@@ -125,7 +164,7 @@ def test_message_delta_normalizer_discards_trailing_newlines_on_tool_boundary():
         "mode": "append",
         "text": "工具后正文",
         "delta": "工具后正文",
-        "offset": 7,
+        "offset": 9,
     }
 
 
@@ -361,14 +400,16 @@ def test_emit_realtime_frame_includes_stable_run_metadata(capture):
     server._emit("message.delta", "runtime-meta", {"text": "hi"})
     params = json.loads(buf.getvalue())["params"]
 
-    assert params["session_id"] == "runtime-meta"
-    assert params["runtime_session_id"] == "runtime-meta"
-    assert params["stored_session_id"] == "stored-meta"
+    assert params["session_id"] == "stored-meta"
+    assert params["execution_session_id"] == "runtime-meta"
+    assert params["conversation_session_id"] == "stored-meta"
     assert params["run_id"] == "run-meta"
     assert params["turn_id"] == "turn-meta"
     assert params["runtime_scope_key"] == "scope-meta"
-    assert isinstance(params["seq"], int)
-    assert params["seq"] > 0
+    assert params["transient"] is True
+    assert "seq" not in params
+    assert isinstance(params["runtime_source_seq"], int)
+    assert params["runtime_source_seq"] > 0
     assert params["payload"]["text"] == "hi"
 
 
@@ -424,7 +465,7 @@ def test_sess_found(server):
     assert err is None
 
 
-def test_sess_resolves_stored_session_id_to_running_runtime(server):
+def test_sess_resolves_conversation_session_id_to_running_runtime(server):
     idle = {"agent": MagicMock(), "session_key": "stored-1", "running": False}
     running = {
         "agent": MagicMock(),
@@ -444,28 +485,23 @@ def test_sess_resolves_stored_session_id_to_running_runtime(server):
 # ── session.resume payload ────────────────────────────────────────────
 
 
-def test_session_resume_returns_hydrated_messages(server, monkeypatch):
-    class _DB:
-        def get_session(self, _sid):
-            return {"id": "20260409_010101_abc123"}
+def test_session_resume_returns_hydrated_messages(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False):
+        return [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "yo"},
+            {"role": "tool", "content": "searched"},
+            {"role": "assistant", "content": "   "},
+            {"role": "assistant", "content": None},
+            {"role": "narrator", "content": "skip"},
+        ]
 
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _sid):
-            return None
-
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
-            return [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "yo"},
-                {"role": "tool", "content": "searched"},
-                {"role": "assistant", "content": "   "},
-                {"role": "assistant", "content": None},
-                {"role": "narrator", "content": "skip"},
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("20260409_010101_abc123", "Hydrated")],
+        history_reader=history_reader,
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
@@ -481,26 +517,20 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     assert "error" not in resp
     assert resp["result"]["message_count"] == 3
     assert resp["result"]["messages"] == [
-        {"role": "user", "text": "hello"},
-        {"role": "assistant", "text": "yo"},
-        {"role": "tool", "name": "tool", "context": "", "result_text": "searched"},
+        {"role": "user", "text": "hello", "message_id": "1", "timestamp": 1.0},
+        {"role": "assistant", "text": "yo", "message_id": "2", "timestamp": 2.0},
+        {
+            "role": "tool",
+            "name": "tool",
+            "context": "",
+            "result_text": "searched",
+            "message_id": "3",
+            "timestamp": 3.0,
+        },
     ]
 
 
-def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
-    class _DB:
-        def get_session(self, _sid):
-            return {"id": "stored-live"}
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def reopen_session(self, _sid):
-            return None
-
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
-            return [{"role": "user", "content": "still running"}]
-
+def test_session_resume_reuses_live_running_runtime(server, monkeypatch, tmp_path):
     live_agent = MagicMock()
     server._sessions["runtime-live"] = {
         "agent": live_agent,
@@ -513,7 +543,8 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
         "run_updated_at": 20,
     }
     make_agent = MagicMock()
-    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    db = _resume_gateway_db(tmp_path, rows=[("stored-live", "Stored Live")])
+    monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
     monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "test/model"})
 
@@ -533,53 +564,39 @@ def test_session_resume_reuses_live_running_runtime(server, monkeypatch):
     make_agent.assert_not_called()
 
 
-def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch):
-    class _DB:
-        def __init__(self):
-            self.replaced = None
-
-        def get_session(self, sid):
-            return {"id": sid} if sid == "stored-1" else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def get_messages_as_conversation(
-            self,
-            _sid,
-            include_ancestors=False,
-            include_storage_metadata=False,
-        ):
-            return [
-                {
-                    "role": "user",
-                    "content": "hidden attachment context",
-                    "metadata": {
-                        "turn_id": "turn-1",
-                        "draft_text": "请读这个文件",
-                        "attachments": [
-                            {
-                                "name": "spec.pdf",
-                                "path": "/tmp/spec.pdf",
-                                "mimeType": "application/pdf",
-                                "size": 123,
-                                "kind": "file",
-                            },
-                        ],
-                    },
+def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False, include_storage_metadata=False):
+        return [
+            {
+                "role": "user",
+                "content": "hidden attachment context",
+                "metadata": {
+                    "turn_id": "turn-1",
+                    "draft_text": "请读这个文件",
+                    "attachments": [
+                        {
+                            "name": "spec.pdf",
+                            "path": "/tmp/spec.pdf",
+                            "mimeType": "application/pdf",
+                            "size": 123,
+                            "kind": "file",
+                        },
+                    ],
                 },
-                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
-                {
-                    "role": "user",
-                    "content": "next",
-                    "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
-                },
-            ]
+            },
+            {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-1"}},
+            {
+                "role": "user",
+                "content": "next",
+                "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+            },
+        ]
 
-        def replace_messages(self, sid, messages):
-            self.replaced = (sid, messages)
-
-    db = _DB()
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("stored-1", "Stored")],
+        history_reader=history_reader,
+    )
     make_agent = MagicMock()
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
@@ -594,10 +611,15 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
 
     assert "error" not in resp
     make_agent.assert_not_called()
-    assert db.replaced is not None
-    assert db.replaced[0] == "stored-1"
-    assert [message["metadata"]["turn_id"] for message in db.replaced[1]] == ["turn-2"]
-    assert resp["result"]["stored_session_id"] == "stored-1"
+    stored_rows = db._conn.execute(
+        "SELECT role, content, timestamp, metadata_json FROM messages WHERE session_id = ? ORDER BY id",
+        ("stored-1",),
+    ).fetchall()
+    assert [(row["role"], row["content"], row["timestamp"]) for row in stored_rows] == [
+        ("user", "next", 3.0)
+    ]
+    assert [json.loads(row["metadata_json"])["turn_id"] for row in stored_rows] == ["turn-2"]
+    assert resp["result"]["conversation_session_id"] == "stored-1"
     assert resp["result"]["removed_messages"] == 2
     assert resp["result"]["draft"]["text"] == "请读这个文件"
     assert resp["result"]["draft"]["attachments"][0]["name"] == "spec.pdf"
@@ -605,46 +627,34 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
         {
             "role": "user",
             "text": "next",
+            "message_id": "3",
+            "timestamp": 3.0,
             "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
         },
     ]
 
 
-def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch):
-    class _DB:
-        def __init__(self):
-            self.replaced = None
-
-        def get_session(self, sid):
-            return {"id": sid} if sid == "stored-1" else None
-
-        def get_session_by_title(self, _title):
-            return None
-
-        def get_messages_as_conversation(
-            self,
-            _sid,
-            include_ancestors=False,
-            include_storage_metadata=False,
-        ):
-            return [
-                {
-                    "role": "user",
-                    "content": "hidden attachment context",
-                    "metadata": {
-                        "turn_id": "turn-canonical",
-                        "run_id": "run-canonical",
-                        "client_message_id": "client-msg-1",
-                        "draft_text": "恢复这个草稿",
-                    },
+def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch, tmp_path):
+    def history_reader(_sid, include_ancestors=False, include_storage_metadata=False):
+        return [
+            {
+                "role": "user",
+                "content": "hidden attachment context",
+                "metadata": {
+                    "turn_id": "turn-canonical",
+                    "run_id": "run-canonical",
+                    "client_message_id": "client-msg-1",
+                    "draft_text": "恢复这个草稿",
                 },
-                {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
-            ]
+            },
+            {"role": "assistant", "content": "ok", "metadata": {"turn_id": "turn-canonical"}},
+        ]
 
-        def replace_messages(self, sid, messages):
-            self.replaced = (sid, messages)
-
-    db = _DB()
+    db = _resume_gateway_db(
+        tmp_path,
+        rows=[("stored-1", "Stored")],
+        history_reader=history_reader,
+    )
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", MagicMock())
 
@@ -661,7 +671,11 @@ def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatc
     )
 
     assert "error" not in resp
-    assert db.replaced == ("stored-1", [])
+    stored_count = db._conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+        ("stored-1",),
+    ).fetchone()[0]
+    assert stored_count == 0
     assert resp["result"]["turn_id"] == "turn-local"
     assert resp["result"]["draft"]["text"] == "恢复这个草稿"
 
@@ -714,7 +728,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 {
                     "type": "message.delta",
                     "session_id": "runtime-live",
-                    "stored_session_id": "stored-live",
+                    "conversation_session_id": "stored-live",
                     "run_id": "run-canonical",
                     "turn_id": "turn-canonical",
                     "seq": 7,
@@ -722,6 +736,12 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 }
             ]
             self.replaced = None
+            self.messages = types.SimpleNamespace(replace=self.replace_messages)
+            self.runs = types.SimpleNamespace(
+                append_event=self.append_run_event,
+                list_events=self.list_run_events,
+                next_event_seq=self.next_run_event_seq,
+            )
 
         def replace_messages(self, sid, messages):
             self.replaced = (sid, messages)
@@ -731,7 +751,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
                 [
                     int(event.get("seq") or 0)
                     for event in self.events
-                    if event.get("stored_session_id") == session_id
+                    if event.get("conversation_session_id") == session_id
                 ],
                 default=0,
             )
@@ -741,7 +761,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
             frame = dict(event)
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             frame["payload"] = dict(payload)
-            frame["stored_session_id"] = session_id
+            frame["conversation_session_id"] = session_id
             if not int(frame.get("seq") or 0):
                 frame["seq"] = self.next_run_event_seq(session_id)
             self.events.append(frame)
@@ -751,7 +771,7 @@ def test_session_recall_turn_records_recall_boundary_with_run_id_and_seq(server,
             return [
                 event
                 for event in self.events
-                if event.get("stored_session_id") == session_id
+                if event.get("conversation_session_id") == session_id
                 and int(event.get("seq") or 0) > int(after_seq or 0)
             ]
 
@@ -821,33 +841,25 @@ def test_session_status_returns_machine_readable_run_state(server):
 
     assert "error" not in resp
     assert resp["result"]["session_id"] == "runtime-status"
-    assert resp["result"]["stored_session_id"] == "stored-status"
+    assert resp["result"]["conversation_session_id"] == "stored-status"
     assert resp["result"]["running"] is True
     assert resp["result"]["active_run_id"] == "run-status"
     assert resp["result"]["run_started_at"] == 11
     assert resp["result"]["run_updated_at"] == 22
 
 
-def test_session_create_control_plane_only_accepts_tool_progress_mode(server, monkeypatch):
+def test_session_create_control_plane_only_persists_through_session_repo(
+    server,
+    monkeypatch,
+    tmp_path,
+):
     import importlib
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
     importlib.reload(importlib.import_module("tui_gateway.methods.session"))
 
-    class _DB:
-        def __init__(self):
-            self.created = []
-
-        def create_session(self, session_id, source, model, transient=False):
-            self.created.append(
-                {
-                    "session_id": session_id,
-                    "source": source,
-                    "model": model,
-                    "transient": transient,
-                }
-            )
-
-    db = _DB()
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_resolve_model", lambda: "gpt-test")
 
@@ -864,28 +876,44 @@ def test_session_create_control_plane_only_accepts_tool_progress_mode(server, mo
     )
 
     assert "error" not in resp
-    assert resp["result"]["session_id"] == resp["result"]["stored_session_id"]
+    assert resp["result"]["session_id"] == resp["result"]["conversation_session_id"]
     assert resp["result"]["info"]["control_plane_only"] is True
     assert resp["result"]["info"]["lazy"] is True
     assert resp["result"]["info"]["transient"] is True
-    assert db.created == [
-        {
-            "session_id": resp["result"]["stored_session_id"],
-            "source": "tui",
-            "model": "gpt-test",
-            "transient": True,
-        }
-    ]
+    session_id = resp["result"]["conversation_session_id"]
+    session_row = db._conn.execute(
+        "SELECT id, source, model, transient FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    assert dict(session_row) == {
+        "id": session_id,
+        "source": "tui",
+        "model": "gpt-test",
+        "transient": 1,
+    }
+    index_row = db._conn.execute(
+        "SELECT session_id, source, transient FROM session_index WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    assert dict(index_row) == {
+        "session_id": session_id,
+        "source": "tui",
+        "transient": 1,
+    }
+    db.close()
 
 
-def test_approval_control_plane_methods_accept_stored_session_id(server, monkeypatch):
+def test_approval_control_plane_methods_accept_conversation_session_id(server, monkeypatch):
     import importlib
 
     importlib.reload(importlib.import_module("tui_gateway.methods.prompt"))
 
     class _DB:
-        def get_session(self, session_id):
-            return {"id": session_id} if session_id == "stored-approval" else None
+        sessions = types.SimpleNamespace(
+            get=lambda session_id: (
+                {"id": session_id} if session_id == "stored-approval" else None
+            )
+        )
 
     yolo_sessions = set()
     approval_mod = types.SimpleNamespace(
@@ -914,7 +942,7 @@ def test_approval_control_plane_methods_accept_stored_session_id(server, monkeyp
         {
             "id": "before",
             "method": "approval.policy.get",
-            "params": {"stored_session_id": "stored-approval"},
+            "params": {"conversation_session_id": "stored-approval"},
         }
     )
     updated = server.handle_request(
@@ -942,8 +970,17 @@ def test_approval_control_plane_methods_accept_stored_session_id(server, monkeyp
     assert after["result"] == {"mode": "full_access", "yolo": True}
 
 
-def test_run_control_replays_events_and_tracks_status(capture):
+def test_run_control_replays_events_and_tracks_status(capture, monkeypatch, tmp_path):
     server, _buf = capture
+    db = _resume_gateway_db(tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.sessions.create("stored-events", source="tui")
+    db.runs.upsert(
+        run_id="run-events",
+        session_id="stored-events",
+        turn_id="turn-events",
+        status="running",
+    )
     server._sessions["runtime-events"] = {
         "agent": MagicMock(model="gpt-test", provider="test-provider"),
         "session_key": "stored-events",
@@ -962,7 +999,7 @@ def test_run_control_replays_events_and_tracks_status(capture):
         {
             "id": "r1",
             "method": "events.subscribe",
-            "params": {"stored_session_id": "stored-events"},
+            "params": {"conversation_session_id": "stored-events"},
         }
     )
     status = server.handle_request(
@@ -975,7 +1012,7 @@ def test_run_control_replays_events_and_tracks_status(capture):
 
     assert "error" not in replay
     assert replay["result"]["events"][0]["type"] == "message.start"
-    assert replay["result"]["events"][0]["stored_session_id"] == "stored-events"
+    assert replay["result"]["events"][0]["conversation_session_id"] == "stored-events"
     assert "error" not in status
     assert status["result"]["run"]["status"] == "running"
 
@@ -1041,7 +1078,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
             {
                 "id": "terminal-status",
                 "method": "session.status",
-                "params": {"stored_session_id": "stored-terminal"},
+                "params": {"conversation_session_id": "stored-terminal"},
             }
         )
     finally:
@@ -1072,7 +1109,7 @@ def test_terminal_event_releases_live_session_before_subscription_delivery(captu
                         {
                             "id": "subscriber-status",
                             "method": "session.status",
-                            "params": {"stored_session_id": "stored-subscriber"},
+                            "params": {"conversation_session_id": "stored-subscriber"},
                         }
                     )
                 )
@@ -1092,7 +1129,7 @@ def test_terminal_event_releases_live_session_before_subscription_delivery(captu
         "history_lock": threading.Lock(),
     }
     subscription_id, _replay = run_control.subscribe_session_with_id(
-        stored_session_id="stored-subscriber",
+        conversation_session_id="stored-subscriber",
         transport=_StatusCheckingTransport(),
     )
 
@@ -1140,7 +1177,7 @@ def test_run_control_control_events_do_not_mark_session_busy(capture):
         {
             "id": "control-status",
             "method": "session.status",
-            "params": {"stored_session_id": "stored-control"},
+            "params": {"conversation_session_id": "stored-control"},
         }
     )
 
@@ -1150,8 +1187,8 @@ def test_run_control_control_events_do_not_mark_session_busy(capture):
 
 
 def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
-    class _RunDB:
-        def get_session_run_status(self, _session_id):
+    class _Runs:
+        def session_status(self, _session_id):
             return {
                 "running": True,
                 "active_run_id": "run-active",
@@ -1159,7 +1196,7 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
                 "last_event_seq": 3,
             }
 
-        def list_runs(self, _session_id):
+        def list(self, _session_id, **_kwargs):
             return [
                 {
                     "run_id": "run-active",
@@ -1172,13 +1209,14 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
                 }
             ]
 
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = types.SimpleNamespace(runs=_Runs())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {
             "id": "r1",
             "method": "run.submit",
-            "params": {"stored_session_id": "stored-active", "text": "hello"},
+            "params": {"conversation_session_id": "stored-active", "text": "hello"},
         }
     )
 
@@ -1213,7 +1251,7 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
             "id": "cancel",
             "method": "run.cancel",
             "params": {
-                "stored_session_id": "stored-prestart-cancel",
+                "conversation_session_id": "stored-prestart-cancel",
                 "run_id": "run-prestart-cancel",
                 "turn_id": "turn-prestart-cancel",
                 "runtime_scope_key": "profile:agent-default",
@@ -1225,7 +1263,7 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
             "id": "submit",
             "method": "run.submit",
             "params": {
-                "stored_session_id": "stored-prestart-cancel",
+                "conversation_session_id": "stored-prestart-cancel",
                 "run_id": "run-prestart-cancel",
                 "turn_id": "turn-prestart-cancel",
                 "text": "hello",
@@ -1283,7 +1321,7 @@ def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeyp
             "id": "submit-image",
             "method": "run.submit",
             "params": {
-                "stored_session_id": "stored-image-submit",
+                "conversation_session_id": "stored-image-submit",
                 "run_id": "run-image",
                 "turn_id": "turn-image",
                 "text": "分析图片",
@@ -1343,7 +1381,7 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
             {
                 "id": "r1",
                 "method": "events.subscribe",
-                "params": {"stored_session_id": "stored-sub"},
+                "params": {"conversation_session_id": "stored-sub"},
             }
         )
         subscription_id = subscribed["result"]["subscription_id"]
@@ -1361,36 +1399,50 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     assert unsubscribed["result"]["removed"] == 1
 
 
-def test_run_events_replays_without_creating_subscription(server, monkeypatch):
+def test_run_events_replays_without_creating_subscription(server, monkeypatch, tmp_path):
+    from hermes_agent.domain.event_ledger import EventLedger
     from tui_gateway.services import run_control
 
-    class _RunDB:
-        def list_run_events(self, session_id, *, after_seq=0, active_only=False, runtime_scope_key="", run_id="", limit=2000):
-            assert session_id == "stored-run-events"
-            assert after_seq == 1
-            assert active_only is False
-            assert runtime_scope_key == "profile:agent-a"
-            assert run_id == "run-a"
-            assert limit == 321
-            return [
-                {
-                    "type": "message.delta",
-                    "stored_session_id": session_id,
-                    "run_id": "run-a",
-                    "runtime_scope_key": runtime_scope_key,
-                    "seq": 2,
-                    "payload": {"text": "hello"},
-                }
-            ]
-
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = _resume_gateway_db(tmp_path)
+    db.sessions.create("stored-run-events", source="tui")
+    payload = {"text": "hello"}
+    EventLedger(db._conn).append_runtime_frame(
+        session_id="stored-run-events",
+        run_id="run-a",
+        turn_id="turn-a",
+        execution_session_id="runtime-run-a",
+        runtime_scope_key="profile:agent-a",
+        participant_id="",
+        activity_id="",
+        event_type="message.delta",
+        seq=2,
+        timestamp=123.0,
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        event_json=json.dumps(
+            {
+                "type": "message.delta",
+                "conversation_session_id": "stored-run-events",
+                "session_id": "runtime-run-a",
+                "run_id": "run-a",
+                "runtime_scope_key": "profile:agent-a",
+                "seq": 2,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+        ),
+        status="",
+        frame_blob=None,
+        frame_format="",
+        retention_class="",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {
             "id": "r1",
             "method": "run.events",
             "params": {
-                "stored_session_id": "stored-run-events",
+                "conversation_session_id": "stored-run-events",
                 "after_seq": 1,
                 "runtime_scope_key": "profile:agent-a",
                 "run_id": "run-a",
@@ -1400,7 +1452,7 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch):
     )
 
     assert "error" not in resp
-    assert resp["result"]["stored_session_id"] == "stored-run-events"
+    assert resp["result"]["conversation_session_id"] == "stored-run-events"
     assert resp["result"]["last_event_seq"] == 2
     assert resp["result"]["events"][0]["run_id"] == "run-a"
     assert run_control._subscriptions_by_id == {}
@@ -1409,8 +1461,8 @@ def test_run_events_replays_without_creating_subscription(server, monkeypatch):
 def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
     captured = {}
 
-    class _RunDB:
-        def list_runs(self, session_id="", *, runtime_scope_key="", statuses=None, limit=200):
+    class _Runs:
+        def list(self, session_id="", *, runtime_scope_key="", statuses=None, limit=200):
             captured.update(
                 {
                     "session_id": session_id,
@@ -1421,7 +1473,8 @@ def test_run_list_accepts_runtime_scope_and_status_filters(server, monkeypatch):
             )
             return [{"run_id": "run-filtered", "status": "running", "runtime_scope_key": runtime_scope_key}]
 
-    monkeypatch.setattr(server, "_get_db", lambda: _RunDB())
+    db = types.SimpleNamespace(runs=_Runs())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
 
     resp = server.handle_request(
         {
@@ -2035,7 +2088,7 @@ def test_platforms_manage_catalog_returns_structured_platforms(server):
 
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
-        "gateway.status": fake_status,
+        "channels.runtime_status": fake_status,
     }):
         resp = server.handle_request({
             "id": "platforms-catalog",
@@ -2228,7 +2281,7 @@ def test_platforms_manage_feishu_qr_flow_does_not_persist_bot_display_name(serve
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
         "hermes_cli.config": fake_config,
-        "gateway.platforms.feishu": fake_feishu,
+        "channels.platforms.feishu": fake_feishu,
     }):
         start = server.handle_request({
             "id": "platforms-feishu-qr-start",
@@ -2311,7 +2364,7 @@ def test_platforms_manage_weixin_qr_flow_allows_scan_owner(server, monkeypatch):
     with patch.dict(sys.modules, {
         "hermes_cli.gateway": fake_gateway,
         "hermes_cli.config": fake_config,
-        "gateway.platforms.weixin": fake_weixin,
+        "channels.platforms.weixin": fake_weixin,
     }):
         start = server.handle_request({
             "id": "platforms-weixin-qr-start",

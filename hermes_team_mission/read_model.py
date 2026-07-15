@@ -190,15 +190,15 @@ def _normalize_team(value: Any, fallback_members: Any = None) -> dict[str, Any]:
     }
 
 
-def _conversation_stable_session_id(conversation: dict[str, Any], mission: dict[str, Any]) -> str:
+def _conversation_conversation_session_id(conversation: dict[str, Any], mission: dict[str, Any]) -> str:
     metadata = _object(mission.get("metadata"))
     return _first_text(
-        conversation.get("stable_session_id"),
-        conversation.get("stableSessionId"),
+        conversation.get("conversation_session_id"),
+        conversation.get("conversationSessionId"),
         metadata.get("conversation_session_id"),
         metadata.get("conversationSessionId"),
-        metadata.get("stable_team_session_id"),
-        metadata.get("stableTeamSessionId"),
+        metadata.get("conversation_team_session_id"),
+        metadata.get("conversationTeamSessionId"),
     )
 
 
@@ -206,12 +206,15 @@ def _normalize_conversation(conversation: Any, mission: dict[str, Any]) -> dict[
     raw = _object(conversation)
     conversation_id = _first_text(raw.get("conversation_id"), raw.get("conversationId"), mission.get("conversation_id"), mission.get("conversationId"))
     team_id = _first_text(raw.get("team_id"), raw.get("teamId"), mission.get("team_id"), mission.get("teamId"))
-    stable_session_id = _conversation_stable_session_id(raw, mission)
+    conversation_session_id = _conversation_conversation_session_id(raw, mission)
     title = _first_text(raw.get("display_title"), raw.get("displayTitle"), raw.get("title"))
     return {
         "conversation_id": conversation_id,
         "team_id": team_id,
-        "stable_team_session_id": stable_session_id,
+        "conversation_session_id": conversation_session_id,
+        # Compatibility alias for pre-canonical desktop consumers. New code
+        # must use conversation_session_id as the cross-surface identity.
+        "conversation_team_session_id": conversation_session_id,
         "title": title,
         "objective": _first_text(raw.get("objective"), mission.get("objective")),
         "workspace_id": _first_text(raw.get("workspace_id"), raw.get("workspaceId"), mission.get("workspace_id"), mission.get("workspaceId")),
@@ -253,7 +256,8 @@ def _normalize_mission(
         "activity_id": activity_id,
         "conversation_id": conversation_id or explicit_mission_id,
         "team_id": team_id,
-        "stable_team_session_id": normalized_conversation["stable_team_session_id"],
+        "conversation_session_id": normalized_conversation["conversation_session_id"],
+        "conversation_team_session_id": normalized_conversation["conversation_team_session_id"],
         "title": title,
         "objective": objective,
         "workspace_id": workspace_id,
@@ -292,15 +296,15 @@ def _normalize_runtime(node: dict[str, Any]) -> dict[str, Any]:
     runtime = _object(node.get("runtime"))
     metadata = _object(node.get("metadata"))
     runtime_metadata = _object(runtime.get("metadata"))
-    runtime_stable_session_id = _first_text(
-        runtime.get("runtime_stable_session_id"),
-        runtime.get("runtimeStableSessionId"),
-        node.get("runtime_stable_session_id"),
-        node.get("runtimeStableSessionId"),
-        runtime_metadata.get("runtime_stable_session_id"),
-        runtime_metadata.get("runtimeStableSessionId"),
-        metadata.get("runtime_stable_session_id"),
-        metadata.get("runtimeStableSessionId"),
+    runtime_conversation_session_id = _first_text(
+        runtime.get("runtime_conversation_session_id"),
+        runtime.get("runtimeConversationSessionId"),
+        node.get("runtime_conversation_session_id"),
+        node.get("runtimeConversationSessionId"),
+        runtime_metadata.get("runtime_conversation_session_id"),
+        runtime_metadata.get("runtimeConversationSessionId"),
+        metadata.get("runtime_conversation_session_id"),
+        metadata.get("runtimeConversationSessionId"),
     )
     mission_id = _first_text(
         node.get("mission_id"),
@@ -359,54 +363,54 @@ def _normalize_runtime(node: dict[str, Any]) -> dict[str, Any]:
         metadata.get("turn_id"),
         metadata.get("turnId"),
     )
-    stable_session_id = _first_text(
-        runtime.get("stable_session_id"),
-        runtime.get("stableSessionId"),
-        node.get("stable_session_id"),
-        node.get("stableSessionId"),
-        runtime_metadata.get("stable_session_id"),
-        runtime_metadata.get("stableSessionId"),
-        metadata.get("stable_session_id"),
-        metadata.get("stableSessionId"),
-        runtime_stable_session_id,
+    conversation_session_id = _first_text(
+        runtime.get("conversation_session_id"),
+        runtime.get("conversationSessionId"),
+        node.get("conversation_session_id"),
+        node.get("conversationSessionId"),
+        runtime_metadata.get("conversation_session_id"),
+        runtime_metadata.get("conversationSessionId"),
+        metadata.get("conversation_session_id"),
+        metadata.get("conversationSessionId"),
+        runtime_conversation_session_id,
     )
-    actual_stable_session_id = _first_text(
-        runtime_stable_session_id,
-        runtime.get("actual_stable_session_id"),
-        runtime.get("actualStableSessionId"),
-        node.get("actual_stable_session_id"),
-        node.get("actualStableSessionId"),
-        runtime_metadata.get("actual_stable_session_id"),
-        runtime_metadata.get("actualStableSessionId"),
-        metadata.get("actual_stable_session_id"),
-        metadata.get("actualStableSessionId"),
+    actual_conversation_session_id = _first_text(
+        runtime_conversation_session_id,
+        runtime.get("actual_conversation_session_id"),
+        runtime.get("actualConversationSessionId"),
+        node.get("actual_conversation_session_id"),
+        node.get("actualConversationSessionId"),
+        runtime_metadata.get("actual_conversation_session_id"),
+        runtime_metadata.get("actualConversationSessionId"),
+        metadata.get("actual_conversation_session_id"),
+        metadata.get("actualConversationSessionId"),
     )
-    stored_session_id = _first_text(
-        runtime_stable_session_id,
-        runtime.get("stored_session_id"),
-        runtime.get("storedSessionId"),
-        node.get("stored_session_id"),
-        node.get("storedSessionId"),
+    conversation_session_id = _first_text(
+        runtime_conversation_session_id,
+        runtime.get("conversation_session_id"),
+        runtime.get("conversationSessionId"),
+        node.get("conversation_session_id"),
+        node.get("conversationSessionId"),
         node.get("session_id"),
         node.get("sessionId"),
-        runtime_metadata.get("stored_session_id"),
-        runtime_metadata.get("storedSessionId"),
+        runtime_metadata.get("conversation_session_id"),
+        runtime_metadata.get("conversationSessionId"),
         runtime_metadata.get("session_id"),
         runtime_metadata.get("sessionId"),
-        metadata.get("stored_session_id"),
-        metadata.get("storedSessionId"),
+        metadata.get("conversation_session_id"),
+        metadata.get("conversationSessionId"),
         metadata.get("session_id"),
         metadata.get("sessionId"),
     )
-    runtime_session_id = _first_text(
-        runtime.get("runtime_session_id"),
-        runtime.get("runtimeSessionId"),
-        node.get("runtime_session_id"),
-        node.get("runtimeSessionId"),
-        runtime_metadata.get("runtime_session_id"),
-        runtime_metadata.get("runtimeSessionId"),
-        metadata.get("runtime_session_id"),
-        metadata.get("runtimeSessionId"),
+    execution_session_id = _first_text(
+        runtime.get("execution_session_id"),
+        runtime.get("executionSessionId"),
+        node.get("execution_session_id"),
+        node.get("executionSessionId"),
+        runtime_metadata.get("execution_session_id"),
+        runtime_metadata.get("executionSessionId"),
+        metadata.get("execution_session_id"),
+        metadata.get("executionSessionId"),
     )
     return {
         "source": "hermes-team-mission",
@@ -418,11 +422,11 @@ def _normalize_runtime(node: dict[str, Any]) -> dict[str, Any]:
         "runtime_scope_key": runtime_scope_key,
         "run_id": run_id,
         "turn_id": turn_id,
-        "stable_session_id": stable_session_id,
-        "actual_stable_session_id": actual_stable_session_id,
-        "stored_session_id": stored_session_id,
-        "runtime_stable_session_id": runtime_stable_session_id,
-        "runtime_session_id": runtime_session_id,
+        "conversation_session_id": conversation_session_id,
+        "actual_conversation_session_id": actual_conversation_session_id,
+        "conversation_session_id": conversation_session_id,
+        "runtime_conversation_session_id": runtime_conversation_session_id,
+        "execution_session_id": execution_session_id,
         "metadata": metadata,
     }
 

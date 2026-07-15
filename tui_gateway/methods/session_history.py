@@ -11,6 +11,8 @@ from tui_gateway.methods.session import (
     _message_page_info,
     _requested_runtime_scope_key,
 )
+from tui_gateway.services.message_history import load_conversation_history
+from tui_gateway.services.run_events import list_runtime_events, list_tool_events
 
 _server = bind_server_globals(globals())
 
@@ -23,6 +25,43 @@ def _get_db():
     return _session_methods._get_db()
 
 
+def _session_repo_for_db(db):
+    return db.sessions
+
+
+def _resolve_session_row_id(rid, db, target: str) -> tuple[str, dict | None]:
+    repo = _session_repo_for_db(db)
+    if repo is None:
+        return "", _err(rid, 5000, "session repository unavailable")
+    found = repo.get(target)
+    if not found:
+        found = repo.get_by_title(target)
+    if not found:
+        return "", _err(rid, 4007, "session not found")
+    return str(found["id"]), None
+
+
+def _coerce_int(value, *, default: int = 0) -> int:
+    """Best-effort int coercion for cursor params; falls back to ``default``."""
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_seq(events: list) -> int:
+    """Return the highest ``seq`` among ``events`` (0 when empty)."""
+    best = 0
+    for event in events or []:
+        try:
+            seq = int((event or {}).get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq > best:
+            best = seq
+    return best
+
+
 @method("session.history")
 def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
@@ -32,11 +71,10 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is not None and session.get("session_key"):
         try:
-            history_reader = getattr(db, "get_conversation_message_read_model", None)
-            if not callable(history_reader):
-                history_reader = db.get_messages_as_conversation
-            history = history_reader(
-                session["session_key"], include_ancestors=True
+            history = load_conversation_history(
+                db,
+                session["session_key"],
+                include_ancestors=True,
             )
         except Exception:
             pass
@@ -57,13 +95,9 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
     cursor = _decode_page_cursor(params.get("cursor"))
     cursor_id = cursor.get("id")
     try:
@@ -71,61 +105,132 @@ def _(rid, params: dict) -> dict:
     except (TypeError, ValueError):
         cursor_id = None
     try:
-        page = db.get_messages_page_as_conversation(
+        page = db.messages.page_as_conversation(
             target,
             direction=str(params.get("direction") or "tail"),
             cursor_id=cursor_id,
             limit=_bounded_page_limit(params.get("limit"), default=50, maximum=200),
-            include_ancestors=bool(params.get("include_ancestors", params.get("includeAncestors", True))),
+            include_ancestors=bool(
+                params.get("include_ancestors", params.get("includeAncestors", True))
+            ),
         )
     except Exception as exc:
         return _err(rid, 5000, f"messages page failed: {exc}")
     activity_id = str(params.get("activity_id") or params.get("activityId") or "").strip()
     include_run_events = bool(params.get("include_run_events", params.get("includeRunEvents", False)))
+    # run_events uses an independent canonical seq cursor. after_seq pages
+    # forward; before_seq returns the immediately preceding window in ASC
+    # display order. Message row pagination remains an orthogonal cursor.
+    after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
+    before_seq = _coerce_int(params.get("before_seq", params.get("beforeSeq")), default=0)
+    cursor_active = after_seq > 0 or before_seq > 0
     run_events = []
+    run_events_warning = ""
     if include_run_events:
         try:
-            list_run_events = getattr(db, "list_run_events", None)
-            if callable(list_run_events):
-                run_events = list_run_events(
-                    target,
-                    runtime_scope_key=_requested_runtime_scope_key(params),
-                    activity_id=activity_id,
-                    limit=_bounded_page_limit(params.get("run_events_limit", params.get("runEventsLimit")), default=2000, maximum=5000),
+            run_events = list_runtime_events(
+                db,
+                target,
+                after_seq=after_seq,
+                before_seq=before_seq,
+                runtime_scope_key=_requested_runtime_scope_key(params),
+                activity_id=activity_id,
+                limit=_bounded_page_limit(
+                    params.get("run_events_limit", params.get("runEventsLimit")),
+                    default=2000,
+                    maximum=5000,
+                ),
+            )
+            # PR-2 §4.2: when no cursor is supplied the legacy behavior
+            # returns the full event set.  Mark it deprecated so callers
+            # migrate to the cursor path.
+            if not cursor_active:
+                run_events_warning = (
+                    "include_run_events without after_seq/before_seq returns the "
+                    "full event window and is deprecated; pass after_seq for "
+                    "cursor-based pagination."
                 )
         except Exception as exc:
             return _err(rid, 5000, f"run event page failed: {exc}")
+    run_events_max_seq = _max_seq(run_events)
     include_tool_events = bool(params.get("include_tool_events", params.get("includeToolEvents", False)))
     tool_events = []
     if include_tool_events:
         try:
-            list_tool_events = getattr(db, "list_tool_events", None)
-            if callable(list_tool_events):
-                tool_events = list_tool_events(
-                    target,
-                    run_id=str(params.get("run_id") or params.get("runId") or ""),
-                    direction=str(params.get("direction") or "tail"),
-                    limit=_bounded_page_limit(
-                        params.get("tool_events_limit", params.get("toolEventsLimit")),
-                        default=2000,
-                        maximum=5000,
-                    ),
-                )
+            tool_events = list_tool_events(
+                db,
+                target,
+                after_seq=after_seq,
+                limit=_bounded_page_limit(
+                    params.get("tool_events_limit", params.get("toolEventsLimit")),
+                    default=2000,
+                    maximum=5000,
+                ),
+            )
         except Exception as exc:
             return _err(rid, 5000, f"tool event page failed: {exc}")
     raw_messages = _history_to_messages(page.get("messages") or [])
     sanitized_messages = sanitize_transcript_messages(raw_messages)
     page_info = _message_page_info(page.get("pageInfo"))
-    branch_info = db.get_session_branch_info(target) if hasattr(db, "get_session_branch_info") else None
+    branch_info = db.branches.get_session_branch_info(target)
+    result = {
+        "session_id": target,
+        "messages": sanitized_messages,
+        "toolEvents": tool_events,
+        "runEvents": run_events,
+        "maxSeq": run_events_max_seq,
+        "pageInfo": page_info,
+        "branchInfo": branch_info,
+    }
+    if run_events_warning:
+        result["runEventsWarning"] = run_events_warning
+    return _ok(rid, result)
+
+
+@method("session.events")
+def _(rid, params: dict) -> dict:
+    """PR-2 §4.2: lightweight run_events cursor reader.
+
+    Returns only run_events (no messages), supporting forward pagination via
+    ``after_seq``.  ``maxSeq`` is the highest seq in the returned window and
+    serves as the next-page cursor; ``hasMore`` is true when the DB returned
+    a full page (i.e. the limit was the binding constraint).
+    """
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
+    after_seq = _coerce_int(params.get("after_seq", params.get("afterSeq")), default=0)
+    limit = _bounded_page_limit(
+        params.get("limit"),
+        default=200,
+        maximum=5000,
+    )
+    try:
+        events = list_runtime_events(
+            db,
+            target,
+            after_seq=after_seq,
+            runtime_scope_key=_requested_runtime_scope_key(params),
+            activity_id=str(params.get("activity_id") or params.get("activityId") or "").strip(),
+            limit=limit,
+        )
+    except Exception as exc:
+        return _err(rid, 5000, f"events page failed: {exc}")
+    max_seq = _max_seq(events)
+    has_more = len(events) >= limit
     return _ok(
         rid,
         {
             "session_id": target,
-            "messages": sanitized_messages,
-            "toolEvents": tool_events,
-            "runEvents": run_events,
-            "pageInfo": page_info,
-            "branchInfo": branch_info,
+            "events": events,
+            "maxSeq": max_seq,
+            "hasMore": has_more,
         },
     )
 
@@ -141,18 +246,11 @@ def _(rid, params: dict) -> dict:
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
-    found = db.get_session(target)
-    if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
-            return _err(rid, 4007, "session not found")
-    merge_message_metadata = getattr(db, "merge_message_metadata", None)
-    if not callable(merge_message_metadata):
-        return _err(rid, 5000, "message metadata merge is not available")
+    target, resolve_err = _resolve_session_row_id(rid, db, target)
+    if resolve_err:
+        return resolve_err
     try:
-        message = merge_message_metadata(
+        message = db.messages.merge_metadata(
             target,
             metadata,
             message_id=params.get("message_id") or params.get("messageId"),
@@ -302,7 +400,7 @@ def _rewrite_live_and_persisted_history(session: dict, history: list[dict]) -> N
     session_key = str(session.get("session_key") or "")
     db = _get_db()
     if db is not None and session_key:
-        db.replace_messages(session_key, history)
+        db.messages.replace(session_key, history)
     session["history"] = history
     session["history_version"] = int(session.get("history_version", 0)) + 1
     agent = session.get("agent")
@@ -343,17 +441,12 @@ def _recall_turn_from_history(
 
 
 def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
-    try:
-        history_reader = getattr(db, "get_conversation_message_read_model", None)
-        if not callable(history_reader):
-            history_reader = db.get_messages_as_conversation
-        return history_reader(
-            session_key,
-            include_ancestors=False,
-            include_storage_metadata=True,
-        )
-    except TypeError:
-        return db.get_messages_as_conversation(session_key, include_ancestors=False)
+    return load_conversation_history(
+        db,
+        session_key,
+        include_ancestors=False,
+        include_storage_metadata=True,
+    )
 
 
 def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
@@ -362,20 +455,18 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
     if db is None:
         return _db_unavailable_error(rid, code=5036)
     session_key = sid
-    found = db.get_session(session_key)
-    if not found:
-        found = db.get_session_by_title(session_key)
-        if found:
-            session_key = found["id"]
-        else:
+    session_key, resolve_err = _resolve_session_row_id(rid, db, session_key)
+    if resolve_err:
+        if resolve_err.get("error", {}).get("code") == 4007:
             return None
+        return resolve_err
     try:
         history = _load_stored_history_for_rewrite(db, session_key)
         recalled = _recall_turn_from_history(list(history or []), target)
         if recalled is None:
             return _err(rid, 4019, "turn not found or already recalled")
         next_history, draft, removed = recalled
-        db.replace_messages(session_key, next_history)
+        db.messages.replace(session_key, next_history)
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
     except Exception as exc:
         return _err(rid, 5036, f"recall failed: {exc}")
@@ -389,7 +480,7 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
     return _ok(rid, {
         "status": "recalled",
         "session_id": sid,
-        "stored_session_id": session_key,
+        "conversation_session_id": session_key,
         "turn_id": turn_id,
         "interrupted": False,
         "removed_messages": removed,
@@ -467,7 +558,7 @@ def _(rid, params: dict) -> dict:
                 return _ok(rid, {
                     "status": "recalled",
                     "session_id": sid,
-                    "stored_session_id": str(session.get("session_key") or ""),
+                    "conversation_session_id": str(session.get("session_key") or ""),
                     "turn_id": turn_id,
                     "interrupted": interrupted,
                     "removed_messages": 0,
@@ -509,7 +600,7 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "status": "recalled",
         "session_id": sid,
-        "stored_session_id": str(session.get("session_key") or ""),
+        "conversation_session_id": str(session.get("session_key") or ""),
         "turn_id": turn_id,
         "interrupted": interrupted,
         "removed_messages": removed,

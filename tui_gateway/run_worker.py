@@ -1,32 +1,28 @@
 """Run-worker entry: stdin/stdout JSON-line subprocess that hosts the
 LLM runtime for one ``runtime_scope_key`` profile.
 
-Replaces the sub-sidecar process spawned by ``RuntimeWorkerPool``. The
-new worker does NOT open a websocket server — the main sidecar drives
-it over the worker's stdin and reads events back from its stdout.
+The worker is owned by ``WorkerSupervisor``. It does not open a websocket
+server; the main sidecar drives it over stdin and reads events back from
+stdout.
 
 Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
 
     inbound (main → worker)
-      {"op":"run.start", "run_id", "turn_id", "stored_session_id",
-       "prompt", "params"}
+      {"op":"run.start", "run_id", "turn_id", "conversation_session_id",
+       "prompt", "params", "dovie_product_context"}
       {"op":"run.cancel", "run_id"}
       {"op":"interactive.response", "kind", "request_id", "answer"}
       {"op":"runtime.env.update", "env_updates": {"KEY": "value"}}
       {"op":"shutdown"}
 
     outbound (worker → main)
-      {"op":"event", "params": {...}}            # 1:1 with the legacy
-                                                 # worker→main ws event
-                                                 # payload
+      {"op":"event", "params": {...}}
       {"op":"interactive.request", "kind", "request_id", "payload"}
       {"op":"run.terminal", "run_id", "status"}
       {"op":"log", "level", "text"}
 
-Phase 4a (this file) implemented the codec + a stub run loop suitable
-for unit tests. Phase 4c wired the run handler into the real agent
-library. Phase 5+ made this the sole worker-spawning path; the legacy
-``RuntimeWorkerPool`` proxy was deleted in Phase 6.
+This module owns the frame codec and the subprocess run loop used by the
+worker/supervisor protocol.
 """
 
 from __future__ import annotations
@@ -36,6 +32,7 @@ import json
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
@@ -58,9 +55,10 @@ _stdout_write_lock = threading.RLock()
 class RunStartFrame:
     run_id: str
     turn_id: str
-    stored_session_id: str
+    conversation_session_id: str
     prompt: str
     params: dict[str, Any] = field(default_factory=dict)
+    dovie_product_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,14 +130,14 @@ class InteractiveRequestFrame:
     # Worker-known context. Optional so older worker builds (or echo-
     # only test stubs) keep working — the router cross-fills from its
     # ``run_table`` when these are empty.
-    stored_session_id: str = ""
+    conversation_session_id: str = ""
 
 
 @dataclass(frozen=True)
 class RunTerminalFrame:
     run_id: str
     status: str
-    stored_session_id: str = ""
+    conversation_session_id: str = ""
     turn_id: str = ""
     message: str = ""
 
@@ -158,12 +156,28 @@ class DBRpcRequestFrame:
     db_scope: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class WorkerReadyFrame:
+    """Worker bootstrap barrier consumed by ``WorkerSupervisor``.
+
+    A subprocess is not usable merely because ``Popen`` succeeded.  This
+    frame is emitted only after the legacy gateway environment and the
+    static agent/tool modules have finished loading.
+    """
+
+    ready: bool
+    bootstrap_ms: float
+    stages_ms: dict[str, float] = field(default_factory=dict)
+    error: str = ""
+
+
 OutgoingFrame = Union[
     EventFrame,
     InteractiveRequestFrame,
     RunTerminalFrame,
     LogFrame,
     DBRpcRequestFrame,
+    WorkerReadyFrame,
 ]
 
 
@@ -198,6 +212,31 @@ def _optional_mapping(obj: dict, key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FrameDecodeError(f"field {key!r} must be an object")
     return value
+
+
+def _normalize_dovie_product_context(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value or "").strip()
+
+
+def dovie_product_context_from_params(params: dict[str, Any]) -> str:
+    """Return the turn-local Dovie context as one JSON string.
+
+    The desktop and Team Mission paths may pass either an already-encoded
+    string or a structured dict. Strings are preserved verbatim so the
+    worker transport never double-encodes JSON.
+    """
+    if not isinstance(params, dict):
+        return ""
+    raw = params.get("dovie_product_context")
+    if raw in (None, ""):
+        raw = params.get("dovieProductContext")
+    return _normalize_dovie_product_context(raw)
+
+
+def dovie_product_context_from_frame(frame: RunStartFrame) -> str:
+    return frame.dovie_product_context or dovie_product_context_from_params(frame.params)
 
 
 def _string_mapping(obj: dict, key: str, *, op: str) -> dict[str, str]:
@@ -240,12 +279,17 @@ def decode_incoming(line: str) -> IncomingFrame:
         raise FrameDecodeError("frame missing string field 'op'")
 
     if op == "run.start":
+        params = _optional_mapping(obj, "params")
+        dovie_product_context = _optional_str(obj, "dovie_product_context")
+        if not dovie_product_context:
+            dovie_product_context = dovie_product_context_from_params(params)
         return RunStartFrame(
             run_id=_require_str(obj, "run_id", op=op),
             turn_id=_require_str(obj, "turn_id", op=op),
-            stored_session_id=_require_str(obj, "stored_session_id", op=op),
+            conversation_session_id=_require_str(obj, "conversation_session_id", op=op),
             prompt=_optional_str(obj, "prompt"),
-            params=_optional_mapping(obj, "params"),
+            params=params,
+            dovie_product_context=dovie_product_context,
         )
     if op == "run.cancel":
         return RunCancelFrame(run_id=_require_str(obj, "run_id", op=op))
@@ -287,10 +331,12 @@ def encode_incoming(frame: IncomingFrame) -> str:
             "op": "run.start",
             "run_id": frame.run_id,
             "turn_id": frame.turn_id,
-            "stored_session_id": frame.stored_session_id,
+            "conversation_session_id": frame.conversation_session_id,
             "prompt": frame.prompt,
             "params": frame.params,
         }
+        if frame.dovie_product_context:
+            body["dovie_product_context"] = frame.dovie_product_context
     elif isinstance(frame, RunCancelFrame):
         body = {"op": "run.cancel", "run_id": frame.run_id}
     elif isinstance(frame, InteractiveResponseFrame):
@@ -350,13 +396,13 @@ def decode_outgoing(line: str) -> OutgoingFrame:
             kind=_require_str(obj, "kind", op=op),
             request_id=_require_str(obj, "request_id", op=op),
             payload=_optional_mapping(obj, "payload"),
-            stored_session_id=_optional_str(obj, "stored_session_id"),
+            conversation_session_id=_optional_str(obj, "conversation_session_id"),
         )
     if op == "run.terminal":
         return RunTerminalFrame(
             run_id=_require_str(obj, "run_id", op=op),
             status=_require_str(obj, "status", op=op),
-            stored_session_id=_optional_str(obj, "stored_session_id"),
+            conversation_session_id=_optional_str(obj, "conversation_session_id"),
             turn_id=_optional_str(obj, "turn_id"),
             message=_optional_str(obj, "message"),
         )
@@ -364,6 +410,27 @@ def decode_outgoing(line: str) -> OutgoingFrame:
         return LogFrame(
             level=_require_str(obj, "level", op=op),
             text=_require_str(obj, "text", op=op),
+        )
+    if op == "worker.ready":
+        ready = obj.get("ready")
+        if not isinstance(ready, bool):
+            raise FrameDecodeError("worker.ready: field 'ready' must be a boolean")
+        bootstrap_ms = obj.get("bootstrap_ms", 0.0)
+        if not isinstance(bootstrap_ms, (int, float)):
+            raise FrameDecodeError("worker.ready: field 'bootstrap_ms' must be a number")
+        raw_stages = _optional_mapping(obj, "stages_ms")
+        stages_ms: dict[str, float] = {}
+        for key, value in raw_stages.items():
+            if not isinstance(value, (int, float)):
+                raise FrameDecodeError(
+                    f"worker.ready: stage {key!r} duration must be a number"
+                )
+            stages_ms[str(key)] = float(value)
+        return WorkerReadyFrame(
+            ready=ready,
+            bootstrap_ms=float(bootstrap_ms),
+            stages_ms=stages_ms,
+            error=_optional_str(obj, "error"),
         )
     raise FrameDecodeError(f"unknown outbound op {op!r}")
 
@@ -379,16 +446,16 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
             "request_id": frame.request_id,
             "payload": frame.payload,
         }
-        if frame.stored_session_id:
-            body["stored_session_id"] = frame.stored_session_id
+        if frame.conversation_session_id:
+            body["conversation_session_id"] = frame.conversation_session_id
     elif isinstance(frame, RunTerminalFrame):
         body = {
             "op": "run.terminal",
             "run_id": frame.run_id,
             "status": frame.status,
         }
-        if frame.stored_session_id:
-            body["stored_session_id"] = frame.stored_session_id
+        if frame.conversation_session_id:
+            body["conversation_session_id"] = frame.conversation_session_id
         if frame.turn_id:
             body["turn_id"] = frame.turn_id
         if frame.message:
@@ -404,6 +471,15 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
         }
         if frame.db_scope:
             body["db_scope"] = frame.db_scope
+    elif isinstance(frame, WorkerReadyFrame):
+        body = {
+            "op": "worker.ready",
+            "ready": frame.ready,
+            "bootstrap_ms": frame.bootstrap_ms,
+            "stages_ms": frame.stages_ms,
+        }
+        if frame.error:
+            body["error"] = frame.error
     else:  # pragma: no cover — exhausted by Union
         raise TypeError(f"unknown outgoing frame type: {type(frame)!r}")
     # ``ensure_ascii=False`` keeps non-ASCII frames compact (event
@@ -697,7 +773,22 @@ def _build_default_handler(
 
     async def handler(proto: WorkerProtocol, frame: IncomingFrame) -> None:
         if isinstance(frame, RunStartFrame):
+            session_tokens: list[Any] = []
+            clear_session_vars = None
             active_runs.add(frame.run_id)
+            try:
+                from channels.session_context import (
+                    clear_session_vars as _clear_session_vars,
+                    set_session_vars,
+                )
+
+                clear_session_vars = _clear_session_vars
+                session_tokens = set_session_vars(
+                    dovie_product_context=dovie_product_context_from_frame(frame),
+                )
+            except Exception:
+                session_tokens = []
+                clear_session_vars = None
             try:
                 await backend.start(frame, proto.emit)
             except Exception as exc:
@@ -708,12 +799,17 @@ def _build_default_handler(
                     RunTerminalFrame(
                         run_id=frame.run_id,
                         status="failed",
-                        stored_session_id=frame.stored_session_id,
+                        conversation_session_id=frame.conversation_session_id,
                         turn_id=frame.turn_id,
                         message=str(exc),
                     )
                 )
             finally:
+                if clear_session_vars is not None:
+                    try:
+                        clear_session_vars(session_tokens)
+                    except Exception:
+                        pass
                 active_runs.discard(frame.run_id)
         elif isinstance(frame, RunCancelFrame):
             await backend.cancel(frame.run_id)
@@ -780,16 +876,58 @@ def _build_default_backend() -> WorkerRunBackend:
     return AgentRunBackend(runner=run_agent)
 
 
+def _prepare_worker_runtime() -> dict[str, float]:
+    """Load process-static runtime state before accepting the first turn.
+
+    ``AIAgent`` itself remains turn-specific because model credentials,
+    toolset overrides, cwd and session history are request data.  Importing
+    its implementation and the tool/plugin registry is process-static and is
+    exactly the cold-start work that belongs behind ``runtime.ensure``.
+    """
+
+    stages: dict[str, float] = {}
+    started = time.perf_counter()
+    from tui_gateway.services.agent_runner import setup_worker_environment
+
+    setup_worker_environment()
+    stages["gateway_environment"] = round((time.perf_counter() - started) * 1000, 3)
+
+    started = time.perf_counter()
+    import run_agent  # noqa: F401 -- intentional process-static warmup
+
+    stages["agent_modules"] = round((time.perf_counter() - started) * 1000, 3)
+
+    started = time.perf_counter()
+    # Materialize the default tool-schema snapshot once.  Profile/turn-specific
+    # filters still receive their own cache key later; plugin discovery and the
+    # common schema assembly no longer sit on the first user turn.
+    run_agent.get_tool_definitions(quiet_mode=True)
+    stages["default_tool_catalog"] = round(
+        (time.perf_counter() - started) * 1000,
+        3,
+    )
+    return stages
+
+
 async def _main_async() -> int:
+    # R1 architectural invariant: this process is a worker; the
+    # main sidecar is the sole writer of run_events. Flip the
+    # process-role bit BEFORE any agent code runs so record_event
+    # / publish_recorded_event refuse to persist even if some
+    # legacy call path passes persist=True. See tui_gateway/
+    # process_role.py for the rationale.
+    from tui_gateway.process_role import mark_as_worker_process
+    mark_as_worker_process()
+
     from agent.activity_event_bus import (
         ActivityEventBus,
         set_default_activity_event_bus,
     )
-    from tui_gateway.services.worker_db_proxy import (
+    from hermes_agent.orchestration.worker_db_proxy import (
         WorkerDBProxy,
         set_default_worker_db_proxy,
     )
-    from tui_gateway.services.worker_rpc_proxy import (
+    from hermes_agent.orchestration.worker_rpc_proxy import (
         WorkerRpcProxy,
         set_default_worker_rpc_proxy,
     )
@@ -800,7 +938,20 @@ async def _main_async() -> int:
     set_default_worker_db_proxy(db_proxy)
     set_default_worker_rpc_proxy(rpc_proxy)
     set_default_activity_event_bus(activity_bus)
-    backend: WorkerRunBackend = _build_default_backend()
+    bootstrap_started = time.perf_counter()
+    try:
+        stages_ms = _prepare_worker_runtime()
+        backend: WorkerRunBackend = _build_default_backend()
+        stages_ms["backend"] = round(
+            (time.perf_counter() - bootstrap_started) * 1000
+            - sum(stages_ms.values()),
+            3,
+        )
+        bootstrap_error = ""
+    except Exception as exc:
+        backend = _StubBackend()
+        stages_ms = {}
+        bootstrap_error = f"{type(exc).__name__}: {exc}"
     responder: WorkerInteractiveResponder = RealInteractiveResponder()
     active_runs: set[str] = set()
 
@@ -813,6 +964,20 @@ async def _main_async() -> int:
         handler=_build_default_handler(backend, responder, active_runs),
         db_reply_handler=_handle_jsonrpc_reply,
     )
+    bootstrap_ms = round((time.perf_counter() - bootstrap_started) * 1000, 3)
+    await proto.emit(
+        WorkerReadyFrame(
+            ready=not bootstrap_error,
+            bootstrap_ms=bootstrap_ms,
+            stages_ms=stages_ms,
+            error=bootstrap_error,
+        )
+    )
+    if bootstrap_error:
+        await proto.emit_log("error", f"run_worker: bootstrap failed: {bootstrap_error}")
+        return 1
+    # Keep the stable lifecycle log consumed by diagnostics/tests; the
+    # structured readiness details travel in WorkerReadyFrame above.
     await proto.emit_log("info", "run_worker: started")
     try:
         await proto.run()

@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -34,7 +34,7 @@ def _make_history() -> list[dict[str, str]]:
 
 
 def _make_runner(history: list[dict[str, str]]):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -57,6 +57,15 @@ def _make_runner(history: list[dict[str, str]]):
     return runner
 
 
+def _patch_runtime(api_key: str = "test-key"):
+    runtime = MagicMock()
+    runtime.resolve_session_agent_runtime.return_value = (
+        "test-model",
+        {"api_key": api_key},
+    )
+    return patch("hermes_gateway.compress_command.runtime_config_for", return_value=runtime)
+
+
 @pytest.mark.asyncio
 async def test_compress_command_reports_noop_without_success_banner():
     history = _make_history()
@@ -75,8 +84,7 @@ async def test_compress_command_reports_noop_without_success_banner():
         return 100
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("test-key"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
@@ -115,8 +123,7 @@ async def test_compress_command_explains_when_token_estimate_rises():
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("test-key"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
@@ -165,8 +172,7 @@ async def test_compress_command_appends_warning_when_compression_aborts():
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("***"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
@@ -227,8 +233,7 @@ async def test_compress_command_surfaces_aux_model_failure_even_when_recovered()
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("***"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):

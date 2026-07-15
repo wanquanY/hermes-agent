@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
@@ -70,7 +71,7 @@ def _set_session_context(
     dovie_product_context: str | None = None,
 ) -> list:
     try:
-        from gateway.session_context import set_session_vars
+        from channels.session_context import set_session_vars
 
         with _sessions_lock:
             session = next(
@@ -101,7 +102,7 @@ def _clear_session_context(tokens: list) -> None:
     if not tokens:
         return
     try:
-        from gateway.session_context import clear_session_vars
+        from channels.session_context import clear_session_vars
 
         clear_session_vars(tokens)
     except Exception:
@@ -147,7 +148,7 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
         # through _block so we can tell at a glance whether a missing
         # popup is a backend (event not emitted) or frontend (event
         # arrived but no handler) issue. We also dump the session keys
-        # that _emit will derive runtime_scope_key / stored_session_id
+        # that _emit will derive runtime_scope_key / conversation_session_id
         # from, because subscription filtering downstream rejects events
         # whose runtime_scope_key doesn't match the FE-side scope key,
         # and that mismatch is invisible from the event_type alone.
@@ -197,9 +198,9 @@ def _project_block_state(sid: str, *, present: bool) -> None:
     mechanism.
 
     The agent's ``sid`` here is the gateway's INTERNAL 8-char hex id
-    (e.g. ``1cf7689d``), NOT the conversation's stored_session_id
+    (e.g. ``1cf7689d``), NOT the conversation's conversation_session_id
     (e.g. ``team-session-team-conversation-d254d3d0-…``). The
-    session_index table is keyed by stored_session_id, so feeding the
+    session_index table is keyed by conversation_session_id, so feeding the
     short sid straight into the resolver matches zero rows. We resolve
     via the gateway's ``_sessions[sid]["session_key"]`` (the stored
     session id) and fall back to the short sid if the lookup fails.
@@ -237,7 +238,7 @@ def _project_block_state(sid: str, *, present: bool) -> None:
         session = None
     if isinstance(session, dict):
         _add(session.get("session_key"))
-        _add(session.get("stored_session_id"))
+        _add(session.get("conversation_session_id"))
         _add(session.get("runtime_scope_key"))
     # Always include the raw sid as the last resort — it might be the
     # stored id itself in non-Dovie code paths, and the resolver is
@@ -355,6 +356,55 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     return model, None
 
 
+def _persisted_session_codex_runtime(session_key: str) -> dict:
+    """Read a session's persisted Codex runtime fields from its DB row.
+
+    session.create writes `runtime_executor` / `codex_home` / `codex_extra_env`
+    into `sessions.model_config` alongside the model + provider so the runtime
+    worker subprocess — which only ever sees the DB row, not the sidecar's
+    in-memory session dict — can rebuild the agent with codex_app_server
+    api_mode instead of falling through to the openai-codex codex_responses
+    path (which then fails on missing OAuth token).
+
+    Returns {} when the row isn't a Codex session or when the DB is
+    unreachable; callers treat that as "no override" and follow their
+    normal fallback chain.
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    try:
+        db = _db_for_stable_session(key)
+        row = db.sessions.get(key) if db is not None else None
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    raw_cfg = row.get("model_config")
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else None
+    if cfg is None and isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            parsed = json.loads(raw_cfg)
+            cfg = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            cfg = None
+    if not isinstance(cfg, dict):
+        return {}
+    result: dict = {}
+    runtime_executor = str(cfg.get("runtime_executor") or "").strip()
+    codex_home = str(cfg.get("codex_home") or "").strip()
+    codex_extra_env = cfg.get("codex_extra_env")
+    if runtime_executor:
+        result["runtime_executor"] = runtime_executor
+    if codex_home:
+        result["codex_home"] = codex_home
+    if isinstance(codex_extra_env, dict) and codex_extra_env:
+        result["codex_extra_env"] = {
+            str(k): str(v) for k, v in codex_extra_env.items() if v is not None
+        }
+    return result
+
+
 def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
     """Read a session's persisted model + provider from its DB row.
 
@@ -372,7 +422,7 @@ def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
         return "", None
     try:
         db = _db_for_stable_session(key)
-        row = db.get_session(key) if db is not None else None
+        row = db.sessions.get(key) if db is not None else None
     except Exception:
         return "", None
     if not isinstance(row, dict):
@@ -446,7 +496,7 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         return
 
     try:
-        row = db.get_session(session_key) or {}
+        row = db.sessions.get(session_key) or {}
         raw_config = row.get("model_config")
         existing_config = {}
         if isinstance(raw_config, dict):
@@ -457,10 +507,11 @@ def _persist_live_session_runtime(session: dict | None) -> None:
                 existing_config = parsed
         model_config = _runtime_model_config(agent, existing_config)
         model = str(getattr(agent, "model", "") or "").strip()
-        if hasattr(db, "update_session_meta"):
-            db.update_session_meta(session_key, json.dumps(model_config), model or None)
-        elif model and hasattr(db, "update_session_model"):
-            db.update_session_model(session_key, model)
+        db.sessions.update_runtime_config(
+            session_key,
+            model_config,
+            model=model or None,
+        )
     except Exception:
         logger.debug("failed to persist live session runtime", exc_info=True)
 
@@ -475,7 +526,7 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
         return
 
     db = getattr(agent, "_session_db", None) or _get_db()
-    if db is None or not hasattr(db, "update_system_prompt"):
+    if db is None:
         return
 
     try:
@@ -492,32 +543,22 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
                 prompt,
             )
             return
-        db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
+        db.sessions.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
     except Exception:
         logger.debug("failed to persist live session system prompt", exc_info=True)
 
 
 def _system_prompt_execution_scope_key(session: dict, agent: Any) -> str:
-    session_key = str(session.get("session_key") or getattr(agent, "session_id", "") or "").strip()
-    for context in (
-        session.get("run_context"),
-        getattr(agent, "run_context", None),
-        getattr(agent, "_run_context", None),
-    ):
-        conversation_session_id = str(
-            getattr(context, "conversation_session_id", "") or ""
-        ).strip()
-        execution_scope_key = str(
-            getattr(context, "execution_scope_key", "") or ""
-        ).strip()
-        if (
-            conversation_session_id
-            and execution_scope_key
-            and conversation_session_id == session_key
-            and execution_scope_key != session_key
-        ):
-            return execution_scope_key
-    return ""
+    from agent.system_prompt_cache import system_prompt_cache_scope_key
+
+    session_key = str(
+        session.get("session_key") or getattr(agent, "session_id", "") or ""
+    ).strip()
+    return system_prompt_cache_scope_key(
+        agent,
+        session_id=session_key,
+        contexts=(session.get("run_context"),),
+    )
 
 
 def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:
@@ -567,7 +608,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         agent = session.get("agent")
         db = getattr(agent, "_session_db", None) if agent is not None else None
         if db is not None:
-            db.append_message(session_id=session_key, role="system", content=marker)
+            db.messages.append(session_id=session_key, role="system", content=marker)
             return
 
         if "_ensure_session_db_row" in globals():
@@ -575,7 +616,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         if "_session_db" in globals():
             with _session_db(session) as scoped_db:
                 if scoped_db is not None:
-                    scoped_db.append_message(
+                    scoped_db.messages.append(
                         session_id=session_key, role="system", content=marker
                     )
     except Exception:
@@ -633,10 +674,8 @@ def _ensure_session_db_row(session: dict) -> None:
     # unified list mis-tags it, and resume 404s ("session not found").
     profile_home = session.get("profile_home")
     if profile_home:
-        from hermes_state import SessionDB
-
         try:
-            db = SessionDB(db_path=Path(profile_home) / "state.db")
+            db = open_cli_session_store(Path(profile_home) / "state.db")
         except Exception:
             logger.debug("failed to open profile db for session row", exc_info=True)
             return
@@ -694,9 +733,9 @@ def _ensure_session_db_row(session: dict) -> None:
     if tier := session.get("create_service_tier_override"):
         model_config["service_tier"] = tier
     try:
-        db.create_session(
+        db.sessions.create(
             key,
-            source=_session_source(session),
+            source=_server._session_source(session),
             model=row_model,
             model_config=model_config or None,
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
@@ -712,7 +751,7 @@ def _ensure_session_db_row(session: dict) -> None:
 
 @contextlib.contextmanager
 def _session_db(session: dict):
-    """Yield the SessionDB that owns this session's row (profile-aware).
+    """Yield the session store that owns this session's row (profile-aware).
 
     Mirrors :func:`_ensure_session_db_row`: a remote/profile session persists
     into its own profile's ``state.db`` (a fresh handle we close on exit);
@@ -722,10 +761,8 @@ def _session_db(session: dict):
     db, close_db = None, False
     profile_home = session.get("profile_home")
     if profile_home:
-        from hermes_state import SessionDB
-
         try:
-            db, close_db = SessionDB(db_path=Path(profile_home) / "state.db"), True
+            db, close_db = open_cli_session_store(Path(profile_home) / "state.db"), True
         except Exception:
             logger.debug("failed to open profile db for session", exc_info=True)
     else:
@@ -1006,7 +1043,7 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
     with _session_db(session) as db:
         if db is not None:
             try:
-                db.update_session_cwd(session.get("session_key", ""), resolved)
+                db.sessions.update_cwd(session.get("session_key", ""), resolved)
             except Exception:
                 logger.debug("failed to persist session cwd", exc_info=True)
     try:

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
-from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
-from hermes_state_runs import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
-from hermes_state_runs import orphaned_active_run_decision
-from hermes_state_run_event_codec import payload_from_run_event_row
+from hermes_agent.domain.run_event_payload import payload_from_run_event_row
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS
+from hermes_agent.domain.run_lifecycle import DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS
+from hermes_agent.domain.run_lifecycle import orphaned_active_run_decision
 
 from .session_common import *
 
 
-class SessionDBTeamMissionGraphMixin:
+class TeamMissionGraphMixin:
     def _linked_conversation_ids_for_mission(
         self,
         mission_id: str,
@@ -74,7 +74,7 @@ class SessionDBTeamMissionGraphMixin:
                 MissionSummaryWriter.emit_mission_summary(
                     self,
                     mission_id=mission_id,
-                    conversation_session_id=_text(conversation.get("stable_session_id")),
+                    conversation_session_id=_text(conversation.get("conversation_session_id")),
                     outcome=normalized_status,
                 )
             except Exception:
@@ -113,14 +113,14 @@ class SessionDBTeamMissionGraphMixin:
             merged_metadata = _json_loads(_row_value(existing, "metadata_json", ""), {})
             if isinstance(metadata, dict):
                 merged_metadata.update(metadata)
-            candidate_stable_session_id = _stable_session_id_from_metadata(
+            candidate_conversation_session_id = _conversation_session_id_from_metadata(
                 merged_metadata,
                 _text(leader_session_id or team_id or mission_id),
             )
             conversation_by_session = conn.execute(
-                "SELECT conversation_id FROM team_mission_conversations WHERE stable_session_id = ?",
-                (candidate_stable_session_id,),
-            ).fetchone() if candidate_stable_session_id else None
+                "SELECT conversation_id FROM team_mission_conversations WHERE conversation_session_id = ?",
+                (candidate_conversation_session_id,),
+            ).fetchone() if candidate_conversation_session_id else None
             resolved_conversation_id = (
                 _text(conversation_id)
                 or _text(_row_value(existing, "conversation_id", ""))
@@ -169,7 +169,7 @@ class SessionDBTeamMissionGraphMixin:
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
                 ),
             )
-            return self._team_mission_from_row(conn.execute(
+            return self.team_mission_rows.mission_from_row(conn.execute(
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone()) or {}
@@ -177,7 +177,7 @@ class SessionDBTeamMissionGraphMixin:
         mission = self._execute_write(_do)
         if mission:
             self.ensure_team_mission_conversation(mission=mission)
-            refreshed = self.get_team_mission_graph(mission_id).get("mission")
+            refreshed = self.team_mission_graphs.get_team_mission_graph(mission_id).get("mission")
             result = refreshed or mission
             self._prune_team_mission_events_if_terminal(mission_id)
             return result
@@ -300,7 +300,7 @@ class SessionDBTeamMissionGraphMixin:
                     "[doxie-session-index] initialize_mission projection FAILED mission_id=%s error=%s",
                     mission_id, exc,
                 )
-        return self.get_team_mission_graph(mission_id)
+        return self.team_mission_graphs.get_team_mission_graph(mission_id)
 
     def upsert_team_mission_node(
         self,
@@ -315,8 +315,8 @@ class SessionDBTeamMissionGraphMixin:
         assignee_profile_version_id: str = "",
         canonical_node_id: str = "",
         task_frame_id: str = "",
-        runtime_stable_session_id: str = "",
-        runtime_session_id: str = "",
+        runtime_conversation_session_id: str = "",
+        execution_session_id: str = "",
         runtime_scope_key: str = "",
         output_contract: Dict[str, Any] | None = None,
         metadata: Dict[str, Any] | None = None,
@@ -362,8 +362,8 @@ class SessionDBTeamMissionGraphMixin:
                 """,
                 (mission_id, "root"),
             ).fetchone()
-            existing_node = self._team_mission_node_from_row(existing) or {}
-            leader_node = self._team_mission_node_from_row(leader_row) or {}
+            existing_node = self.team_mission_rows.node_from_row(existing) or {}
+            leader_node = self.team_mission_rows.node_from_row(leader_row) or {}
             resolved_profile_id, resolved_profile_version_id, resolved_runtime_scope_key, resolved_metadata = _resolve_node_assignee(
                 mission_id=mission_id,
                 node_id=node_id,
@@ -378,8 +378,8 @@ class SessionDBTeamMissionGraphMixin:
             )
             existing_canonical_node_id = _text(_row_value(existing, "canonical_node_id", ""))
             existing_task_frame_id = _text(_row_value(existing, "task_frame_id", ""))
-            existing_runtime_stable_session_id = _text(_row_value(existing, "runtime_stable_session_id", ""))
-            existing_runtime_session_id = _text(_row_value(existing, "runtime_session_id", ""))
+            existing_runtime_conversation_session_id = _text(_row_value(existing, "runtime_conversation_session_id", ""))
+            existing_execution_session_id = _text(_row_value(existing, "execution_session_id", ""))
             effective_canonical_node_id = (
                 _text(canonical_node_id)
                 or existing_canonical_node_id
@@ -391,21 +391,21 @@ class SessionDBTeamMissionGraphMixin:
                 or existing_task_frame_id
                 or (f"mission-frame:{mission_id}" if mission_id else "")
             )
-            effective_runtime_stable_session_id = (
-                _text(runtime_stable_session_id)
-                or existing_runtime_stable_session_id
+            effective_runtime_conversation_session_id = (
+                _text(runtime_conversation_session_id)
+                or existing_runtime_conversation_session_id
             )
-            effective_runtime_session_id = (
-                _text(runtime_session_id)
-                or existing_runtime_session_id
+            effective_execution_session_id = (
+                _text(execution_session_id)
+                or existing_execution_session_id
             )
             conn.execute(
                 """
                 INSERT INTO team_mission_nodes (
                     node_id, mission_id, kind, title, objective, status,
                     assignee_profile_id, assignee_profile_version_id,
-                    canonical_node_id, task_frame_id, runtime_stable_session_id,
-                    runtime_session_id, runtime_scope_key,
+                    canonical_node_id, task_frame_id, runtime_conversation_session_id,
+                    execution_session_id, runtime_scope_key,
                     output_contract_json, metadata_json, position_x, position_y,
                     created_at, updated_at
                 )
@@ -419,8 +419,8 @@ class SessionDBTeamMissionGraphMixin:
                     assignee_profile_version_id = excluded.assignee_profile_version_id,
                     canonical_node_id = excluded.canonical_node_id,
                     task_frame_id = excluded.task_frame_id,
-                    runtime_stable_session_id = excluded.runtime_stable_session_id,
-                    runtime_session_id = excluded.runtime_session_id,
+                    runtime_conversation_session_id = excluded.runtime_conversation_session_id,
+                    execution_session_id = excluded.execution_session_id,
                     runtime_scope_key = excluded.runtime_scope_key,
                     output_contract_json = excluded.output_contract_json,
                     metadata_json = excluded.metadata_json,
@@ -439,8 +439,8 @@ class SessionDBTeamMissionGraphMixin:
                     resolved_profile_version_id,
                     effective_canonical_node_id,
                     effective_task_frame_id,
-                    effective_runtime_stable_session_id,
-                    effective_runtime_session_id,
+                    effective_runtime_conversation_session_id,
+                    effective_execution_session_id,
                     resolved_runtime_scope_key,
                     _json_dumps(output_contract or {}),
                     _json_dumps(resolved_metadata),
@@ -450,7 +450,7 @@ class SessionDBTeamMissionGraphMixin:
                     updated,
                 ),
             )
-            return self._team_mission_node_from_row(conn.execute(
+            return self.team_mission_rows.node_from_row(conn.execute(
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()) or {}
@@ -490,15 +490,15 @@ class SessionDBTeamMissionGraphMixin:
                 """,
                 (mission_id, node_id),
             ).fetchone()
-        mission = self._team_mission_from_row(mission_row) or {}
-        resolved_node = self._team_mission_node_with_resolved_assignee(
-            self._team_mission_node_from_row(row) or {},
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {}
+        resolved_node = self.team_mission_rows.node_with_resolved_assignee(
+            self.team_mission_rows.node_from_row(row) or {},
             mission_metadata=dict(mission.get("metadata") or {}),
-            leader_node=self._team_mission_node_from_row(leader_row) or {},
+            leader_node=self.team_mission_rows.node_from_row(leader_row) or {},
         )
-        return self._team_mission_node_with_runtime_binding(
+        return self.team_mission_rows.node_with_runtime_binding(
             resolved_node,
-            self._team_mission_run_binding_from_row(binding_row) or {},
+            self.team_mission_rows.run_binding_from_row(binding_row) or {},
         )
 
     def claim_team_mission_node_start(
@@ -520,7 +520,7 @@ class SessionDBTeamMissionGraphMixin:
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()
-            node = self._team_mission_node_from_row(row)
+            node = self.team_mission_rows.node_from_row(row)
             if not node:
                 return {}
             if str(node.get("status") or "") != "ready":
@@ -549,11 +549,11 @@ class SessionDBTeamMissionGraphMixin:
                 ),
             )
             if cursor.rowcount <= 0:
-                return self._team_mission_node_from_row(conn.execute(
+                return self.team_mission_rows.node_from_row(conn.execute(
                     "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                     (mission_id, node_id),
                 ).fetchone()) or {}
-            return self._team_mission_node_from_row(conn.execute(
+            return self.team_mission_rows.node_from_row(conn.execute(
                 "SELECT * FROM team_mission_nodes WHERE mission_id = ? AND node_id = ?",
                 (mission_id, node_id),
             ).fetchone()) or {}
@@ -603,7 +603,7 @@ class SessionDBTeamMissionGraphMixin:
                     created,
                 ),
             )
-            return self._team_mission_edge_from_row(conn.execute(
+            return self.team_mission_rows.edge_from_row(conn.execute(
                 "SELECT * FROM team_mission_edges WHERE edge_id = ?",
                 (normalized_edge_id,),
             ).fetchone()) or {}
@@ -621,7 +621,7 @@ class SessionDBTeamMissionGraphMixin:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -693,7 +693,7 @@ class SessionDBTeamMissionGraphMixin:
                     },
                 },
             )
-        return self.get_team_mission_graph(mission_id)
+        return self.team_mission_graphs.get_team_mission_graph(mission_id)
 
     def _approval_actions_with_leader_assignee(
         self,
@@ -710,7 +710,7 @@ class SessionDBTeamMissionGraphMixin:
         """
         if not any(_normalize_node_kind(node.kind) == "approval_gate" for node in actions.nodes):
             return actions
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         graph_nodes = graph.get("nodes", []) if isinstance(graph, dict) else []
         leader_node = next(
             (
@@ -797,7 +797,7 @@ class SessionDBTeamMissionGraphMixin:
         task_id: str = "",
         event_source: str = "plan.complete",
     ) -> Dict[str, Any]:
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -870,7 +870,7 @@ class SessionDBTeamMissionGraphMixin:
         mission_id = str(mission_id or "").strip()
         if not mission_id:
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             return {}
@@ -919,6 +919,47 @@ class SessionDBTeamMissionGraphMixin:
                 position_x=float(node.get("position_x") or 0),
                 position_y=float(node.get("position_y") or 0),
             ))
+        # BUG FIX(2026-07-06): Safety reaper — 与 cancel_team_mission 对齐。
+        # 之前 reject 只 cancel 主表 status + node status,没 reap bound worker runs,
+        # 导致 mission node worker 在 reject 后继续跑并 emit `plan_complete` /
+        # `node_create` / `edge_create` 等事件,FE 收到这些事件后重算 mission
+        # 状态,审批卡片"取消一次又弹一次"(user report:新建 team 会话第一次
+        # 团队任务也弹两次,activeGraphRunIds 里 stale worker run 是直接证据)。
+        # cancel_team_mission line 1021+ 的 reaper 是同一 pattern,原样复用。
+        rejected_at = time.time()
+        cancel_run_bindings: list[Dict[str, Any]] = []
+        active_run_ids: set[str] = set()
+        run_bindings = [b for b in graph.get("run_bindings", []) if isinstance(b, dict)]
+        for binding in run_bindings:
+            bound_run_id = _text(binding.get("run_id"))
+            if not bound_run_id or bound_run_id in active_run_ids:
+                continue
+            run = self.runs.get(bound_run_id)
+            run_status = _text((run or {}).get("status")).lower()
+            if run and run_status not in _TERMINAL_RUN_STATUSES:
+                active_run_ids.add(bound_run_id)
+                cancel_run_bindings.append(binding)
+                self.runs.upsert(
+                        run_id=bound_run_id,
+                        session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
+                        runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
+                        turn_id=_text(run.get("turn_id")),
+                        execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
+                        status="cancelled",
+                        completed_at=rejected_at,
+                        metadata={
+                            "cancelled_by": _text(rejected_by) or "team_mission.plan.reject",
+                            "cancel_reason": _text(reason),
+                            "cancelled_mission_id": mission_id,
+                            "cancelled_via": "plan.reject",
+                        },
+                )
+        # BUG FIX(2026-07-06): 之前这里写 status="draft" 与 link 表的 "cancelled"
+        # 不一致。desktop `selectActiveConversationMission` 用主表 status 判 terminal;
+        # "draft" ∉ TERMINAL_MISSION_STATUSES → 前端一直认为这个 mission 还是
+        # active,`waiting_approval` 审批卡在 UI 上反复出现(user report 三症状 C3)。
+        # 语义上 reject plan == cancel mission(前端 handler 提示"已取消团队任务",
+        # 构造 terminal session marker),两处都对齐 "cancelled"。
         self.upsert_team_mission(
             mission_id=mission_id,
             team_id=str(mission.get("team_id") or ""),
@@ -927,7 +968,7 @@ class SessionDBTeamMissionGraphMixin:
             workspace_id=str(mission.get("workspace_id") or ""),
             workspace_path=str(mission.get("workspace_path") or ""),
             mode=str(mission.get("mode") or ""),
-            status="draft",
+            status="cancelled",
             leader_session_id=str(mission.get("leader_session_id") or ""),
             metadata=dict(mission.get("metadata") or {}),
         )
@@ -947,7 +988,7 @@ class SessionDBTeamMissionGraphMixin:
                 "node_ids": [str(node.get("node_id") or "") for node in canceled_nodes],
                 "rejected_by": _text(rejected_by),
                 "reason": _text(reason),
-                "mission_status": "draft",
+                "mission_status": "cancelled",
             },
         }
         if run_id:
@@ -971,7 +1012,8 @@ class SessionDBTeamMissionGraphMixin:
             "mission_id": mission_id,
             "task_id": normalized_task_id,
             "canceled_nodes": canceled_nodes,
-            "graph": self.get_team_mission_graph(mission_id),
+            "cancel_run_bindings": cancel_run_bindings,
+            "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
         }
 
     def cancel_team_mission(
@@ -985,7 +1027,7 @@ class SessionDBTeamMissionGraphMixin:
         if not mission_id:
             _log.warning("[doxie-cancel] cancel_team_mission ENTRY empty_mission_id")
             return {}
-        graph = self.get_team_mission_graph(mission_id)
+        graph = self.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else None
         if not isinstance(mission, dict):
             _log.warning(
@@ -1024,22 +1066,21 @@ class SessionDBTeamMissionGraphMixin:
             run_id = _text(binding.get("run_id"))
             if not run_id or run_id in active_run_ids:
                 continue
-            run = self.get_run(run_id) if hasattr(self, "get_run") else None
+            run = self.runs.get(run_id)
             run_status = _text((run or {}).get("status")).lower()
             if run and run_status not in _TERMINAL_RUN_STATUSES:
                 active_run_ids.add(run_id)
                 cancel_run_bindings.append(binding)
-                if hasattr(self, "upsert_run"):
-                    # Reap the run to a terminal status so the control-plane DB
-                    # can never report it as 'running' after a cancel. The
-                    # gateway still issues run.cancel for live worker
-                    # termination; this is the durable backstop.
-                    self.upsert_run(
+                # Reap the run to a terminal status so the control-plane DB
+                # can never report it as 'running' after a cancel. The
+                # gateway still issues run.cancel for live worker
+                # termination; this is the durable backstop.
+                self.runs.upsert(
                         run_id=run_id,
                         session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                         runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
                         turn_id=_text(run.get("turn_id")),
-                        runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                        execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
                         status="cancelled",
                         completed_at=canceled_at,
                         metadata={
@@ -1047,7 +1088,7 @@ class SessionDBTeamMissionGraphMixin:
                             "cancel_reason": _text(reason),
                             "cancelled_mission_id": mission_id,
                         },
-                    )
+                )
 
         if _is_terminal_mission_status(mission_status):
             # Mission is already terminal, but we still return (and have just
@@ -1078,7 +1119,7 @@ class SessionDBTeamMissionGraphMixin:
                 "mission_status": mission_status or "cancelled",
                 "canceled_nodes": [],
                 "cancel_run_bindings": cancel_run_bindings,
-                "graph": self.get_team_mission_graph(mission_id),
+                "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
             }
         cancellation_metadata = {
             "canceled_by": _text(canceled_by),
@@ -1121,18 +1162,18 @@ class SessionDBTeamMissionGraphMixin:
             if run_id in active_run_ids or node_id in canceled_node_ids:
                 if not any(_text(item.get("run_id")) == run_id for item in cancel_run_bindings):
                     cancel_run_bindings.append(binding)
-                if run_id not in active_run_ids and hasattr(self, "get_run") and hasattr(self, "upsert_run"):
+                if run_id not in active_run_ids:
                     # Reap runs surfaced only via a cancelled node (not seen in
                     # the first status sweep) so they cannot stay non-terminal.
-                    run = self.get_run(run_id)
+                    run = self.runs.get(run_id)
                     if run and _text(run.get("status")).lower() not in _TERMINAL_RUN_STATUSES:
                         active_run_ids.add(run_id)
-                        self.upsert_run(
+                        self.runs.upsert(
                             run_id=run_id,
                             session_id=_text(run.get("session_id")) or _text(binding.get("session_id")),
                             runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(binding.get("runtime_scope_key")),
                             turn_id=_text(run.get("turn_id")),
-                            runtime_session_id=_text(run.get("runtime_session_id")) or _text(binding.get("runtime_session_id")),
+                            execution_session_id=_text(run.get("execution_session_id")) or _text(binding.get("execution_session_id")),
                             status="cancelled",
                             completed_at=canceled_at,
                             metadata={
@@ -1190,7 +1231,7 @@ class SessionDBTeamMissionGraphMixin:
             "mission_status": "cancelled",
             "canceled_nodes": canceled_nodes,
             "cancel_run_bindings": cancel_run_bindings,
-            "graph": self.get_team_mission_graph(mission_id),
+            "graph": self.team_mission_graphs.get_team_mission_graph(mission_id),
         }
 
     def reap_terminal_mission_runs(
@@ -1209,8 +1250,6 @@ class SessionDBTeamMissionGraphMixin:
         existing callers; the decision is per run.
         """
         trigger_mission_id = _text(mission_id)
-        if not hasattr(self, "upsert_run"):
-            return 0
         now = time.time()
         with self._lock:
             rows = self._conn.execute(
@@ -1220,7 +1259,7 @@ class SessionDBTeamMissionGraphMixin:
                     b.mission_id AS binding_mission_id,
                     b.session_id AS binding_session_id,
                     b.runtime_scope_key AS binding_runtime_scope_key,
-                    b.runtime_session_id AS binding_runtime_session_id,
+                    b.execution_session_id AS binding_execution_session_id,
                     b.metadata_json AS binding_metadata_json,
                     m.status AS mission_status,
                     m.conversation_id AS mission_conversation_id
@@ -1255,7 +1294,7 @@ class SessionDBTeamMissionGraphMixin:
                     """
                     SELECT conversation_id
                     FROM team_mission_conversations
-                    WHERE stable_session_id = ? OR conversation_id = ?
+                    WHERE conversation_session_id = ? OR conversation_id = ?
                     LIMIT 1
                     """,
                     (session_id, session_id),
@@ -1294,7 +1333,7 @@ class SessionDBTeamMissionGraphMixin:
                 should_reap, stale_decision = orphaned_active_run_decision(
                     row,
                     now=now,
-                    live_runtime_session_ids=set(),
+                    live_runtime_ids=set(),
                     stale_after_seconds=stale_after_seconds,
                     owner_dead_grace_seconds=owner_dead_grace_seconds,
                 )
@@ -1302,12 +1341,12 @@ class SessionDBTeamMissionGraphMixin:
                     continue
                 reap_reason = f"legacy_run_without_mission:{stale_decision}"
                 error = "runtime run reaped: no active mission owns stale legacy run"
-            self.upsert_run(
+            self.runs.upsert(
                 run_id=run_id,
                 session_id=_text(run.get("session_id")) or _text(_row_value(row, "binding_session_id", "")),
                 runtime_scope_key=_text(run.get("runtime_scope_key")) or _text(_row_value(row, "binding_runtime_scope_key", "")),
                 turn_id=_text(run.get("turn_id")),
-                runtime_session_id=_text(run.get("runtime_session_id")) or _text(_row_value(row, "binding_runtime_session_id", "")),
+                execution_session_id=_text(run.get("execution_session_id")) or _text(_row_value(row, "binding_execution_session_id", "")),
                 status="interrupted",
                 completed_at=now,
                 error=error,
@@ -1345,20 +1384,10 @@ class SessionDBTeamMissionGraphMixin:
                 return 0
             if not _is_terminal_mission_status(_row_value(mission_row, "status", "")):
                 return 0
-        placeholders = ",".join("?" for _ in _TEAM_MISSION_PRUNABLE_SOURCE_TYPES)
-
-        def _do(conn: sqlite3.Connection) -> int:
-            cursor = conn.execute(
-                f"""
-                DELETE FROM team_mission_events
-                WHERE mission_id = ?
-                  AND source_event_type IN ({placeholders})
-                """,
-                (mission_id, *_TEAM_MISSION_PRUNABLE_SOURCE_TYPES),
-            )
-            return int(cursor.rowcount or 0)
-
-        return self._execute_write(_do)
+        return self.team_mission_audit.prune_source_event_types(
+            mission_id=mission_id,
+            source_event_types=_TEAM_MISSION_PRUNABLE_SOURCE_TYPES,
+        )
 
     def _prune_team_mission_events_if_terminal(self, mission_id: str) -> int:
         try:
@@ -1375,7 +1404,7 @@ class SessionDBTeamMissionGraphMixin:
         run_id: str,
         session_id: str,
         role: str = "worker",
-        runtime_session_id: str = "",
+        execution_session_id: str = "",
         runtime_scope_key: str = "",
         metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
@@ -1397,7 +1426,7 @@ class SessionDBTeamMissionGraphMixin:
             conn.execute(
                 """
                 INSERT INTO team_mission_run_bindings (
-                    mission_id, node_id, run_id, session_id, runtime_session_id,
+                    mission_id, node_id, run_id, session_id, execution_session_id,
                     runtime_scope_key, role, metadata_json, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1405,7 +1434,7 @@ class SessionDBTeamMissionGraphMixin:
                     mission_id = excluded.mission_id,
                     node_id = excluded.node_id,
                     session_id = excluded.session_id,
-                    runtime_session_id = excluded.runtime_session_id,
+                    execution_session_id = excluded.execution_session_id,
                     runtime_scope_key = excluded.runtime_scope_key,
                     role = excluded.role,
                     metadata_json = excluded.metadata_json,
@@ -1416,7 +1445,7 @@ class SessionDBTeamMissionGraphMixin:
                     str(node_id or ""),
                     run_id,
                     session_id,
-                    str(runtime_session_id or ""),
+                    str(execution_session_id or ""),
                     str(runtime_scope_key or ""),
                     str(role or "worker"),
                     _json_dumps(merged_metadata if isinstance(merged_metadata, dict) else {}),
@@ -1433,8 +1462,8 @@ class SessionDBTeamMissionGraphMixin:
                     UPDATE team_mission_nodes
                        SET canonical_node_id = COALESCE(NULLIF(canonical_node_id, ''), ?),
                            task_frame_id = COALESCE(NULLIF(task_frame_id, ''), ?),
-                           runtime_stable_session_id = COALESCE(NULLIF(?, ''), runtime_stable_session_id),
-                           runtime_session_id = COALESCE(NULLIF(?, ''), runtime_session_id),
+                           runtime_conversation_session_id = COALESCE(NULLIF(?, ''), runtime_conversation_session_id),
+                           execution_session_id = COALESCE(NULLIF(?, ''), execution_session_id),
                            runtime_scope_key = COALESCE(NULLIF(?, ''), runtime_scope_key),
                            updated_at = ?
                      WHERE mission_id = ?
@@ -1444,14 +1473,14 @@ class SessionDBTeamMissionGraphMixin:
                         canonical_node_id,
                         task_frame_id,
                         session_id,
-                        str(runtime_session_id or ""),
+                        str(execution_session_id or ""),
                         str(runtime_scope_key or ""),
                         now,
                         mission_id,
                         str(node_id or ""),
                     ),
                 )
-            return self._team_mission_run_binding_from_row(conn.execute(
+            return self.team_mission_rows.run_binding_from_row(conn.execute(
                 "SELECT * FROM team_mission_run_bindings WHERE run_id = ?",
                 (run_id,),
             ).fetchone()) or {}
@@ -1467,7 +1496,7 @@ class SessionDBTeamMissionGraphMixin:
                 "SELECT * FROM team_mission_run_bindings WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-        return self._team_mission_run_binding_from_row(row) or {}
+        return self.team_mission_rows.run_binding_from_row(row) or {}
 
     def team_mission_run_session_ids(self, session_ids: list[str]) -> set[str]:
         normalized = [str(session_id or "").strip() for session_id in session_ids]
@@ -1478,17 +1507,17 @@ class SessionDBTeamMissionGraphMixin:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT DISTINCT session_id, runtime_session_id
+                SELECT DISTINCT session_id, execution_session_id
                 FROM team_mission_run_bindings
                 WHERE session_id IN ({placeholders})
-                   OR runtime_session_id IN ({placeholders})
+                   OR execution_session_id IN ({placeholders})
                 """,
                 tuple(normalized + normalized),
             ).fetchall()
         requested = set(normalized)
         internal_ids: set[str] = set()
         for row in rows:
-            for key in ("session_id", "runtime_session_id"):
+            for key in ("session_id", "execution_session_id"):
                 value = str(_row_value(row, key, "") or "").strip()
                 if value and value in requested:
                     internal_ids.add(value)

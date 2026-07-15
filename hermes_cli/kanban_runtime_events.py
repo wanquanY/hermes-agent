@@ -99,7 +99,7 @@ class KanbanRuntimeEventSink:
             {
                 "type": "session.info",
                 "session_id": self.session_id,
-                "stored_session_id": self.session_id,
+                "conversation_session_id": self.session_id,
                 "runtime_scope_key": self.runtime_scope_key,
                 "profile": profile,
                 "workspace": workspace,
@@ -112,7 +112,7 @@ class KanbanRuntimeEventSink:
                 "type": "message.start",
                 "role": "assistant",
                 "session_id": self.session_id,
-                "stored_session_id": self.session_id,
+                "conversation_session_id": self.session_id,
                 "runtime_scope_key": self.runtime_scope_key,
             },
         )
@@ -251,7 +251,7 @@ class KanbanRuntimeEventSink:
                 "timestamp": time.time(),
                 "run_id": self.run_id,
                 "session_id": self.session_id,
-                "stored_session_id": self.session_id,
+                "conversation_session_id": self.session_id,
                 "runtime_scope_key": self.runtime_scope_key,
                 **payload,
             }

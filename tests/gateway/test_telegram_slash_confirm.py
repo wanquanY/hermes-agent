@@ -34,8 +34,8 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter
-from gateway.config import PlatformConfig
+from channels.platforms.telegram import TelegramAdapter
+from hermes_gateway.config import PlatformConfig
 
 
 def _make_adapter():
@@ -71,7 +71,7 @@ class TestSendSlashConfirm:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert str(sent["parse_mode"]) == "MarkdownV2" or "MARKDOWN_V2" in repr(sent["parse_mode"])
         # Underscores and dots must be escaped by format_message
         assert "script\\_name" in sent["text"]
         assert "\\." in sent["text"]

@@ -73,7 +73,7 @@ def _resolve_to_parent(db, session_id: str) -> str:
     while cur and cur not in visited:
         visited.add(cur)
         try:
-            s = db.get_session(cur)
+            s = db.sessions.get(cur)
             if not s:
                 break
             parent = s.get("parent_session_id")
@@ -110,7 +110,7 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
-        sessions = db.list_sessions_rich(
+        sessions = db.sessions.list_rich(
             limit=limit + 5,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             order_by_last_active=True,
@@ -193,7 +193,7 @@ def _scroll(
 
     # Session existence check
     try:
-        session_meta = db.get_session(session_id) or {}
+        session_meta = db.sessions.get(session_id) or {}
     except Exception as e:
         logging.debug("get_session failed for %s: %s", session_id, e, exc_info=True)
         session_meta = {}
@@ -202,7 +202,11 @@ def _scroll(
 
     # Fetch the window
     try:
-        view = db.get_messages_around(session_id, around_message_id, window=window)
+        view = db.messages.window_around(
+            session_id,
+            around_message_id,
+            window=window,
+        )
     except Exception as e:
         logging.error("get_messages_around failed: %s", e, exc_info=True)
         return tool_error(f"failed to load messages: {e}", success=False)
@@ -216,13 +220,7 @@ def _scroll(
     if not messages:
         owning = None
         try:
-            conn = getattr(db, "_conn", None)
-            if conn is not None:
-                row = conn.execute(
-                    "SELECT session_id FROM messages WHERE id = ?",
-                    (around_message_id,),
-                ).fetchone()
-                owning = row[0] if row else None
+            owning = db.messages.owning_session_id(around_message_id)
         except Exception as e:
             logging.debug("owning-session lookup failed: %s", e, exc_info=True)
             owning = None
@@ -231,7 +229,11 @@ def _scroll(
             o_root = _resolve_to_parent(db, owning)
             if a_root and o_root and a_root == o_root:
                 try:
-                    rebind_view = db.get_messages_around(owning, around_message_id, window=window)
+                    rebind_view = db.messages.window_around(
+                        owning,
+                        around_message_id,
+                        window=window,
+                    )
                     messages = rebind_view.get("window") or []
                     if messages:
                         view = rebind_view
@@ -240,7 +242,7 @@ def _scroll(
                             f"(child of {session_id}); rebound transparently"
                         )
                         try:
-                            session_meta = db.get_session(owning) or session_meta
+                            session_meta = db.sessions.get(owning) or session_meta
                         except Exception:
                             pass
                         session_id = owning
@@ -286,7 +288,7 @@ def _discover(
     role_list = role_filter if role_filter else ["user", "assistant"]
 
     try:
-        raw_results = db.search_messages(
+        raw_results = db.messages.search(
             query=query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
@@ -334,13 +336,18 @@ def _discover(
         hit_sid = match_info.get("session_id") or lineage_root
         msg_id = match_info.get("id")
         try:
-            view = db.get_anchored_view(hit_sid, msg_id, window=5, bookend=3)
+            view = db.messages.anchored_view(
+                hit_sid,
+                msg_id,
+                window=5,
+                bookend=3,
+            )
         except Exception as e:
             logging.warning("get_anchored_view failed for %s/%s: %s", hit_sid, msg_id, e, exc_info=True)
             continue
 
         try:
-            session_meta = db.get_session(lineage_root) or {}
+            session_meta = db.sessions.get(lineage_root) or {}
         except Exception:
             session_meta = {}
 
@@ -398,13 +405,8 @@ def session_search(
     asked for a slice of a known session.
     """
     if db is None:
-        try:
-            from hermes_state import SessionDB
-            db = SessionDB()
-        except Exception:
-            logging.debug("SessionDB unavailable for session_search", exc_info=True)
-            from hermes_state import format_session_db_unavailable
-            return tool_error(format_session_db_unavailable(), success=False)
+        from hermes_agent.read_models.session_recall import unavailable_message
+        return tool_error(unavailable_message(), success=False)
 
     # Scroll shape takes precedence — explicit anchor beats any query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
@@ -453,9 +455,9 @@ def session_search(
 def check_session_search_requirements() -> bool:
     """Requires the SQLite state database."""
     try:
-        from hermes_state import DEFAULT_DB_PATH
-        return DEFAULT_DB_PATH.parent.exists()
-    except ImportError:
+        from hermes_constants import get_hermes_home
+        return (get_hermes_home() / "state.db").parent.exists()
+    except Exception:
         return False
 
 

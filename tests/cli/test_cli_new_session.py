@@ -6,9 +6,10 @@ import importlib
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from tools.todo_tool import TodoStore
 
 
@@ -121,8 +122,8 @@ def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
 
 def _prepare_cli_with_active_session(tmp_path):
     cli = _make_cli()
-    cli._session_db = SessionDB(db_path=tmp_path / "state.db")
-    cli._session_db.create_session(session_id=cli.session_id, source="cli", model=cli.model)
+    cli._session_db = open_cli_session_store(db_path=tmp_path / "state.db")
+    cli._session_db.sessions.create(session_id=cli.session_id, source="cli", model=cli.model)
 
     cli.agent = _FakeAgent(cli.session_id, cli.session_start)
     cli.conversation_history = [{"role": "user", "content": "hello"}]
@@ -147,14 +148,14 @@ def test_new_command_creates_real_fresh_session_and_resets_agent_state(tmp_path)
 
     assert cli.session_id != old_session_id
 
-    old_session = cli._session_db.get_session(old_session_id)
+    old_session = cli._session_db.sessions.get(old_session_id)
     assert old_session is not None
     assert old_session["end_reason"] == "new_session"
 
-    new_session = cli._session_db.get_session(cli.session_id)
+    new_session = cli._session_db.sessions.get(cli.session_id)
     assert new_session is not None
 
-    cli._session_db.append_message(cli.session_id, role="user", content="next turn")
+    cli._session_db.messages.append(cli.session_id, role="user", content="next turn")
 
     assert cli.agent.session_id == cli.session_id
     assert cli.agent._last_flushed_db_idx == 0
@@ -171,8 +172,8 @@ def test_reset_command_is_alias_for_new_session(tmp_path):
     cli.process_command("/reset")
 
     assert cli.session_id != old_session_id
-    assert cli._session_db.get_session(old_session_id)["end_reason"] == "new_session"
-    assert cli._session_db.get_session(cli.session_id) is not None
+    assert cli._session_db.sessions.get(old_session_id)["end_reason"] == "new_session"
+    assert cli._session_db.sessions.get(cli.session_id) is not None
 
 
 def test_clear_command_starts_new_session_before_redrawing(tmp_path):
@@ -184,8 +185,8 @@ def test_clear_command_starts_new_session_before_redrawing(tmp_path):
     cli.process_command("/clear")
 
     assert cli.session_id != old_session_id
-    assert cli._session_db.get_session(old_session_id)["end_reason"] == "new_session"
-    assert cli._session_db.get_session(cli.session_id) is not None
+    assert cli._session_db.sessions.get(old_session_id)["end_reason"] == "new_session"
+    assert cli._session_db.sessions.get(cli.session_id) is not None
     cli.console.clear.assert_called_once()
     cli.show_banner.assert_called_once()
     assert cli.conversation_history == []
@@ -235,9 +236,9 @@ def test_new_session_with_title(capsys):
 
     cli.new_session(title="My Test Session")
 
-    # Assert set_session_title was called with the new session ID and sanitized title
-    cli._session_db.set_session_title.assert_called_once()
-    call_args = cli._session_db.set_session_title.call_args
+    # Assert the session component receives the sanitized title.
+    cli._session_db.sessions.set_title.assert_called_once()
+    call_args = cli._session_db.sessions.set_title.call_args
     assert call_args[0][0] == cli.session_id
     assert call_args[0][1] == "My Test Session"
 
@@ -253,7 +254,7 @@ def test_new_session_with_duplicate_title_surfaces_error(capsys):
     """
     cli = _make_cli()
     cli._session_db = MagicMock()
-    cli._session_db.set_session_title.side_effect = ValueError(
+    cli._session_db.sessions.set_title.side_effect = ValueError(
         "Title 'Dup' is already in use by session abc-123"
     )
     cli.agent = _FakeAgent("old_session_id", datetime.now())
@@ -271,7 +272,7 @@ def test_new_session_with_duplicate_title_surfaces_error(capsys):
     finally:
         method_globals["_cprint"] = original
 
-    cli._session_db.set_session_title.assert_called_once()
+    cli._session_db.sessions.set_title.assert_called_once()
     joined = "\n".join(warnings)
     assert "already in use" in joined
     assert "session started untitled" in joined
@@ -280,3 +281,44 @@ def test_new_session_with_duplicate_title_surfaces_error(capsys):
     captured = capsys.readouterr()
     assert "New session started: Dup" not in captured.out
     assert "New session started!" in captured.out
+
+
+def test_empty_session_handoff_persists_session_aggregate():
+    from hermes_gateway.config import Platform
+
+    cli = _make_cli()
+    cli._session_db = MagicMock()
+    cli._session_db.sessions.get.side_effect = [
+        None,
+        {"id": cli.session_id, "title": "handoff-session"},
+    ]
+    cli._session_db.sessions.request_handoff.return_value = True
+    cli._session_db.sessions.handoff_state.return_value = {"state": "completed"}
+    gateway_config = SimpleNamespace(
+        platforms={Platform.TELEGRAM: SimpleNamespace(enabled=True)},
+        get_home_channel=lambda _platform: SimpleNamespace(
+            chat_id="home-chat",
+            name="Home",
+        ),
+    )
+
+    with patch(
+        "hermes_gateway.config.load_gateway_config",
+        return_value=gateway_config,
+    ):
+        keep_running = cli._handle_handoff_command("/handoff telegram")
+
+    assert keep_running is False
+    cli._session_db.sessions.ensure.assert_called_once_with(
+        cli.session_id,
+        source="cli",
+        model=cli.model,
+    )
+    cli._session_db.sessions.set_title.assert_called_once_with(
+        cli.session_id,
+        f"handoff-{cli.session_id[:8]}",
+    )
+    cli._session_db.sessions.request_handoff.assert_called_once_with(
+        cli.session_id,
+        "telegram",
+    )

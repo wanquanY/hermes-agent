@@ -11,7 +11,7 @@ from hermes_team_mission.tools import profile as profile_tools
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_PATH = REPO_ROOT / "hermes_team_mission/tools/profile.py"
-WORKER_SUPERVISOR_PATH = REPO_ROOT / "tui_gateway/services/worker_supervisor.py"
+WORKER_SUPERVISOR_PATH = REPO_ROOT / "hermes_agent/orchestration/worker_supervisor.py"
 
 FORBIDDEN_SNAPSHOT_DB_METHODS = {
     "get_team_capability_snapshot",

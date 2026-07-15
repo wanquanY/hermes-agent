@@ -6,9 +6,7 @@ import importlib
 import sys
 from typing import Any
 
-from dovie_extension import load_extension
-
-METHOD_MODULES = (
+MODULES = (
     "session",
     "session_history",
     "session_interrupt",
@@ -29,7 +27,7 @@ METHOD_MODULES = (
     "hermes_team_mission.gateway.conversation_methods",
     "hermes_team_mission.gateway.runtime_methods",
     "hermes_team_mission.gateway.snapshot_methods",
-    "hermes_team_mission.gateway.memory_methods",
+    "hermes_team_mission.gateway.conversation_memory_methods",
     "hermes_team_mission.gateway.history_methods",
     "config",
     "setup",
@@ -39,6 +37,7 @@ METHOD_MODULES = (
     "billing",
     "paste",
     "complete",
+    "codex",
     "model",
     "slash",
     "voice",
@@ -50,14 +49,12 @@ METHOD_MODULES = (
 
 
 def register_method_modules(target: dict[str, Any]) -> None:
-    for module in METHOD_MODULES:
+    for module in MODULES:
         name = module if "." in module else f"tui_gateway.methods.{module}"
         if name in sys.modules:
             importlib.reload(sys.modules[name])
         else:
             importlib.import_module(name)
-
-    load_extension().register_gateway_methods(target)
 
     from tui_gateway.methods import prompt, slash, system
 

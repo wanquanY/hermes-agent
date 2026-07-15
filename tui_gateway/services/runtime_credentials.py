@@ -28,6 +28,20 @@ def ensure_agent_runtime_current(
     if agent is None:
         return False
 
+    # Codex-employee guard: codex_app_server agents are backed by a codex CLI
+    # subprocess that authenticates itself via CODEX_HOME/auth.json (BYO) or
+    # CODEX_HOME/config.toml `[model_providers.doxie]` (platform). There are
+    # no hermes-side credentials to "keep current". Re-resolving here would
+    # rebuild the runtime from the composer's `_gateway_runtime_requested_
+    # provider` (typically `custom`, tied to whichever model the composer
+    # has selected) — that yields chat_completions against the platform
+    # gateway and silently swaps the codex CLI out from under the session.
+    # Symptom: user chatting with a Codex employee gets replies from
+    # glm-5.2 / claude / etc via the gateway, never touching their ChatGPT
+    # account. Skip the rebind entirely for codex_app_server sessions.
+    if str(getattr(agent, "api_mode", "") or "").strip() == "codex_app_server":
+        return False
+
     requested_provider = str(
         getattr(agent, "_gateway_runtime_requested_provider", "") or ""
     ).strip() or None

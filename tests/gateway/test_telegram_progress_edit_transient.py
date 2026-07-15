@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.platforms.base import SendResult
+from channels.platforms.base import SendResult
 
 
 # ---------------------------------------------------------------------------

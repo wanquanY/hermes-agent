@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from tools.session_search_tool import (
     SESSION_SEARCH_SCHEMA,
     _HIDDEN_SESSION_SOURCES,
@@ -23,38 +23,38 @@ from tools.session_search_tool import (
 
 @pytest.fixture
 def db(tmp_path):
-    return SessionDB(tmp_path / "state.db")
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 def _seed_modpack_sessions(db):
     """Create three sessions about a modpack so FTS5 has hits to dedupe."""
     now = int(time.time())
     # Older session — modpack origin
-    db.create_session("s_oldest", source="cli")
+    db.sessions.create("s_oldest", source="cli")
     db._conn.execute("UPDATE sessions SET started_at = ?, title = ? WHERE id = ?",
                      (now - 30000, "Building the Modpack", "s_oldest"))
-    db.append_message("s_oldest", role="user", content="Let's build a Minecraft modpack")
-    db.append_message("s_oldest", role="assistant", content="Great. Let me scaffold the modpack repo.")
-    db.append_message("s_oldest", role="user", content="Use NeoForge 1.21.1")
-    db.append_message("s_oldest", role="assistant", content="Done. Modpack repo created with NeoForge 1.21.1.")
-    db.append_message("s_oldest", role="assistant", content="Tier-0 mods installed; modpack smoke test passes.")
+    db.messages.append("s_oldest", role="user", content="Let's build a Minecraft modpack")
+    db.messages.append("s_oldest", role="assistant", content="Great. Let me scaffold the modpack repo.")
+    db.messages.append("s_oldest", role="user", content="Use NeoForge 1.21.1")
+    db.messages.append("s_oldest", role="assistant", content="Done. Modpack repo created with NeoForge 1.21.1.")
+    db.messages.append("s_oldest", role="assistant", content="Tier-0 mods installed; modpack smoke test passes.")
 
     # Middle session — modpack quest coverage
-    db.create_session("s_middle", source="cli")
+    db.sessions.create("s_middle", source="cli")
     db._conn.execute("UPDATE sessions SET started_at = ?, title = ? WHERE id = ?",
                      (now - 15000, "Modpack Quest Coverage", "s_middle"))
-    db.append_message("s_middle", role="user", content="Deep-dive every modpack reference quest guide")
-    db.append_message("s_middle", role="assistant", content="Surveying ATM10 questbook for modpack inspiration.")
-    db.append_message("s_middle", role="user", content="Update the modpack version too")
-    db.append_message("s_middle", role="assistant", content="Modpack version bumped 0.4 → 0.8.5; quest coverage page added.")
+    db.messages.append("s_middle", role="user", content="Deep-dive every modpack reference quest guide")
+    db.messages.append("s_middle", role="assistant", content="Surveying ATM10 questbook for modpack inspiration.")
+    db.messages.append("s_middle", role="user", content="Update the modpack version too")
+    db.messages.append("s_middle", role="assistant", content="Modpack version bumped 0.4 → 0.8.5; quest coverage page added.")
 
     # Newest session — modpack mob spawn fix
-    db.create_session("s_newest", source="cli")
+    db.sessions.create("s_newest", source="cli")
     db._conn.execute("UPDATE sessions SET started_at = ?, title = ? WHERE id = ?",
                      (now - 1000, "Modpack Mob Spawn Fix", "s_newest"))
-    db.append_message("s_newest", role="user", content="Fix the modpack mob spawning")
-    db.append_message("s_newest", role="assistant", content="Investigating elite mob gating in the modpack KubeJS.")
-    db.append_message("s_newest", role="assistant", content="Shipped commit b850442. Modpack alternator nerfed too.")
+    db.messages.append("s_newest", role="user", content="Fix the modpack mob spawning")
+    db.messages.append("s_newest", role="assistant", content="Investigating elite mob gating in the modpack KubeJS.")
+    db.messages.append("s_newest", role="assistant", content="Shipped commit b850442. Modpack alternator nerfed too.")
     db._conn.commit()
 
 
@@ -97,6 +97,13 @@ class TestSchema:
         # The new design never calls an LLM
         desc = SESSION_SEARCH_SCHEMA["description"].lower()
         assert "no llm" in desc
+
+
+def test_session_search_without_read_model_reports_unavailable():
+    result = json.loads(session_search(query="anything", db=None))
+
+    assert result["success"] is False
+    assert "read model" in result["error"]
 
 
 class TestHiddenSources:
@@ -228,9 +235,9 @@ class TestDiscoverySort:
 
 class TestRoleFilter:
     def test_default_excludes_tool_role(self, db):
-        db.create_session("s1", source="cli")
-        db.append_message("s1", role="user", content="modpack question")
-        db.append_message("s1", role="tool", content="modpack tool output", tool_name="x")
+        db.sessions.create("s1", source="cli")
+        db.messages.append("s1", role="user", content="modpack question")
+        db.messages.append("s1", role="tool", content="modpack tool output", tool_name="x")
         result = json.loads(session_search(query="modpack", db=db))
         # The FTS5 match should be on the user message, not the tool message
         if result["count"] > 0:
@@ -238,8 +245,8 @@ class TestRoleFilter:
             assert matched_role in ("user", "assistant")
 
     def test_explicit_tool_role_includes_tool(self, db):
-        db.create_session("s1", source="cli")
-        db.append_message("s1", role="tool", content="modpack tool output", tool_name="x")
+        db.sessions.create("s1", source="cli")
+        db.messages.append("s1", role="tool", content="modpack tool output", tool_name="x")
         result = json.loads(session_search(query="modpack", role_filter="tool", db=db))
         # Should now match the tool message
         if result["count"] > 0:
@@ -353,10 +360,10 @@ class TestScrollPattern:
 
     def test_scroll_forward_from_last_id(self, db):
         # Long session
-        db.create_session("s_long", source="cli")
+        db.sessions.create("s_long", source="cli")
         ids = []
         for i in range(20):
-            ids.append(db.append_message("s_long", role="user" if i % 2 == 0 else "assistant",
+            ids.append(db.messages.append("s_long", role="user" if i % 2 == 0 else "assistant",
                                          content=f"long session msg {i}"))
 
         v1 = json.loads(session_search(

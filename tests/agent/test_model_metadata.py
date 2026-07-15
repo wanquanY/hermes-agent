@@ -134,7 +134,9 @@ class TestDefaultContextLengths:
             # Claude 4.6+ models (4.6 and 4.7) have 1M context at standard
             # API pricing (no long-context premium).  Older Claude 4.x and
             # 3.x models cap at 200k.
-            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7")):
+            if any(tag in key for tag in (
+                "4.6", "4-6", "4.7", "4-7", "4.8", "4-8", "fable"
+            )):
                 assert value == 1000000, f"{key} should be 1000000"
             else:
                 assert value == 200000, f"{key} should be 200000"

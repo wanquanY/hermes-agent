@@ -754,8 +754,8 @@ class TestReasoningStreaming:
         assert response.choices[0].message.reasoning_content == "Let me think about this"
         assert response.choices[0].message.content == "The answer is 42"
 
-    def test_reasoning_callback_normalizes_cumulative_snapshots(self):
-        """Reasoning callbacks expose append-only deltas even when providers resend snapshots."""
+    def test_reasoning_callback_preserves_literal_repeated_deltas(self):
+        """Provider reasoning deltas are forwarded without content-based truncation."""
         from run_agent import AIAgent
 
         agent = object.__new__(AIAgent)
@@ -764,10 +764,12 @@ class TestReasoningStreaming:
         agent._current_streamed_reasoning_text = ""
 
         agent._fire_reasoning_delta("Let me think")
-        agent._fire_reasoning_delta("Let me think about this")
-        agent._fire_reasoning_delta(" about this carefully")
+        agent._fire_reasoning_delta(" ")
+        agent._fire_reasoning_delta("think")
+        agent._fire_reasoning_delta("think")
 
-        assert reasoning_deltas == ["Let me think", " about this", " carefully"]
+        assert reasoning_deltas == ["Let me think", " ", "think", "think"]
+        assert agent._current_streamed_reasoning_text == "Let me think thinkthink"
 
 
 # ── Test: _has_stream_consumers ──────────────────────────────────────────

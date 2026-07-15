@@ -32,7 +32,7 @@ from tui_gateway.run_worker import (
     LogFrame,
     RunTerminalFrame,
 )
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
 
 
 class _FakeSupervisor:
@@ -50,7 +50,7 @@ class _FakeSupervisor:
         return self.deliver
 
 
-def _make_router(supervisor: _FakeSupervisor = None):
+def _make_router(supervisor: _FakeSupervisor = None, persist_interaction_event=None):
     sup = supervisor or _FakeSupervisor()
     events: list[dict] = []
     terminals: list[dict] = []
@@ -67,6 +67,7 @@ def _make_router(supervisor: _FakeSupervisor = None):
         sender=sup,
         publish_event=publish_event,
         publish_run_terminal=publish_run_terminal,
+        persist_interaction_event=persist_interaction_event,
     )
     return router, sup, events, terminals
 
@@ -90,6 +91,88 @@ async def test_on_event_forwards_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interaction_request_publishes_independent_frame_and_persists_internal() -> None:
+    persisted: list[tuple[str, str, str, str, int]] = []
+
+    def persist(event_type: str, entry: Any) -> None:
+        persisted.append((event_type, entry.request_id, entry.kind, entry.session_key, entry.anchor_seq))
+
+    router, _sup, events, _ = _make_router(persist_interaction_event=persist)
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(params={
+            "type": "approval.request",
+            "conversation_session_id": "sess-1",
+            "payload": {
+                "request_id": "req-approval",
+                "command": "rm -rf /tmp/demo",
+                "anchor_seq": 12,
+            },
+        }),
+    )
+
+    assert persisted == [("interaction.requested", "req-approval", "approval", "sess-1", 12)]
+    assert events == [
+        {
+            "type": "interaction.requested",
+            "kind": "approval",
+            "request_id": "req-approval",
+            "conversation_session_id": "sess-1",
+            "session_id": "",
+            "runtime_scope_key": "profile:x",
+            "conversation_id": "sess-1",
+            "run_id": "",
+            "turn_id": "",
+            "seq": 0,
+            "payload": {
+                "request_id": "req-approval",
+                "command": "rm -rf /tmp/demo",
+                "anchor_seq": 12,
+                "kind": "approval",
+                "status": "pending",
+                "source_event_type": "approval.request",
+                "source_event": {
+                    "type": "approval.request",
+                    "conversation_session_id": "sess-1",
+                    "payload": {
+                        "request_id": "req-approval",
+                        "command": "rm -rf /tmp/demo",
+                        "anchor_seq": 12,
+                    },
+                    "runtime_scope_key": "profile:x",
+                    "conversation_id": "sess-1",
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interaction_request_persistence_failure_blocks_delivery() -> None:
+    def persist(_event_type: str, _entry: Any) -> None:
+        raise RuntimeError("persist failed")
+
+    router, _sup, events, _ = _make_router(persist_interaction_event=persist)
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        await router.on_event(
+            "profile:x",
+            "sess-1",
+            EventFrame(params={
+                "type": "approval.request",
+                "conversation_session_id": "sess-1",
+                "payload": {
+                    "request_id": "req-approval",
+                    "anchor_seq": 12,
+                },
+            }),
+        )
+
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_on_interactive_request_records_pending_only() -> None:
     """The worker's monkey-patched publish_recorded_event emits the
     public ``{kind}.request`` event via the standard path; the router
@@ -101,13 +184,13 @@ async def test_on_interactive_request_records_pending_only() -> None:
             kind="clarify",
             request_id="req-1",
             payload={"question": "ok?"},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     assert router.has_pending_request("req-1")
     # No event published — that's the worker's job, not the router's.
     assert events == []
-    # But the routing table did capture the stored_session_id.
+    # But the routing table did capture the conversation_session_id.
     snap = router.pending_snapshot()
     assert snap["pendingInteractive"] == [
         {
@@ -115,21 +198,21 @@ async def test_on_interactive_request_records_pending_only() -> None:
             "scopeKey": "profile:x",
             "conversationId": "sess-1",
             "kind": "clarify",
-            "storedSessionId": "sess-1",
+            "conversationSessionId": "sess-1",
         },
     ]
 
 
 @pytest.mark.asyncio
 async def test_on_interactive_request_cross_fills_stored_session_from_run() -> None:
-    """When the worker omits stored_session_id (e.g. an older worker
+    """When the worker omits conversation_session_id (e.g. an older worker
     build), the router fills it from the active run record so a later
     respond/lookup can still scope correctly."""
     router, _sup, events, _ = _make_router()
     router.record_run_start(
         scope_key="profile:x",
         run_id="run-1",
-        stored_session_id="sess-A",
+        conversation_session_id="sess-A",
         turn_id="t-1",
     )
     await router.on_interactive_request(
@@ -147,7 +230,7 @@ async def test_on_interactive_request_cross_fills_stored_session_from_run() -> N
             "scopeKey": "profile:x",
             "conversationId": "sess-A",
             "kind": "approval",
-            "storedSessionId": "sess-A",
+            "conversationSessionId": "sess-A",
         },
     ]
     assert events == []
@@ -165,22 +248,116 @@ async def test_on_interactive_request_drops_unknown_kind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_run_terminal_skips_publish_on_completed() -> None:
-    """For a normal completion the worker's agent already published a
-    ``message.complete`` event via the publish hook; the router must
-    NOT re-publish here."""
+async def test_on_run_terminal_reconciles_completed_run() -> None:
+    """RunTerminalFrame is the main-side lifecycle reconciliation barrier."""
     router, _sup, _events, terminals = _make_router()
     await router.on_run_terminal(
         "profile:x",
         RunTerminalFrame(
             run_id="run-1",
             status="completed",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="",
         ),
     )
-    assert terminals == []  # NOT published
+    assert terminals == [
+        {
+            "conversation_session_id": "sess-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "runtime_scope_key": "profile:x",
+            "execution_session_id": "sess-1",
+            "activity_id": "",
+            "status": "completed",
+            "message": "",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_activity_terminal_is_persisted_through_activity_service(monkeypatch) -> None:
+    from tui_gateway import server
+
+    class Activities:
+        def __init__(self) -> None:
+            self.row = {
+                "activity_id": "activity-1",
+                "kind": "agent",
+                "status": "running",
+                "title": "Delegated task",
+            }
+            self.completed: list[dict] = []
+
+        def get(self, activity_id: str):
+            return dict(self.row) if activity_id == "activity-1" else {}
+
+        def mark_completed(self, activity_id: str, **kwargs) -> bool:
+            self.completed.append({"activity_id": activity_id, **kwargs})
+            self.row.update(status="completed", **kwargs)
+            return True
+
+    class DB:
+        def __init__(self) -> None:
+            self.activities = Activities()
+
+    db = DB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    router, _sup, events, terminals = _make_router()
+    router.record_run_start(
+        scope_key="profile:x",
+        run_id="run-1",
+        conversation_session_id="sess-1",
+        turn_id="turn-1",
+        dispatch_activity_id="activity-1",
+    )
+    await router.on_event(
+        "profile:x",
+        "sess-1",
+        EventFrame(
+            params={
+                "type": "message.complete",
+                "run_id": "run-1",
+                "payload": {"text": "done", "usage": {"total_tokens": 7}},
+            }
+        ),
+    )
+
+    await router.on_run_terminal(
+        "profile:x",
+        "sess-1",
+        RunTerminalFrame(
+            run_id="run-1",
+            status="completed",
+            conversation_session_id="sess-1",
+            turn_id="turn-1",
+        ),
+    )
+
+    assert db.activities.completed == [
+        {
+            "activity_id": "activity-1",
+            "result_summary": "done",
+            "result_json": {
+                "last_message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "metadata": {
+                        "run_id": "run-1",
+                        "turn_id": None,
+                        "status": None,
+                        "usage": {"total_tokens": 7},
+                        "source_event": "message.complete",
+                    },
+                },
+                "usage": {"total_tokens": 7},
+                "run_id": "run-1",
+            },
+        }
+    ]
+    assert any(event.get("type") == "activity.completed" for event in events)
+    assert len(terminals) == 1
+    assert terminals[0]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -194,18 +371,19 @@ async def test_on_run_terminal_publishes_on_failed() -> None:
         RunTerminalFrame(
             run_id="run-1",
             status="failed",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="kaboom",
         ),
     )
     assert terminals == [
         {
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:x",
-            "runtime_session_id": "sess-1",
+            "execution_session_id": "sess-1",
+            "activity_id": "",
             "status": "failed",
             "message": "kaboom",
         }
@@ -220,7 +398,7 @@ async def test_on_run_terminal_publishes_on_cancelled() -> None:
         RunTerminalFrame(
             run_id="run-1",
             status="cancelled",
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
             turn_id="turn-1",
             message="user cancelled",
         ),
@@ -235,15 +413,14 @@ async def test_on_run_terminal_cross_fills_from_record_run_start() -> None:
     router.record_run_start(
         scope_key="profile:x",
         run_id="run-1",
-        stored_session_id="sess-A",
+        conversation_session_id="sess-A",
         turn_id="turn-A",
     )
-    # Use failed so the publish path actually fires (completed skips publish).
     await router.on_run_terminal(
         "profile:x",
         RunTerminalFrame(run_id="run-1", status="failed"),
     )
-    assert terminals[0]["stored_session_id"] == "sess-A"
+    assert terminals[0]["conversation_session_id"] == "sess-A"
     assert terminals[0]["turn_id"] == "turn-A"
     # cleanup: run table no longer holds run-1
     snapshot = router.pending_snapshot()
@@ -269,7 +446,7 @@ async def test_respond_routes_to_correct_worker() -> None:
             kind="clarify",
             request_id="req-1",
             payload={"question": "?"},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes", expected_kind="clarify")
@@ -299,7 +476,7 @@ async def test_respond_rejects_kind_mismatch() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="approval", request_id="req-1", payload={},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes", expected_kind="clarify")
@@ -317,7 +494,7 @@ async def test_respond_keeps_entry_on_send_failure() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-1", payload={},
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         ),
     )
     ok = await router.respond("req-1", "yes")
@@ -334,7 +511,7 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-A1", payload={},
-            stored_session_id="sess-A",
+            conversation_session_id="sess-A",
         ),
     )
     # Pending for sess-B (different session, same scope)
@@ -342,13 +519,13 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
         "profile:x",
         InteractiveRequestFrame(
             kind="clarify", request_id="req-B1", payload={},
-            stored_session_id="sess-B",
+            conversation_session_id="sess-B",
         ),
     )
     # Terminal for the sess-A run should drop only sess-A pending.
     router.record_run_start(
         scope_key="profile:x", run_id="run-A",
-        stored_session_id="sess-A", turn_id="t-A",
+        conversation_session_id="sess-A", turn_id="t-A",
     )
     await router.on_run_terminal(
         "profile:x", RunTerminalFrame(run_id="run-A", status="completed"),
@@ -361,7 +538,7 @@ async def test_run_terminal_clears_stale_pending_for_session() -> None:
 async def test_on_log_uses_main_logger(caplog) -> None:
     import logging
     router, _sup, _events, _ = _make_router()
-    with caplog.at_level(logging.WARNING, logger="tui_gateway.services.worker_frame_router"):
+    with caplog.at_level(logging.WARNING, logger="hermes_agent.orchestration.worker_frame_router"):
         await router.on_log("profile:x", LogFrame(level="warn", text="hello"))
     assert any("hello" in m for m in caplog.messages)
 
@@ -370,7 +547,7 @@ def test_pending_snapshot_shape() -> None:
     router, _sup, _events, _ = _make_router()
     router.record_run_start(
         scope_key="profile:x", run_id="run-1",
-        stored_session_id="sess-1", turn_id="t-1",
+        conversation_session_id="sess-1", turn_id="t-1",
     )
     snap = router.pending_snapshot()
     assert {"pendingInteractive", "activeRuns"} <= snap.keys()
@@ -379,7 +556,7 @@ def test_pending_snapshot_shape() -> None:
                 "runId": "run-1",
                 "scopeKey": "profile:x",
                 "conversationId": "sess-1",
-                "storedSessionId": "sess-1",
+                "conversationSessionId": "sess-1",
             "turnId": "t-1",
         }
     ]

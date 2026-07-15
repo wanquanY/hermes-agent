@@ -259,6 +259,38 @@ class TestRunTurn:
         assert "[Image attached at: /tmp/a.png]" in text
         assert "[image attached]" in text
 
+    def test_turn_start_includes_explicit_platform_model_override(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client)
+        r = s.run_turn("hi", model_override="glm-5.2", turn_timeout=2.0)
+
+        assert r.error is None
+        method, params = next(req for req in client.requests if req[0] == "turn/start")
+        assert method == "turn/start"
+        assert params["model"] == "glm-5.2"
+        assert r.requested_model == "glm-5.2"
+
+    def test_turn_start_omits_model_without_override(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client)
+        r = s.run_turn("hi", turn_timeout=2.0)
+
+        assert r.error is None
+        _method, params = next(req for req in client.requests if req[0] == "turn/start")
+        assert "model" not in params
+
     def test_tool_iteration_counter_ticks(self):
         client = FakeClient()
         # Two completed exec items + one final agent message
@@ -416,6 +448,27 @@ class TestRunTurn:
                        notification_poll_timeout=0.01)
         assert r.interrupted is True
         assert r.error and "timed out" in r.error
+
+    def test_no_event_watchdog_after_turn_started_closes_client(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        s = make_session(client)
+        r = s.run_turn(
+            "stream wedges",
+            turn_timeout=2.0,
+            notification_poll_timeout=0.005,
+            no_event_timeout=0.02,
+        )
+        assert r.interrupted is True
+        assert r.should_retire is True
+        assert r.error and "codex_app_server_no_event_timeout" in r.error
+        assert "Hint:" in r.error
+        assert client._closed is True
+        assert s._client is None
+        assert any(
+            method == "turn/interrupt" and params.get("turnId") == "turn-fake-001"
+            for (method, params) in client.requests
+        )
 
     def test_deadline_uses_monotonic_clock(self):
         client = FakeClient()

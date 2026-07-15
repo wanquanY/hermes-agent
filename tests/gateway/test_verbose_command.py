@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-import gateway.run as gateway_run
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+import hermes_gateway.runner as gateway_run
+import hermes_gateway.verbose_command as verbose_command
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/verbose", platform=Platform.TELEGRAM, user_id="12345", chat_id="67890"):
@@ -53,10 +54,10 @@ class TestVerboseCommand:
         config_path = hermes_home / "config.yaml"
         config_path.write_text("display:\n  tool_progress: all\n", encoding="utf-8")
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         assert "not enabled" in result.lower()
         assert "tool_progress_command" in result
@@ -72,10 +73,10 @@ class TestVerboseCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         # all -> verbose
         assert "VERBOSE" in result
@@ -96,10 +97,10 @@ class TestVerboseCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         assert "not enabled" in result.lower()
         assert "tool_progress_command" in result
@@ -115,13 +116,13 @@ class TestVerboseCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
         runner = _make_runner()
 
         # off -> new -> all -> verbose -> off
         expected = ["new", "all", "verbose", "off"]
         for mode in expected:
-            result = await runner._handle_verbose_command(_make_event())
+            result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
             saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             actual = saved["display"]["platforms"]["telegram"]["tool_progress"]
             assert actual == mode, \
@@ -138,10 +139,10 @@ class TestVerboseCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
 
         # Telegram platform default is "new" → cycles to "all"
         assert "ALL" in result
@@ -164,15 +165,15 @@ class TestVerboseCommand:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
         runner = _make_runner()
 
         # Cycle on Telegram
-        await runner._handle_verbose_command(
+        await verbose_command.verbose_command_for(runner).handle_verbose_command(
             _make_event(platform=Platform.TELEGRAM)
         )
         # Cycle on Slack
-        await runner._handle_verbose_command(
+        await verbose_command.verbose_command_for(runner).handle_verbose_command(
             _make_event(platform=Platform.SLACK)
         )
 
@@ -190,10 +191,10 @@ class TestVerboseCommand:
         hermes_home.mkdir()
         # No config.yaml
 
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(verbose_command, "GATEWAY_HOME", hermes_home)
 
         runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
+        result = await verbose_command.verbose_command_for(runner).handle_verbose_command(_make_event())
         assert "not enabled" in result.lower()
 
     def test_verbose_is_in_gateway_known_commands(self):

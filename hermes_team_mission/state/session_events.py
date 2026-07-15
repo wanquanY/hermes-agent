@@ -2,9 +2,10 @@ from __future__ import annotations
 
 # ruff: noqa: F401,F403,F405
 from .session_common import *
+from hermes_team_mission.domain.runtime_identity import runtime_event_identity
 
 
-class SessionDBTeamMissionEventMixin:
+class TeamMissionEventMixin:
     def _record_missing_team_mission_handoff(
         self,
         *,
@@ -69,10 +70,10 @@ class SessionDBTeamMissionEventMixin:
             elif status == "interrupted":
                 next_status = "interrupted"
             elif status in {"failed", "error"}:
-                if (
-                    self.team_mission_run_has_deliverable(run_id)
-                    or self._team_mission_run_has_deliverable_text(run_id, max_seq=_event_seq(event))
-                ):
+                # A failed run's streamed prose is not an authoritative
+                # deliverable. Only the explicit handoff contract can turn an
+                # error terminal into a completed node.
+                if self.team_mission_run_has_deliverable(run_id):
                     next_status = "completed"
                 else:
                     next_status = "failed"
@@ -209,7 +210,7 @@ class SessionDBTeamMissionEventMixin:
                 and _normalize_node_kind(node.get("kind")) == "root"
                 and next_status in {"completed", "failed", "cancelled", "interrupted"}
             ):
-                graph_for_check = self.get_team_mission_graph(mission_id_for_check)
+                graph_for_check = self.team_mission_graphs.get_team_mission_graph(mission_id_for_check)
                 mission_for_check = graph_for_check.get("mission") or {}
                 mission_status = _text(mission_for_check.get("status")).lower()
                 if not _is_terminal_mission_status(mission_status) and mission_status != "waiting_approval":
@@ -257,20 +258,21 @@ class SessionDBTeamMissionEventMixin:
             ).fetchone() if binding is not None else None
         if binding is None:
             return {}
-        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
-        node = self._team_mission_node_from_row(node_row) or {}
-        binding_value = self._team_mission_run_binding_from_row(binding) or {}
-        identity = _team_mission_runtime_event_identity(
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {"mission_id": mission_id}
+        node = self.team_mission_rows.node_from_row(node_row) or {}
+        binding_value = self.team_mission_rows.run_binding_from_row(binding) or {}
+        identity = runtime_event_identity(
             mission=mission,
             node=node,
             binding=binding_value,
         )
         frame = dict(event or {})
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        runtime_conversation_session_id = str(binding["session_id"] or "").strip()
         frame.update({
             "run_id": run_id,
-            "session_id": str(frame.get("session_id") or binding["runtime_session_id"] or ""),
-            "stored_session_id": str(binding["session_id"] or ""),
+            "session_id": str(frame.get("session_id") or binding["execution_session_id"] or ""),
+            "conversation_session_id": runtime_conversation_session_id,
             "runtime_scope_key": str(frame.get("runtime_scope_key") or binding["runtime_scope_key"] or binding["session_id"] or ""),
             "payload": payload,
         })
@@ -286,40 +288,46 @@ class SessionDBTeamMissionEventMixin:
         # explicit path performs the canonical projection itself below.
         self._team_mission_projecting = True
         try:
-            saved = self.append_run_event(str(binding["session_id"] or ""), frame)
+            saved = self.runs.append_event(str(binding["session_id"] or ""), frame)
             if (
                 isinstance(saved, dict)
                 and saved.get("_persistence_disposition") in {"duplicate_terminal", "ignored_after_terminal"}
             ):
                 return saved
-            source_event = saved or frame
-            if _text(frame.get("type")) == "message.delta":
-                source_event = dict(frame)
-                if isinstance(saved, dict):
-                    for key in ("seq", "timestamp", "session_id", "stored_session_id", "runtime_scope_key", "runtime_session_id"):
-                        if saved.get(key) is not None and not source_event.get(key):
-                            source_event[key] = saved.get(key)
+            # Projection must consume the canonical row returned by RunService.
+            # The incoming frame intentionally has no seq when planning tools
+            # emit structural events; persistence allocates that seq. Projecting
+            # the pre-write frame made every node.created (and every edge.created)
+            # share runtime_source_seq=0, so the mission audit log deduped all but
+            # the first event of each type. The saved row is the sole durable
+            # event identity and already contains every normalized session field.
+            source_event = dict(saved) if isinstance(saved, dict) else dict(frame)
+            source_seq = _event_seq(frame)
+            if source_seq > 0:
+                # Explicit callers of append_team_mission_run_event own a
+                # runtime source sequence used by node terminal arbitration.
+                # Keep it separate from saved["seq"], which is the canonical
+                # conversation-ledger sequence allocated by persistence.
+                source_event["source_seq"] = source_seq
             self._project_team_mission_run_event_locked(
                 mission_id=mission_id,
                 run_id=run_id,
                 binding=binding_value,
                 identity=identity,
+                node=node,
                 source_event=source_event,
             )
             terminal_status = _terminal_run_status_for_event(
                 _text(source_event.get("type")),
                 source_event.get("payload") if isinstance(source_event.get("payload"), dict) else {},
             )
-            if terminal_status and hasattr(self, "_maintain_run_events_after_append"):
-                try:
-                    self._maintain_run_events_after_append(
-                        session_id=str(binding["session_id"] or ""),
-                        run_id=run_id,
-                        seq=_event_seq(source_event),
-                        terminal_status=terminal_status,
-                    )
-                except Exception:
-                    pass
+            if terminal_status:
+                self.runs.retention.maintain_after_append(
+                    session_id=str(binding["session_id"] or ""),
+                    run_id=run_id,
+                    seq=_event_seq(source_event),
+                    terminal_status=terminal_status,
+                )
                 self._prune_team_mission_events_if_terminal(mission_id)
             return saved
         finally:
@@ -332,15 +340,14 @@ class SessionDBTeamMissionEventMixin:
         run_id: str,
         binding: Dict[str, Any],
         identity: Dict[str, str],
+        node: Dict[str, Any],
         source_event: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Canonical projection for one runtime event of a team-mission-bound run.
 
         Single implementation shared by both the explicit
         ``append_team_mission_run_event`` path and the write-time hook in
-        ``append_run_event`` (directly-delivered node events). Callers MUST set
-        ``self._team_mission_projecting`` for the duration so the conversation
-        mirror's nested ``append_run_event`` does not re-enter the hook.
+        ``append_run_event`` (directly-delivered node events).
         """
         mission_event = _event_log.append_team_mission_runtime_event(
             self,
@@ -350,20 +357,10 @@ class SessionDBTeamMissionEventMixin:
             identity=identity,
         )
         self.reduce_team_mission_run_event(run_id=run_id, event=source_event)
-        try:
-            _mirror_team_mission_event(
-                self,
-                mission_id=mission_id,
-                binding=binding,
-                event=source_event,
-                source="team_mission_run_event",
-            )
-        except Exception:
-            pass
         if (
             isinstance(mission_event, dict)
             and not mission_event.get("_persistence_disposition")
-            and _should_emit_conversation_status_projection(source_event)
+            and _should_emit_conversation_status_projection(source_event, node=node)
         ):
             _event_log.append_team_mission_conversation_status_event(
                 self,
@@ -402,8 +399,8 @@ class SessionDBTeamMissionEventMixin:
                 "SELECT * FROM team_missions WHERE mission_id = ?",
                 (mission_id,),
             ).fetchone()
-        mission = self._team_mission_from_row(mission_row) or {"mission_id": mission_id}
-        identity = _team_mission_runtime_event_identity(
+        mission = self.team_mission_rows.mission_from_row(mission_row) or {"mission_id": mission_id}
+        identity = runtime_event_identity(
             mission=mission,
             node=node,
             binding=binding,

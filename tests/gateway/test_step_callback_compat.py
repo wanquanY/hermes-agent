@@ -15,7 +15,7 @@ class TestStepCallbackNormalization:
     """The gateway's _step_callback_sync normalizes prev_tools from run_agent."""
 
     def _extract_step_callback(self):
-        """Build a minimal _step_callback_sync using the same logic as gateway/run.py.
+        """Build a minimal _step_callback_sync using the same logic as hermes_gateway/runner.py.
 
         We replicate the closure so we can test normalisation in isolation
         without spinning up the full gateway.

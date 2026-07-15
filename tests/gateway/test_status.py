@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from gateway import status
+import channels.runtime_status as status
 
 
 class TestGatewayPidState:
@@ -482,7 +482,7 @@ class TestScopedLocks:
         }))
 
         # Post-#21561 the liveness probe routes through
-        # ``gateway.status._pid_exists`` (psutil-first, safe on Windows).
+        # ``channels.runtime_status._pid_exists`` (psutil-first, safe on Windows).
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
@@ -510,7 +510,7 @@ class TestScopedLocks:
         }))
 
         # Post-#21561 the liveness probe routes through
-        # ``gateway.status._pid_exists`` (psutil-first, safe on Windows),
+        # ``channels.runtime_status._pid_exists`` (psutil-first, safe on Windows),
         # not ``os.kill``.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
@@ -1035,7 +1035,7 @@ class TestActiveAgentsTurnBoundaryWrite:
         rec = status.read_runtime_status()
         assert rec["active_agents"] == 2
         # The state must survive the per-turn write — this is what makes the
-        # _persist_active_agents helper safe to call on every turn.
+        # RuntimeStatusService.persist_active_agents safe to call on every turn.
         assert rec["gateway_state"] == "running"
 
     def test_active_agents_only_write_preserves_draining_state(self, tmp_path, monkeypatch):
@@ -1054,4 +1054,3 @@ class TestActiveAgentsTurnBoundaryWrite:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         status.write_runtime_status(gateway_state="running", active_agents=-5)
         assert status.read_runtime_status()["active_agents"] == 0
-

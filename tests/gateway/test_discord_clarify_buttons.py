@@ -26,11 +26,11 @@ if _repo not in sys.path:
 
 # Triggers the shared discord mock from tests/gateway/conftest.py before
 # importing the production module.
-from gateway.platforms.discord import (  # noqa: E402
+from channels.platforms.discord import (  # noqa: E402
     ClarifyChoiceView,
     DiscordAdapter,
 )
-from gateway.config import PlatformConfig  # noqa: E402
+from hermes_gateway.config import PlatformConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

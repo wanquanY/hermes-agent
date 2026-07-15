@@ -473,20 +473,25 @@ class TestDelegateTask(unittest.TestCase):
         reasoning_callback = MockAgent.call_args.kwargs.get("reasoning_callback")
         self.assertIsNotNone(reasoning_callback)
 
-        reasoning_callback("先确认版本。")
+        reasoning_callback("📋")
+        reasoning_callback(" 先确认版本。")
 
         reasoning_calls = [
             call
             for call in parent.tool_progress_callback.mock_calls
             if call.args and call.args[0] == "subagent.reasoning_delta"
         ]
-        self.assertEqual(len(reasoning_calls), 1)
-        event_type, tool_name, preview, args = reasoning_calls[0].args[:4]
+        self.assertEqual(len(reasoning_calls), 2)
+        event_type, tool_name, preview, args = reasoning_calls[1].args[:4]
         self.assertEqual(event_type, "subagent.reasoning_delta")
         self.assertIsNone(tool_name)
-        self.assertEqual(preview, "先确认版本。")
+        self.assertEqual(preview, " 先确认版本。")
         self.assertIsNone(args)
         self.assertEqual(reasoning_calls[0].kwargs["source"], "provider_reasoning")
+        self.assertEqual(reasoning_calls[0].kwargs["mode"], "append")
+        self.assertEqual(reasoning_calls[0].kwargs["delta"], "📋")
+        self.assertEqual(reasoning_calls[0].kwargs["offset"], 0)
+        self.assertEqual(reasoning_calls[1].kwargs["offset"], 2)
         self.assertTrue(reasoning_calls[0].kwargs["subagent_id"].startswith("sa-0-"))
         self.assertEqual(reasoning_calls[0].kwargs["task_index"], 0)
         self.assertEqual(reasoning_calls[0].kwargs["task_count"], 2)
@@ -2167,16 +2172,20 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         output_delta_cb = call_kwargs["stream_delta_callback"]
         self.assertIsNotNone(output_delta_cb)
 
-        output_delta_cb("hello")
+        output_delta_cb("📋")
+        output_delta_cb(" hello")
 
         args, kwargs = parent.tool_progress_callback.call_args
-        self.assertEqual(args[:4], ("subagent.output_delta", "test_agent_profile", "hello", None))
+        self.assertEqual(args[:4], ("subagent.output_delta", "test_agent_profile", " hello", None))
         self.assertNotIn("goal", kwargs)
         self.assertNotIn("dispatch_message", kwargs)
         self.assertNotIn("context", kwargs)
         self.assertEqual(kwargs["task_index"], 0)
         self.assertEqual(kwargs["task_count"], 1)
         self.assertEqual(kwargs["depth"], 0)
+        self.assertEqual(kwargs["mode"], "append")
+        self.assertEqual(kwargs["delta"], " hello")
+        self.assertEqual(kwargs["offset"], 2)
 
     @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_disables_session_persistence_for_transient_child(self, mock_cfg):
@@ -2203,6 +2212,8 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         self.assertIs(child, mock_child)
         self.assertIsNone(MockAgent.call_args[1]["session_db"])
+        self.assertEqual(MockAgent.call_args[1]["session_kind"], "execution")
+        self.assertEqual(MockAgent.call_args[1]["conversation_kind"], "internal")
         self.assertTrue(child._session_persistence_disabled)
         self.assertIsNone(child._session_db)
 
@@ -2233,6 +2244,9 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
         args, kwargs = parent.tool_progress_callback.call_args
         self.assertEqual(args[:4], ("subagent.output_delta", None, "child chunk", None))
+        self.assertEqual(kwargs["mode"], "append")
+        self.assertEqual(kwargs["delta"], "child chunk")
+        self.assertEqual(kwargs["offset"], 0)
         self.assertNotIn("goal", kwargs)
         self.assertNotIn("dispatch_message", kwargs)
         self.assertNotIn("context", kwargs)

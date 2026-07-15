@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -62,14 +63,11 @@ def test_get_control_plane_db_honors_DOVIE_HERMES_CONTROL_HOME_env_for_testing(
     override.mkdir()
     created: list[Path] = []
 
-    class FakeSessionDB:
-        def __init__(self, db_path: Path):
-            self.db_path = Path(db_path)
-            created.append(self.db_path)
+    def fake_open_cli_session_store(db_path: Path):
+        created.append(Path(db_path))
+        return SimpleNamespace(db_path=Path(db_path))
 
-    import hermes_state
-
-    monkeypatch.setattr(hermes_state, "SessionDB", FakeSessionDB)
+    monkeypatch.setattr(server, "_open_cli_session_store", fake_open_cli_session_store)
     monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(override))
 
     db = server._get_control_plane_db()
@@ -87,3 +85,49 @@ def test_get_control_plane_db_never_routes_to_profile_db(server_state) -> None:
     assert db.db_path == root.resolve() / "state.db"
     assert db.db_path != profile.resolve() / "state.db"
     assert calls[0]["active_home"] == root.resolve()
+
+
+def test_get_control_plane_db_initializes_singleton_once_under_concurrency(
+    monkeypatch,
+    server_state,
+) -> None:
+    from tui_gateway.services.session_store import SessionStoreResult
+
+    server, root, _profile, _calls = server_state
+    factory_started = threading.Event()
+    allow_factory_return = threading.Event()
+    created: list[SimpleNamespace] = []
+    results: list[SimpleNamespace] = []
+
+    def blocking_get_session_db_for_home(**kwargs):
+        cached = kwargs["default_db"]
+        if cached is not None:
+            return SessionStoreResult(
+                db=cached,
+                default_db=cached,
+                default_error=kwargs["default_error"],
+            )
+        db = SimpleNamespace(db_path=root.resolve() / "state.db")
+        created.append(db)
+        factory_started.set()
+        assert allow_factory_return.wait(timeout=1.0)
+        return SessionStoreResult(db=db, default_db=db, default_error=None)
+
+    monkeypatch.setattr(
+        server,
+        "_get_session_db_for_home",
+        blocking_get_session_db_for_home,
+    )
+
+    first = threading.Thread(target=lambda: results.append(server._get_control_plane_db()))
+    second = threading.Thread(target=lambda: results.append(server._get_control_plane_db()))
+    first.start()
+    assert factory_started.wait(timeout=1.0)
+    second.start()
+    assert len(created) == 1
+    allow_factory_return.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert len(created) == 1
+    assert results == [created[0], created[0]]

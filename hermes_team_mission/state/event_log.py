@@ -3,39 +3,23 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
-import threading
 import time
 from typing import Any, Dict, List
 
 from hermes_team_mission.domain.identities import canonical_node_id as _canonical_graph_node_id
+from hermes_team_mission.domain.runtime_identity import runtime_event_identity
 from hermes_team_mission.runtime.failure import classify_team_mission_failure
 
 
 TEAM_MISSION_EVENT_PROTOCOL = "team_mission.event.v1"
 TEAM_MISSION_RUNTIME_EVENT_TYPE = "team_mission.runtime.event"
 TEAM_MISSION_CONVERSATION_STATUS_EVENT_TYPE = "team_mission.conversation.status"
+_MESSAGE_TEXT_STREAM_EVENT_TYPES = {"message.start", "message.delta", "message.complete"}
+_REASONING_TEXT_STREAM_CHANNELS = {
+    "reasoning.delta": "reasoning",
+    "thinking.delta": "thinking",
+}
 logger = logging.getLogger(__name__)
-_listener_lock = threading.RLock()
-_event_listeners: list[Any] = []
-
-
-def register_team_mission_event_listener(callback: Any) -> None:
-    if not callable(callback):
-        return
-    with _listener_lock:
-        if callback not in _event_listeners:
-            _event_listeners.append(callback)
-
-
-def notify_team_mission_event_listeners(mission_id: str, event: Dict[str, Any]) -> None:
-    with _listener_lock:
-        listeners = list(_event_listeners)
-    for listener in listeners:
-        try:
-            listener(mission_id, event)
-        except Exception:
-            logger.debug("failed to notify Team Mission event listener", exc_info=True)
 
 
 def text(value: Any) -> str:
@@ -74,6 +58,13 @@ def event_payload(event: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 def _emit_team_event_log_diagnostic(stage: str, **fields: Any) -> None:
+    # Per-token stream success logs drown the structural/audit boundary that
+    # this diagnostic is meant to expose. Keep drops, errors and lifecycle
+    # facts; runtime delivery already emits sampled stream counters.
+    if stage in {"runtime-event-project-start", "runtime-event-appended"} and text(
+        fields.get("event_type") or fields.get("source_event_type")
+    ).endswith(".delta"):
+        return
     try:
         from agent.dovie_diagnostics import emit_dovie_diagnostic
 
@@ -145,24 +136,27 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     event_type = source_event_type(source_event)
     mission_id = _first_text(identity.get("mission_id"), identity.get("missionId"), payload.get("mission_id"), payload.get("missionId"))
     conversation_id = _first_text(identity.get("conversation_id"), identity.get("conversationId"), payload.get("conversation_id"), payload.get("conversationId"))
-    conversation_stable_session_id = _first_text(identity.get("stable_session_id"), identity.get("stableSessionId"), payload.get("stable_session_id"), payload.get("stableSessionId"))
-    runtime_stable_session_id = _first_text(
-        source_event.get("stored_session_id"),
-        source_event.get("storedSessionId"),
-        payload.get("stored_session_id"),
-        payload.get("storedSessionId"),
-        payload.get("session_key"),
-        payload.get("sessionKey"),
-        identity.get("runtime_stable_session_id"),
-        identity.get("runtimeStableSessionId"),
+    conversation_session_id = _first_text(
+        identity.get("conversation_session_id"),
+        identity.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
     )
-    runtime_session_id = _first_text(
-        source_event.get("session_id"),
-        source_event.get("sessionId"),
-        payload.get("runtime_session_id"),
-        payload.get("runtimeSessionId"),
-        identity.get("runtime_session_id"),
-        identity.get("runtimeSessionId"),
+    runtime_conversation_session_id = _first_text(
+        source_event.get("conversation_session_id"),
+        source_event.get("conversationSessionId"),
+        payload.get("conversation_session_id"),
+        payload.get("conversationSessionId"),
+        identity.get("runtime_conversation_session_id"),
+        identity.get("runtimeConversationSessionId"),
+    )
+    execution_session_id = _first_text(
+        source_event.get("execution_session_id"),
+        source_event.get("executionSessionId"),
+        payload.get("execution_session_id"),
+        payload.get("executionSessionId"),
+        identity.get("execution_session_id"),
+        identity.get("executionSessionId"),
     )
     runtime_scope_key = _first_text(
         source_event.get("runtime_scope_key"),
@@ -186,12 +180,9 @@ def _canonical_subject(source_event: Dict[str, Any], identity: Dict[str, str]) -
     subject: Dict[str, Any] = {
         "mission_id": mission_id,
         "conversation_id": conversation_id,
-        "stable_session_id": conversation_stable_session_id,
-        "conversation_stable_session_id": conversation_stable_session_id,
-        "conversation_session_id": conversation_stable_session_id,
-        "runtime_stable_session_id": runtime_stable_session_id,
-        "source_session_id": runtime_stable_session_id,
-        "runtime_session_id": runtime_session_id,
+        "conversation_session_id": conversation_session_id,
+        "runtime_conversation_session_id": runtime_conversation_session_id,
+        "execution_session_id": execution_session_id,
         "runtime_scope_key": runtime_scope_key,
         "run_id": run_id,
         "turn_id": turn_id,
@@ -276,30 +267,47 @@ def _payload_int(payload: Dict[str, Any], key: str) -> int | None:
 
 def _text_stream_contract(source_event: Dict[str, Any], subject: Dict[str, Any]) -> Dict[str, Any]:
     event_type = source_event_type(source_event)
-    if event_type not in {"message.start", "message.delta", "message.complete"}:
+    is_message_stream = event_type in _MESSAGE_TEXT_STREAM_EVENT_TYPES
+    stream_channel = "assistant" if is_message_stream else _REASONING_TEXT_STREAM_CHANNELS.get(event_type, "")
+    if not stream_channel:
         return {}
     payload = event_payload(source_event)
     mode = text(payload.get("mode")).lower()
+    is_delta = event_type == "message.delta" or event_type in _REASONING_TEXT_STREAM_CHANNELS
     if event_type == "message.delta":
         if _is_snapshot_message_delta(source_event):
             return {}
+    if is_delta:
         if mode in {"", "append"}:
             mode = "append"
     stream_id = _first_text(
         payload.get("stream_id"),
         payload.get("streamId"),
-        f"{subject.get('runtime_stable_session_id') or subject.get('stable_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:assistant",
+        f"{subject.get('runtime_conversation_session_id') or subject.get('conversation_session_id')}:{subject.get('node_id') or subject.get('id')}:{subject.get('run_id')}:{stream_channel}",
     )
     fragment = _payload_stream_fragment(payload)
     contract: Dict[str, Any] = {
         "stream_id": stream_id,
         "subject": subject,
-        "event": event_type.replace("message.", ""),
+        "event": event_type.rsplit(".", 1)[-1],
         "mode": mode,
         "run_id": subject.get("run_id", ""),
         "turn_id": subject.get("turn_id", ""),
     }
-    if event_type == "message.delta":
+    if not is_message_stream:
+        # Reasoning is a first-class stream owned by the run/node. It must not
+        # be projected as assistant prose, otherwise speaker and message
+        # boundaries become ambiguous in team conversations.
+        contract["channel"] = stream_channel
+    client_message_id = _first_text(
+        payload.get("client_message_id"),
+        payload.get("clientMessageId"),
+        source_event.get("client_message_id"),
+        source_event.get("clientMessageId"),
+    )
+    if client_message_id:
+        contract["client_message_id"] = client_message_id
+    if is_delta:
         contract["delta"] = fragment
         contract["text"] = fragment
         offset = _payload_int(payload, "offset")
@@ -408,7 +416,7 @@ def source_event_type(event: Dict[str, Any] | None) -> str:
 
 def event_seq(event: Dict[str, Any] | None) -> int:
     event = event if isinstance(event, dict) else {}
-    for key in ("source_seq", "sourceSeq", "seq"):
+    for key in ("source_seq", "sourceSeq", "runtime_source_seq", "runtimeSourceSeq", "seq"):
         try:
             value = int(event.get(key) or 0)
         except (TypeError, ValueError):
@@ -416,7 +424,7 @@ def event_seq(event: Dict[str, Any] | None) -> int:
         if value > 0:
             return value
     payload = event_payload(event)
-    for key in ("source_seq", "sourceSeq", "seq"):
+    for key in ("source_seq", "sourceSeq", "runtime_source_seq", "runtimeSourceSeq", "seq"):
         try:
             value = int(payload.get(key) or 0)
         except (TypeError, ValueError):
@@ -579,10 +587,20 @@ def projection_event(
         if text(value):
             event[key] = value
     _apply_subject_node_identity(event, subject)
-    for key in ("run_id", "turn_id", "session_id", "stored_session_id", "runtime_session_id", "runtime_scope_key"):
+    for key in ("run_id", "turn_id", "execution_session_id", "runtime_scope_key"):
         value = source_event.get(key)
         if text(value):
             event[key] = value
+    projected_conversation_session_id = _first_text(
+        subject.get("conversation_session_id"),
+    )
+    if projected_conversation_session_id:
+        event["session_id"] = projected_conversation_session_id
+        event["conversation_session_id"] = projected_conversation_session_id
+        payload["session_id"] = projected_conversation_session_id
+        payload["conversation_session_id"] = projected_conversation_session_id
+    if text(event.get("execution_session_id")):
+        payload["execution_session_id"] = event["execution_session_id"]
     return event
 
 
@@ -607,7 +625,7 @@ def runtime_dedupe_key(mission_id: str, run_id: str, source_event: Dict[str, Any
             "runtime",
             text(mission_id),
             text(run_id) or text(source_event.get("run_id") or source_event.get("runId")),
-            text(source_event.get("stored_session_id") or source_event.get("session_id")),
+            text(source_event.get("conversation_session_id") or source_event.get("session_id")),
             source_event_type(source_event),
             str(event_seq(source_event)),
         ]
@@ -640,7 +658,7 @@ def runtime_stream_delta_dedupe_key(mission_id: str, run_id: str, source_event: 
             "runtime-stream-delta",
             text(mission_id),
             text(run_id) or text(source_event.get("run_id") or source_event.get("runId")),
-            text(source_event.get("stored_session_id") or source_event.get("session_id")),
+            text(source_event.get("conversation_session_id") or source_event.get("session_id")),
             event_type,
             stream_id,
             str(offset),
@@ -686,13 +704,6 @@ def structural_dedupe_key(mission_id: str, source_event: Dict[str, Any]) -> str:
     return ":".join(["structural", text(mission_id), event_type, entity_id])
 
 
-def _row_to_event(row: sqlite3.Row | None) -> Dict[str, Any]:
-    if row is None:
-        return {}
-    event = json_loads(row["event_json"], {})
-    return event if isinstance(event, dict) else {}
-
-
 def append_team_mission_event(
     db: Any,
     *,
@@ -717,65 +728,25 @@ def append_team_mission_event(
     source_type = text(payload.get("source_event_type") or payload.get("sourceEventType") or source_event_type(source_event))
     source_run_id = text(event.get("run_id") or payload.get("run_id") or payload.get("runId") or source_event.get("run_id"))
     source_session_id = text(
-        event.get("stored_session_id")
-        or payload.get("stable_session_id")
-        or source_event.get("stored_session_id")
+        event.get("conversation_session_id")
+        or payload.get("conversation_session_id")
+        or source_event.get("conversation_session_id")
         or source_event.get("session_id")
     )
     source_seq = int(payload.get("source_seq") or payload.get("sourceSeq") or event_seq(source_event) or 0)
-    inserted = False
-    with db._lock:
-        existing = db._conn.execute(
-            "SELECT event_json FROM team_mission_events WHERE mission_id = ? AND dedupe_key = ?",
-            (mission_id, dedupe_key),
-        ).fetchone()
-        if existing is not None:
-            duplicate = _row_to_event(existing)
-            duplicate["_persistence_disposition"] = "duplicate_mission_event"
-            return duplicate
-        row = db._conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM team_mission_events WHERE mission_id = ?",
-            (mission_id,),
-        ).fetchone()
-        seq = int((row["next_seq"] if row is not None else 1) or 1)
-        stored = _with_mission_seq(event, seq)
-        try:
-            db._conn.execute(
-                """
-                INSERT INTO team_mission_events (
-                    mission_id, seq, event_type, source_event_type,
-                    source_run_id, source_session_id, source_seq, dedupe_key,
-                    timestamp, payload_json, source_event_json, event_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mission_id,
-                    seq,
-                    event_type,
-                    source_type,
-                    source_run_id,
-                    source_session_id,
-                    source_seq,
-                    dedupe_key,
-                    float(stored.get("timestamp") or now),
-                    "",
-                    "",
-                    json_dumps(stored),
-                    now,
-                ),
-            )
-            inserted = True
-        except sqlite3.IntegrityError:
-            existing = db._conn.execute(
-                "SELECT event_json FROM team_mission_events WHERE mission_id = ? AND dedupe_key = ?",
-                (mission_id, dedupe_key),
-            ).fetchone()
-            duplicate = _row_to_event(existing)
-            duplicate["_persistence_disposition"] = "duplicate_mission_event"
-            return duplicate
-    if inserted:
-        notify_team_mission_event_listeners(mission_id, stored)
-    return stored
+    result = db.team_mission_audit.append(
+        mission_id=mission_id,
+        dedupe_key=dedupe_key,
+        event=event,
+        event_type=event_type,
+        source_event_type=source_type,
+        source_run_id=source_run_id,
+        source_session_id=source_session_id,
+        source_seq=source_seq,
+        timestamp=float(event.get("timestamp") or now),
+        now=now,
+    )
+    return result.event
 
 
 def append_team_mission_runtime_event(
@@ -804,6 +775,13 @@ def append_team_mission_runtime_event(
         dedupe_key=runtime_dedupe_key(mission_id, run_id, source_event),
         source_event=source_event,
     )
+    if stored and not stored.get("_persistence_disposition"):
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+            identity=identity,
+        )
     payload = event_payload(stored)
     subject = mapping(payload.get("subject"))
     text_stream = mapping(payload.get("text_stream"))
@@ -819,11 +797,107 @@ def append_team_mission_runtime_event(
         subject_type=subject.get("type"),
         subject_id=subject.get("id"),
         subject_node_id=subject.get("node_id") or subject.get("nodeId"),
-        runtime_stable_session_id=subject.get("runtime_stable_session_id") or subject.get("runtimeStableSessionId"),
+        runtime_conversation_session_id=subject.get("runtime_conversation_session_id") or subject.get("runtimeConversationSessionId"),
         text_event=text_stream.get("event"),
         text_len=len(raw_text(text_stream.get("delta") or text_stream.get("text"))),
     )
     return stored
+
+
+def _mission_activity_session_id(
+    db: Any,
+    mission_id: str,
+    event: Dict[str, Any],
+    identity: Dict[str, str] | None = None,
+) -> str:
+    # A mission subscription needs exactly one monotonic cursor domain. Runtime
+    # node sessions each allocate seq from 1, so indexing mission activity rows
+    # into those sessions makes `after_seq` invalid as soon as two nodes run.
+    # Keep source session/run identity in the payload and write every replayable
+    # mission fact to this dedicated activity ledger session instead.
+    stable_mission = text(mission_id)
+    return f"team:mission:{stable_mission}:events" if stable_mission else ""
+
+
+def _ensure_activity_session(db: Any, session_id: str) -> None:
+    stable = text(session_id)
+    if not stable:
+        return
+    sessions = db.sessions
+    if sessions.get(stable):
+        return
+    try:
+        sessions.create(stable, "team_mission", transient=True)
+    except TypeError:
+        sessions.create(stable, "team_mission")
+
+
+def _append_mission_activity_run_event(
+    db: Any,
+    *,
+    mission_id: str,
+    event: Dict[str, Any],
+    identity: Dict[str, str] | None = None,
+) -> None:
+    appender = db.runs.append_event
+    stable_mission = text(mission_id)
+    session_id = _mission_activity_session_id(db, stable_mission, event, identity)
+    if not stable_mission or not session_id:
+        return
+    activity_id = f"mission:{stable_mission}"
+    frame = dict(event or {})
+    payload = dict(event_payload(frame))
+    audit_seq = int(frame.get("seq") or payload.get("team_mission_event_seq") or 0)
+    event_type = text(frame.get("type"))
+    if audit_seq > 0 and db.runs.has_event_source(
+        session_id,
+        event_type=event_type,
+        runtime_source_seq=audit_seq,
+    ):
+        return
+    source_run_id = text(frame.get("run_id") or payload.get("run_id"))
+    source_turn_id = text(frame.get("turn_id") or payload.get("turn_id"))
+    source_session_id = text(
+        frame.get("conversation_session_id")
+        or frame.get("session_id")
+        or payload.get("conversation_session_id")
+        or payload.get("session_id")
+    )
+    if source_run_id:
+        payload["source_run_id"] = source_run_id
+        payload["sourceRunId"] = source_run_id
+    if source_turn_id:
+        payload["source_turn_id"] = source_turn_id
+        payload["sourceTurnId"] = source_turn_id
+    if source_session_id:
+        payload["source_session_id"] = source_session_id
+        payload["sourceSessionId"] = source_session_id
+    for key in ("run_id", "runId", "turn_id", "turnId"):
+        payload.pop(key, None)
+    frame["activity_id"] = activity_id
+    frame["activityId"] = activity_id
+    frame["session_id"] = session_id
+    frame["conversation_session_id"] = session_id
+    payload["session_id"] = session_id
+    payload["conversation_session_id"] = session_id
+    payload["activity_id"] = activity_id
+    payload["activityId"] = activity_id
+    # Canonical activity rows are an index, not executions. Do not let their
+    # append mutate the source run's owning session or terminal state.
+    frame["run_id"] = ""
+    frame["turn_id"] = ""
+    frame["execution_session_id"] = ""
+    frame["runtime_scope_key"] = f"mission:{stable_mission}:activity-ledger"
+    frame.pop("seq", None)
+    frame["runtime_source_seq"] = audit_seq
+    frame["payload"] = payload
+    _ensure_activity_session(db, session_id)
+    previous = getattr(db, "_team_mission_projecting", False)
+    db._team_mission_projecting = True
+    try:
+        appender(session_id, frame)
+    finally:
+        db._team_mission_projecting = previous
 
 
 def append_team_mission_structural_event(
@@ -867,13 +941,22 @@ def append_team_mission_structural_event(
         if edge_id:
             event_identity.setdefault("edge_id", edge_id)
             event_identity.setdefault("edgeId", edge_id)
-    return append_team_mission_event(
+    projected = projection_event(source_event, event_identity)
+    stored = append_team_mission_event(
         db,
         mission_id=mission_id,
-        event=projection_event(source_event, event_identity),
+        event=projected,
         dedupe_key=text(dedupe_key) or structural_dedupe_key(mission_id, source_event),
         source_event=source_event,
     )
+    if stored and not stored.get("_persistence_disposition"):
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+            identity=event_identity,
+        )
+    return stored
 
 
 def append_team_mission_conversation_status_event(
@@ -901,13 +984,20 @@ def append_team_mission_conversation_status_event(
     payload["source_event_seq"] = int(source_mission_seq or 0)
     payload["sourceEventSeq"] = int(source_mission_seq or 0)
     event["payload"] = payload
-    return append_team_mission_event(
+    stored = append_team_mission_event(
         db,
         mission_id=mission_id,
         event=event,
         dedupe_key=status_dedupe_key(mission_id, source_mission_seq, source_event),
         source_event=source_event,
     )
+    if stored and not stored.get("_persistence_disposition"):
+        _append_mission_activity_run_event(
+            db,
+            mission_id=mission_id,
+            event=stored,
+        )
+    return stored
 
 
 def append_team_mission_event_for_run(
@@ -940,26 +1030,18 @@ def append_team_mission_event_for_run(
             node = node_getter(mission_id, text(binding.get("node_id"))) or {}
         except Exception:
             node = {}
-    graph_getter = getattr(db, "get_team_mission_graph", None)
     mission = {"mission_id": mission_id}
-    if callable(graph_getter):
-        try:
-            graph = graph_getter(mission_id)
-            if isinstance(graph, dict) and isinstance(graph.get("mission"), dict):
-                mission = graph["mission"]
-        except Exception:
-            mission = {"mission_id": mission_id}
-    identity_builder = getattr(db, "_team_mission_runtime_event_identity", None)
-    if not callable(identity_builder):
-        _emit_team_event_log_diagnostic(
-            "runtime-event-drop-no-identity-builder",
-            mission_id=mission_id,
-            run_id=run_id,
-            node_id=text(binding.get("node_id")),
-            **_text_stream_summary(event),
-        )
-        return {}
-    identity = identity_builder(mission=mission, node=node, binding=binding)
+    try:
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
+        if isinstance(graph, dict) and isinstance(graph.get("mission"), dict):
+            mission = graph["mission"]
+    except Exception:
+        mission = {"mission_id": mission_id}
+    identity = runtime_event_identity(
+        mission=mission,
+        node=node,
+        binding=binding,
+    )
     _emit_team_event_log_diagnostic(
         "runtime-event-project-start",
         mission_id=mission_id,
@@ -993,23 +1075,8 @@ def list_team_mission_events(
     mission_id = text(mission_id)
     if not mission_id:
         return []
-    after_seq = int(after_seq or 0)
-    safe_limit = max(1, min(int(limit or 2000), 10000))
-    with db._lock:
-        rows = db._conn.execute(
-            """
-            SELECT event_json
-            FROM team_mission_events
-            WHERE mission_id = ?
-              AND seq > ?
-            ORDER BY seq ASC
-            LIMIT ?
-            """,
-            (mission_id, after_seq, safe_limit),
-        ).fetchall()
-    events: List[Dict[str, Any]] = []
-    for row in rows:
-        event = _row_to_event(row)
-        if event:
-            events.append(event)
-    return events
+    return db.team_mission_audit.list(
+        mission_id,
+        after_seq=int(after_seq or 0),
+        limit=limit,
+    )

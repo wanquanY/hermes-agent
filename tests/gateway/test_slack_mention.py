@@ -7,7 +7,7 @@ Follows the same pattern as test_whatsapp_group_gating.py.
 import sys
 from unittest.mock import MagicMock
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +40,10 @@ def _ensure_slack_mock():
 
 _ensure_slack_mock()
 
-import gateway.platforms.slack as _slack_mod
+import channels.platforms.slack as _slack_mod
 _slack_mod.SLACK_AVAILABLE = True
 
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from channels.platforms.slack import SlackAdapter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +351,7 @@ def test_bot_uid_none_processes_channel_message():
 # ---------------------------------------------------------------------------
 
 def test_config_bridges_slack_free_response_channels(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -381,7 +381,7 @@ def test_config_bridges_slack_free_response_channels(monkeypatch, tmp_path):
 
 
 def test_top_level_slack_settings_do_not_disable_env_token_setup(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -405,7 +405,7 @@ def test_top_level_slack_settings_do_not_disable_env_token_setup(monkeypatch, tm
 
 
 def test_explicit_top_level_slack_enabled_false_wins_over_env_token(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -430,7 +430,7 @@ def test_explicit_top_level_slack_enabled_false_wins_over_env_token(monkeypatch,
 
 
 def test_explicit_platforms_slack_enabled_false_wins_over_env_token(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -456,7 +456,7 @@ def test_explicit_platforms_slack_enabled_false_wins_over_env_token(monkeypatch,
 
 
 def test_config_bridges_slack_reply_in_thread(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -496,7 +496,7 @@ def test_config_bridges_slack_reply_in_thread(monkeypatch, tmp_path):
 
 
 def test_config_bridges_slack_strict_mention(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -646,7 +646,7 @@ def test_allowed_channels_env_var_blocks_channel(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_config_bridges_slack_allowed_channels(monkeypatch, tmp_path):
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -669,7 +669,7 @@ def test_config_bridges_slack_allowed_channels(monkeypatch, tmp_path):
 
 def test_config_bridges_slack_allowed_channels_env_takes_precedence(monkeypatch, tmp_path):
     """Env var set before load_gateway_config() should not be overwritten."""
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()

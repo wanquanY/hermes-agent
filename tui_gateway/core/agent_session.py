@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 from tui_gateway.methods._shared import bind_server_globals
 
 _server = bind_server_globals(globals())
+logger = logging.getLogger(__name__)
 _TUI_VERBOSE_TEXT_MAX_CHARS = 16_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 240
 
@@ -54,6 +56,52 @@ def _cap_tui_verbose_text(text: str) -> str:
     else:
         label = f"[showing verbose tail; omitted {omitted_chars} chars]\n"
     return f"{label}{tail}"
+
+
+def _truthy_model_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _persisted_session_codex_metadata(session_key: str) -> dict:
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    try:
+        db = _db_for_stable_session(key)
+        row = db.sessions.get(key) if db is not None else None
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    raw_cfg = row.get("model_config")
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else None
+    if cfg is None and isinstance(raw_cfg, str) and raw_cfg.strip():
+        try:
+            parsed = json.loads(raw_cfg)
+            cfg = parsed if isinstance(parsed, dict) else None
+        except Exception:
+            cfg = None
+    if not isinstance(cfg, dict):
+        return {}
+    result: dict = {}
+    mode = str(
+        cfg.get("codex_account_mode")
+        or cfg.get("codexAccountMode")
+        or ""
+    ).strip()
+    if mode:
+        result["codex_account_mode"] = mode
+    if "model_explicit" in cfg or "explicit_model" in cfg:
+        result["model_explicit"] = _truthy_model_flag(
+            cfg.get("model_explicit", cfg.get("explicit_model"))
+        )
+    return result
 
 
 def _redact_tui_verbose_text(text: str) -> str:
@@ -280,14 +328,27 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
+    old_agent = session.get("agent")
+    reasoning_override = getattr(old_agent, "reasoning_config", None)
+    if reasoning_override is None:
+        reasoning_override = session.get("create_reasoning_override")
+    service_tier_override = getattr(old_agent, "service_tier", None)
+    if service_tier_override is None:
+        service_tier_override = session.get("create_service_tier_override")
     tokens = _set_session_context(session["session_key"])
     try:
         new_agent = _make_agent(
-            sid, session["session_key"], session_id=session["session_key"]
+            sid,
+            session["session_key"],
+            session_id=session["session_key"],
+            reasoning_config_override=reasoning_override,
+            service_tier_override=service_tier_override,
         )
     finally:
         _clear_session_context(tokens)
-    session["agent"] = new_agent
+    from tui_gateway.services.model_descriptor import bind_session_agent
+
+    bind_session_agent(session, new_agent)
     session["attached_images"] = []
     session["edit_snapshots"] = {}
     session["image_counter"] = 0
@@ -385,6 +446,9 @@ def _make_agent(
     cwd: str | None = None,
     agent_context_mode: str | None = None,
     model_override: dict | None = None,
+    profile_context: dict | None = None,
+    reasoning_config_override: dict | None = None,
+    service_tier_override: str | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -422,6 +486,118 @@ def _make_agent(
     # override (composer pick shipped on session.create).
     _override = model_override if isinstance(model_override, dict) else (_sessions.get(sid) or {}).get("model_override")
     _override = _override if isinstance(_override, dict) else None
+    session_context = dict(_sessions.get(sid) or {})
+    session_model_descriptor = session_context.get("model_descriptor")
+    descriptor_context_window = (
+        session_model_descriptor.get("context_window")
+        if isinstance(session_model_descriptor, dict)
+        else None
+    )
+    if not (
+        isinstance(descriptor_context_window, int)
+        and not isinstance(descriptor_context_window, bool)
+        and descriptor_context_window > 0
+    ):
+        descriptor_context_window = None
+    _profile_context = (
+        profile_context
+        if isinstance(profile_context, dict)
+        else session_context.get("profile_context")
+    )
+    if not isinstance(_profile_context, dict):
+        try:
+            from tui_gateway.services.profile_context import active_profile_context
+
+            _profile_context = active_profile_context()
+        except Exception:
+            _profile_context = None
+    _profile_context = _profile_context if isinstance(_profile_context, dict) else {}
+
+    def _first_text(*values) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    # Read the row's persisted codex fields once so worker subprocesses (which
+    # only see the DB, never the sidecar's in-memory _sessions dict) can pick
+    # up runtime_executor / codex_home / codex_extra_env recorded at
+    # session.create time. Sidecar in-process callers usually get these from
+    # _override or _profile_context and never touch the fallback below.
+    try:
+        from tui_gateway.core.session_config import (
+            _persisted_session_codex_runtime as _persisted_codex_runtime,
+        )
+        _persisted_codex = _persisted_codex_runtime(session_id or key)
+    except Exception as _pc_exc:
+        _persisted_codex = {}
+        logger.warning("persisted codex runtime lookup failed sid=%s: %s", session_id or key, _pc_exc)
+    _persisted_codex_meta = _persisted_session_codex_metadata(session_id or key)
+    logger.debug("[codex-flow][_make_agent] ENTER sid=%s override_keys=%s profile_ctx_keys=%s persisted_codex=%s persisted_codex_meta=%s",
+        session_id or key,
+        sorted((_override or {}).keys()),
+        sorted(_profile_context.keys()),
+        _persisted_codex,
+        _persisted_codex_meta,
+    )
+    _runtime_executor = _first_text(
+        (_override or {}).get("runtime_executor"),
+        (_override or {}).get("runtimeExecutor"),
+        _profile_context.get("runtime_executor"),
+        _profile_context.get("runtimeExecutor"),
+        _persisted_codex.get("runtime_executor"),
+    )
+    _codex_home = _first_text(
+        (_override or {}).get("codex_home"),
+        (_override or {}).get("codexHome"),
+        (_override or {}).get("codexHomePath"),
+        _profile_context.get("codex_home"),
+        _profile_context.get("codexHome"),
+        _profile_context.get("codexHomePath"),
+        _persisted_codex.get("codex_home"),
+    )
+    # Extra env bag for the Codex spawn — used by Dovie to inject the
+    # platform runtime token as DOXIE_PLATFORM_API_KEY when the employee is
+    # in platform-billing mode. BYO mode sends nothing here, so the codex
+    # subprocess falls back to its own ChatGPT auth.json.
+    def _first_mapping(*values) -> dict:
+        for value in values:
+            if isinstance(value, dict) and value:
+                return {str(k): str(v) for k, v in value.items() if v is not None}
+        return {}
+    _codex_extra_env = _first_mapping(
+        (_override or {}).get("codex_extra_env"),
+        (_override or {}).get("codexExtraEnv"),
+        _profile_context.get("codex_extra_env"),
+        _profile_context.get("codexExtraEnv"),
+        _persisted_codex.get("codex_extra_env"),
+    )
+    from agent.codex_runtime import normalize_codex_account_mode
+
+    _codex_account_mode = normalize_codex_account_mode(
+        _first_text(
+            (_override or {}).get("codex_account_mode"),
+            (_override or {}).get("codexAccountMode"),
+            _profile_context.get("codex_account_mode"),
+            _profile_context.get("codexAccountMode"),
+            _persisted_codex_meta.get("codex_account_mode"),
+        ),
+        extra_env=_codex_extra_env,
+    )
+    _model_explicit = (
+        _truthy_model_flag((_override or {}).get("model_explicit"))
+        or _truthy_model_flag((_override or {}).get("explicit_model"))
+        or _truthy_model_flag(_profile_context.get("model_explicit"))
+        or _truthy_model_flag(_profile_context.get("explicit_model"))
+        or _truthy_model_flag(_persisted_codex_meta.get("model_explicit"))
+    )
+    _runtime_provider_override = _first_text(
+        (_override or {}).get("provider"),
+        _profile_context.get("provider"),
+        _profile_context.get("model_provider"),
+        _profile_context.get("modelProvider"),
+    )
     _override_model = str((_override or {}).get("model") or "").strip()
     if _override_model:
         model = _override_model
@@ -439,31 +615,91 @@ def _make_agent(
             requested_provider = _persisted_provider
         else:
             model, requested_provider = _resolve_startup_runtime()
-    runtime = resolve_runtime_provider(
-        requested=requested_provider,
-        target_model=model or None,
+    from hermes_cli.runtime_provider import _normalize_runtime_executor as _norm_runtime_executor
+
+    normalized_runtime_executor = _norm_runtime_executor(_runtime_executor)
+    if normalized_runtime_executor == "codex_app_server":
+        # A Codex executor owns the provider boundary because it launches the
+        # Codex app-server instead of Hermes' native model client.  Other
+        # executor labels (notably Dovie's ordinary ``hermes`` profile value)
+        # are orchestration metadata and must never rewrite the configured
+        # inference provider to OpenAI Codex.
+        requested_provider = _runtime_provider_override or "openai-codex"
+
+    # Guard: refuse to spawn a forced Codex app-server without an isolated
+    # employee CODEX_HOME. Silently falling back to the user's ~/.codex would
+    # blend platform-employee state with the user's personal Codex account.
+    if normalized_runtime_executor == "codex_app_server" and not _codex_home:
+        raise ValueError(
+            "codex_app_server runtime requires codex_home; refusing to fall back to user home"
+        )
+    runtime_kwargs = {
+        "requested": requested_provider,
+        "target_model": model or None,
+    }
+    if _runtime_executor:
+        runtime_kwargs["runtime_executor"] = _runtime_executor
+    if _codex_home:
+        runtime_kwargs["codex_home"] = _codex_home
+    logger.debug("[codex-flow][_make_agent] pre-resolve runtime_kwargs=%s _runtime_executor=%r _codex_home=%r",
+        {k: v for k, v in runtime_kwargs.items() if k != "explicit_api_key"},
+        _runtime_executor,
+        _codex_home,
+    )
+    runtime = resolve_runtime_provider(**runtime_kwargs)
+    logger.debug("[codex-flow][_make_agent] post-resolve runtime.api_mode=%r runtime.provider=%r runtime.codex_home=%r",
+        runtime.get("api_mode"),
+        runtime.get("provider"),
+        runtime.get("codex_home"),
     )
     # Concrete credentials from a completed in-session /model switch survive the
     # rebuild: when the override carries an explicit base_url / api_key / api_mode
     # (the switch already resolved them), use them verbatim instead of letting
     # resolve_runtime_provider re-derive — re-resolution can return the global
     # endpoint and silently route the session to the wrong provider.
+    #
+    # EXCEPT for codex_app_server: the runtime dict we just resolved reflects
+    # the Codex-employee runtime (spawn a codex CLI subprocess reading its
+    # own CODEX_HOME). If the session's override still carries an old
+    # base_url / api_mode from a pre-switch chat_completions state (e.g. a
+    # persisted `[model_switch]` snapshot), letting them win here silently
+    # downgrades the runtime to chat_completions and dies looking for the
+    # OpenAI-codex OAuth token. Codex spawn doesn't use base_url / api_key /
+    # api_mode at all — they're read by the codex subprocess from
+    # CODEX_HOME/config.toml + auth.json.
+    _is_codex_app_server = str(runtime.get("api_mode") or "").strip() == "codex_app_server"
     _ov_base_url = str((_override or {}).get("base_url") or "").strip()
     _ov_api_key = (_override or {}).get("api_key")
     _ov_api_mode = str((_override or {}).get("api_mode") or "").strip()
-    _runtime_base_url = _ov_base_url or runtime.get("base_url")
-    _runtime_api_key = _ov_api_key if (isinstance(_ov_api_key, str) and _ov_api_key.strip()) else runtime.get("api_key")
-    _runtime_api_mode = _ov_api_mode or runtime.get("api_mode")
+    if _is_codex_app_server:
+        _runtime_base_url = runtime.get("base_url")
+        _runtime_api_key = runtime.get("api_key")
+        _runtime_api_mode = runtime.get("api_mode")
+    else:
+        _runtime_base_url = _ov_base_url or runtime.get("base_url")
+        _runtime_api_key = _ov_api_key if (isinstance(_ov_api_key, str) and _ov_api_key.strip()) else runtime.get("api_key")
+        _runtime_api_mode = _ov_api_mode or runtime.get("api_mode")
     enabled_toolsets, disabled_toolsets = resolve_session_toolsets(
         session=_sessions.get(sid),
         session_id=session_id or key,
         load_enabled_toolsets=_load_enabled_toolsets,
         load_disabled_toolsets=_load_disabled_toolsets,
     )
-    session_context = dict(_sessions.get(sid) or {})
     if agent_context_mode:
         session_context["agent_context_mode"] = agent_context_mode
     context_options = _agent_context_options_for_session(session_context)
+    run_context = session_context.get("run_context")
+    memory_session_id = str(
+        getattr(run_context, "memory_namespace", "")
+        or (
+            f"conversation:{getattr(run_context, 'conversation_session_id', '')}"
+            f"/participant:{getattr(run_context, 'participant_id', '')}"
+            if run_context is not None
+            else ""
+        )
+        or session_id
+        or key
+    ).strip()
     agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -476,12 +712,22 @@ def _make_agent(
         credential_pool=runtime.get("credential_pool"),
         quiet_mode=True,
         verbose_logging=_load_tool_progress_mode() == "verbose",
-        reasoning_config=_load_reasoning_config(),
-        service_tier=_load_service_tier(),
+        model_context_window=descriptor_context_window,
+        reasoning_config=(
+            reasoning_config_override
+            if reasoning_config_override is not None
+            else _load_reasoning_config()
+        ),
+        service_tier=(
+            service_tier_override
+            if service_tier_override is not None
+            else _load_service_tier()
+        ),
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         platform="tui",
         session_id=session_id or key,
+        memory_session_id=memory_session_id,
         session_db=_db_for_stable_session(session_id or key),
         ephemeral_system_prompt=system_prompt or None,
         cwd=cwd,
@@ -492,6 +738,15 @@ def _make_agent(
     )
     if cwd:
         agent.session_cwd = cwd
+    if runtime.get("codex_home") is not None:
+        agent.codex_home = runtime.get("codex_home")
+    if _codex_extra_env:
+        agent.codex_extra_env = _codex_extra_env
+    if _is_codex_app_server:
+        agent.codex_account_mode = _codex_account_mode
+        agent.codex_explicit_model = (
+            model if _codex_account_mode == "platform" and _model_explicit else ""
+        )
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     return agent
 

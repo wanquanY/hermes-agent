@@ -1,24 +1,20 @@
 from __future__ import annotations
 
-from .conversation_missions import SessionDBConversationMissionMixin
-from .session_context import SessionDBTeamMissionContextMixin
-from .session_conversations import SessionDBTeamMissionConversationMixin
-from .session_events import SessionDBTeamMissionEventMixin
-from .session_finalizers import SessionDBTeamMissionFinalizerMixin
-from .session_graph import SessionDBTeamMissionGraphMixin
-from .session_rows import SessionDBTeamMissionRowsMixin
-from .session_views import SessionDBTeamMissionViewMixin
+from .conversation_missions import TeamMissionConversationMissionMixin
+from .session_context import TeamMissionContextMixin
+from .session_conversations import TeamMissionConversationMixin
+from .session_events import TeamMissionEventMixin
+from .session_finalizers import TeamMissionFinalizerMixin
+from .session_graph import TeamMissionGraphMixin
 
 
-class SessionDBTeamMissionMixin(
-    SessionDBConversationMissionMixin,
-    SessionDBTeamMissionRowsMixin,
-    SessionDBTeamMissionConversationMixin,
-    SessionDBTeamMissionGraphMixin,
-    SessionDBTeamMissionEventMixin,
-    SessionDBTeamMissionViewMixin,
-    SessionDBTeamMissionContextMixin,
-    SessionDBTeamMissionFinalizerMixin,
+class TeamMissionStateMixin(
+    TeamMissionConversationMissionMixin,
+    TeamMissionConversationMixin,
+    TeamMissionGraphMixin,
+    TeamMissionEventMixin,
+    TeamMissionContextMixin,
+    TeamMissionFinalizerMixin,
 ):
     """Native Hermes Team Mission graph and run-binding persistence.
 

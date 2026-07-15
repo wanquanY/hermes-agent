@@ -79,10 +79,20 @@ def _normalized_custom_base_url(value: Any) -> str:
 
 
 def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> bool:
-    provider_model = str(entry.get("model", "") or "").strip().lower()
-    if not provider_model:
+    agent_model_norm = str(agent_model or "").strip().lower()
+    models = entry.get("models")
+    catalog: List[str] = []
+    if isinstance(models, dict):
+        catalog = [str(model).strip().lower() for model in models]
+    elif isinstance(models, (list, tuple)):
+        catalog = [str(model).strip().lower() for model in models]
+    if catalog and agent_model_norm in catalog:
         return True
-    return provider_model == str(agent_model or "").strip().lower()
+
+    provider_model = str(entry.get("model", "") or "").strip().lower()
+    if not provider_model and not catalog:
+        return True
+    return provider_model == agent_model_norm
 
 
 def _custom_provider_extra_body_for_agent(
@@ -167,6 +177,7 @@ def init_agent(
     provider_data_collection: str = None,
     openrouter_min_coding_score: Optional[float] = None,
     session_id: str = None,
+    memory_session_id: str = None,
     tool_progress_callback: callable = None,
     tool_start_callback: callable = None,
     tool_complete_callback: callable = None,
@@ -185,6 +196,7 @@ def init_agent(
     prefill_messages: List[Dict[str, Any]] = None,
     platform: str = None,
     user_id: str = None,
+    user_id_alt: str = None,
     user_name: str = None,
     chat_id: str = None,
     chat_name: str = None,
@@ -196,6 +208,8 @@ def init_agent(
     skip_memory: bool = False,
     session_db=None,
     parent_session_id: str = None,
+    session_kind: str = "hermes_session",
+    conversation_kind: str = "direct",
     iteration_budget: "IterationBudget" = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
@@ -205,6 +219,7 @@ def init_agent(
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
     cwd: str = None,
+    model_context_window: int = None,
 ):
     """
     Initialize the AI Agent.
@@ -271,6 +286,7 @@ def init_agent(
     agent.ephemeral_system_prompt = ephemeral_system_prompt
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
+    agent._user_id_alt = user_id_alt
     agent._user_name = user_name
     agent._chat_id = chat_id
     agent._chat_name = chat_name
@@ -296,6 +312,9 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
+    logger.debug("[codex-flow][agent_init] AIAgent.__init__ received api_mode=%r provider=%r base_url=%r api_key_empty=%s model=%r",
+        api_mode, provider, base_url, not api_key, model,
+    )
     if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
         agent.api_mode = api_mode
     elif agent.provider == "openai-codex":
@@ -415,8 +434,6 @@ def init_agent(
     agent._executing_tools = False
     agent._tool_guardrails = ToolCallGuardrailController()
     agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
-    agent._tool_handoff_exit: dict | None = None
-
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
     agent._interrupt_message = None  # Optional message that triggered interrupt
@@ -690,7 +707,15 @@ def init_agent(
         if not agent.quiet_mode:
             _gr_label = " + Guardrails" if agent._bedrock_guardrail_config else ""
             print(f"🤖 AI Agent initialized with model: {agent.model} (AWS Bedrock, {agent._bedrock_region}{_gr_label})")
+    elif agent.api_mode == "codex_app_server":
+        # codex_app_server hands the entire turn to a codex CLI subprocess.
+        logger.debug("[codex-flow][agent_init] taking codex_app_server BRANCH — api_mode=%r provider=%r", agent.api_mode, agent.provider)
+        agent.client = None
+        agent._client_kwargs = {}
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Codex app-server)")
     else:
+        logger.debug("[codex-flow][agent_init] FALLING THROUGH to ELSE branch — api_mode=%r provider=%r api_key_empty=%s base_url=%r", agent.api_mode, agent.provider, not api_key, base_url)
         if api_key and base_url:
             # Explicit credentials from CLI/gateway — construct directly.
             # The runtime provider resolver already handled auth for us.
@@ -870,6 +895,12 @@ def init_agent(
         agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             agent.client = agent._create_openai_client(client_kwargs, reason="agent_init", shared=True)
+            try:
+                from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+                attach_dovie_attribution_request_hook(agent.client)
+            except Exception:
+                pass
             if not agent.quiet_mode:
                 print(f"🤖 AI Agent initialized with model: {agent.model}")
                 if base_url:
@@ -987,6 +1018,10 @@ def init_agent(
         timestamp_str = agent.session_start.strftime("%Y%m%d_%H%M%S")
         short_uuid = uuid.uuid4().hex[:6]
         agent.session_id = f"{timestamp_str}_{short_uuid}"
+    # Persistence/compression may share a canonical Conversation session while
+    # external memory providers must remain isolated per Participant actor.
+    # Ordinary single-agent sessions keep the historical one-id behavior.
+    agent.memory_session_id = str(memory_session_id or agent.session_id).strip()
 
     # Expose session ID to tools (terminal, execute_code) so agents can
     # reference their own session for --resume commands, cross-session
@@ -996,7 +1031,7 @@ def init_agent(
     # CLI mode where ContextVars aren't used.
     os.environ["HERMES_SESSION_ID"] = agent.session_id
     try:
-        from gateway.session_context import _SESSION_ID
+        from channels.session_context import _SESSION_ID
         _SESSION_ID.set(agent.session_id)
     except Exception:
         pass  # CLI/test mode — ContextVar not needed
@@ -1045,7 +1080,10 @@ def init_agent(
     
     # SQLite session store (optional -- provided by CLI or gateway)
     agent._session_db = session_db
+    agent._session_recall_read_model = None
     agent._parent_session_id = parent_session_id
+    agent._session_kind = str(session_kind or "hermes_session")
+    agent._conversation_kind = str(conversation_kind or "direct")
     agent._last_flushed_db_idx = 0  # per-message-buffer DB-write cursor
     agent._last_flushed_db_buffer_id = None
     agent._last_flushed_db_visible_session_id = ""
@@ -1129,7 +1167,7 @@ def init_agent(
                     agent._memory_manager.add_provider(_mp)
                 if agent._memory_manager.providers:
                     _init_kwargs = {
-                        "session_id": agent.session_id,
+                        "session_id": agent.memory_session_id,
                         "platform": platform or "cli",
                         "hermes_home": str(get_hermes_home()),
                         "agent_context": "primary",
@@ -1138,7 +1176,7 @@ def init_agent(
                     # (e.g. honcho uses this to derive chat-scoped session keys)
                     if agent._session_db:
                         try:
-                            _st = agent._session_db.get_session_title(agent.session_id)
+                            _st = agent._session_db.sessions.get_title(agent.session_id)
                             if _st:
                                 _init_kwargs["session_title"] = _st
                         except Exception:
@@ -1146,6 +1184,8 @@ def init_agent(
                     # Thread gateway user identity for per-user memory scoping
                     if agent._user_id:
                         _init_kwargs["user_id"] = agent._user_id
+                    if agent._user_id_alt:
+                        _init_kwargs["user_id_alt"] = agent._user_id_alt
                     if agent._user_name:
                         _init_kwargs["user_name"] = agent._user_name
                     if agent._chat_id:
@@ -1272,9 +1312,17 @@ def init_agent(
     compression_threshold = float(_compression_cfg.get("threshold", DEFAULT_COMPRESSION_THRESHOLD))
     try:
         from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
-        _model_cthresh = _cthresh_fn(agent.model)
+        _allow_codex_autoraise = str(
+            _compression_cfg.get("codex_gpt55_autoraise", True)
+        ).lower() in {"true", "1", "yes"}
+        _model_cthresh = _cthresh_fn(
+            agent.model,
+            agent.provider,
+            allow_codex_gpt55_autoraise=_allow_codex_autoraise,
+        )
         if _model_cthresh is not None:
-            compression_threshold = _model_cthresh
+            # Codex auto-raise must not lower an explicitly higher user value.
+            compression_threshold = max(compression_threshold, _model_cthresh)
     except Exception:
         pass
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
@@ -1290,7 +1338,7 @@ def init_agent(
         0, int(_compression_cfg.get("protect_first_n", 3))
     )
     compression_abort_on_summary_failure = str(
-        _compression_cfg.get("abort_on_summary_failure", False)
+        _compression_cfg.get("abort_on_summary_failure", True)
     ).lower() in {"true", "1", "yes"}
     # In-place compaction: when True, compress_context() rewrites the message
     # list + rebuilds the system prompt WITHOUT rotating the session id (no
@@ -1347,8 +1395,19 @@ def init_agent(
                 )
     agent._session_init_model_config["max_tokens"] = agent.max_tokens
 
-    # Read explicit context_length override from model config
-    if isinstance(_model_cfg, dict):
+    # A caller-owned model registry can provide the selected model's context
+    # window as part of the immutable runtime descriptor.  Consume it before
+    # constructing the context engine so remote OpenAI-compatible relays do
+    # not block first-token delivery on a speculative ``/models`` probe.
+    # Standalone Hermes callers continue to use model.context_length or the
+    # provider discovery chain when no descriptor value is supplied.
+    if (
+        isinstance(model_context_window, int)
+        and not isinstance(model_context_window, bool)
+        and model_context_window > 0
+    ):
+        _config_context_length = model_context_window
+    elif isinstance(_model_cfg, dict):
         _config_context_length = _model_cfg.get("context_length")
     else:
         _config_context_length = None
@@ -1437,6 +1496,7 @@ def init_agent(
     # Persist for reuse on switch_model / fallback activation. Must come
     # AFTER the custom_providers branch so per-model overrides aren't lost.
     agent._config_context_length = _config_context_length
+    agent._session_init_model_config["context_length"] = _config_context_length
 
     agent._ensure_lmstudio_runtime_loaded(_config_context_length)
 

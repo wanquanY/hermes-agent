@@ -16,9 +16,10 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.update_lifecycle import update_lifecycle_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/update", platform=Platform.TELEGRAM,
@@ -35,7 +36,7 @@ def _make_event(text="/update", platform=Platform.TELEGRAM,
 
 def _make_runner(hermes_home=None):
     """Create a bare GatewayRunner without calling __init__."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -45,7 +46,7 @@ def _make_runner(hermes_home=None):
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._failed_platforms = {}
-    # config is accessed by _check_slash_access and quick_commands lookup;
+    # config is accessed by slash access policy and quick_commands lookup;
     # None makes policy_for_source return a disabled (allow-all) policy.
     runner.config = None
     # Bypass the destructive-slash confirm gate — this test exercises
@@ -226,11 +227,11 @@ class TestUpdateCommandGatewayFlag:
         hermes_home.mkdir()
 
         mock_popen = MagicMock()
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Check the bash command string contains --gateway and PYTHONUNBUFFERED
         call_args = mock_popen.call_args[0][0]
@@ -274,9 +275,9 @@ class TestWatchUpdateProgress:
             , encoding="utf-8")
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(write_exit_code())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -315,9 +316,9 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.3)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(simulate_prompt_cycle())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=10.0,
@@ -370,9 +371,9 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.2)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_prompt())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -402,8 +403,8 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._watch_update_progress(
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -429,8 +430,8 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._watch_update_progress(
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -456,8 +457,8 @@ class TestWatchUpdateProgress:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._watch_update_progress(
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=5.0,
@@ -499,9 +500,9 @@ class TestWatchUpdateProgress:
             await asyncio.sleep(0.3)
             (hermes_home / ".update_exit_code").write_text("0")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             task = asyncio.create_task(finish_after_polls())
-            await runner._watch_update_progress(
+            await update_lifecycle_for(runner).watch_update_progress(
                 poll_interval=0.1,
                 stream_interval=0.2,
                 timeout=10.0,
@@ -541,9 +542,9 @@ class TestWatchUpdateProgress:
         adapter1 = AsyncMock()
         runner1.adapters = {Platform.TELEGRAM: adapter1}
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             watch1 = asyncio.create_task(
-                runner1._watch_update_progress(
+                update_lifecycle_for(runner1).watch_update_progress(
                     poll_interval=0.05,
                     stream_interval=0.1,
                     timeout=10.0,
@@ -572,7 +573,7 @@ class TestWatchUpdateProgress:
                 (hermes_home / ".update_exit_code").write_text("0")
 
             finisher = asyncio.create_task(respond_and_finish())
-            await runner2._watch_update_progress(
+            await update_lifecycle_for(runner2).watch_update_progress(
                 poll_interval=0.05,
                 stream_interval=0.1,
                 timeout=10.0,
@@ -611,7 +612,7 @@ class TestUpdatePromptInterception:
         runner._is_user_authorized = MagicMock(return_value=True)
         runner._session_key_for_source = MagicMock(return_value=session_key)
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         assert result is not None
@@ -644,7 +645,7 @@ class TestUpdatePromptInterception:
         runner._handle_reset_command = AsyncMock(return_value="reset ok")
         (hermes_home / ".update_prompt.json").write_text(json.dumps({"prompt": "test"}))
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         assert result == "reset ok"
@@ -674,7 +675,7 @@ class TestUpdatePromptInterception:
         runner._session_key_for_source = MagicMock(return_value=session_key)
         (hermes_home / ".update_prompt.json").write_text(json.dumps({"prompt": "test"}))
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.message_runtime.get_hermes_home", return_value=hermes_home):
             result = await runner._handle_message(event)
 
         response_path = hermes_home / ".update_response"

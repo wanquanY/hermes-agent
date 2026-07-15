@@ -1,0 +1,61 @@
+{
+  "checks": [
+    {
+      "id": "file_exists:docs/hermes_zero_debt_manifest.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:docs/hermes_zero_debt_execution_plan.md",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:scripts/zero_debt/verdict.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "file_exists:tests/observability/test_zero_debt_gates.py",
+      "message": "exists",
+      "ok": true
+    },
+    {
+      "id": "manifest:required_sections",
+      "message": "all required sections present",
+      "ok": true
+    },
+    {
+      "id": "manifest:wire_boundary_explicit",
+      "message": "wire alias allowlist is explicit",
+      "ok": true
+    },
+    {
+      "id": "manifest:production_gates_defined",
+      "message": "production grep gates are named",
+      "ok": true
+    },
+    {
+      "id": "plan:p0_to_p6_present",
+      "message": "P0-P6 are defined",
+      "ok": true
+    },
+    {
+      "id": "plan:vertical_slice_rule",
+      "message": "vertical slice E2E rule is present",
+      "ok": true
+    },
+    {
+      "id": "plan:two_signoff_files",
+      "message": "machine and user sign-off files are required",
+      "ok": true
+    }
+  ],
+  "next_required_human_signoff": "docs/audits/zero_debt_phase_p0_human_signoff.md",
+  "phase": "P0",
+  "status": "pass",
+  "warnings": [
+    "current branch is 'feat/team-timeline-rearchitecture'; destructive phases must run on 'feat/hermes-zero-debt'",
+    "worktree is dirty; P1+ requires an explicit baseline or clean handoff"
+  ]
+}

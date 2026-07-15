@@ -4,9 +4,10 @@ from unittest.mock import patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.debug_command import debug_command_for
+from hermes_gateway.config import GatewayConfig, Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/debug", platform=Platform.TELEGRAM,
@@ -21,7 +22,7 @@ def _make_event(text="/debug", platform=Platform.TELEGRAM,
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig()
@@ -40,7 +41,7 @@ class TestHandleDebugCommand:
              patch("hermes_cli.debug.collect_debug_report", return_value="report"), \
              patch("hermes_cli.debug.upload_to_pastebin", return_value="https://paste.rs/report"), \
              patch("hermes_cli.debug._schedule_auto_delete"):
-            result = await runner._handle_debug_command(event)
+            result = await debug_command_for(runner).handle_debug_command(event)
 
         mock_sweep.assert_called_once()
         assert "https://paste.rs/report" in result
@@ -55,6 +56,6 @@ class TestHandleDebugCommand:
              patch("hermes_cli.debug.collect_debug_report", return_value="report"), \
              patch("hermes_cli.debug.upload_to_pastebin", return_value="https://paste.rs/report"), \
              patch("hermes_cli.debug._schedule_auto_delete"):
-            result = await runner._handle_debug_command(event)
+            result = await debug_command_for(runner).handle_debug_command(event)
 
         assert "https://paste.rs/report" in result

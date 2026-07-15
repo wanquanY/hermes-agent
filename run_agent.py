@@ -34,7 +34,6 @@ except ModuleNotFoundError:
 import asyncio
 import base64
 import concurrent.futures
-import contextvars
 import copy
 import hashlib
 import json
@@ -377,6 +376,7 @@ class AIAgent:
         provider_data_collection: str = None,
         openrouter_min_coding_score: Optional[float] = None,
         session_id: str = None,
+        memory_session_id: str = None,
         tool_progress_callback: callable = None,
         tool_start_callback: callable = None,
         tool_complete_callback: callable = None,
@@ -395,6 +395,7 @@ class AIAgent:
         prefill_messages: List[Dict[str, Any]] = None,
         platform: str = None,
         user_id: str = None,
+        user_id_alt: str = None,
         user_name: str = None,
         chat_id: str = None,
         chat_name: str = None,
@@ -406,6 +407,8 @@ class AIAgent:
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
+        session_kind: str = "hermes_session",
+        conversation_kind: str = "direct",
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
@@ -415,6 +418,7 @@ class AIAgent:
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
         cwd: str = None,
+        model_context_window: int = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -448,6 +452,7 @@ class AIAgent:
             provider_data_collection=provider_data_collection,
             openrouter_min_coding_score=openrouter_min_coding_score,
             session_id=session_id,
+            memory_session_id=memory_session_id,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
@@ -466,6 +471,7 @@ class AIAgent:
             prefill_messages=prefill_messages,
             platform=platform,
             user_id=user_id,
+            user_id_alt=user_id_alt,
             user_name=user_name,
             chat_id=chat_id,
             chat_name=chat_name,
@@ -477,6 +483,8 @@ class AIAgent:
             skip_memory=skip_memory,
             session_db=session_db,
             parent_session_id=parent_session_id,
+            session_kind=session_kind,
+            conversation_kind=conversation_kind,
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
@@ -486,27 +494,27 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
             cwd=cwd,
+            model_context_window=model_context_window,
         )
 
     def _get_session_db_for_recall(self):
-        """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
-
-        Most frontends pass ``session_db`` into ``AIAgent`` explicitly, but recall
-        is important enough that a missing constructor argument should degrade by
-        opening the default state DB instead of making the advertised
-        ``session_search`` tool unusable.
-        """
+        """Return the explicit session recall read model."""
         if getattr(self, "_session_persistence_disabled", False):
             return None
-        if self._session_db is not None:
-            return self._session_db
+        cached = getattr(self, "_session_recall_read_model", None)
+        if cached is not None:
+            return cached
         try:
-            from hermes_state import SessionDB
+            from hermes_agent.read_models.session_recall import SessionRecallReadModel
 
-            self._session_db = SessionDB()
-            return self._session_db
+            if self._session_db is not None:
+                cached = SessionRecallReadModel.from_session_db(self._session_db)
+            else:
+                cached = SessionRecallReadModel.open_default()
+            self._session_recall_read_model = cached
+            return cached
         except Exception as exc:
-            logger.debug("SessionDB unavailable for recall", exc_info=True)
+            logger.debug("Session recall read model unavailable", exc_info=True)
             return None
 
     def _ensure_db_session(self) -> None:
@@ -516,7 +524,7 @@ class AIAgent:
         if self._session_db_created or not self._session_db:
             return
         try:
-            self._session_db.create_session(
+            self._session_db.sessions.create(
                 session_id=self.session_id,
                 source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                 model=self.model,
@@ -524,6 +532,8 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                session_kind=self._session_kind,
+                conversation_kind=self._conversation_kind,
             )
             self._session_db_created = True
         except Exception as e:
@@ -1216,7 +1226,11 @@ class AIAgent:
             review_memory=review_memory,
             review_skills=review_skills,
         )
-        t = threading.Thread(target=target, daemon=True, name="bg-review")
+        t = threading.Thread(
+            target=target,
+            daemon=True,
+            name="bg-review",
+        )
         t.start()
 
     def _build_memory_write_metadata(
@@ -1255,29 +1269,41 @@ class AIAgent:
             if isinstance(msg, dict) and msg.get("role") == "user":
                 msg["content"] = override
 
+    def _messages_for_persistence(self, messages: List[Dict]) -> List[Dict]:
+        """Return a persistence-safe copy without mutating provider context.
+
+        ``persist_user_message`` is a storage contract, not a prompt rewrite.
+        Team Mission terminal reports deliberately submit an API-only user
+        instruction while persisting an empty external-message placeholder.
+        Applying the override to the live list before the provider call made
+        the current user message empty and caused the model to answer an older
+        request from history.
+        """
+        persisted = [dict(message) if isinstance(message, dict) else message for message in messages]
+        self._apply_persist_user_message_override(persisted)
+        return persisted
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
         """
         if getattr(self, "_session_persistence_disabled", False):
-            self._session_messages = messages
+            self._session_messages = self._messages_for_persistence(messages)
             return
         self._drop_trailing_empty_response_scaffolding(messages)
-        self._apply_persist_user_message_override(messages)
-        self._session_messages = messages
-        self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        persisted_messages = self._messages_for_persistence(messages)
+        self._session_messages = persisted_messages
+        self._save_session_log(persisted_messages)
+        self._flush_messages_to_session_db(persisted_messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
 
         Also rewinds past any trailing tool-result / assistant(tool_calls) pair
-        that the failed iteration left hanging. Without this, the tail ends at
-        a raw ``tool`` message and the next user turn lands as
-        ``...tool, user, user`` — a protocol-invalid sequence that most
-        providers silently reject (returns empty content), causing the
-        empty-retry loop to fire forever. See #<TBD>.
+        that the failed iteration left hanging. Without this, later requests
+        can replay an unresolved tool protocol tail, which providers reject or
+        answer with empty content and thereby retrigger the recovery loop.
         """
         # Pass 1: strip the flagged scaffolding messages themselves.
         dropped_scaffolding = False
@@ -1294,9 +1320,8 @@ class AIAgent:
 
         # Pass 2: if we stripped scaffolding, rewind through any trailing
         # tool-result messages plus the assistant(tool_calls) message that
-        # produced them. This preserves role alternation so the next user
-        # message follows a user or assistant message, not an orphan tool
-        # result. Only runs when scaffolding was actually present — normal
+        # produced them. This keeps an orphan tool result out of the next
+        # provider request. Only runs when scaffolding was actually present — normal
         # conversation tails (real tool loops mid-progress) are untouched.
         if not dropped_scaffolding:
             return
@@ -1335,7 +1360,7 @@ class AIAgent:
             if context is not None:
                 return context
         try:
-            from tui_gateway.services.worker_publish_bridge import get_active_run_context
+            from hermes_agent.orchestration.worker_publish_bridge import get_active_run_context
 
             return get_active_run_context()
         except Exception:
@@ -1450,7 +1475,7 @@ class AIAgent:
         if not session_id or not self._session_db:
             return
         try:
-            self._session_db.create_session(session_id, source="team_mission", transient=False)
+            self._session_db.sessions.create(session_id, source="team_mission", transient=False)
         except Exception:
             # create_session is INSERT OR IGNORE for the real DB; proxy/test
             # doubles may still raise. The append path below will surface any
@@ -1608,7 +1633,7 @@ class AIAgent:
         *,
         turn_message_index: int,
     ) -> Dict[str, Any]:
-        """Stamp a stable per-run key used by SessionDB for idempotent append."""
+        """Stamp a stable per-run key used by storage for idempotent append."""
         if not isinstance(metadata, dict):
             return metadata
         run_id = str(metadata.get("run_id") or metadata.get("runId") or "").strip()
@@ -1640,11 +1665,8 @@ class AIAgent:
             return True
         if not session_id or not self._session_db or not messages or prefix_len > len(messages):
             return False
-        get_messages = getattr(self._session_db, "get_messages", None)
-        if not callable(get_messages):
-            return False
         try:
-            rows = get_messages(session_id)
+            rows = self._session_db.messages.list(session_id)
         except Exception:
             return False
         if len(rows or []) < prefix_len:
@@ -1710,11 +1732,10 @@ class AIAgent:
 
         The in-memory cursor is scoped to the current message buffer/run/turn.
         Rebuilt histories fall back to the explicit turn boundary and rely on
-        SessionDB's persisted run-message key for idempotency.
+        Persisted run-message key for idempotency.
         """
         if not self._session_db:
             return
-        self._apply_persist_user_message_override(messages)
         visible_session_id = ""
         try:
             visible_session_id = self._visible_transcript_session_id()
@@ -1861,6 +1882,15 @@ class AIAgent:
                 if prior.get("role") == "user":
                     current_turn_metadata = _turn_metadata(prior.get("metadata"))
                     break
+            assistant_segment_index = 0
+            for prior in messages[start_idx:flush_from]:
+                if not isinstance(prior, dict) or prior.get("_synthetic_continuation"):
+                    continue
+                prior_role = prior.get("role")
+                if prior_role == "user":
+                    assistant_segment_index = 0
+                elif prior_role == "assistant":
+                    assistant_segment_index += 1
             for msg_idx, msg in enumerate(messages[flush_from:], start=flush_from):
                 # In-memory trajectory artifacts (truncation continuation prompt,
                 # large-tool-call recovery) are added so the LLM can continue the
@@ -1886,6 +1916,7 @@ class AIAgent:
                 target_session_id = visible_session_id
                 if role == "user":
                     current_turn_metadata = _turn_metadata(msg_metadata)
+                    assistant_segment_index = 0
                 elif role in {"assistant", "tool"}:
                     if active_turn_metadata:
                         msg_metadata = self._merge_message_metadata(msg_metadata, active_turn_metadata)
@@ -1897,6 +1928,17 @@ class AIAgent:
                         identity_value = str(context_metadata.get(identity_key) or "").strip()
                         if identity_value:
                             msg_metadata[identity_key] = identity_value
+                if role == "assistant":
+                    raw_segment_index = msg_metadata.get("assistant_segment_index")
+                    try:
+                        persisted_segment_index = max(0, int(raw_segment_index))
+                    except (TypeError, ValueError):
+                        persisted_segment_index = assistant_segment_index
+                        msg_metadata["assistant_segment_index"] = persisted_segment_index
+                    assistant_segment_index = max(
+                        assistant_segment_index,
+                        persisted_segment_index + 1,
+                    )
                 if role in {"user", "assistant", "tool"}:
                     msg_metadata = self._message_persist_identity_metadata(
                         msg_metadata,
@@ -1927,9 +1969,9 @@ class AIAgent:
                             )
                         continue
                     if not is_main_team_transcript_message:
-                        runtime_session_id = str(getattr(self, "session_id", "") or "").strip()
-                        if runtime_session_id:
-                            target_session_id = runtime_session_id
+                        execution_session_id = str(getattr(self, "session_id", "") or "").strip()
+                        if execution_session_id:
+                            target_session_id = execution_session_id
                             self._ensure_visible_transcript_session(target_session_id)
                         else:
                             if len(skipped_samples) < 12:
@@ -1984,7 +2026,7 @@ class AIAgent:
                     tool_calls_data = msg["tool_calls"]
                 msg_participant_id = self._flush_message_participant_id(role, msg, msg_metadata)
                 append_attempts += 1
-                appended_id = self._session_db.append_message(
+                appended_id = self._session_db.messages.append(
                     session_id=target_session_id,
                     role=role,
                     content=content,
@@ -2093,7 +2135,7 @@ class AIAgent:
             if participant_id:
                 return participant_id
         try:
-            from tui_gateway.services.worker_publish_bridge import get_active_run_context
+            from hermes_agent.orchestration.worker_publish_bridge import get_active_run_context
 
             active_context = get_active_run_context()
             return str(getattr(active_context, "participant_id", "") or "").strip()
@@ -2816,11 +2858,11 @@ class AIAgent:
         try:
             self._memory_manager.sync_all(
                 original_user_message, final_response,
-                session_id=self.session_id or "",
+                session_id=self.memory_session_id or self.session_id or "",
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
-                session_id=self.session_id or "",
+                session_id=self.memory_session_id or self.session_id or "",
             )
         except Exception:
             pass
@@ -2951,7 +2993,7 @@ class AIAgent:
                 session_db = getattr(self, "_session_db", None)
                 session_id = getattr(self, "session_id", None)
                 if session_db and session_id:
-                    session_db.end_session(session_id, "agent_close")
+                    session_db.sessions.end(session_id, "agent_close")
         except Exception:
             pass
 
@@ -3101,9 +3143,16 @@ class AIAgent:
     def _drop_thinking_only_and_merge_users(
         messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_and_merge_users``."""
-        from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
-        return drop_thinking_only_and_merge_users(messages)
+        """Compatibility alias; adjacent user events are no longer merged."""
+        return AIAgent._drop_thinking_only_messages(messages)
+
+    @staticmethod
+    def _drop_thinking_only_messages(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Forwarder — see ``agent.agent_runtime_helpers.drop_thinking_only_messages``."""
+        from agent.agent_runtime_helpers import drop_thinking_only_messages
+        return drop_thinking_only_messages(messages)
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -3850,35 +3899,6 @@ class AIAgent:
         return callbacks
 
     @staticmethod
-    def _stream_suffix_prefix_overlap(left: str, right: str) -> int:
-        limit = min(len(left), len(right))
-        for size in range(limit, 0, -1):
-            if left.endswith(right[:size]):
-                return size
-        return 0
-
-    def _normalize_reasoning_delta(self, text: str) -> str:
-        incoming = str(text or "")
-        if not incoming:
-            return ""
-        current = str(getattr(self, "_current_streamed_reasoning_text", "") or "")
-        if not current:
-            self._current_streamed_reasoning_text = incoming
-            return incoming
-        if incoming == current or current.startswith(incoming):
-            return ""
-        if incoming.startswith(current):
-            delta = incoming[len(current):]
-            self._current_streamed_reasoning_text = incoming
-            return delta
-        overlap = self._stream_suffix_prefix_overlap(current, incoming)
-        delta = incoming[overlap:] if overlap > 0 else incoming
-        if not delta:
-            return ""
-        self._current_streamed_reasoning_text = current + delta
-        return delta
-
-    @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
         if not isinstance(text, str):
             return ""
@@ -3971,10 +3991,13 @@ class AIAgent:
             self._record_streamed_assistant_text(text)
 
     def _fire_reasoning_delta(self, text: str) -> None:
-        """Fire reasoning callback if registered."""
-        text = self._normalize_reasoning_delta(text)
+        """Fire one provider reasoning delta without content-based guessing."""
+        text = str(text or "")
         if not text:
             return
+        self._current_streamed_reasoning_text = (
+            str(getattr(self, "_current_streamed_reasoning_text", "") or "") + text
+        )
         cb = self.reasoning_callback
         if cb is not None:
             try:
@@ -4531,7 +4554,7 @@ class AIAgent:
         else:
             requested_effort = "medium"
 
-        if requested_effort == "xhigh" and "high" in supported_efforts:
+        if requested_effort in {"xhigh", "max", "ultra"} and "high" in supported_efforts:
             requested_effort = "high"
         elif requested_effort not in supported_efforts:
             if requested_effort == "minimal" and "low" in supported_efforts:
@@ -4836,10 +4859,11 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
+        current_input_conversation_message_id: str = "",
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(
+        result = run_conversation(
             self,
             user_message,
             system_message,
@@ -4848,7 +4872,13 @@ class AIAgent:
             stream_callback,
             persist_user_message,
             turn_metadata,
+            current_input_conversation_message_id,
         )
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            persisted_messages = self._messages_for_persistence(result["messages"])
+            result = {**result, "messages": persisted_messages}
+            self._session_messages = persisted_messages
+        return result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

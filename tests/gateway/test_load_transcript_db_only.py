@@ -1,28 +1,28 @@
 """Verify load_transcript returns SQLite messages without any JSONL file."""
-from pathlib import Path
-
-import pytest
-
-from gateway.session import SessionStore
-from gateway.config import GatewayConfig
+from hermes_gateway.session import SessionStore
+from hermes_gateway.config import GatewayConfig
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.storage.session_repository_db import connect_session_repository_db
 
 
-def test_load_transcript_returns_db_messages_when_no_jsonl(tmp_path, monkeypatch):
+def test_load_transcript_returns_db_messages_when_no_jsonl(tmp_path):
     """Reading a transcript must work from SQLite alone — no JSONL fallback needed.
 
-    Pin DEFAULT_DB_PATH to tmp_path so this test cannot write to the real
-    ~/.hermes/state.db. (DEFAULT_DB_PATH is a module-level constant computed
-    at hermes_state import time, before pytest's HERMES_HOME monkeypatch
-    fires — the autouse fixture's HERMES_HOME override doesn't help here.)
+    The gateway must go through the repository/read-model owner, not the legacy
+    state facade.
     """
-    import hermes_state
-    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
-
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    session_repo = SessionRepoImpl(conn)
     config = GatewayConfig()
-    store = SessionStore(sessions_dir=tmp_path, config=config)
+    store = SessionStore(
+        sessions_dir=tmp_path,
+        config=config,
+        session_repo=session_repo,
+        storage_conn=conn,
+    )
 
     sid = "test-session-db-only"
-    store._db.create_session(session_id=sid, source="test")
+    session_repo.create(SessionSpec(session_id=sid, source="test"))
     store.append_to_transcript(sid, {"role": "user", "content": "hello", "timestamp": 1.0})
     store.append_to_transcript(sid, {"role": "assistant", "content": "world", "timestamp": 2.0})
 

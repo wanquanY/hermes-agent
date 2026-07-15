@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.config import Platform, _PLATFORM_CONNECTED_CHECKERS, _BUILTIN_PLATFORM_VALUES
+from hermes_gateway.config import Platform, _PLATFORM_CONNECTED_CHECKERS, _BUILTIN_PLATFORM_VALUES
 
 
 def test_all_builtins_have_checker_or_generic_token_path():

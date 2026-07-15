@@ -52,6 +52,21 @@ def test_build_native_request_preserves_thought_signature_on_tool_replay():
     assert parts[0]["thoughtSignature"] == "sig-123"
 
 
+def test_build_native_request_uses_full_output_ceiling_by_default():
+    from agent.gemini_native_adapter import (
+        GEMINI_DEFAULT_MAX_OUTPUT_TOKENS,
+        build_gemini_request,
+    )
+
+    request = build_gemini_request(
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+
+    assert request["generationConfig"]["maxOutputTokens"] == (
+        GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+    )
+
+
 def test_build_native_request_uses_original_function_name_for_tool_result():
     from agent.gemini_native_adapter import build_gemini_request
 

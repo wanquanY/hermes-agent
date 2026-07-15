@@ -40,6 +40,7 @@ from typing import Any, List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
@@ -424,7 +425,7 @@ def _plugin_cron_env_var(platform_name: str) -> str:
     try:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         entry = platform_registry.get(platform_name.lower())
         if entry and entry.cron_deliver_env_var:
             return entry.cron_deliver_env_var
@@ -508,7 +509,7 @@ def _iter_home_target_platforms():
     try:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             if entry.cron_deliver_env_var and entry.name not in _HOME_TARGET_ENV_VARS:
                 yield entry.name
@@ -562,7 +563,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
         # Resolve human-friendly labels like "Alice (dm)" to real IDs.
         try:
-            from gateway.channel_directory import resolve_channel_name
+            from hermes_gateway.channel_directory import resolve_channel_name
             resolved = resolve_channel_name(platform_key, chat_id)
             if resolved:
                 parsed_chat_id, parsed_thread_id, resolved_is_explicit = _parse_target_ref(platform_key, resolved)
@@ -686,7 +687,7 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
-# Media extension sets — audio routing is centralized in gateway.platforms.base
+# Media extension sets — audio routing is centralized in channels.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
 _IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
@@ -709,7 +710,7 @@ def _send_media_via_adapter(
     """
     from pathlib import Path
 
-    from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+    from channels.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
@@ -768,7 +769,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         return None  # local-only jobs don't deliver — not a failure
 
     from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
+    from hermes_gateway.config import load_gateway_config, Platform
 
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
@@ -794,7 +795,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         delivery_content = content
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
@@ -987,14 +988,13 @@ def _append_dovie_session_message(
     if not content or (success and SILENT_MARKER in content.upper()):
         return None
 
+    session_store = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        db.ensure_session(target_session_id, source="tui", model=job.get("model"))
+        session_store = open_cli_session_store()
+        session_store.sessions.ensure(target_session_id, source="tui", model=job.get("model"))
         trigger_content = _dovie_trigger_content(job)
         if trigger_content:
-            db.append_message(
+            session_store.messages.append(
                 target_session_id,
                 "user",
                 trigger_content,
@@ -1002,11 +1002,11 @@ def _append_dovie_session_message(
                     "source": "dovie_automation_trigger",
                     "job_id": job.get("id"),
                     "job_name": job.get("name"),
-                    "runtime_session_id": job.get("_runtime_session_id"),
+                    "execution_session_id": job.get("_execution_session_id"),
                     "result_binding_mode": mode,
                 },
             )
-        db.append_message(
+        session_store.messages.append(
             target_session_id,
             "assistant",
             content,
@@ -1014,7 +1014,7 @@ def _append_dovie_session_message(
                 "source": "dovie_automation",
                 "job_id": job.get("id"),
                 "job_name": job.get("name"),
-                "runtime_session_id": job.get("_runtime_session_id"),
+                "execution_session_id": job.get("_execution_session_id"),
                 "result_binding_mode": mode,
                 "success": success,
             },
@@ -1027,6 +1027,16 @@ def _append_dovie_session_message(
             exc,
         )
         return str(exc)
+    finally:
+        if session_store is not None:
+            try:
+                session_store.close()
+            except Exception as exc:
+                logger.debug(
+                    "Job '%s': failed to close Dovie result session store: %s",
+                    job.get("id", "?"),
+                    exc,
+                )
     return None
 
 
@@ -1508,7 +1518,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # stdout to telegram" watchdog pattern. The agent path is skipped
     # entirely: no AIAgent, no prompt, no tool loop, no token spend.
     #
-    # We check this BEFORE importing run_agent / constructing SessionDB so
+    # We check this BEFORE importing run_agent / constructing the session store so
     # a pure-script tick never pays for the agent machinery it isn't going
     # to use. Keep this block self-contained.
     #
@@ -1607,17 +1617,16 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # ---------------------------------------------------------------
     # Default (LLM) path — import and construct the agent machinery now
     # that we know we actually need it. Doing these imports here instead of
-    # at module top keeps no_agent ticks from paying for AIAgent / SessionDB
+    # at module top keeps no_agent ticks from paying for AIAgent / session-store
     # construction costs.
     # ---------------------------------------------------------------
     from run_agent import AIAgent
 
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
-    _session_db = None
+    _session_store = None
     try:
-        from hermes_state import SessionDB
-        _session_db = SessionDB()
+        _session_store = open_cli_session_store()
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
@@ -1673,7 +1682,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
-    job["_runtime_session_id"] = _cron_session_id
+    job["_execution_session_id"] = _cron_session_id
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -1694,7 +1703,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
-    from gateway.session_context import set_session_vars, clear_session_vars, _VAR_MAP
+    from channels.session_context import set_session_vars, clear_session_vars, _VAR_MAP
 
     # Cron execution is an internal scheduler context, not a live inbound
     # gateway message. Do not seed HERMES_SESSION_* contextvars from the
@@ -1943,7 +1952,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
-            session_db=_session_db,
+            session_db=_session_store,
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run
@@ -2122,13 +2131,13 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
-        if _session_db:
+        if _session_store:
             try:
-                _session_db.end_session(_cron_session_id, "cron_complete")
+                _session_store.sessions.end(_cron_session_id, "cron_complete")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
             try:
-                _session_db.close()
+                _session_store.close()
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
         # Release subprocesses, terminal sandboxes, browser daemons, and the
@@ -2282,18 +2291,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 mark_kwargs = {"delivery_error": delivery_error}
-                runtime_session_id = job.get("_runtime_session_id")
-                if runtime_session_id:
-                    mark_kwargs["session_id"] = runtime_session_id
+                execution_session_id = job.get("_execution_session_id")
+                if execution_session_id:
+                    mark_kwargs["session_id"] = execution_session_id
                 mark_job_run(job["id"], success, error, **mark_kwargs)
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
                 mark_kwargs = {}
-                runtime_session_id = job.get("_runtime_session_id")
-                if runtime_session_id:
-                    mark_kwargs["session_id"] = runtime_session_id
+                execution_session_id = job.get("_execution_session_id")
+                if execution_session_id:
+                    mark_kwargs["session_id"] = execution_session_id
                 mark_job_run(job["id"], False, str(e), **mark_kwargs)
                 return False
 

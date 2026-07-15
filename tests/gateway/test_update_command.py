@@ -11,9 +11,10 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.update_lifecycle import update_lifecycle_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _make_event(text="/update", platform=Platform.TELEGRAM,
@@ -31,7 +32,7 @@ def _make_event(text="/update", platform=Platform.TELEGRAM,
 
 def _make_runner():
     """Create a bare GatewayRunner without calling __init__."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     runner = object.__new__(GatewayRunner)
     runner.adapters = {}
     runner._voice_mode = {}
@@ -52,7 +53,7 @@ class TestHandleUpdateCommand:
         event = _make_event()
         monkeypatch.setenv("HERMES_MANAGED", "homebrew")
 
-        result = await runner._handle_update_command(event)
+        result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "managed by Homebrew" in result
         assert "brew upgrade hermes-agent" in result
@@ -65,8 +66,8 @@ class TestHandleUpdateCommand:
         # Point _hermes_home to tmp_path and project_root to a dir without .git
         fake_root = tmp_path / "project"
         fake_root.mkdir()
-        with patch("gateway.run._hermes_home", tmp_path), \
-             patch("gateway.run.Path") as MockPath:
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", tmp_path), \
+             patch("hermes_gateway.runner.Path") as MockPath:
             # Path(__file__).parent.parent.resolve() -> fake_root
             MockPath.return_value = MagicMock()
             MockPath.__truediv__ = Path.__truediv__
@@ -74,13 +75,13 @@ class TestHandleUpdateCommand:
             pass
 
         # Simpler approach — mock at method level using a wrapper
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
         runner = _make_runner()
 
-        with patch("gateway.run._hermes_home", tmp_path):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", tmp_path):
             # The handler does Path(__file__).parent.parent.resolve()
             # We need to make project_root / '.git' not exist.
-            # Since Path(__file__) resolves to the real gateway/run.py,
+            # Since Path(__file__) resolves to the real hermes_gateway/runner.py,
             # project_root will be the real hermes-agent dir (which HAS .git).
             # Patch Path to control this.
             original_path = Path
@@ -93,8 +94,8 @@ class TestHandleUpdateCommand:
             (fake_root / "gateway").mkdir(parents=True)
             (fake_root / "gateway" / "run.py").touch()
 
-            with patch("gateway.run.__file__", fake_file):
-                result = await runner._handle_update_command(event)
+            with patch("hermes_gateway.update_lifecycle.__file__", fake_file):
+                result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Not a git repository" in result
 
@@ -112,11 +113,11 @@ class TestHandleUpdateCommand:
         (fake_root / "gateway" / "run.py").touch()
         fake_file = str(fake_root / "gateway" / "run.py")
 
-        with patch("gateway.run._hermes_home", tmp_path), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", tmp_path), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=None):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Could not locate" in result
         assert "hermes update" in result
@@ -139,12 +140,12 @@ class TestHandleUpdateCommand:
         mock_popen = MagicMock()
         fake_spec = MagicMock()
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=fake_spec), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Starting Hermes update" in result
         call_args = mock_popen.call_args[0][0]
@@ -155,10 +156,10 @@ class TestHandleUpdateCommand:
     @pytest.mark.asyncio
     async def test_resolve_hermes_bin_prefers_which(self, tmp_path):
         """_resolve_hermes_bin returns argv parts from shutil.which when available."""
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         with patch("shutil.which", return_value="/custom/path/hermes"):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result == ["/custom/path/hermes"]
 
@@ -166,23 +167,23 @@ class TestHandleUpdateCommand:
     async def test_resolve_hermes_bin_fallback(self):
         """_resolve_hermes_bin falls back to sys.executable argv when which fails."""
         import sys
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         fake_spec = MagicMock()
         with patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=fake_spec):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result == [sys.executable, "-m", "hermes_cli.main"]
 
     @pytest.mark.asyncio
     async def test_resolve_hermes_bin_returns_none_when_both_fail(self):
         """_resolve_hermes_bin returns None when both strategies fail."""
-        from gateway.run import _resolve_hermes_bin
+        from hermes_gateway.bootstrap import resolve_hermes_bin
 
         with patch("shutil.which", return_value=None), \
              patch("importlib.util.find_spec", return_value=None):
-            result = _resolve_hermes_bin()
+            result = resolve_hermes_bin()
 
         assert result is None
 
@@ -201,11 +202,11 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
              patch("subprocess.Popen"):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         pending_path = hermes_home / ".update_pending.json"
         assert pending_path.exists()
@@ -234,11 +235,11 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: "/usr/bin/hermes" if x == "hermes" else "/usr/bin/setsid"), \
              patch("subprocess.Popen"):
-            await runner._handle_update_command(event)
+            await update_lifecycle_for(runner).handle_update_command(event)
 
         data = json.loads((hermes_home / ".update_pending.json").read_text())
         assert data["thread_id"] == "777"
@@ -259,11 +260,11 @@ class TestHandleUpdateCommand:
         hermes_home.mkdir()
 
         mock_popen = MagicMock()
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Verify setsid was used
         call_args = mock_popen.call_args[0][0]
@@ -296,11 +297,11 @@ class TestHandleUpdateCommand:
                 return None
             return None
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=which_no_setsid), \
              patch("subprocess.Popen", mock_popen):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         # Verify plain bash -c fallback (no nohup, no setsid)
         call_args = mock_popen.call_args[0][0]
@@ -327,11 +328,11 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen", side_effect=OSError("spawn failed")):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "Failed to start update" in result
         # Pending file should be cleaned up
@@ -353,11 +354,11 @@ class TestHandleUpdateCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
-        with patch("gateway.run._hermes_home", hermes_home), \
-             patch("gateway.run.__file__", fake_file), \
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home), \
+             patch("hermes_gateway.update_lifecycle.__file__", fake_file), \
              patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}"), \
              patch("subprocess.Popen"):
-            result = await runner._handle_update_command(event)
+            result = await update_lifecycle_for(runner).handle_update_command(event)
 
         assert "stream progress" in result
 
@@ -377,9 +378,9 @@ class TestSendUpdateNotification:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             # Should not raise
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
     @pytest.mark.asyncio
     async def test_defers_notification_while_update_still_running(self, tmp_path):
@@ -397,8 +398,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            result = await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is False
         mock_adapter.send.assert_not_called()
@@ -421,8 +422,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            result = await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is True
         mock_adapter.send.assert_called_once()
@@ -453,8 +454,8 @@ class TestSendUpdateNotification:
         mock_adapter.send = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         mock_adapter.send.assert_called_once()
         call_args = mock_adapter.send.call_args
@@ -481,8 +482,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         assert mock_adapter.send.call_args.kwargs["metadata"] == {"thread_id": "777"}
 
@@ -503,8 +504,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         assert "\x1b[" not in sent_text
@@ -525,8 +526,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         # Should start with truncation marker
@@ -549,8 +550,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            result = await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            result = await update_lifecycle_for(runner).send_update_notification()
 
         assert result is True
         sent_text = mock_adapter.send.call_args[0][1]
@@ -572,8 +573,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         sent_text = mock_adapter.send.call_args[0][1]
         assert "finished successfully" in sent_text
@@ -597,8 +598,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         assert not pending_path.exists()
         assert not output_path.exists()
@@ -625,8 +626,8 @@ class TestSendUpdateNotification:
         mock_adapter.send.side_effect = RuntimeError("network error")
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         # Files should still be cleaned up (finally block)
         assert not pending_path.exists()
@@ -643,9 +644,9 @@ class TestSendUpdateNotification:
         pending_path = hermes_home / ".update_pending.json"
         pending_path.write_text("{corrupt json!!")
 
-        with patch("gateway.run._hermes_home", hermes_home):
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
             # Should not raise
-            await runner._send_update_notification()
+            await update_lifecycle_for(runner).send_update_notification()
 
         # File should be cleaned up
         assert not pending_path.exists()
@@ -669,8 +670,8 @@ class TestSendUpdateNotification:
         mock_adapter = AsyncMock()
         runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-        with patch("gateway.run._hermes_home", hermes_home):
-            await runner._send_update_notification()
+        with patch("hermes_gateway.lifecycle_home.GATEWAY_HOME", hermes_home):
+            await update_lifecycle_for(runner).send_update_notification()
 
         # send should not have been called (wrong platform)
         mock_adapter.send.assert_not_called()
@@ -699,7 +700,7 @@ class TestUpdateInHelp:
         """The /update command is in the help text (proxy for _known_commands)."""
         # _known_commands is local to _handle_message, so we verify by
         # checking the help output includes it.
-        from gateway.run import GatewayRunner
+        from hermes_gateway.message_command_runtime import GatewayMessageCommandService
         import inspect
-        source = inspect.getsource(GatewayRunner._handle_message)
+        source = inspect.getsource(GatewayMessageCommandService.dispatch)
         assert '"update"' in source

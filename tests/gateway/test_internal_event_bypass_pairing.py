@@ -13,10 +13,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.process_watcher import process_watcher_for
+from hermes_gateway.session import SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ def _build_runner(monkeypatch, tmp_path) -> GatewayRunner:
         encoding="utf-8",
     )
 
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
@@ -91,7 +92,7 @@ async def test_notify_on_complete_sets_internal_flag(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path)
     adapter = runner.adapters[Platform.DISCORD]
 
-    await runner._run_process_watcher(_watcher_dict_with_notify())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict_with_notify())
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]
@@ -102,7 +103,7 @@ async def test_notify_on_complete_sets_internal_flag(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
     """An internal event should skip _is_user_authorized entirely."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     (tmp_path / "config.yaml").write_text("", encoding="utf-8")
@@ -151,7 +152,7 @@ async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
     """An internal event with no user_id must not generate a pairing code."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     (tmp_path / "config.yaml").write_text("", encoding="utf-8")
@@ -222,7 +223,7 @@ async def test_notify_on_complete_preserves_user_identity(monkeypatch, tmp_path)
     watcher["user_id"] = "user-42"
     watcher["user_name"] = "alice"
 
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]
@@ -233,7 +234,7 @@ async def test_notify_on_complete_preserves_user_identity(monkeypatch, tmp_path)
 @pytest.mark.asyncio
 async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monkeypatch, tmp_path):
     import tools.process_registry as pr_module
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     sessions = [
         SimpleNamespace(
@@ -270,7 +271,7 @@ async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monk
         "notify_on_complete": True,
     }
 
-    await runner._run_process_watcher(watcher)
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     assert adapter.handle_message.await_count == 1
     event = adapter.handle_message.await_args.args[0]
@@ -286,7 +287,7 @@ async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monk
 @pytest.mark.asyncio
 async def test_none_user_id_skips_pairing(monkeypatch, tmp_path):
     """A non-internal event with user_id=None should be silently dropped."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     (tmp_path / "config.yaml").write_text("", encoding="utf-8")
@@ -317,7 +318,7 @@ async def test_none_user_id_skips_pairing(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_none_user_id_does_not_generate_pairing_code(monkeypatch, tmp_path):
     """A message with user_id=None must never call generate_code."""
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     (tmp_path / "config.yaml").write_text("", encoding="utf-8")
@@ -354,11 +355,11 @@ async def test_none_user_id_does_not_generate_pairing_code(monkeypatch, tmp_path
 @pytest.mark.asyncio
 async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp_path):
     """Verify the normal (non-internal) path still triggers pairing for unknown users."""
-    import gateway.run as gateway_run
-    import gateway.pairing as pairing_mod
+    import hermes_gateway.runner as gateway_run
+    import hermes_gateway.pairing as pairing_mod
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    # gateway.pairing.PAIRING_DIR is a module-level constant captured at
+    # hermes_gateway.pairing.PAIRING_DIR is a module-level constant captured at
     # import time from whichever HERMES_HOME was set then. Per-test
     # HERMES_HOME redirection in conftest doesn't retroactively move it.
     # Override directly so pairing rate-limit state lives in this test's
@@ -369,7 +370,7 @@ async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp
     (tmp_path / "config.yaml").write_text("", encoding="utf-8")
 
     # Clear env vars that could let all users through (loaded by
-    # module-level dotenv in gateway/run.py from the real ~/.hermes/.env).
+    # module-level dotenv in hermes_gateway/runner.py from the real ~/.hermes/.env).
     monkeypatch.delenv("DISCORD_ALLOW_ALL_USERS", raising=False)
     monkeypatch.delenv("DISCORD_ALLOWED_USERS", raising=False)
     monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)

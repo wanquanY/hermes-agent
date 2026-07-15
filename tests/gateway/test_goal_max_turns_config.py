@@ -1,9 +1,10 @@
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.goal_commands import goal_command_for
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 from hermes_cli import goals
 
 
@@ -29,7 +30,7 @@ async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monk
     home.mkdir()
     (home / "config.yaml").write_text("goals:\n  max_turns: 7\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -51,7 +52,7 @@ async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monk
         message_id="msg-goal-config",
     )
 
-    response = await GatewayRunner._handle_goal_command(runner, event)
+    response = await goal_command_for(runner).handle_goal_command(event)
 
     try:
         assert "⊙ Goal set (7-turn budget): ship the benchmark" in response
@@ -59,4 +60,4 @@ async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monk
         assert state is not None
         assert state.max_turns == 7
     finally:
-        goals._DB_CACHE.clear()
+        goals._STORE_CACHE.clear()

@@ -3369,7 +3369,7 @@ def test_config_default_dispatch_in_gateway_is_true():
 
 def test_check_dispatcher_presence_silent_when_gateway_running(monkeypatch):
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 12345)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 12345)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3382,7 +3382,7 @@ def test_check_dispatcher_presence_silent_when_gateway_running(monkeypatch):
 
 def test_check_dispatcher_presence_warns_when_no_gateway(monkeypatch):
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3395,7 +3395,7 @@ def test_check_dispatcher_presence_warns_when_no_gateway(monkeypatch):
 def test_check_dispatcher_presence_warns_when_flag_off(monkeypatch):
     """Gateway is up but dispatch_in_gateway=false -> warning."""
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 999)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 999)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": False}},
@@ -3410,7 +3410,7 @@ def test_check_dispatcher_presence_silent_on_probe_error(monkeypatch):
     from hermes_cli import kanban as kb_cli
     def _raise():
         raise RuntimeError("boom")
-    monkeypatch.setattr("gateway.status.get_running_pid", _raise)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", _raise)
     running, msg = kb_cli._check_dispatcher_presence()
     assert running is True
     assert msg == ""
@@ -3433,7 +3433,7 @@ def _make_create_ns(**overrides):
 def test_cli_create_warns_when_no_gateway(kanban_home, monkeypatch, capsys):
     """ready+assigned task + no gateway -> warning on stderr."""
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3448,7 +3448,7 @@ def test_cli_create_warns_when_no_gateway(kanban_home, monkeypatch, capsys):
 def test_cli_create_silent_when_gateway_up(kanban_home, monkeypatch, capsys):
     """gateway running + dispatch enabled -> no warning."""
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 4242)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: 4242)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3462,7 +3462,7 @@ def test_cli_create_silent_when_gateway_up(kanban_home, monkeypatch, capsys):
 def test_cli_create_no_warn_on_triage(kanban_home, monkeypatch, capsys):
     """Triage tasks can't be dispatched -> no warning."""
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3476,7 +3476,7 @@ def test_cli_create_no_warn_on_triage(kanban_home, monkeypatch, capsys):
 def test_cli_create_no_warn_unassigned(kanban_home, monkeypatch, capsys):
     """Unassigned tasks can't be dispatched -> no warning."""
     from hermes_cli import kanban as kb_cli
-    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("channels.runtime_status.get_running_pid", lambda: None)
     monkeypatch.setattr(
         "hermes_cli.config.load_config",
         lambda: {"kanban": {"dispatch_in_gateway": True}},
@@ -3542,7 +3542,7 @@ def test_cli_daemon_help_marks_deprecated():
 def test_gateway_dispatcher_watcher_respects_config_flag_off(monkeypatch):
     """dispatch_in_gateway=false -> watcher exits fast, no loop."""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
 
     runner = object.__new__(GatewayRunner)
@@ -3563,7 +3563,7 @@ def test_gateway_dispatcher_watcher_respects_config_flag_off(monkeypatch):
 def test_gateway_dispatcher_watcher_respects_env_override(monkeypatch):
     """HERMES_KANBAN_DISPATCH_IN_GATEWAY=0 disables without touching config."""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "0")
 
     runner = object.__new__(GatewayRunner)
@@ -3581,7 +3581,7 @@ def test_gateway_dispatcher_watcher_env_truthy_uses_config(monkeypatch):
     (We only treat explicit falses as an override; unset or truthy
     defers to config.)"""
     import asyncio
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
 
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "yes")
@@ -3610,7 +3610,7 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     import logging
     import sqlite3
 
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
     import hermes_cli.config as _cfg_mod
     import hermes_cli.kanban_db as _kb
 
@@ -3658,8 +3658,8 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
         return None
 
     monkeypatch.setattr(_kb, "connect", _connect)
-    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
-    monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
+    monkeypatch.setattr("hermes_gateway.runner.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hermes_gateway.runner.asyncio.sleep", _sleep)
 
     with caplog.at_level(logging.ERROR, logger="gateway.run"):
         asyncio.run(

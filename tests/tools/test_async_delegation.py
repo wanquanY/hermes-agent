@@ -525,18 +525,19 @@ def _make_async_evt(**over):
 
 
 def test_gateway_enriches_routing_from_session_key():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
+    from hermes_gateway.process_watcher import process_watcher_for
 
     runner = object.__new__(GatewayRunner)
     evt = _make_async_evt()
-    runner._enrich_async_delegation_routing(evt)
+    process_watcher_for(runner).enrich_async_delegation_routing(evt)
     assert evt["platform"] == "telegram"
     assert evt["chat_id"] == "12345"
     assert evt["thread_id"] == "678"
 
 
 def test_gateway_formatter_renders_async_block():
-    from gateway.run import _format_gateway_process_notification
+    from hermes_gateway.runner import _format_gateway_process_notification
 
     txt = _format_gateway_process_notification(_make_async_evt())
     assert txt is not None
@@ -546,7 +547,7 @@ def test_gateway_formatter_renders_async_block():
 
 
 def test_gateway_watch_drain_requeues_async_without_looping():
-    from gateway.run import _drain_gateway_watch_events
+    from hermes_gateway.runner import _drain_gateway_watch_events
 
     q = queue.Queue()
     async_evt = _make_async_evt()
@@ -568,12 +569,15 @@ def test_gateway_watch_drain_requeues_async_without_looping():
 
 
 def test_gateway_builds_routable_source_from_enriched_event():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
+    from hermes_gateway.process_watcher import process_watcher_for
 
     runner = object.__new__(GatewayRunner)
+    runner._get_cached_session_source = lambda _session_key: None
     evt = _make_async_evt()
-    runner._enrich_async_delegation_routing(evt)
-    src = runner._build_process_event_source(evt)
+    watcher = process_watcher_for(runner)
+    watcher.enrich_async_delegation_routing(evt)
+    src = watcher.build_process_event_source(evt)
     assert src is not None
     assert src.platform.value == "telegram"
     assert src.chat_id == "12345"
@@ -581,11 +585,11 @@ def test_gateway_builds_routable_source_from_enriched_event():
 
 def test_gateway_cli_origin_event_left_unrouted():
     """An empty session_key (CLI origin) is left without routing fields."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
+    from hermes_gateway.process_watcher import process_watcher_for
 
     runner = object.__new__(GatewayRunner)
     evt = _make_async_evt(session_key="")
-    runner._enrich_async_delegation_routing(evt)
+    process_watcher_for(runner).enrich_async_delegation_routing(evt)
     assert "platform" not in evt
-
 

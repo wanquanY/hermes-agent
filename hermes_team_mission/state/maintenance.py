@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hermes_team_mission.state.conversation import prune_empty_team_mission_conversations
 from hermes_team_mission.state.conversation import repair_legacy_team_mission_conversation_sessions
 from hermes_team_mission.state.conversation import repair_placeholder_team_mission_conversation_titles
 
@@ -37,29 +36,12 @@ def run_team_mission_startup_maintenance(db: Any, logger: Any) -> None:
             retitle_exc,
         )
     try:
-        pruned = prune_empty_team_mission_conversations(db)
-        if pruned:
+        repaired_running = db.session_index.repair_terminal_active_runs()
+        if repaired_running:
             logger.info(
-                "pruned %d empty Team Mission conversation shell(s)",
-                pruned,
+                "repaired %d stale Team Mission running session index row(s)",
+                repaired_running,
             )
-    except Exception as prune_exc:
-        logger.warning(
-            "empty Team Mission conversation shell prune skipped: %s",
-            prune_exc,
-        )
-    try:
-        conn = getattr(db, "_conn", None)
-        lock = getattr(db, "_lock", None)
-        repairer = getattr(db, "_repair_session_index_terminal_active_runs_locked", None)
-        if conn is not None and lock is not None and callable(repairer):
-            with lock:
-                repaired_running = int(repairer(conn) or 0)
-            if repaired_running:
-                logger.info(
-                    "repaired %d stale Team Mission running session index row(s)",
-                    repaired_running,
-                )
     except Exception as repair_running_exc:
         logger.warning(
             "stale Team Mission running session index repair skipped: %s",

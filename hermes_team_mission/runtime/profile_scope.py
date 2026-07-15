@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_team_mission.context.worker_context import cap_text
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 _log = logging.getLogger(__name__)
 
@@ -225,14 +226,14 @@ def compact_team_profile_snapshot(
 
 def _worker_rpc_proxy() -> Any:
     try:
-        from tui_gateway.services.worker_rpc_proxy import get_default_worker_rpc_proxy
+        from hermes_agent.orchestration.worker_rpc_proxy import get_default_worker_rpc_proxy
 
         return get_default_worker_rpc_proxy()
     except Exception:
         return None
 
 
-def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+def gateway_call(method: str, params: dict[str, Any], *, db: Any = None) -> dict[str, Any]:
     normalized_method = text(method)
     payload = dict(params) if isinstance(params, Mapping) else {}
     proxy = _worker_rpc_proxy()
@@ -275,7 +276,15 @@ def gateway_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
         fn = server._methods.get(normalized_method)
         if not callable(fn):
             return {"error": {"message": f"Gateway method {normalized_method} is unavailable."}}
-        return fn(None, payload)
+        if db is None:
+            return fn(None, payload)
+        original_get_db = getattr(server, "_get_db", None)
+        try:
+            server._get_db = lambda: db
+            return fn(None, payload)
+        finally:
+            if original_get_db is not None:
+                server._get_db = original_get_db
     except Exception as exc:
         return {"error": {"message": str(exc)}}
 
@@ -307,16 +316,17 @@ def leave_team_mission_control_home(token: Any) -> None:
         return
 
 
-def team_mission_control_db(parent_agent: Any = None) -> Any:
+def team_mission_control_db(parent_agent: Any = None, *, create_if_missing: bool = True) -> Any:
     db = getattr(parent_agent, "_session_db", None) if parent_agent is not None else None
     if _is_worker_db_proxy(db):
         return db
     explicit_control_home = text(os.getenv("DOVIE_HERMES_CONTROL_HOME"))
     if explicit_control_home:
         try:
-            from hermes_state import SessionDB
-
-            return SessionDB(db_path=Path(explicit_control_home).expanduser().resolve() / "state.db")
+            db_path = Path(explicit_control_home).expanduser().resolve() / "state.db"
+            if not create_if_missing and not db_path.exists():
+                return None
+            return open_cli_session_store(db_path)
         except Exception:
             pass
     if db is not None:
@@ -330,14 +340,15 @@ def team_mission_control_db(parent_agent: Any = None) -> Any:
     control_home = text(os.getenv("HERMES_HOME"))
     if control_home:
         try:
-            from hermes_state import SessionDB
-
-            return SessionDB(db_path=Path(control_home).expanduser().resolve() / "state.db")
+            db_path = Path(control_home).expanduser().resolve() / "state.db"
+            if not create_if_missing and not db_path.exists():
+                return None
+            return open_cli_session_store(db_path)
         except Exception:
             pass
-    from hermes_state import SessionDB
-
-    return SessionDB()
+    if not create_if_missing:
+        return None
+    return open_cli_session_store()
 
 
 def _is_worker_db_proxy(db: Any) -> bool:

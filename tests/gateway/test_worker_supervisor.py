@@ -29,10 +29,11 @@ from tui_gateway.run_worker import (
     RunCancelFrame,
     RunStartFrame,
     RunTerminalFrame,
+    WorkerReadyFrame,
     encode_outgoing,
 )
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_supervisor import (
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_supervisor import (
     RunWorker,
     WorkerSupervisor,
     _DEFAULT_WORKER_STDIO_LIMIT_BYTES,
@@ -118,7 +119,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
             RunStartFrame(
                 run_id="run-e2e-1",
                 turn_id="turn-1",
-                stored_session_id="sess-1",
+                conversation_session_id="sess-1",
                 prompt="hello",
                 params={},
             ),
@@ -131,7 +132,7 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         assert scope == worker.scope_key
         assert terminal.run_id == "run-e2e-1"
         assert terminal.status == "completed"
-        assert terminal.stored_session_id == "sess-1"
+        assert terminal.conversation_session_id == "sess-1"
         assert terminal.turn_id == "turn-1"
         # The bridge surfaced the agent-init failure as an EventFrame.
         event_payloads = [
@@ -249,6 +250,9 @@ async def test_spawn_configures_large_worker_stdio_limit(monkeypatch, tmp_path) 
     async def fake_create_subprocess_exec(*args, **kwargs):
         captured["limit"] = kwargs["limit"]
         stdout = asyncio.StreamReader(limit=kwargs["limit"])
+        stdout.feed_data(
+            (encode_outgoing(WorkerReadyFrame(ready=True, bootstrap_ms=1.0)) + "\n").encode()
+        )
         stdout.feed_eof()
         return _FakeProcess(stdout)
 
@@ -298,6 +302,29 @@ async def test_read_loop_dispatches_large_event_frame(tmp_path) -> None:
     assert len(collector.events) == 1
     assert collector.events[0][0] == "profile:test-e2e"
     assert collector.events[0][1].params["payload"]["text"] == large_text
+
+
+@pytest.mark.asyncio
+async def test_rebind_atomically_claims_ready_worker(tmp_path) -> None:
+    collector = _Collector()
+    sup = _make_supervisor(collector)
+    try:
+        warm = await sup.ensure(_scope(tmp_path))
+        target = RuntimeScope(
+            agent_profile_id="prof-test",
+            runtime_scope_key=warm.scope_key,
+            conversation_id="conversation-1",
+            hermes_home=str(tmp_path),
+        )
+
+        claimed = await sup.rebind(warm, target)
+
+        assert claimed is warm
+        assert sup.get(target.runtime_scope_key, "") is None
+        assert sup.get(target.runtime_scope_key, "conversation-1") is warm
+        assert warm.conversation_id == "conversation-1"
+    finally:
+        await sup.shutdown_all()
 
 
 @pytest.mark.asyncio

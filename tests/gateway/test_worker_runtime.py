@@ -1,4 +1,4 @@
-"""Unit tests for ``tui_gateway.services.worker_runtime``.
+"""Unit tests for ``hermes_agent.orchestration.worker_runtime``.
 
 Covers:
 - ``worker_supervisor`` / ``worker_frame_router`` singleton identity
@@ -17,10 +17,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hermes_team_mission.gateway import runtime_methods
-from tui_gateway.services import worker_runtime
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_supervisor import RunWorker, WorkerSupervisor
+from hermes_agent.orchestration import worker_runtime
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_supervisor import RunWorker, WorkerSupervisor
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +99,7 @@ async def test_team_mission_proxy_run_submit_uses_control_plane_transport(monkey
     result = await asyncio.to_thread(
         runtime_methods._proxy_run_submit_via_worker,
         {
-            "stored_session_id": "team:mission-1:node:root",
+            "conversation_session_id": "team:mission-1:node:root",
             "run_id": "run-1",
             "turn_id": "turn-1",
             "runtime_scope_key": "profile:agent-default",
@@ -147,7 +147,7 @@ def _scoped_prompt_submit(text: str = "hi", **extra) -> dict:
         "method": "prompt.submit",
         "params": {
             "text": text,
-            "stored_session_id": "sess-1",
+            "conversation_session_id": "sess-1",
             "runtime_scope_key": "profile:test",
             "agent_profile_id": "test",
             "dovie_profile": {
@@ -172,6 +172,51 @@ async def test_primary_dispatch_skips_non_submit_methods() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_ensure_waits_for_real_warm_worker(monkeypatch) -> None:
+    transport = _RecordingTransport()
+    scope = RuntimeScope(
+        agent_profile_id="test",
+        runtime_scope_key="profile:test",
+        hermes_home="/tmp/test-hermes-home",
+    )
+    worker = _fake_worker(scope)
+    worker.ready_event.set()
+    worker.bootstrap_ms = 321.0
+    worker.bootstrap_stages_ms = {"agent_modules": 300.0}
+
+    class _FakePool:
+        async def ensure_warm(self, profile_context, *, scope_key=None):
+            assert scope_key == "profile:test"
+            assert profile_context["agent_profile_id"] == "test"
+            return worker
+
+    monkeypatch.setattr(worker_runtime, "worker_pool", lambda: _FakePool())
+    req = {
+        "jsonrpc": "2.0",
+        "id": "ensure-1",
+        "method": "runtime.ensure",
+        "params": {
+            "agent_profile_id": "test",
+            "runtime_scope_key": "profile:test",
+            "dovie_profile": {
+                "id": "test",
+                "runtimeScopeKey": "profile:test",
+                "hermesHomePath": "/tmp/test-hermes-home",
+            },
+        },
+    }
+
+    handled = await worker_runtime.primary_dispatch(req, transport)
+
+    assert handled is True
+    result = transport.written[0]["result"]
+    assert result["ready"] is True
+    assert result["worker"]["warm"] is True
+    assert result["worker"]["conversation_bound"] is False
+    assert result["worker"]["bootstrap_ms"] == 321.0
+
+
+@pytest.mark.asyncio
 async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
     """frontend sends ``run.submit`` (not ``prompt.submit``) as the
     canonical chat entry — intercept it just like prompt.submit."""
@@ -179,7 +224,7 @@ async def test_primary_dispatch_intercepts_run_submit(monkeypatch) -> None:
     sent = []
 
     class _FakeSup:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -211,7 +256,7 @@ async def test_primary_dispatch_skips_scopeless_prompt_submit() -> None:
     handled = await worker_runtime.primary_dispatch(
         {
             "jsonrpc": "2.0", "id": 1, "method": "prompt.submit",
-            "params": {"text": "hi", "stored_session_id": "sess-1"},
+            "params": {"text": "hi", "conversation_session_id": "sess-1"},
         },
         transport,
     )
@@ -224,7 +269,7 @@ async def test_primary_dispatch_skips_scopeless_prompt_submit() -> None:
 async def test_primary_dispatch_errors_when_no_stored_session() -> None:
     transport = _RecordingTransport()
     req = _scoped_prompt_submit()
-    req["params"].pop("stored_session_id")
+    req["params"].pop("conversation_session_id")
     handled = await worker_runtime.primary_dispatch(req, transport)
     assert handled is True
     assert len(transport.written) == 1
@@ -240,7 +285,7 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     ensure_calls: list = []
 
     class _FakeSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             ensure_calls.append(scope)
             return _fake_worker(scope)
 
@@ -260,13 +305,13 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
             scope_key,
             conversation_id,
             run_id,
-            stored_session_id,
+            conversation_session_id,
             turn_id,
         ):
             self.starts.append(
                 {"scope_key": scope_key, "run_id": run_id,
                  "conversation_id": conversation_id,
-                 "stored_session_id": stored_session_id, "turn_id": turn_id}
+                 "conversation_session_id": conversation_session_id, "turn_id": turn_id}
             )
 
         def forget_run(self, run_id):
@@ -289,18 +334,18 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     assert conversation_id == "sess-1"
     from tui_gateway.run_worker import RunStartFrame
     assert isinstance(frame, RunStartFrame)
-    assert frame.stored_session_id == "sess-1"
+    assert frame.conversation_session_id == "sess-1"
     assert frame.prompt == "hello"
     # Params include everything EXCEPT the keys we already lifted into
     # named fields.
     assert "text" not in frame.params
-    assert "stored_session_id" not in frame.params
+    assert "conversation_session_id" not in frame.params
     assert frame.params["runtime_scope_key"] == "profile:test"
     assert frame.params["conversation_id"] == "sess-1"
     # router recorded the run
     assert len(fake_router.starts) == 1
     assert fake_router.starts[0]["conversation_id"] == "sess-1"
-    assert fake_router.starts[0]["stored_session_id"] == "sess-1"
+    assert fake_router.starts[0]["conversation_session_id"] == "sess-1"
     # ack returned
     assert len(transport.written) == 1
     result = transport.written[0]["result"]
@@ -316,7 +361,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
     workspace_root.mkdir()
 
     class _FakeSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -332,7 +377,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
 
     def _workspace_context(session_id, params):
         assert session_id == "sess-1"
-        assert params["stored_session_id"] == "sess-1"
+        assert params["conversation_session_id"] == "sess-1"
         return {
             "cwd": str(workspace_root),
             "workspace": {
@@ -355,7 +400,7 @@ async def test_primary_dispatch_injects_session_workspace_context(monkeypatch, t
     _scope_key, _conversation_id, frame = sent_frames[0]
     assert frame.params["cwd"] == str(workspace_root)
     assert frame.params["workspace"]["id"] == "workspace-1"
-    assert "stored_session_id" not in frame.params
+    assert "conversation_session_id" not in frame.params
 
 
 @pytest.mark.asyncio
@@ -363,7 +408,7 @@ async def test_primary_dispatch_rejects_invalid_session_workspace(monkeypatch) -
     transport = _RecordingTransport()
 
     class _Supervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             raise AssertionError("supervisor must not start for invalid workspace")
 
     monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _Supervisor())
@@ -388,7 +433,7 @@ async def test_primary_dispatch_acks_error_when_send_fails(monkeypatch) -> None:
     forgot: list[str] = []
 
     class _FailingSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             return _fake_worker(scope)
 
         async def send(self, scope_key, conversation_id, frame):
@@ -417,7 +462,7 @@ async def test_primary_dispatch_acks_error_when_ensure_raises(monkeypatch) -> No
     transport = _RecordingTransport()
 
     class _BrokenSupervisor:
-        async def ensure(self, scope):
+        async def ensure(self, scope, env_overrides=None):
             raise RuntimeError("spawn failed")
 
         async def send(self, scope_key, conversation_id, frame):

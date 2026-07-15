@@ -4,20 +4,20 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.domain.identities import canonical_node_id
-from hermes_team_mission.state.session_common import node_to_participant_id
-from hermes_team_mission.state.session_views import transform_to_member_perspective
+from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
+from hermes_team_mission.domain.runtime_identity import node_participant_id
 
 
-def _db(tmp_path: Path, session_id: str = "team-session") -> SessionDB:
-    db = SessionDB(tmp_path / "state.db")
-    db.create_session(session_id, source="team_mission", transient=False)
+def _db(tmp_path: Path, session_id: str = "team-session") -> CliSessionStore:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id, source="team_mission", transient=False)
     return db
 
 
 def _upsert_mission_with_node(
-    db: SessionDB,
+    db: CliSessionStore,
     *,
     mission_id: str,
     conversation_id: str,
@@ -48,7 +48,7 @@ def _upsert_mission_with_node(
         node_id=node_id,
         run_id=run_id,
         session_id=session_id,
-        runtime_session_id=f"runtime-{run_id}",
+        execution_session_id=f"runtime-{run_id}",
         runtime_scope_key="member-chat:conversation-1:member-alpha",
         role="worker",
         metadata={"participant_id": participant_id},
@@ -70,7 +70,7 @@ def _message_complete(
     return {
         "type": "message.complete",
         "session_id": session_id,
-        "stored_session_id": session_id,
+        "conversation_session_id": session_id,
         "run_id": run_id,
         "turn_id": f"turn-{run_id}",
         "seq": seq,
@@ -86,8 +86,8 @@ def test_canonical_node_id_is_graph_identity_only() -> None:
     }
 
     assert canonical_node_id("mission-A", "member:member-beta") == "mission-A:member:member-beta"
-    assert node_to_participant_id(misleading_node) == "member:member-alpha"
-    assert node_to_participant_id({"canonical_node_id": "member:member-beta"}) == ""
+    assert node_participant_id(misleading_node) == "member:member-alpha"
+    assert node_participant_id({"canonical_node_id": "member:member-beta"}) == ""
 
 
 def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
@@ -109,12 +109,12 @@ def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
         {"participant_id": "member:member-beta", "display_name": "Beta"},
     ]
 
-    alpha_view = transform_to_member_perspective(
+    alpha_view = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-alpha",
         participants=participants,
     )
-    beta_view = transform_to_member_perspective(
+    beta_view = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-beta",
         participants=participants,
@@ -123,8 +123,12 @@ def test_speaker_resolution_uses_participant_id_not_node_id() -> None:
     assert alpha_view[0]["role"] == "assistant"
     assert alpha_view[0]["content"] == "Alpha has the build."
     assert beta_view[0]["role"] == "user"
-    assert beta_view[0]["content"] == "[Alpha] Alpha has the build."
-    assert beta_view[0]["metadata"]["transformed_speaker_pid"] == "member:member-alpha"
+    assert beta_view[0]["content"] == (
+        "[assistant | Alpha | member:member-alpha]\nAlpha has the build."
+    )
+    assert "name" not in beta_view[0]
+    assert beta_view[0]["metadata"]["speaker_participant_id"] == "member:member-alpha"
+    assert beta_view[0]["metadata"]["speaker_projected_role"] == "user"
 
 
 def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Path, monkeypatch) -> None:
@@ -136,7 +140,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
 
     db = _db(tmp_path, "team-session-render")
     try:
-        db.append_message(
+        db.messages.append(
             "team-session-render",
             role="assistant",
             content="Alpha rendered from run events.",
@@ -147,7 +151,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
                 "team_mission": {"canonical_node_id": "mission-A:member:member-beta"},
             },
         )
-        db.append_run_event(
+        db.runs.append_event(
             "team-session-render",
             _message_complete(
                 session_id="team-session-render",
@@ -169,7 +173,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
                 "result": {
                     "conversation": {
                         "conversation_id": "conversation-1",
-                        "stable_session_id": "team-session-render",
+                        "conversation_session_id": "team-session-render",
                     },
                     "mission": {},
                     "team": {},
@@ -194,7 +198,7 @@ def test_render_snapshot_messages_speaker_field_uses_participant_id(tmp_path: Pa
 def test_member_node_across_two_missions_has_two_node_ids_but_one_participant_id(tmp_path: Path) -> None:
     db = _db(tmp_path, "team-session-cross-mission")
     try:
-        db.upsert_conversation_participant(
+        db.participants.upsert_conversation_participant(
             conversation_session_id="team-session-cross-mission",
             participant_id="member:member-alpha",
             role="member",
@@ -228,7 +232,7 @@ def test_member_node_across_two_missions_has_two_node_ids_but_one_participant_id
         node_b = db.get_team_mission_node("mission-B", "shared-member-node")
         events = {
             event["run_id"]: event
-            for event in db.list_run_events("team-session-cross-mission")
+            for event in db.runs.list_events("team-session-cross-mission")
         }
 
         assert node_a["canonical_node_id"] == "mission-A:shared-member-node"

@@ -16,13 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner(stt_enabled: bool = True) -> "GatewayRunner":  # type: ignore[name-defined]
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=stt_enabled)
@@ -173,7 +173,7 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
 
 def test_telegram_media_type_detection_audio_vs_voice():
     """The Telegram platform must set MessageType.AUDIO for msg.audio, VOICE for msg.voice."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     # The Telegram adapter's _build_media_type already returns correct values
     # via MessageType.AUDIO for .audio and MessageType.VOICE for .voice.

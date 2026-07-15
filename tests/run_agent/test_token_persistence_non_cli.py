@@ -50,8 +50,11 @@ def test_run_conversation_persists_tokens_for_telegram_sessions():
     result = agent.run_conversation("hello")
 
     assert result["final_response"] == "done"
-    session_db.update_token_counts.assert_called_once()
-    assert session_db.update_token_counts.call_args.args[0] == "telegram-session"
+    session_db.sessions.update_token_counts.assert_called_once()
+    assert (
+        session_db.sessions.update_token_counts.call_args.args[0]
+        == "telegram-session"
+    )
 
 
 def test_run_conversation_persists_tokens_for_cron_sessions():
@@ -61,21 +64,18 @@ def test_run_conversation_persists_tokens_for_cron_sessions():
     result = agent.run_conversation("hello")
 
     assert result["final_response"] == "done"
-    session_db.update_token_counts.assert_called_once()
-    assert session_db.update_token_counts.call_args.args[0] == "cron-session"
+    session_db.sessions.update_token_counts.assert_called_once()
+    assert session_db.sessions.update_token_counts.call_args.args[0] == "cron-session"
 
 
 def test_session_search_lazily_opens_db_when_entrypoint_did_not_pass_one(monkeypatch):
     sentinel_db = object()
     captured = {}
 
-    class FakeSessionDB:
-        def __new__(cls):
-            return sentinel_db
-
-    hermes_state = ModuleType("hermes_state")
-    hermes_state.SessionDB = FakeSessionDB
-    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
+    monkeypatch.setattr(
+        "hermes_agent.read_models.session_recall.SessionRecallReadModel.open_default",
+        lambda: sentinel_db,
+    )
 
     session_search_mod = ModuleType("tools.session_search_tool")
 
@@ -92,18 +92,22 @@ def test_session_search_lazily_opens_db_when_entrypoint_did_not_pass_one(monkeyp
     assert result["success"] is True
     assert captured["db"] is sentinel_db
     assert captured["query"] == "Hermes"
-    assert agent._session_db is sentinel_db
+    assert agent._session_recall_read_model is sentinel_db
+    assert agent._session_db is None
 
 
 def test_session_search_does_not_open_db_when_session_persistence_disabled(monkeypatch):
-    class UnexpectedSessionDB:
-        def __new__(cls):
-            raise AssertionError("transient agents must not open the default SessionDB")
+    def unexpected_open():
+        raise AssertionError("transient agents must not open the default recall DB")
 
-    hermes_state = ModuleType("hermes_state")
-    hermes_state.SessionDB = UnexpectedSessionDB
-    hermes_state.format_session_db_unavailable = lambda: "session db unavailable"
-    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
+    monkeypatch.setattr(
+        "hermes_agent.read_models.session_recall.SessionRecallReadModel.open_default",
+        unexpected_open,
+    )
+    monkeypatch.setattr(
+        "hermes_agent.read_models.session_recall.unavailable_message",
+        lambda: "session db unavailable",
+    )
 
     session_search_mod = ModuleType("tools.session_search_tool")
     session_search_mod.session_search = MagicMock()

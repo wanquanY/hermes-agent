@@ -26,7 +26,7 @@ from tui_gateway.run_worker import (
     InteractiveRequestFrame,
     OutgoingFrame,
 )
-from tui_gateway.services.worker_publish_bridge import WorkerPublishBridge
+from hermes_agent.orchestration.worker_publish_bridge import WorkerPublishBridge
 
 
 # Helpers -----------------------------------------------------------
@@ -116,24 +116,40 @@ def fake_run_control(monkeypatch):
 
 @pytest.fixture
 def fake_clarify(monkeypatch):
+    import tools as tools_pkg
+
+    missing = object()
     original = sys.modules.get("tools.clarify_gateway")
+    original_attr = getattr(tools_pkg, "clarify_gateway", missing)
     mod, calls = _install_fake_clarify_gateway()
     yield mod, calls
     if original is not None:
         sys.modules["tools.clarify_gateway"] = original
     else:
         sys.modules.pop("tools.clarify_gateway", None)
+    if original_attr is missing:
+        delattr(tools_pkg, "clarify_gateway")
+    else:
+        tools_pkg.clarify_gateway = original_attr
 
 
 @pytest.fixture
 def fake_approval(monkeypatch):
+    import tools as tools_pkg
+
+    missing = object()
     original = sys.modules.get("tools.approval")
+    original_attr = getattr(tools_pkg, "approval", missing)
     mod, calls = _install_fake_approval()
     yield mod, calls
     if original is not None:
         sys.modules["tools.approval"] = original
     else:
         sys.modules.pop("tools.approval", None)
+    if original_attr is missing:
+        delattr(tools_pkg, "approval")
+    else:
+        tools_pkg.approval = original_attr
 
 
 # Tests -------------------------------------------------------------
@@ -155,6 +171,47 @@ async def test_publish_hook_emits_event_and_preserves_original(fake_run_control)
     assert original_calls == [{"type": "message.delta", "text": "x"}]
     events = [f for f in sink.frames if isinstance(f, EventFrame)]
     assert events == [EventFrame(params={"type": "message.delta", "text": "x"})]
+
+
+@pytest.mark.asyncio
+async def test_publish_hook_stamps_canonical_conversation_and_execution_identity(fake_run_control) -> None:
+    mod, original_calls = fake_run_control
+    sink = _Sink()
+    loop = asyncio.get_running_loop()
+    bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
+    bridge.install(conversation_session_id="stored-1")
+    try:
+        mod.publish_recorded_event(
+            {
+                "type": "message.delta",
+                "session_id": "runtime-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {"delta": "x"},
+            }
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        bridge.uninstall()
+
+    assert original_calls == [
+        {
+            "type": "message.delta",
+            "session_id": "runtime-1",
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "payload": {"delta": "x"},
+        }
+    ]
+    events = [f for f in sink.frames if isinstance(f, EventFrame)]
+    assert len(events) == 1
+    params = events[0].params
+    assert params["session_id"] == "stored-1"
+    assert params["execution_session_id"] == "runtime-1"
+    assert params["conversation_session_id"] == "stored-1"
+    assert params["payload"]["session_id"] == "stored-1"
+    assert params["payload"]["conversation_session_id"] == "stored-1"
+    assert params["payload"]["execution_session_id"] == "runtime-1"
 
 
 @pytest.mark.asyncio
@@ -190,7 +247,7 @@ async def test_clarify_hook_emits_interactive_request(fake_clarify) -> None:
     sink = _Sink()
     loop = asyncio.get_running_loop()
     bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
-    bridge.install(stored_session_id="sess-1")
+    bridge.install(conversation_session_id="sess-1")
     try:
         entry = mod.register("clr-1", "sess-1", "Pick one", ["A", "B"])
         await asyncio.sleep(0.05)
@@ -210,7 +267,7 @@ async def test_clarify_hook_emits_interactive_request(fake_clarify) -> None:
                 "question": "Pick one",
                 "choices": ["A", "B"],
             },
-            stored_session_id="sess-1",
+            conversation_session_id="sess-1",
         )
     ]
 
@@ -221,7 +278,7 @@ async def test_approval_hook_emits_interactive_request(fake_approval) -> None:
     sink = _Sink()
     loop = asyncio.get_running_loop()
     bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
-    bridge.install(stored_session_id="sess-A")
+    bridge.install(conversation_session_id="sess-A")
     try:
         mod.submit_pending("sess-A", {"command": "rm -rf /", "description": "danger"})
         await asyncio.sleep(0.05)
@@ -234,7 +291,7 @@ async def test_approval_hook_emits_interactive_request(fake_approval) -> None:
             kind="approval",
             request_id="sess-A",
             payload={"command": "rm -rf /", "description": "danger"},
-            stored_session_id="sess-A",
+            conversation_session_id="sess-A",
         )
     ]
 
@@ -288,7 +345,7 @@ async def test_uninstall_is_idempotent(fake_run_control) -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_modules_dont_crash() -> None:
+async def test_missing_modules_dont_crash(fake_run_control) -> None:
     """When tools.clarify_gateway / tools.approval aren't importable
     (CLI-only contexts), install should still complete and the publish
     hook should be in place."""
@@ -306,8 +363,6 @@ async def test_missing_modules_dont_crash() -> None:
 
     builtins.__import__ = reject
     try:
-        # Also install fake run_control so publish hook does land.
-        rc_mod, _ = _install_fake_run_control()
         sink = _Sink()
         loop = asyncio.get_running_loop()
         bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
@@ -320,4 +375,3 @@ async def test_missing_modules_dont_crash() -> None:
             sys.modules["tools.clarify_gateway"] = saved_clarify
         if saved_approval is not None:
             sys.modules["tools.approval"] = saved_approval
-        sys.modules.pop("tui_gateway.services.run_control", None)

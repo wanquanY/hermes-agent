@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 def _clear_auth_env(monkeypatch) -> None:
@@ -42,7 +42,7 @@ def _make_event(text: str = "hello", platform: Platform = Platform.WHATSAPP) -> 
 
 
 def _make_runner(platform: Platform):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     config = GatewayConfig(
         platforms={platform: PlatformConfig(enabled=True)},

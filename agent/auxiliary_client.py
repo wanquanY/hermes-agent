@@ -79,6 +79,15 @@ def _load_openai_cls() -> type:
     return _OPENAI_CLS_CACHE
 
 
+def _attach_dovie_attribution(client: Any) -> Any:
+    try:
+        from agent.dovie_attribution import attach_dovie_attribution_request_hook
+
+        return attach_dovie_attribution_request_hook(client)
+    except Exception:
+        return client
+
+
 class _OpenAIProxy:
     """Module-level proxy that looks like the ``openai.OpenAI`` class.
 
@@ -89,7 +98,7 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
-        return _load_openai_cls()(*args, **kwargs)
+        return _attach_dovie_attribution(_load_openai_cls()(*args, **kwargs))
 
     def __instancecheck__(self, obj):
         return isinstance(obj, _load_openai_cls())
@@ -283,18 +292,52 @@ def _fixed_temperature_for_model(
     return None
 
 
-def _compression_threshold_for_model(model: Optional[str]) -> Optional[float]:
+_CODEX_GPT5_COMPACTION_THRESHOLD = 0.85
+
+
+def _is_codex_gpt5_large_context_family(
+    model: Optional[str],
+    provider: Optional[str] = None,
+) -> bool:
+    """Match the 272K-capped GPT-5.4/5.5/5.6 families on Codex OAuth only."""
+    if (provider or "").strip().lower() != "openai-codex":
+        return False
+    bare = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return any(
+        bare == family
+        or bare.startswith(f"{family}-")
+        or bare.startswith(f"{family}.")
+        for family in ("gpt-5.4", "gpt-5.5", "gpt-5.6")
+    )
+
+
+def _compression_threshold_for_model(
+    model: Optional[str],
+    provider: Optional[str] = None,
+    *,
+    allow_codex_gpt55_autoraise: bool = True,
+) -> Optional[float]:
     """Return a context-compression threshold override for specific models.
 
     The threshold is the fraction of the model's context window that must be
     consumed before Hermes triggers summarization.  Higher values delay
     compression and preserve more raw context.
 
+    GPT-5.4/5.5/5.6 use their 1.05M window on direct API routes, but Codex
+    OAuth caps them at 272K.  On that exact route Hermes raises the default
+    compaction trigger to 85%, gated by the historical
+    ``compression.codex_gpt55_autoraise`` setting.
+
     Returns a float in (0, 1] to override the global ``compression.threshold``
     config value, or ``None`` to leave the user's config value unchanged.
     """
     if _is_arcee_trinity_thinking(model):
         return DEFAULT_COMPRESSION_THRESHOLD
+    if (
+        allow_codex_gpt55_autoraise
+        and _is_codex_gpt5_large_context_family(model, provider)
+    ):
+        return _CODEX_GPT5_COMPACTION_THRESHOLD
     return None
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
@@ -3188,7 +3231,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
                     async_kwargs["default_headers"] = dict(_ph_async.default_headers)
         except Exception:
             pass
-    return AsyncOpenAI(**async_kwargs), model
+    return _attach_dovie_attribution(AsyncOpenAI(**async_kwargs)), model
 
 
 def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:

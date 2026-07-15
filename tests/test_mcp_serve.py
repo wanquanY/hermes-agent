@@ -184,12 +184,12 @@ def mock_session_db(tmp_path, populated_sessions_dir):
     ]
     _create_test_db(db_path, "20260329_120000_abc123", messages)
 
-    # Create a mock SessionDB that reads from our test DB
-    class TestSessionDB:
+    class TestMessageHistoryStore:
         def __init__(self):
             self._db_path = db_path
+            self.messages = self
 
-        def get_messages(self, session_id):
+        def list(self, session_id):
             conn = sqlite3.connect(str(self._db_path))
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -205,7 +205,7 @@ def mock_session_db(tmp_path, populated_sessions_dir):
                 result.append(d)
             return result
 
-    return TestSessionDB()
+    return TestMessageHistoryStore()
 
 
 class _FakeTool:
@@ -246,7 +246,7 @@ def fake_mcp_server(populated_sessions_dir, mock_session_db, monkeypatch):
     import mcp_serve
 
     monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: populated_sessions_dir)
-    monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: mock_session_db)
+    monkeypatch.setattr(mcp_serve, "_get_message_history_store", lambda: mock_session_db)
     monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {})
     monkeypatch.setattr(mcp_serve, "_MCP_SERVER_AVAILABLE", True)
     monkeypatch.setattr(mcp_serve, "FastMCP", _FakeFastMCP)
@@ -502,7 +502,7 @@ def mcp_server_e2e(populated_sessions_dir, mock_session_db, monkeypatch):
     mcp = pytest.importorskip("mcp", reason="MCP SDK not installed")
     import mcp_serve
     monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: populated_sessions_dir)
-    monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: mock_session_db)
+    monkeypatch.setattr(mcp_serve, "_get_message_history_store", lambda: mock_session_db)
     monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {})
 
     bridge = mcp_serve.EventBridge()
@@ -1092,9 +1092,13 @@ class TestEventBridgePollE2E:
         ]
         _create_test_db(db_path, session_id, messages)
 
-        # Create a mock SessionDB that reads our test DB
-        class TestDB:
-            def get_messages(self, sid):
+        # Create a mock message history store that reads our test DB.
+        class TestMessageHistoryStore:
+            @property
+            def messages(self):
+                return self
+
+            def list(self, sid):
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
@@ -1104,11 +1108,15 @@ class TestEventBridgePollE2E:
                 conn.close()
                 return [dict(r) for r in rows]
 
-        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: TestDB())
+        monkeypatch.setattr(
+            mcp_serve,
+            "_get_message_history_store",
+            lambda: TestMessageHistoryStore(),
+        )
 
         bridge = mcp_serve.EventBridge()
         # Run one poll cycle manually
-        bridge._poll_once(TestDB())
+        bridge._poll_once(TestMessageHistoryStore())
 
         # Should have found the messages
         result = bridge.poll_events(after_cursor=0)
@@ -1144,8 +1152,9 @@ class TestEventBridgePollE2E:
         class TestDB:
             def __init__(self):
                 self.call_count = 0
+                self.messages = self
 
-            def get_messages(self, sid):
+            def list(self, sid):
                 self.call_count += 1
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
@@ -1194,7 +1203,11 @@ class TestEventBridgePollE2E:
         ])
 
         class TestDB:
-            def get_messages(self, sid):
+            @property
+            def messages(self):
+                return self
+
+            def list(self, sid):
                 conn = sqlite3.connect(str(db_path))
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(

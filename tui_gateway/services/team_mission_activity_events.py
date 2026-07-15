@@ -1,13 +1,20 @@
 """Team Mission activity subscription bridge.
 
-Mission activity subscriptions consume the Team Mission event log, not raw
-runtime run_events.  This keeps the canvas protocol aligned with the canonical
-``team_mission.runtime.event`` projection used by the frontend reducer.
+Mission activity subscriptions consume canonical ``run_events`` activity
+indexes. ``team_mission_events`` is audit-only and must not be used as the
+runtime replay source.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable
+
+from hermes_team_mission.state.event_log import projection_event
+from tui_gateway.services import runtime_event_protocol
+from tui_gateway.services.run_events import (
+    list_activity_events as _list_activity_run_events,
+    list_mission_activity_events as _list_mission_run_events,
+)
 
 _TERMINAL_DELIVERY_LOG_COUNTS: dict[tuple[str, str, str, str, str, str], int] = {}
 
@@ -71,6 +78,10 @@ TEAM_MISSION_ACTIVITY_INTERACTIVE_SOURCE_EVENT_TYPES = {
     "secret.request",
     "clarify.request",
 }
+TEAM_MISSION_ACTIVITY_REASONING_SOURCE_EVENT_TYPES = {
+    "reasoning.delta",
+    "thinking.delta",
+}
 TEAM_MISSION_ACTIVITY_TOOL_PAYLOAD_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tool_call_id", ("toolCallId", "tool_id", "toolId")),
     ("tool_name", ("toolName", "name")),
@@ -108,6 +119,23 @@ def text(value: Any) -> str:
 
 
 def _emit_activity_diagnostic(stage: str, **fields: Any) -> None:
+    # Empty replay polls are the steady state of every active subscription and
+    # do not help identify an event-loss boundary. Likewise, a live event with
+    # no matching subscription has no frontend delivery path to diagnose.
+    if stage == "list-activity-events" and not int(fields.get("raw_count") or 0) and not int(
+        fields.get("matched_count") or 0
+    ):
+        return
+    if stage == "deliver-appended-event-match" and not int(
+        fields.get("matched_subscription_count") or 0
+    ):
+        return
+    event = fields.get("event") if isinstance(fields.get("event"), dict) else {}
+    if stage in {"deliver-appended-event-match", "deliver-appended-event-written"} and (
+        text(event.get("text_event")) == "delta"
+        or text(event.get("source_event_type")).endswith(".delta")
+    ):
+        return
     try:
         from agent.dovie_diagnostics import emit_dovie_diagnostic
 
@@ -164,42 +192,12 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
         "subject_type": text(subject.get("type")),
         "subject_id": text(subject.get("id")),
         "subject_node_id": text(subject.get("node_id") or subject.get("nodeId")),
-        "runtime_stable_session_id": text(
-            subject.get("runtime_stable_session_id") or subject.get("runtimeStableSessionId")
+        "runtime_conversation_session_id": text(
+            subject.get("runtime_conversation_session_id") or subject.get("runtimeConversationSessionId")
         ),
         "text_event": text(text_stream.get("event")),
         "text_len": len(text(text_stream.get("delta") or text_stream.get("text"))),
     }
-
-
-def _db_method(db: Any, name: str):
-    if db is None or db.__class__.__module__.startswith("unittest.mock"):
-        return None
-    method = getattr(db, name, None)
-    return method if callable(method) else None
-
-
-def _sqlite_scalar(db: Any, sql: str, params: tuple[Any, ...]) -> Any:
-    conn = getattr(db, "_conn", None)
-    lock = getattr(db, "_lock", None)
-    if conn is None or lock is None:
-        return None
-    with lock:
-        row = conn.execute(sql, params).fetchone()
-    if row is None:
-        return None
-    try:
-        return row[0]
-    except Exception:
-        return None
-
-
-def _int_value(value: Any) -> int:
-    try:
-        parsed = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
 
 
 def mission_id(activity_id: str) -> str:
@@ -221,11 +219,10 @@ def _activity_target_mission_id(activity_id: str, db: Any = None) -> str:
     normalized = str(activity_id or "").strip()
     if not normalized:
         return ""
-    getter = _db_method(db, "get_activity")
-    if getter is None:
+    if db is None:
         return ""
     try:
-        activity = getter(normalized)
+        activity = db.activities.get(normalized)
     except Exception:
         return ""
     if not isinstance(activity, dict):
@@ -242,6 +239,47 @@ def mission_id_for_activity(activity_id: str, db: Any = None) -> str:
     activities table's ``target_mission_id``.
     """
     return mission_id(activity_id) or _activity_target_mission_id(activity_id, db=db)
+
+
+def mission_id_for_run_event(event: dict[str, Any], db: Any = None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    activity_id = text(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+    )
+    direct = text(
+        event.get("mission_id")
+        or event.get("missionId")
+        or payload.get("mission_id")
+        or payload.get("missionId")
+    )
+    if direct:
+        return direct
+    encoded = mission_id(activity_id)
+    if encoded:
+        return encoded
+    run_id = text(event.get("run_id") or event.get("runId") or payload.get("run_id"))
+    if not run_id or db is None:
+        return ""
+    try:
+        return db.team_missions.mission_id_for_run(run_id)
+    except Exception:
+        return ""
+
+
+def session_id_for_activity(activity_id: str) -> str:
+    normalized = text(activity_id)
+    if normalized.startswith("chat:"):
+        return normalized.removeprefix("chat:")
+    if normalized.startswith("act-member_chat:"):
+        parts = normalized.split(":")
+        if len(parts) >= 2:
+            return text(parts[1])
+    return ""
 
 
 def node_selector(activity_id: str) -> str:
@@ -262,49 +300,36 @@ def is_activity_id(activity_id: str) -> bool:
 
 
 def uses_event_log(activity_id: str, db: Any = None) -> bool:
-    """Return true when an activity id is backed by Team Mission event log.
+    """Return true when an activity id is backed by Team Mission activity replay.
 
     ``mission:<id>`` is also used by the generic Activity command bridge in a
     few legacy paths. Those activities have no Team Mission graph and must keep
-    reading ``run_events``. A real Team Mission graph is the boundary that
-    switches the subscription source to ``team_mission_events``.
+    reading ordinary activity-indexed ``run_events``. A real Team Mission graph
+    is the boundary that switches to mission-scoped run_events replay.
     """
     normalized_mission_id = mission_id_for_activity(activity_id, db=db)
     if not normalized_mission_id:
         return False
     if str(activity_id or "").strip().startswith("act-node:"):
         return True
-    graph_getter = _db_method(db, "get_team_mission_graph")
-    if graph_getter is None:
+    if db is None:
         return False
     try:
-        graph = graph_getter(normalized_mission_id)
+        return db.team_missions.exists(normalized_mission_id)
     except Exception:
         return False
-    mission = graph.get("mission") if isinstance(graph, dict) else {}
-    return isinstance(mission, dict) and bool(str(mission.get("mission_id") or "").strip())
 
 
 def mission_status_for_activity(activity_id: str, db: Any = None) -> str:
     normalized_mission_id = mission_id_for_activity(activity_id, db=db)
     if not normalized_mission_id:
         return ""
-    graph_getter = _db_method(db, "get_team_mission_graph")
-    if graph_getter is not None:
-        try:
-            graph = graph_getter(normalized_mission_id)
-        except Exception:
-            graph = {}
-        mission = graph.get("mission") if isinstance(graph, dict) else {}
-        status = text(mission.get("status")) if isinstance(mission, dict) else ""
-        if status:
-            return status.lower()
-    status = _sqlite_scalar(
-        db,
-        "SELECT status FROM team_missions WHERE mission_id = ?",
-        (normalized_mission_id,),
-    )
-    return text(status).lower()
+    if db is None:
+        return ""
+    try:
+        return db.team_missions.status(normalized_mission_id)
+    except Exception:
+        return ""
 
 
 def is_terminal_activity(activity_id: str, db: Any = None) -> bool:
@@ -316,17 +341,24 @@ def activity_last_seq(activity_id: str, db: Any = None) -> int:
     if not normalized_activity_id:
         return 0
     if uses_event_log(normalized_activity_id, db=db):
-        normalized_mission_id = mission_id_for_activity(normalized_activity_id, db=db)
-        return _int_value(_sqlite_scalar(
+        events = _list_mission_activity_run_events(
             db,
-            "SELECT COALESCE(MAX(seq), 0) FROM team_mission_events WHERE mission_id = ?",
-            (normalized_mission_id,),
-        ))
-    return _int_value(_sqlite_scalar(
-        db,
-        "SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE activity_id = ?",
-        (normalized_activity_id,),
-    ))
+            normalized_activity_id,
+            after_seq=0,
+            limit=1,
+            reverse=True,
+        )
+        return max((int(event.get("seq") or 0) for event in events if isinstance(event, dict)), default=0)
+    session_id = session_id_for_activity(normalized_activity_id)
+    if not session_id:
+        return 0
+    if db is None:
+        return 0
+    try:
+        status = db.runs.session_status(session_id)
+    except Exception:
+        return 0
+    return max(int(status.get("last_event_seq") or 0), 0)
 
 
 def event_subject(event: dict[str, Any]) -> dict[str, Any]:
@@ -443,6 +475,34 @@ def _copy_interactive_payload_fields(
             target[key] = value
 
 
+def _copy_reasoning_payload_fields(
+    target: dict[str, Any],
+    *,
+    text_stream: dict[str, Any],
+    source_event_type: str,
+) -> None:
+    """Keep the canonical reasoning payload after audit fields are stripped.
+
+    The compact event reconstructs the original canonical source event on the
+    client. ReasoningDeltaPayload/ThinkingDeltaPayload require ``text`` while
+    ``text_stream`` carries ordering and stream identity. Both are part of the
+    ABI; neither should depend on the audit-only source_event blob.
+    """
+    if source_event_type not in TEAM_MISSION_ACTIVITY_REASONING_SOURCE_EVENT_TYPES:
+        return
+    if "delta" in text_stream:
+        fragment = "" if text_stream.get("delta") is None else str(text_stream.get("delta"))
+    elif "text" in text_stream:
+        fragment = "" if text_stream.get("text") is None else str(text_stream.get("text"))
+    else:
+        return
+    target["text"] = fragment
+    target["delta"] = fragment
+    for key in ("mode", "offset", "channel", "stream_id", "client_message_id"):
+        if key in text_stream and text_stream.get(key) not in (None, ""):
+            target[key] = text_stream[key]
+
+
 def transport_event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str, Any]:
     """Project a persisted Team Mission audit event to the live activity ABI.
 
@@ -495,6 +555,11 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         source_payload=source_payload,
         source_event_type=source_event_type,
     )
+    _copy_reasoning_payload_fields(
+        compact_payload,
+        text_stream=text_stream,
+        source_event_type=source_event_type,
+    )
     _copy_compact_payload_fields(
         compact_payload,
         event=source,
@@ -502,9 +567,9 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         fields=(
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
-            ("stable_session_id", ("stableSessionId",)),
-            ("stored_session_id", ("storedSessionId",)),
-            ("runtime_session_id", ("runtimeSessionId",)),
+            ("conversation_session_id", ("conversationSessionId",)),
+            ("conversation_session_id", ("conversationSessionId",)),
+            ("execution_session_id", ("executionSessionId",)),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
             ("turn_id", ("turnId",)),
@@ -547,8 +612,8 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         fields=(
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
-            ("stored_session_id", ("storedSessionId", "stable_session_id", "stableSessionId")),
-            ("session_id", ("sessionId", "runtime_session_id", "runtimeSessionId")),
+            ("conversation_session_id", ("conversationSessionId", "conversation_session_id", "conversationSessionId")),
+            ("session_id", ("sessionId", "execution_session_id", "executionSessionId")),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
             ("turn_id", ("turnId",)),
@@ -638,6 +703,148 @@ def event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str,
     return projected
 
 
+def _identity_for_activity_event(
+    event: dict[str, Any],
+    activity_id: str,
+    mission_id_value: str,
+) -> dict[str, str]:
+    identity: dict[str, str] = {
+        "mission_id": mission_id_value,
+        "missionId": mission_id_value,
+    }
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    source_activity_id = text(
+        event.get("activity_id")
+        or event.get("activityId")
+        or payload.get("activity_id")
+        or payload.get("activityId")
+    )
+    selector = node_selector(source_activity_id) or node_selector(activity_id)
+    if selector:
+        identity["node_id"] = selector
+        identity["nodeId"] = selector
+        identity["canonical_node_id"] = selector
+        identity["canonicalNodeId"] = selector
+    return identity
+
+
+def _project_run_event_for_subscription(
+    event: dict[str, Any],
+    activity_id: str,
+    *,
+    mission_id_value: str,
+) -> dict[str, Any]:
+    event_type = text(event.get("type"))
+    if event_type.startswith("team_mission."):
+        return event_for_subscription(event, activity_id)
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    try:
+        source_seq = int(
+            payload.get("source_seq")
+            or payload.get("sourceSeq")
+            or event.get("source_seq")
+            or event.get("sourceSeq")
+            or 0
+        )
+    except (TypeError, ValueError):
+        source_seq = 0
+    try:
+        activity_seq = int(event.get("seq") or 0)
+    except (TypeError, ValueError):
+        activity_seq = 0
+    projected = projection_event(
+        event,
+        _identity_for_activity_event(event, activity_id, mission_id_value),
+        source_seq=source_seq,
+        mission_seq=activity_seq,
+    )
+    return event_for_subscription(projected, activity_id)
+
+
+def project_run_event_for_subscription(
+    event: dict[str, Any],
+    activity_id: str,
+    *,
+    mission_id_value: str,
+) -> dict[str, Any]:
+    source = dict(event or {})
+    source_payload = dict(source.get("payload") or {}) if isinstance(source.get("payload"), dict) else {}
+    snapshot_mode = str(source_payload.get("mode") or "").strip().lower() == "snapshot"
+    if snapshot_mode:
+        # The durable audit projector intentionally rejects historical snapshot
+        # deltas. A transient reconnect snapshot is a transport repair frame,
+        # so project it as append first and restore explicit snapshot semantics.
+        source_payload["mode"] = "append"
+        source["payload"] = source_payload
+    projected = _project_run_event_for_subscription(
+        source,
+        activity_id,
+        mission_id_value=mission_id_value,
+    )
+    if snapshot_mode:
+        payload = projected.get("payload") if isinstance(projected.get("payload"), dict) else {}
+        text_stream = payload.get("text_stream") if isinstance(payload.get("text_stream"), dict) else {}
+        text_stream["mode"] = "snapshot"
+        payload["text_stream"] = text_stream
+        payload["mode"] = "snapshot"
+        payload["replay_snapshot"] = True
+        projected["text_stream"] = dict(text_stream)
+        projected["payload"] = payload
+    if event.get("transient"):
+        runtime_event_protocol.mark_transient(projected)
+        projected["runtime_source_seq"] = int(
+            event.get("runtime_source_seq")
+            or event.get("runtimeSourceSeq")
+            or event.get("source_seq")
+            or event.get("sourceSeq")
+            or 0
+        )
+        for key in (
+            "activity_event_seq",
+            "activityEventSeq",
+            "team_mission_event_seq",
+            "teamMissionEventSeq",
+        ):
+            projected.pop(key, None)
+        payload = projected.get("payload") if isinstance(projected.get("payload"), dict) else {}
+        payload["runtime_source_seq"] = projected["runtime_source_seq"]
+        for key in (
+            "activity_event_seq",
+            "activityEventSeq",
+            "team_mission_event_seq",
+            "teamMissionEventSeq",
+        ):
+            payload.pop(key, None)
+        projected["payload"] = payload
+    return projected
+
+
+def _list_mission_activity_run_events(
+    db: Any,
+    activity_id: str,
+    *,
+    after_seq: int,
+    limit: int,
+    reverse: bool = False,
+) -> list[dict[str, Any]]:
+    normalized_mission_id = mission_id_for_activity(activity_id, db=db)
+    if not normalized_mission_id:
+        return []
+    if str(activity_id or "").strip().startswith("act-node:"):
+        if db is None:
+            return []
+        events = _list_activity_run_events(db, activity_id, after_seq=after_seq, limit=limit)
+    else:
+        events = _list_mission_run_events(
+            db,
+            normalized_mission_id,
+            after_seq=after_seq,
+            limit=limit,
+            reverse=reverse,
+        )
+    return [event for event in events if isinstance(event, dict)]
+
+
 def list_activity_events(
     db: Any,
     activity_id: str,
@@ -658,23 +865,25 @@ def list_activity_events(
             )
         except (TypeError, ValueError):
             bounded_limit = TEAM_MISSION_ACTIVITY_REPLAY_DEFAULT_LIMIT
-        method = _db_method(db, "list_team_mission_events")
-        if method is None or not normalized_mission_id:
+        if not normalized_mission_id:
             _emit_activity_diagnostic(
-                "list-activity-events-drop-no-event-log",
+                "list-activity-events-drop-no-mission-id",
                 activity_id=activity_id,
                 mission_id=normalized_mission_id,
-                has_method=method is not None,
             )
             _terminal_activity_log(
-                "list-drop-no-event-log",
+                "list-drop-no-mission-id",
                 activity_id=activity_id,
                 mission_id=normalized_mission_id,
-                has_method=method is not None,
             )
             return []
         try:
-            events = method(normalized_mission_id, after_seq=after_seq, limit=bounded_limit)
+            events = _list_mission_activity_run_events(
+                db,
+                activity_id,
+                after_seq=after_seq,
+                limit=bounded_limit,
+            )
         except Exception as exc:
             _emit_activity_diagnostic(
                 "list-activity-events-error",
@@ -694,20 +903,19 @@ def list_activity_events(
             )
             return []
         result = [
-            event_for_subscription(event, activity_id)
-            for event in events
-            if isinstance(event, dict)
-            and event_matches_activity(
+            _project_run_event_for_subscription(
                 event,
                 activity_id,
-                resolved_mission_id=normalized_mission_id,
+                mission_id_value=normalized_mission_id,
             )
+            for event in events
+            if isinstance(event, dict)
         ]
         _emit_activity_diagnostic(
             "list-activity-events",
             activity_id=activity_id,
             mission_id=normalized_mission_id,
-            source="team_mission_events",
+            source="run_events",
             after_seq=after_seq,
             requested_limit=limit,
             limit=bounded_limit,
@@ -734,8 +942,7 @@ def list_activity_events(
             reason="target_mission_not_bound",
         )
         return []
-    method = _db_method(db, "list_run_events_by_activity")
-    if method is None:
+    if db is None:
         _emit_activity_diagnostic(
             "list-activity-events-drop-no-run-event-activity-index",
             activity_id=activity_id,
@@ -746,7 +953,7 @@ def list_activity_events(
         )
         return []
     try:
-        events = method(activity_id, after_seq=after_seq, limit=limit)
+        events = _list_activity_run_events(db, activity_id, after_seq=after_seq, limit=limit)
     except Exception as exc:
         _emit_activity_diagnostic(
             "list-activity-events-run-event-index-error",
@@ -790,11 +997,8 @@ def deliver_appended_event(
     lock: Any,
     subscription_ids_by_activity: dict[str, set[str]],
     subscriptions_by_id: dict[str, dict[str, Any]],
-    delta_event_for_subscription: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None],
-    reserve_subscription_delivery: Callable[[dict[str, Any], dict[str, Any]], bool],
     live_status_event_for_subscription: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
-    write_event: Callable[[Any, dict[str, Any]], bool],
-    remember_transport_delivery: Callable[[Any, dict[str, Any]], None],
+    deliver_subscription_event: Callable[[str, Any, dict[str, Any]], bool],
 ) -> None:
     normalized_mission_id = str(mission_id_value or "").strip()
     if not normalized_mission_id or not isinstance(event, dict):
@@ -839,56 +1043,26 @@ def deliver_appended_event(
         transport = subscription.get("transport")
         if transport is None:
             continue
-        event_for_transport = event_for_subscription(event, activity_id)
-        event_for_transport = delta_event_for_subscription(subscription, event_for_transport)
-        if event_for_transport is None:
-            reserve_subscription_delivery(subscription, event_for_subscription(event, activity_id))
-            _emit_activity_diagnostic(
-                "deliver-appended-event-skip-delta-dedup",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event),
-            )
-            _terminal_activity_log(
-                "deliver-skip-delta-dedup",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event),
-            )
-            continue
+        event_for_transport = project_run_event_for_subscription(
+            event,
+            activity_id,
+            mission_id_value=normalized_mission_id,
+        )
         event_for_transport = live_status_event_for_subscription(subscription, event_for_transport)
-        if not reserve_subscription_delivery(subscription, event_for_transport):
-            _emit_activity_diagnostic(
-                "deliver-appended-event-skip-reserved",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event_for_transport),
-            )
-            _terminal_activity_log(
-                "deliver-skip-reserved",
-                mission_id=normalized_mission_id,
-                activity_id=activity_id,
-                subscription_id=subscription.get("id"),
-                event=_event_summary(event_for_transport),
-            )
-            continue
-        if write_event(transport, event_for_transport):
-            remember_transport_delivery(transport, event_for_transport)
+        subscription_id = text(subscription.get("id"))
+        if deliver_subscription_event(subscription_id, transport, event_for_transport):
             _emit_activity_diagnostic(
                 "deliver-appended-event-written",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )
             _terminal_activity_log(
                 "deliver-written",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )
         else:
@@ -896,6 +1070,6 @@ def deliver_appended_event(
                 "deliver-write-failed",
                 mission_id=normalized_mission_id,
                 activity_id=activity_id,
-                subscription_id=subscription.get("id"),
+                subscription_id=subscription_id,
                 event=_event_summary(event_for_transport),
             )

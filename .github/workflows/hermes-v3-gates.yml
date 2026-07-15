@@ -1,0 +1,139 @@
+name: Hermes v3 gates
+
+# Blocking CI gates for the Hermes Agent Backend v3.0.2/v3.0.3 landing
+# (see docs/hermes_agent_architecture_v3.md § J1-J11 invariants).
+#
+# Three gates:
+#   1. v3 pytest — the v3/domain observability tests must stay green.
+#      J2/J3/J4 guards are blocking and scan production legacy entrypoints
+#      where those invariants are already switched.
+#   2. import-linter — the layered skeleton contract must remain KEPT.
+#      Runs against the .importlinter config at repo root.
+#   3. silent-swallow lint — hermes_agent/ must remain 0 findings, and the
+#      whole-repo terminal fallback guard must stay green.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hermes_agent/**"
+      - "hermes_state.py"
+      - "hermes_state_*.py"
+      - "hermes_team_mission/**"
+      - "tui_gateway/**"
+      - "tests/domain/**"
+      - "tests/gateway_v3/**"
+      - "tests/observability/**"
+      - "tests/orchestration/**"
+      - "tests/repositories/**"
+      - "tests/transport/**"
+      - ".importlinter"
+      - ".github/workflows/hermes-v3-gates.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "hermes_agent/**"
+      - "hermes_state.py"
+      - "hermes_state_*.py"
+      - "hermes_team_mission/**"
+      - "tui_gateway/**"
+      - "tests/domain/**"
+      - "tests/gateway_v3/**"
+      - "tests/observability/**"
+      - "tests/orchestration/**"
+      - "tests/repositories/**"
+      - "tests/transport/**"
+      - ".importlinter"
+      - ".github/workflows/hermes-v3-gates.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-v3-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  v3-pytest:
+    name: v3 pytest (six directories, blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Install project + test deps
+        run: |
+          python -m pip install --upgrade pip
+          # The v3 test set only touches stdlib + our package; install the
+          # project in editable mode so imports resolve.
+          pip install -e . || true
+          pip install pytest pytest-timeout pytest-asyncio pytest-anyio
+
+      - name: Run v3 pytest
+        run: |
+          python -m pytest \
+            tests/transport \
+            tests/gateway_v3 \
+            tests/orchestration \
+            tests/repositories \
+            tests/observability \
+            tests/domain \
+            -q
+
+  import-linter:
+    name: import-linter (layered skeleton, blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Install import-linter
+        run: |
+          python -m pip install --upgrade pip
+          pip install import-linter
+
+      - name: Run lint-imports
+        run: lint-imports
+
+  silent-swallow-v3:
+    name: silent-swallow lint + terminal fallback guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Run silent-swallow scanner on hermes_agent/
+        run: |
+          python - <<'EOF'
+          from hermes_agent.observability.silent_swallow_lint import scan_paths
+          from pathlib import Path
+          import sys
+          f = scan_paths([Path('hermes_agent')])
+          if f:
+              print(f"silent-swallow findings inside hermes_agent/ ({len(f)}):")
+              for x in f:
+                  print(f"  {x.file}:{x.line} except {x.exception_type}")
+              sys.exit(1)
+          print("hermes_agent/ clean —— 0 silent-swallow findings")
+          EOF
+
+      - name: Run whole-repo terminal fallback guard
+        run: python -m pytest tests/observability/test_silent_fallback_scan.py -q

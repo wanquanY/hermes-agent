@@ -8,7 +8,7 @@ of `extra.base_url` as the explicit opt-in to the higher cap.
 import sys
 from unittest.mock import MagicMock
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
@@ -29,7 +29,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
 
 
 def test_max_doc_bytes_defaults_to_20mb_without_base_url():

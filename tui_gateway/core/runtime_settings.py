@@ -428,6 +428,70 @@ def _apply_model_switch(
         raise ValueError("model value required")
 
     agent = session.get("agent")
+    _agent_api_mode = str(getattr(agent, "api_mode", "") or "").strip() if agent else ""
+    _override_for_runtime = session.get("model_override") if isinstance(session, dict) else None
+    _override_for_runtime = _override_for_runtime if isinstance(_override_for_runtime, dict) else {}
+    _profile_context = session.get("profile_context") if isinstance(session, dict) else None
+    _profile_context = _profile_context if isinstance(_profile_context, dict) else {}
+    _runtime_executor = str(
+        _override_for_runtime.get("runtime_executor")
+        or _override_for_runtime.get("runtimeExecutor")
+        or _profile_context.get("runtime_executor")
+        or _profile_context.get("runtimeExecutor")
+        or ""
+    ).strip()
+    if _agent_api_mode == "codex_app_server" or _runtime_executor == "codex_app_server":
+        from agent.codex_runtime import normalize_codex_account_mode
+
+        override = _override_for_runtime
+        extra_env = (
+            override.get("codex_extra_env")
+            or override.get("codexExtraEnv")
+            or _profile_context.get("codex_extra_env")
+            or _profile_context.get("codexExtraEnv")
+            or (getattr(agent, "codex_extra_env", None) if agent else None)
+        )
+        account_mode = normalize_codex_account_mode(
+            override.get("codex_account_mode")
+            or override.get("codexAccountMode")
+            or _profile_context.get("codex_account_mode")
+            or _profile_context.get("codexAccountMode")
+            or (getattr(agent, "codex_account_mode", "") if agent else ""),
+            extra_env=extra_env,
+        )
+        if account_mode == "platform":
+            next_override = dict(override)
+            next_override["model"] = model_input
+            next_override["model_explicit"] = True
+            next_override["codex_account_mode"] = "platform"
+            next_override.setdefault("runtime_executor", "codex_app_server")
+            if agent is not None and getattr(agent, "codex_home", None):
+                next_override.setdefault("codex_home", getattr(agent, "codex_home"))
+            if isinstance(extra_env, dict) and extra_env:
+                next_override.setdefault(
+                    "codex_extra_env",
+                    {str(k): str(v) for k, v in extra_env.items() if v is not None},
+                )
+            session["model_override"] = next_override
+            if agent is not None:
+                try:
+                    agent.codex_account_mode = "platform"
+                    agent.codex_explicit_model = model_input
+                    agent.model = model_input
+                except Exception:
+                    pass
+            return {
+                "success": True,
+                "value": model_input,
+                "warning": "",
+                "confirm_required": False,
+            }
+        return {
+            "success": True,
+            "no_op": True,
+            "reason": "codex_employee_owned_runtime",
+            "value": getattr(agent, "model", "") or model_input,
+        }
     if agent:
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or ""
@@ -704,7 +768,7 @@ def _sync_session_key_after_compress(
 ) -> None:
     """Re-anchor session_key when AIAgent._compress_context rotates session_id.
 
-    AIAgent._compress_context ends the current SessionDB session and creates
+    AIAgent._compress_context ends the current persisted session and creates
     a new continuation session, rotating ``agent.session_id``.  The TUI
     gateway keeps the gateway-side ``session_key`` separate (used for
     approval routing, slash worker init, DB title/history lookups, yolo

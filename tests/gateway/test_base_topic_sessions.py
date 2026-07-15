@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class DummyTelegramAdapter(BasePlatformAdapter):

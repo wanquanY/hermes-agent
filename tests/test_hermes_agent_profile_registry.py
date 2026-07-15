@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_agent.storage.cli_session_store import open_cli_session_store
 
 
 def test_agent_profile_registry_latest_profile_is_native_hermes_state(tmp_path: Path):
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     profile_home = tmp_path / "profiles" / "research-agent"
 
-    profile = db.upsert_agent_profile(
+    profile = db.profiles.upsert_agent_profile(
         profile_id="agent-1",
         slug="research-agent",
         name="Research Agent",
@@ -26,7 +26,7 @@ def test_agent_profile_registry_latest_profile_is_native_hermes_state(tmp_path: 
         created_at="2026-06-14T00:00:00Z",
         updated_at="2026-06-14T03:00:00Z",
     )
-    draft = db.upsert_agent_profile_draft(
+    draft = db.profiles.upsert_agent_profile_draft(
         draft_id="draft-1",
         draft_kind="revision",
         base_agent_profile_id=profile["id"],
@@ -42,7 +42,7 @@ def test_agent_profile_registry_latest_profile_is_native_hermes_state(tmp_path: 
         updated_at="2026-06-14T02:00:00Z",
     )
 
-    resolved = db.get_agent_profile(profile["id"])
+    resolved = db.profiles.get_agent_profile(profile["id"])
 
     assert resolved["id"] == "agent-1"
     assert resolved["currentVersionId"] == "snapshot-2"
@@ -50,31 +50,31 @@ def test_agent_profile_registry_latest_profile_is_native_hermes_state(tmp_path: 
     assert resolved["runtimeHomePath"] == str(profile_home)
     assert resolved["runtimeScopeKey"] == "profile:agent-1"
     assert resolved["recommendedSkills"] == ["search"]
-    assert db.get_agent_profile_by_slug("research-agent")["id"] == "agent-1"
-    listed_profiles = db.list_agent_profiles()
+    assert db.profiles.get_agent_profile_by_slug("research-agent")["id"] == "agent-1"
+    listed_profiles = db.profiles.list_agent_profiles()
     assert [item["id"] for item in listed_profiles] == ["agent-1"]
     assert listed_profiles[0]["runtimeHomePath"] == str(profile_home)
     assert listed_profiles[0]["runtimeScopeKey"] == "profile:agent-1"
     assert listed_profiles[0]["name"] == "Research Agent"
 
-    drafts = db.list_agent_profile_drafts(source_session_id="session-1")
+    drafts = db.profiles.list_agent_profile_drafts(source_session_id="session-1")
     assert drafts[0]["id"] == draft["id"]
     assert drafts[0]["draftKind"] == "revision"
     assert drafts[0]["recommendedToolsets"] == ["file", "terminal"]
 
-    discarded = db.discard_agent_profile_draft("draft-1")
+    discarded = db.profiles.discard_agent_profile_draft("draft-1")
     assert discarded["status"] == "discarded"
-    assert db.list_agent_profile_drafts(source_session_id="session-1") == []
-    assert db.list_agent_profile_drafts(source_session_id="session-1", include_discarded=True)[0]["id"] == "draft-1"
+    assert db.profiles.list_agent_profile_drafts(source_session_id="session-1") == []
+    assert db.profiles.list_agent_profile_drafts(source_session_id="session-1", include_discarded=True)[0]["id"] == "draft-1"
 
-    archived = db.archive_agent_profile("agent-1")
+    archived = db.profiles.archive_agent_profile("agent-1")
     assert archived["status"] == "archived"
-    assert db.list_agent_profiles() == []
-    assert [item["id"] for item in db.list_agent_profiles(include_archived=True)] == ["agent-1"]
+    assert db.profiles.list_agent_profiles() == []
+    assert [item["id"] for item in db.profiles.list_agent_profiles(include_archived=True)] == ["agent-1"]
 
 
 def test_agent_profile_growth_summary_reads_latest_profile_home(tmp_path: Path):
-    control_db = SessionDB(tmp_path / "state.db")
+    control_db = open_cli_session_store(tmp_path / "state.db")
     profile_home = tmp_path / "profiles" / "research-agent"
     (profile_home / "memories").mkdir(parents=True)
     (profile_home / "skills" / "research" / "search").mkdir(parents=True)
@@ -82,7 +82,7 @@ def test_agent_profile_growth_summary_reads_latest_profile_home(tmp_path: Path):
     (profile_home / "memories" / "USER.md").write_text("- User preference\n", encoding="utf-8")
     (profile_home / "skills" / "research" / "search" / "SKILL.md").write_text("# Search\n", encoding="utf-8")
 
-    control_db.upsert_agent_profile(
+    control_db.profiles.upsert_agent_profile(
         profile_id="agent-1",
         slug="research-agent",
         name="Research Agent",
@@ -91,13 +91,13 @@ def test_agent_profile_growth_summary_reads_latest_profile_home(tmp_path: Path):
         current_version_id="snapshot-1",
         current_version_number=1,
     )
-    runtime_db = SessionDB(profile_home / "state.db")
-    runtime_db.create_session("session-1", source="tui")
-    runtime_db.append_message("session-1", "user", "Build a market research brief.")
-    runtime_db.create_session("tool-session", source="tool")
-    runtime_db.append_message("tool-session", "user", "internal")
+    runtime_db = open_cli_session_store(profile_home / "state.db")
+    runtime_db.sessions.create("session-1", source="tui")
+    runtime_db.messages.append("session-1", "user", "Build a market research brief.")
+    runtime_db.sessions.create("tool-session", source="tool")
+    runtime_db.messages.append("tool-session", "user", "internal")
 
-    growth = control_db.agent_profile_growth_summary("agent-1", range_preset="week")
+    growth = control_db.profiles.agent_profile_growth_summary("agent-1", range_preset="week")
 
     assert growth["projectMemoryItems"] == 1
     assert growth["userMemoryItems"] == 1
@@ -116,7 +116,7 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
     from tui_gateway import server
 
     profile_registry = importlib.import_module("tui_gateway.methods.profile_registry")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(profile_registry, "_get_db", lambda: db)
 
     assert "profile.version.upsert" not in server._methods
@@ -201,6 +201,41 @@ def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Pat
     assert discarded_response["result"]["draft"]["status"] == "discarded"
 
 
+def test_profile_upsert_uses_control_db_when_profile_context_has_home(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from tui_gateway import server
+
+    control_home = tmp_path / "control-home"
+    profile_home = tmp_path / "profiles" / "agent-a"
+    monkeypatch.setenv("DOVIE_HERMES_CONTROL_HOME", str(control_home))
+    monkeypatch.setattr(server, "_db_by_home", {})
+    monkeypatch.setattr(server, "_db_error_by_home", {})
+
+    response = server.handle_request({
+        "id": "profile-upsert",
+        "method": "profile.upsert",
+        "params": {
+            "profile": {
+                "id": "agent-a",
+                "slug": "agent-a",
+                "name": "Agent A",
+                "hermesHomePath": str(profile_home),
+            },
+            "dovie_profile": {
+                "id": "agent-a",
+                "runtimeScopeKey": "profile:agent-a",
+                "hermesHomePath": str(profile_home),
+            },
+        },
+    })
+
+    assert "error" not in response
+    assert (control_home / "state.db").exists()
+    assert not (profile_home / "state.db").exists()
+
+
 def test_team_mission_control_home_falls_back_to_hermes_home(monkeypatch, tmp_path: Path):
     from hermes_team_mission.runtime.profile_scope import team_mission_control_home
 
@@ -216,7 +251,7 @@ def test_profile_registry_gateway_returns_validation_errors(monkeypatch, tmp_pat
     from tui_gateway import server
 
     profile_registry = importlib.import_module("tui_gateway.methods.profile_registry")
-    db = SessionDB(tmp_path / "state.db")
+    db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(profile_registry, "_get_db", lambda: db)
 
     response = server._methods["profile.upsert"](

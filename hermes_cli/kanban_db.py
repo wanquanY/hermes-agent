@@ -1068,8 +1068,8 @@ def connect(
             # startup threads do not race before _INITIALIZED_PATHS is populated.
             # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
             # falls back to DELETE with one WARNING so kanban stays usable there.
-            # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
-            from hermes_state import apply_wal_with_fallback
+            from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -3888,7 +3888,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
     """Return True if ``pid`` is still running on this host.
 
     Cross-platform: uses ``OpenProcess`` + ``WaitForSingleObject`` on
-    Windows (via ``gateway.status._pid_exists``) and ``os.kill(pid, 0)``
+    Windows (via ``channels.runtime_status._pid_exists``) and ``os.kill(pid, 0)``
     on POSIX. Returns False for falsy PIDs or on any OS error.
 
     **DO NOT** use ``os.kill(pid, 0)`` directly on Windows — Python's
@@ -3909,7 +3909,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
     """
     if not pid or pid <= 0:
         return False
-    from gateway.status import _pid_exists
+    from channels.runtime_status import _pid_exists
     if not _pid_exists(int(pid)):
         return False
     # Still here → process exists. Check for zombie on platforms
@@ -5279,9 +5279,8 @@ def _resolve_hermes_argv() -> list[str]:
        launchd jobs, detached processes, etc.). Goes through the running
        interpreter so the result is independent of ``$PATH``.
 
-    Mirrors ``gateway.run._resolve_hermes_bin`` for the same reason. Kept
-    local (not imported from gateway) because ``hermes_cli`` sits below
-    ``gateway`` in the dependency order.
+    Mirrors the gateway executable resolution for the same reason. Kept local
+    because ``hermes_cli`` sits below the gateway runtime in the dependency order.
     """
     import shutil
 

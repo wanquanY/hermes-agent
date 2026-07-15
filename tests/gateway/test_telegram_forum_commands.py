@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 def _make_test_adapter():
     """Build a TelegramAdapter without running __init__."""
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     adapter = object.__new__(TelegramAdapter)
     adapter.platform = Platform.TELEGRAM

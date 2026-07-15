@@ -142,7 +142,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                "Configuration"),
     CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",
                args_hint="[level|show|hide]",
-               subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "show", "hide", "on", "off")),
+               subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "show", "hide", "on", "off")),
     CommandDef("fast", "Toggle fast mode — OpenAI Priority Processing / Anthropic Fast Mode (Normal/Fast)", "Configuration",
                args_hint="[normal|fast|status]",
                subcommands=("normal", "fast", "status", "on", "off")),
@@ -357,13 +357,13 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     """Return True for any resolvable slash command.
 
     Rationale: every gateway-registered slash command either has a
-    specific Level-2 handler in gateway/run.py (/stop, /new, /model,
+    specific Level-2 handler in the gateway command runtime (/stop, /new, /model,
     /approve, etc.) or reaches the running-agent catch-all that returns
     a "busy — wait or /stop first" response. In both paths the command
     is dispatched, not queued.
 
     Queueing is always wrong for a recognized slash command because the
-    safety net in gateway.run discards any command text that reaches
+    safety net in the gateway command runtime discards any command text that reaches
     the pending queue — which meant a mid-run /model (or /reasoning,
     /voice, /insights, /title, /resume, /retry, /undo, /compress,
     /usage, /reload-mcp, /sethome, /reset) would silently
@@ -452,7 +452,7 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     :func:`hermes_cli.plugins.PluginContext.register_command`. They behave
     like ``CommandDef`` entries for gateway surfacing: they appear in the
     Telegram command menu, in Slack's ``/hermes`` subcommand mapping, and
-    (via :func:`gateway.platforms.discord._register_slash_commands`) in
+    (via :func:`channels.platforms.discord._register_slash_commands`) in
     Discord's native slash command picker.
 
     Lookup is lazy so importing this module never forces plugin discovery

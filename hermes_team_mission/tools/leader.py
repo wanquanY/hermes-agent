@@ -13,10 +13,8 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from hermes_state import SessionDB
 from hermes_team_mission.domain.modes import MODE_AUTONOMOUS_MISSION
 from hermes_team_mission.domain.modes import MODE_SUPERVISED_MISSION
-from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from hermes_team_mission.runtime.profile_scope import gateway_call as _gateway_call
 from hermes_team_mission.runtime.profile_scope import team_mission_control_db as _team_mission_control_db
 from hermes_team_mission.runtime.profile_scope import unwrap_response as _unwrap_response
@@ -32,12 +30,25 @@ _START_TASK_RESULT_MESSAGE = (
     "Team mission task accepted. A new asynchronous team task was created "
     "and execution is now owned by the Team Mission runtime."
 )
-_START_TASK_FOLLOWUP_INSTRUCTION = (
-    "Reply naturally and briefly in the user's language. Tell the user the "
-    "team task has started and is being processed asynchronously, progress is "
-    "available on the canvas, and they can continue chatting or submit another "
-    "task. Do not continue task execution, do not create deliverables, and do "
-    "not call additional tools in this turn."
+_DOVIE_ATTRIBUTION_CONTEXT_KEYS = (
+    "cloud_query",
+    "cloudQuery",
+    "sourceAgentProfileId",
+    "source_agent_profile_id",
+    "sourceSessionId",
+    "source_session_id",
+    "sourceRunId",
+    "source_run_id",
+    "sourceTurnId",
+    "source_turn_id",
+    "sourceClientMessageId",
+    "source_client_message_id",
+    "root_agent_profile_id",
+    "rootAgentProfileId",
+    "executing_agent_profile_id",
+    "executingAgentProfileId",
+    "agent_role",
+    "agentRole",
 )
 
 
@@ -46,15 +57,12 @@ def _text(value: Any) -> str:
 
 
 def _get_db(parent_agent=None):
-    try:
-        return _team_mission_control_db(parent_agent)
-    except Exception:
-        return SessionDB()
+    return _team_mission_control_db(parent_agent)
 
 
 def _session_context() -> dict[str, Any]:
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         raw = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
     except Exception:
@@ -82,10 +90,21 @@ def _team_context() -> dict[str, Any] | str:
     return dict(team)
 
 
+def _session_dovie_attribution_context() -> dict[str, Any]:
+    context = _session_context()
+    carried: dict[str, Any] = {}
+    for key in _DOVIE_ATTRIBUTION_CONTEXT_KEYS:
+        value = context.get(key)
+        if value in (None, "", {}, []):
+            continue
+        carried[key] = dict(value) if isinstance(value, Mapping) else value
+    return carried
+
+
 def _active_mission_graph(db, team_context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     mission_id = _text(team_context.get("mission_id") or team_context.get("missionId"))
     if mission_id:
-        graph = db.get_team_mission_graph(mission_id)
+        graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         if graph:
             return mission_id, graph
     identifier = _text(
@@ -201,7 +220,7 @@ def _handle_status(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
         return tool_error(f"{ctx} Leader run context: {leader_run_ctx}")
     _db, _run_id, binding, _mission, _node = leader_run_ctx
     mission_id = _text(binding.get("mission_id"))
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     return tool_result(
         success=True,
         mission_id=mission_id,
@@ -235,7 +254,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     if not conversation_session_id:
         resolved = db.resolve_team_mission_conversation(conversation_id) if conversation_id else {}
         conversation = resolved.get("conversation") if isinstance(resolved, dict) and isinstance(resolved.get("conversation"), Mapping) else {}
-        conversation_session_id = _text(conversation.get("stable_session_id")) or conversation_id
+        conversation_session_id = _text(conversation.get("conversation_session_id")) or conversation_id
     if not conversation_id or not conversation_session_id:
         return tool_error("Team Mission conversation context is not available for this Leader turn.")
     active_run_id = _active_run_id(parent_agent)
@@ -282,15 +301,11 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             run={},
             graph_summary=_graph_summary(existing_graph),
             message=_START_TASK_RESULT_MESSAGE,
-            assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
             idempotent=True,
             hermes_control={
                 "kind": "team_mission_started",
-                "skip_remaining_tool_calls": True,
-                "require_followup_response": True,
                 "await_final_deliverable": True,
                 "mission_status": mission_status,
-                "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
             },
         )
     members = list(team_context.get("members") or []) if isinstance(team_context.get("members"), list) else []
@@ -298,7 +313,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
     task_execution_mode = _task_execution_mode(team_context)
     metadata = {
         "conversation_id": conversation_id,
-        "stableTeamSessionId": conversation_session_id,
+        "conversationTeamSessionId": conversation_session_id,
         "started_from_leader_conversation_run_id": active_run_id,
         "task_id": task_id,
         "task_title": title,
@@ -309,24 +324,7 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         **({"dispatch_activity_id": request_activity_id} if request_activity_id else {}),
         **({"parent_activity_id": request_activity_id} if request_activity_id else {}),
     }
-    # ADR-0001 Phase 1.D: audit-only activity_command for leader-tool mission start.
-    _db = _get_db(parent_agent)
-    if _db is not None:
-        record_legacy_activity_command(
-            _db,
-            activity_id=request_activity_id or (f"mission:{mission_id}" if mission_id else ""),
-            kind="create",
-            payload={
-                "mission_id": mission_id,
-                "task_id": task_id,
-                "conversation_id": conversation_id,
-                "conversation_session_id": conversation_session_id,
-                **({"request_activity_id": request_activity_id} if request_activity_id else {}),
-                "title": title,
-                "objective": objective,
-            },
-            source="team_mission_start_task",
-        )
+    product_context = _session_dovie_attribution_context()
     create_response = _gateway_call(
         "team_mission.create",
         {
@@ -346,12 +344,13 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
             **({"activity_id": request_activity_id} if request_activity_id else {}),
             "record_user_task_message": False,
             "metadata": metadata,
+            **({"dovie_product_context": product_context} if product_context else {}),
         },
     )
     created, error = _unwrap_response(create_response)
     if error:
         return tool_error(error)
-    graph = db.get_team_mission_graph(mission_id)
+    graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     started = created.get("leader_start") if isinstance(created.get("leader_start"), Mapping) else {}
     node = started.get("node") if isinstance(started.get("node"), Mapping) else _root_leader_node(graph)
     mission = graph.get("mission") if isinstance(graph, dict) and isinstance(graph.get("mission"), Mapping) else {}
@@ -372,14 +371,10 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         run=started.get("run") if isinstance(started, Mapping) else {},
         graph_summary=_graph_summary(graph),
         message=_START_TASK_RESULT_MESSAGE,
-        assistant_followup_instruction=_START_TASK_FOLLOWUP_INSTRUCTION,
         hermes_control={
             "kind": "team_mission_started",
-            "skip_remaining_tool_calls": True,
-            "require_followup_response": True,
             "await_final_deliverable": True,
             "mission_status": mission_status,
-            "assistant_followup_instruction": _START_TASK_FOLLOWUP_INSTRUCTION,
         },
     )
 

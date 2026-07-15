@@ -248,7 +248,7 @@ def build_recap(
         messages: the full conversation history as a list of
             chat-completion-style dicts (``role``, ``content``,
             ``tool_calls``, …).
-        session_title: optional human title (from SessionDB).
+        session_title: optional human title from storage.
         session_id: optional session id.
         platform: optional hint (``"cli"``, ``"telegram"``, …). Does not
             change behavior today but is accepted for forward compat.

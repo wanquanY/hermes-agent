@@ -70,6 +70,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from hermes_agent.storage.cli_session_store import open_cli_session_store
+
 
 def _add_accept_hooks_flag(parser) -> None:
     """Attach the ``--accept-hooks`` flag.  Shared across every agent
@@ -779,10 +781,8 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
     """Look up the most recently-used session ID for a source."""
     db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        sessions = db.search_sessions(source=source, limit=1)
+        db = open_cli_session_store()
+        sessions = db.sessions.search(source=source, limit=1)
         return sessions[0]["id"] if sessions else None
     except Exception:
         pass
@@ -917,32 +917,36 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
       from an exit summary printed before the bug fix, or from notes) get
       resumed at the live tip instead of a stale parent with no messages.
     """
+    db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
+        db = open_cli_session_store()
 
         # Try as exact session ID first
-        session = db.get_session(name_or_id)
+        session = db.sessions.get(name_or_id)
         resolved_id: Optional[str] = None
         if session:
             resolved_id = session["id"]
         else:
             # Try as title (with auto-latest for lineage)
-            resolved_id = db.resolve_session_by_title(name_or_id)
+            resolved_id = db.sessions.resolve_by_title(name_or_id)
 
         if resolved_id:
             # Project forward through compression chain so resumes land on
             # the live tip instead of a dead compressed parent.
             try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
+                resolved_id = db.sessions.compression_tip(resolved_id) or resolved_id
             except Exception:
                 pass
 
-        db.close()
         return resolved_id
     except Exception:
         pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     return None
 
 
@@ -971,14 +975,12 @@ def _print_tui_exit_summary(
 
     db = None
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        session = db.get_session(target)
+        db = open_cli_session_store()
+        session = db.sessions.get(target)
         if not session:
             return
 
-        title = db.get_session_title(target)
+        title = db.sessions.get_title(target)
         message_count = int(session.get("message_count") or 0)
         if message_count == 0:
             return  # No real conversation — don't show resume info
@@ -4492,7 +4494,7 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
             str(effort).strip().lower() for effort in efforts if str(effort).strip()
         )
     )
-    canonical_order = ("minimal", "low", "medium", "high", "xhigh")
+    canonical_order = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
     ordered = [effort for effort in canonical_order if effort in deduped]
     ordered.extend(effort for effort in deduped if effort not in canonical_order)
     if not ordered:
@@ -6793,7 +6795,7 @@ def _kill_stale_dashboard_processes(
             still_pending = []
             # On Windows, os.kill(pid, 0) is NOT a no-op. Route through
             # the cross-platform existence check.
-            from gateway.status import _pid_exists
+            from channels.runtime_status import _pid_exists
             for pid in pending:
                 if _pid_exists(pid):
                     still_pending.append(pid)
@@ -9633,7 +9635,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(
                         f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing"
                     )
-                    from gateway.status import terminate_pid as _terminate_pid
+                    from channels.runtime_status import terminate_pid as _terminate_pid
                     for pid in _stuck:
                         try:
                             # Routes through taskkill /T /F on Windows,
@@ -12864,9 +12866,7 @@ Examples:
         import json as _json
 
         try:
-            from hermes_state import SessionDB
-
-            db = SessionDB()
+            db = open_cli_session_store()
         except Exception as e:
             print(f"Error: Could not open session database: {e}")
             return
@@ -12878,7 +12878,7 @@ Examples:
         _exclude = None if _source else ["tool"]
 
         if action == "list":
-            sessions = db.list_sessions_rich(
+            sessions = db.sessions.list_rich(
                 source=args.source, exclude_sources=_exclude, limit=args.limit
             )
             if not sessions:
@@ -12908,11 +12908,11 @@ Examples:
 
         elif action == "export":
             if args.session_id:
-                resolved_session_id = db.resolve_session_id(args.session_id)
+                resolved_session_id = db.sessions.resolve_id(args.session_id)
                 if not resolved_session_id:
                     print(f"Session '{args.session_id}' not found.")
                     return
-                data = db.export_session(resolved_session_id)
+                data = db.sessions.export(resolved_session_id)
                 if not data:
                     print(f"Session '{args.session_id}' not found.")
                     return
@@ -12925,7 +12925,7 @@ Examples:
                         f.write(line)
                     print(f"Exported 1 session to {args.output}")
             else:
-                sessions = db.export_all(source=args.source)
+                sessions = db.sessions.export_all(source=args.source)
                 if args.output == "-":
 
                     for s in sessions:
@@ -12937,7 +12937,7 @@ Examples:
                     print(f"Exported {len(sessions)} sessions to {args.output}")
 
         elif action == "delete":
-            resolved_session_id = db.resolve_session_id(args.session_id)
+            resolved_session_id = db.sessions.resolve_id(args.session_id)
             if not resolved_session_id:
                 print(f"Session '{args.session_id}' not found.")
                 return
@@ -12948,7 +12948,11 @@ Examples:
                     print("Cancelled.")
                     return
             sessions_dir = get_hermes_home() / "sessions"
-            if db.delete_session(resolved_session_id, sessions_dir=sessions_dir):
+            deletion = db.sessions.delete(
+                resolved_session_id,
+                sessions_dir=sessions_dir,
+            )
+            if deletion.session_deleted:
                 print(f"Deleted session '{resolved_session_id}'.")
             else:
                 print(f"Session '{args.session_id}' not found.")
@@ -12963,19 +12967,19 @@ Examples:
                     print("Cancelled.")
                     return
             sessions_dir = get_hermes_home() / "sessions"
-            count = db.prune_sessions(
+            count = db.maintenance.prune_sessions(
                 older_than_days=days, source=args.source, sessions_dir=sessions_dir
             )
             print(f"Pruned {count} session(s).")
 
         elif action == "rename":
-            resolved_session_id = db.resolve_session_id(args.session_id)
+            resolved_session_id = db.sessions.resolve_id(args.session_id)
             if not resolved_session_id:
                 print(f"Session '{args.session_id}' not found.")
                 return
             title = " ".join(args.title)
             try:
-                if db.set_session_title(resolved_session_id, title):
+                if db.sessions.set_title(resolved_session_id, title):
                     print(f"Session '{resolved_session_id}' renamed to: {title}")
                 else:
                     print(f"Session '{args.session_id}' not found.")
@@ -12986,7 +12990,7 @@ Examples:
             limit = getattr(args, "limit", 500) or 500
             source = getattr(args, "source", None)
             _browse_exclude = None if source else ["tool"]
-            sessions = db.list_sessions_rich(
+            sessions = db.sessions.list_rich(
                 source=source, exclude_sources=_browse_exclude, limit=limit
             )
             db.close()
@@ -13007,12 +13011,12 @@ Examples:
             return  # won't reach here after execvp
 
         elif action == "stats":
-            total = db.session_count()
-            msgs = db.message_count()
+            total = db.sessions.count()
+            msgs = db.messages.count()
             print(f"Total sessions: {total}")
             print(f"Total messages: {msgs}")
             for src in ["cli", "telegram", "discord", "whatsapp", "slack"]:
-                c = db.session_count(source=src)
+                c = db.sessions.count(source=src)
                 if c > 0:
                     print(f"  {src}: {c} sessions")
             db_path = db.db_path
@@ -13043,17 +13047,22 @@ Examples:
     )
 
     def cmd_insights(args):
+        db = None
         try:
-            from hermes_state import SessionDB
             from agent.insights import InsightsEngine
 
-            db = SessionDB()
-            engine = InsightsEngine(db)
+            db = open_cli_session_store()
+            engine = InsightsEngine(db.analytics)
             report = engine.generate(days=args.days, source=args.source)
             print(engine.format_terminal(report))
-            db.close()
         except Exception as e:
             print(f"Error generating insights: {e}")
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     insights_parser.set_defaults(func=cmd_insights)
 

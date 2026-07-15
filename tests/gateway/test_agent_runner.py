@@ -31,6 +31,21 @@ from tui_gateway.services.agent_runner import (
 from hermes_team_mission.domain.run_context import RunContext
 
 
+@pytest.fixture(autouse=True)
+def _restore_worker_environment_globals():
+    """Keep process-global worker bootstrap state isolated between tests."""
+    from tui_gateway import server as _server
+    from tui_gateway.services import agent_runner as _agent_runner
+
+    original_setup_done = _agent_runner._setup_done
+    original_stdio_transport = _server._stdio_transport
+    try:
+        yield
+    finally:
+        _agent_runner._setup_done = original_setup_done
+        _server._stdio_transport = original_stdio_transport
+
+
 def test_noop_transport_write_returns_true() -> None:
     t = _NoopTransport()
     assert t.write({"jsonrpc": "2.0", "method": "event", "params": {}}) is True
@@ -61,11 +76,11 @@ def test_run_start_frame_carries_all_fields_for_runner() -> None:
     frame = RunStartFrame(
         run_id="r1",
         turn_id="t1",
-        stored_session_id="20260625_120000_abcdef",
+        conversation_session_id="20260625_120000_abcdef",
         prompt="hello",
         params={"runtime_scope_key": "profile:test", "cwd": "/tmp"},
     )
-    assert frame.stored_session_id
+    assert frame.conversation_session_id
     assert frame.run_id
     assert frame.turn_id
     assert isinstance(frame.params, dict)
@@ -91,7 +106,7 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
         RunStartFrame(
             run_id="team-run-1",
             turn_id="team-turn-1",
-            stored_session_id="team-session-team-conversation-1",
+            conversation_session_id="team-session-team-conversation-1",
             prompt="start team task",
             params={
                 "runtime_scope_key": "team:team-conversation-1:leader-conversation",
@@ -107,52 +122,152 @@ def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pyte
     assert starts == []
 
 
+def test_worker_session_restores_explicit_model_from_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A worker can recover an explicit model when the frame omits it."""
+    from tui_gateway import server as _server
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    session_id = "stored-session-with-explicit-model"
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id=session_id,
+        source="dovie",
+        model="deepseek-v4-pro",
+        model_config={
+            "model_explicit": True,
+            "reasoning_config": {"enabled": True, "effort": "xhigh"},
+            "service_tier": "priority",
+        },
+    )
+    persisted_session = db.sessions.get(session_id)
+    assert isinstance(persisted_session, dict)
+    assert isinstance(persisted_session["model_config"], str)
+
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
+
+    sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="run-restore-model",
+            turn_id="turn-restore-model",
+            conversation_session_id=session_id,
+            prompt="hello",
+            params={"runtime_scope_key": "profile:test"},
+        )
+    )
+
+    assert sessions[sid] is session
+    assert session["model_override"] == {
+        "model": "deepseek-v4-pro",
+        "model_explicit": True,
+    }
+    assert session["create_reasoning_override"] == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+    assert session["create_service_tier_override"] == "priority"
+
+
+def test_worker_session_turn_model_takes_precedence_over_persisted_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """The control-plane turn selection is newer than the stored fallback."""
+    from tui_gateway import server as _server
+
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
+
+    session_id = "stored-session-with-new-turn-model"
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id=session_id,
+        source="dovie",
+        model="stale-model",
+        model_config={"model_explicit": True},
+    )
+
+    sessions: dict[str, dict] = {}
+    monkeypatch.setattr(_server, "_sessions", sessions)
+    monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
+    monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
+
+    _sid, session = _ensure_worker_session(
+        RunStartFrame(
+            run_id="run-new-model",
+            turn_id="turn-new-model",
+            conversation_session_id=session_id,
+            prompt="hello",
+            params={
+                "runtime_scope_key": "profile:test",
+                "model": "turn-selected-model",
+            },
+        )
+    )
+
+    assert session["model_override"] == {
+        "model": "turn-selected-model",
+        "model_explicit": True,
+    }
+
+
 def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     from tui_gateway import server as _server
 
-    class FakeDB:
-        def get_conversation_message_read_model(self, session_id: str):
-            assert session_id == "team-session-team-conversation-1"
-            return [
-                {
-                    "role": "user",
-                    "content": "你是谁？",
-                    "metadata": {"participant_id": "user"},
-                },
-                {
-                    "role": "assistant",
-                    "content": "我是小多，负责团队协调。",
-                    "metadata": {"participant_id": "leader:team-conversation-1"},
-                },
-                {
-                    "role": "assistant",
-                    "content": "我是前端工程师，负责 UI。",
-                    "metadata": {"participant_id": "member:frontend"},
-                },
-            ]
+    from hermes_agent.storage.cli_session_store import open_cli_session_store
 
-        def list_conversation_participants(self, session_id: str):
-            assert session_id == "team-session-team-conversation-1"
-            return [
-                {"participant_id": "leader:team-conversation-1", "display_name": "小多"},
-                {"participant_id": "member:frontend", "display_name": "前端工程师"},
-            ]
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(
+        session_id="team-session-team-conversation-1",
+        source="team",
+        conversation_kind="team",
+    )
+    for index, message in enumerate(
+        [
+            ("user", "你是谁？", "user"),
+            ("assistant", "我是小多，负责团队协调。", "leader:team-conversation-1"),
+            ("assistant", "我是前端工程师，负责 UI。", "member:frontend"),
+        ],
+        start=1,
+    ):
+        db.messages.append(
+            "team-session-team-conversation-1",
+            role=message[0],
+            content=message[1],
+            participant_id=message[2],
+            timestamp=float(index),
+        )
+    monkeypatch.setattr(
+        db.participants,
+        "list_conversation_participants",
+        lambda session_id: [
+            {"participant_id": "leader:team-conversation-1", "display_name": "小多"},
+            {"participant_id": "member:frontend", "display_name": "前端工程师"},
+        ],
+    )
 
     control_home = str(tmp_path / "control")
     execution_home = str(tmp_path / "execution")
     monkeypatch.setattr(_server, "_sessions", {})
     monkeypatch.setattr(_server, "_sessions_lock", threading.Lock())
     monkeypatch.setattr(_server, "_stdio_transport", _NoopTransport())
-    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: FakeDB())
+    monkeypatch.setattr(_server, "_db_for_stable_session", lambda _sid: db)
 
     _, session = _ensure_worker_session(
         RunStartFrame(
             run_id="team-leader-run-1",
             turn_id="team-leader-turn-1",
-            stored_session_id="team-session-team-conversation-1",
+            conversation_session_id="team-session-team-conversation-1",
             prompt="总结一下我们的对话记录",
             params={
                 "cwd": str(tmp_path),
@@ -160,7 +275,7 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
                 "run_context_json": RunContext(
                     conversation_session_id="team-session-team-conversation-1",
                     participant_id="leader:team-conversation-1",
-                    activity_id="chat",
+                    activity_id="chat:team-conversation-1",
                     activity_kind="chat",
                     execution_scope_key="team:team-conversation-1:leader-conversation",
                     control_home=control_home,
@@ -170,12 +285,18 @@ def test_team_leader_worker_hydrates_member_replies_as_observed_group_speech(
         )
     )
 
-    assert [(msg["role"], msg["content"]) for msg in session["history"]] == [
-        ("user", "你是谁？"),
-        ("assistant", "我是小多，负责团队协调。"),
-        ("user", "[前端工程师] 我是前端工程师，负责 UI。"),
+    assert [msg["role"] for msg in session["history"]] == [
+        "user", "assistant", "user"
     ]
-    assert session["history"][2]["metadata"]["transformed_speaker_pid"] == "member:frontend"
+    assert session["history"][0]["content"] == "你是谁？"
+    assert session["history"][1]["content"] == "我是小多，负责团队协调。"
+    assert "name" not in session["history"][1]
+    assert session["history"][2]["content"] == (
+        "[assistant | 前端工程师 | member:frontend]\n我是前端工程师，负责 UI。"
+    )
+    assert "name" not in session["history"][2]
+    assert session["history"][2]["metadata"]["speaker_participant_id"] == "member:frontend"
+    assert session["history"][2]["metadata"]["speaker_projected_role"] == "user"
 
 
 def test_worker_session_restores_workspace_context(
@@ -211,7 +332,7 @@ def test_worker_session_restores_workspace_context(
         RunStartFrame(
             run_id="run-1",
             turn_id="turn-1",
-            stored_session_id="stored-session-1",
+            conversation_session_id="stored-session-1",
             prompt="pwd",
             params={"runtime_scope_key": "profile:test"},
         )

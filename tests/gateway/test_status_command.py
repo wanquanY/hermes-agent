@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
@@ -31,7 +33,7 @@ def _make_event(text: str, *, platform: Platform = Platform.TELEGRAM) -> Message
 
 
 def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.TELEGRAM):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -54,18 +56,18 @@ def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.T
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._session_db = MagicMock()
-    runner._session_db.get_session_title.return_value = None
+    runner._session_db.sessions.get_title.return_value = None
     # Default: no DB row → /status reports 0 tokens.  Tests that exercise
     # the populated path override this.
-    runner._session_db.get_session.return_value = None
+    runner._session_db.sessions.get.return_value = None
     runner._reasoning_config = None
     runner._provider_routing = {}
     runner._fallback_model = None
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
     return runner
@@ -84,7 +86,7 @@ async def test_status_command_reports_running_agent_without_interrupt(monkeypatc
     )
     runner = _make_runner(session_entry)
     # Token total comes from the SQLite SessionDB, not SessionEntry.
-    runner._session_db.get_session.return_value = {
+    runner._session_db.sessions.get.return_value = {
         "input_tokens": 200,
         "output_tokens": 121,
         "cache_read_tokens": 0,
@@ -116,7 +118,7 @@ async def test_status_command_includes_session_title_when_present():
         total_tokens=321,
     )
     runner = _make_runner(session_entry)
-    runner._session_db.get_session_title.return_value = "My titled session"
+    runner._session_db.sessions.get_title.return_value = "My titled session"
 
     result = await runner._handle_message(_make_event("/status"))
 
@@ -139,7 +141,7 @@ async def test_status_command_reads_token_totals_from_session_db():
         total_tokens=0,  # SessionEntry never gets written to — always 0.
     )
     runner = _make_runner(session_entry)
-    runner._session_db.get_session.return_value = {
+    runner._session_db.sessions.get.return_value = {
         "input_tokens": 1000,
         "output_tokens": 250,
         "cache_read_tokens": 500,
@@ -167,7 +169,7 @@ async def test_status_command_tokens_zero_when_session_db_row_missing():
         total_tokens=999,  # This should be ignored.
     )
     runner = _make_runner(session_entry)
-    runner._session_db.get_session.return_value = None
+    runner._session_db.sessions.get.return_value = None
 
     result = await runner._handle_message(_make_event("/status"))
 
@@ -245,7 +247,7 @@ async def test_tasks_alias_routes_to_agents_command(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_message_persists_agent_token_counts(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
@@ -287,7 +289,7 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source(Platform.SLACK)),
@@ -331,7 +333,7 @@ async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monke
 
 @pytest.mark.asyncio
 async def test_first_run_non_slack_home_channel_onboarding_keeps_direct_command(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source(Platform.TELEGRAM)),
@@ -374,7 +376,7 @@ async def test_first_run_non_slack_home_channel_onboarding_keeps_direct_command(
 
 @pytest.mark.asyncio
 async def test_handle_message_discards_stale_result_after_session_invalidation(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
@@ -390,7 +392,10 @@ async def test_handle_message_discards_stale_result_after_session_invalidation(m
     runner.adapters[Platform.TELEGRAM]._post_delivery_callbacks = {session_key: object()}
 
     async def _stale_result(**kwargs):
-        runner._invalidate_session_run_generation(kwargs["session_key"], reason="test_stale_result")
+        session_runtime_state_for(runner).invalidate_session_run_generation(
+            kwargs["session_key"],
+            reason="test_stale_result",
+        )
         return {
             "final_response": "late reply",
             "messages": [],
@@ -420,7 +425,7 @@ async def test_handle_message_discards_stale_result_after_session_invalidation(m
 
 @pytest.mark.asyncio
 async def test_handle_message_stale_result_keeps_newer_generation_callback(monkeypatch):
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     class _Adapter:
         def __init__(self):
@@ -493,9 +498,9 @@ async def test_status_command_bypasses_active_session_guard():
     """When an agent is running, /status must be dispatched immediately via
     base.handle_message — not queued or treated as an interrupt (#5046)."""
     import asyncio
-    from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
-    from gateway.session import build_session_key
-    from gateway.config import Platform, PlatformConfig, GatewayConfig
+    from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+    from hermes_gateway.session import build_session_key
+    from hermes_gateway.config import Platform, PlatformConfig, GatewayConfig
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -576,13 +581,13 @@ async def test_post_delivery_callback_generation_snapshot_happens_after_bind():
     must happen AFTER the handler runs, not before.
 
     _hermes_run_generation is set on the interrupt event by
-    GatewayRunner._bind_adapter_run_generation during _handle_message_with_agent.
+    session runtime state binding during _handle_message_with_agent.
     The earlier snapshot-at-task-start always captured None, which bypassed the
     generation-ownership check in pop_post_delivery_callback and let stale runs
     fire a fresher run's callbacks.
     """
     import asyncio
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
 
     source = _make_source()
     session_key = build_session_key(source)
@@ -601,7 +606,7 @@ async def test_post_delivery_callback_generation_snapshot_happens_after_bind():
     )
 
     async def fake_handler(event):
-        # Simulate what _bind_adapter_run_generation does mid-run.
+        # Simulate what session runtime state binding does mid-run.
         interrupt_event = adapter._active_sessions.get(session_key)
         setattr(interrupt_event, "_hermes_run_generation", 1)
         # Stale run registers its callback at generation=1.

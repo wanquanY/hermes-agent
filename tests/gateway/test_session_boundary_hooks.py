@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -25,7 +25,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -117,7 +117,7 @@ async def test_finalize_before_reset(mock_invoke_hook):
 @patch("hermes_cli.plugins.invoke_hook")
 async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     """Gateway stop() must fire on_session_finalize for each active agent."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -136,7 +136,6 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     runner._restart_drain_timeout = 0.0
     runner._stop_task = None
     runner._running_agents_ts = {}
-    runner._update_runtime_status = MagicMock()
 
     agent1 = MagicMock()
     agent1.session_id = "sess-a"
@@ -144,8 +143,8 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     agent2.session_id = "sess-b"
     runner._running_agents = {"key-a": agent1, "key-b": agent2}
 
-    with patch("gateway.status.remove_pid_file"), \
-         patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), \
+         patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     finalize_calls = [
@@ -182,7 +181,8 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
     """
     from datetime import datetime, timedelta
 
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
+    from hermes_gateway.session_expiry_runtime import session_expiry_runtime_for
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
@@ -230,8 +230,8 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
 
     mock_invoke_hook.side_effect = _hook_and_stop
 
-    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
-        await runner._session_expiry_watcher(interval=0)
+    with patch("hermes_gateway.session_expiry_runtime.asyncio.sleep", side_effect=_fast_sleep):
+        await session_expiry_runtime_for(runner).session_expiry_watcher(interval=0)
 
     # Look for the finalize call targeting the expired session.
     finalize_calls = [

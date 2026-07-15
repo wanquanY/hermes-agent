@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from gateway.platforms.base import BasePlatformAdapter
+from channels.platforms.base import BasePlatformAdapter
 
 
 # ---------------------------------------------------------------------------

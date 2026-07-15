@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import time
+import uuid
 from typing import Any
 
 from agent.dovie_diagnostics import emit_dovie_diagnostic
 from hermes_runtime_event_payloads import terminal_text_metadata
-from hermes_team_mission.runtime.activity_command_bridge import record_legacy_activity_command
 from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
@@ -65,7 +66,7 @@ def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> Non
     pairs = {
         "stage": stage,
         "sid": sid,
-        "stored_session_id": str(session.get("session_key") or sid),
+        "conversation_session_id": str(session.get("session_key") or sid),
         "run_id": run_id,
         "turn_id": turn_id,
         "runtime_scope_key": runtime_scope_key,
@@ -120,15 +121,64 @@ def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
     return "complete"
 
 
+def _worker_bootstrap_model_is_preselected(
+    session: dict,
+    requested_model: str,
+    _model_descriptor: dict,
+) -> bool:
+    """Return whether the control plane already selected this worker model.
+
+    ``RunStartFrame`` materialization stores the turn's explicit model in the
+    worker session before ``prompt.submit`` runs.  Replaying that selection
+    through the interactive ``/model`` pipeline is both redundant and wrong:
+    it performs synchronous provider discovery before the agent even exists.
+    The override is materialized from the same immutable RunStartFrame as the
+    prompt request, so an exact model match is the authority boundary.  A
+    descriptor enriches reasoning/context semantics when present, but must not
+    be required: internal team and restored-session runs can legitimately omit
+    it, and routing those runs through interactive ``/model`` validation makes
+    first-token delivery depend on a relay exposing a reachable ``/models``.
+    """
+    from tui_gateway.process_role import is_worker_process
+
+    if not is_worker_process() or session.get("agent") is not None:
+        return False
+    override = session.get("model_override")
+    if not isinstance(override, dict):
+        return False
+    override_model = str(override.get("model") or "").strip()
+    return bool(
+        requested_model
+        and override_model == requested_model
+        and bool(override.get("model_explicit"))
+    )
+
+
 def _apply_prompt_model_selection(
     sid: str,
     session: dict,
     requested_model: str,
     model_descriptor: dict,
 ) -> None:
-    """Apply a prompt-selected model only to the addressed conversation."""
+    """Apply a prompt model without re-validating worker bootstrap state."""
+    if _worker_bootstrap_model_is_preselected(
+        session,
+        requested_model,
+        model_descriptor,
+    ):
+        # The deferred agent build consumes session["model_override"].  Bind
+        # the descriptor now so bind_session_agent() replays reasoning/context
+        # semantics before the first provider request.
+        _set_session_model_descriptor(session, model_descriptor, clear_if_empty=True)
+        return
+
+    # Interactive/direct TUI callers still use the canonical model-switch
+    # pipeline.  Only commit the descriptor after a successful switch so a
+    # rejected model cannot mutate the currently-running agent's semantics.
     catalog_model_id = _authoritative_catalog_model_id(model_descriptor)
     switch_options = {
+        # A prompt-selected model belongs to this conversation.  Keep the
+        # terminal CLI's global persistence policy out of the RPC contract.
         "parsed_flags": (requested_model, "", False, False, True),
     }
     if catalog_model_id:
@@ -145,19 +195,27 @@ def _apply_prompt_model_selection(
 def _mark_prompt_run_failed(
     *,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     runtime_scope_key: str,
     turn_id: str = "",
     message: str = "",
 ) -> None:
-    db = _db_for_stable_session(stored_session_id)
-    if db is None or not run_id or not stored_session_id:
+    from tui_gateway.process_role import is_worker_process
+
+    # Worker processes are event sources, never terminal-state writers.  The
+    # AgentRunBackend converts the raised prompt failure into RunTerminalFrame;
+    # WorkerFrameRouter applies that frame in the main process and publishes
+    # the live terminal event after the DB transition commits.
+    if is_worker_process():
         return
-    run_control.publish_run_terminal_event(
-        stored_session_id=stored_session_id,
+    db = _db_for_stable_session(conversation_session_id)
+    if db is None or not run_id or not conversation_session_id:
+        return
+    run_control.terminate_run(
+        conversation_session_id=conversation_session_id,
         run_id=run_id,
         turn_id=turn_id,
-        runtime_scope_key=runtime_scope_key or stored_session_id,
+        runtime_scope_key=runtime_scope_key or conversation_session_id,
         status="failed",
         message=message,
         db=db,
@@ -168,30 +226,33 @@ def _mark_prompt_run_failed(
 def _mark_prompt_run_cancelled(
     *,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     runtime_scope_key: str,
     turn_id: str = "",
     message: str = "",
 ) -> dict:
-    db = _db_for_stable_session(stored_session_id)
+    from tui_gateway.process_role import is_worker_process
+
     event = None
-    if db is not None and run_id and stored_session_id:
-        event = run_control.publish_run_terminal_event(
-            stored_session_id=stored_session_id,
-            run_id=run_id,
-            turn_id=turn_id,
-            runtime_scope_key=runtime_scope_key or stored_session_id,
-            status="cancelled",
-            message=message or "cancelled before prompt start",
-            db=db,
-            owner_transport=current_transport(),
-        )
+    if not is_worker_process():
+        db = _db_for_stable_session(conversation_session_id)
+        if db is not None and run_id and conversation_session_id:
+            event = run_control.terminate_run(
+                conversation_session_id=conversation_session_id,
+                run_id=run_id,
+                turn_id=turn_id,
+                runtime_scope_key=runtime_scope_key or conversation_session_id,
+                status="cancelled",
+                message=message or "cancelled before prompt start",
+                db=db,
+                owner_transport=current_transport(),
+            )
     return {
         "status": "cancelled",
         "run_id": run_id,
         "turn_id": turn_id,
-        "stored_session_id": stored_session_id,
-        "runtime_scope_key": runtime_scope_key or stored_session_id,
+        "conversation_session_id": conversation_session_id,
+        "runtime_scope_key": runtime_scope_key or conversation_session_id,
         "seq": int((event or {}).get("seq") or 0),
     }
 
@@ -213,7 +274,7 @@ def _fail_unavailable_runtime_agent(
     if not session.get("transient"):
         _mark_prompt_run_failed(
             run_id=run_id,
-            stored_session_id=str(session.get("session_key") or sid),
+            conversation_session_id=str(session.get("session_key") or sid),
             runtime_scope_key=str(
                 session.get("runtime_scope_key")
                 or session.get("active_runtime_scope_key")
@@ -222,6 +283,118 @@ def _fail_unavailable_runtime_agent(
             ),
             turn_id=turn_id,
             message=message,
+        )
+
+
+def _persist_prompt_user_turn(
+    *,
+    sid: str,
+    session: dict,
+    conversation_session_id: str,
+    runtime_scope_key: str,
+    run_id: str,
+    turn_id: str,
+    client_message_id: str,
+    text: Any,
+    persist_user_message: str,
+    user_message_persistence: str,
+    attachments: list[dict],
+    draft_text: str,
+    model: str,
+    model_descriptor: dict,
+    dovie_product_context: str,
+) -> None:
+    if session.get("transient"):
+        return
+    if str(user_message_persistence or "").strip().lower() == "external":
+        # A control-plane writer already committed the canonical visible user
+        # event for this run/turn. The execution runtime consumes the input but
+        # is not a second transcript owner.
+        return
+    canonical_session_id = str(conversation_session_id or "").strip()
+    if not canonical_session_id or not run_id or not turn_id:
+        return
+    content = str(persist_user_message or text or "")
+    if not content.strip() and not attachments:
+        return
+    db = _db_for_stable_session(canonical_session_id)
+    if db is None:
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persist-skipped",
+            run_id=run_id,
+            turn_id=turn_id,
+            reason="db-unavailable",
+        )
+        return
+    try:
+        if db.sessions.get(canonical_session_id) is None:
+            db.sessions.create(canonical_session_id, source="tui", transient=False)
+    except Exception as exc:
+        logger.warning(
+            "prompt.submit user turn session ensure failed sid=%s conversation_session_id=%s: %s",
+            sid,
+            canonical_session_id,
+            exc,
+            exc_info=True,
+        )
+    metadata: dict[str, Any] = {
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "turn_message_index": 0,
+        "persist_message_key": f"run:{run_id}|turn:{turn_id}|idx:0",
+        "runtime_scope_key": runtime_scope_key or canonical_session_id,
+        "conversation_session_id": canonical_session_id,
+        "prompt_submit_owned": True,
+    }
+    if client_message_id:
+        metadata["client_message_id"] = client_message_id
+    if attachments:
+        metadata["attachments"] = attachments
+    if draft_text:
+        metadata["draft_text"] = draft_text
+    if model:
+        metadata["model"] = model
+    if model_descriptor:
+        metadata["model_descriptor"] = model_descriptor
+    if dovie_product_context:
+        metadata["dovie_product_context"] = dovie_product_context
+    try:
+        message_id = db.messages.append(
+            session_id=canonical_session_id,
+            role="user",
+            content=content,
+            metadata=metadata,
+        )
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persisted",
+            run_id=run_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            content_len=len(content),
+            client_message_id=client_message_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "prompt.submit user turn persistence failed sid=%s conversation_session_id=%s run_id=%s turn_id=%s: %s",
+            sid,
+            canonical_session_id,
+            run_id,
+            turn_id,
+            exc,
+            exc_info=True,
+        )
+        _log_prompt_stage(
+            session,
+            sid,
+            "user-persist-failed",
+            run_id=run_id,
+            turn_id=turn_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
         )
 
 
@@ -238,7 +411,6 @@ class _MessageDeltaNormalizer:
 
     def __init__(self) -> None:
         self.text = ""
-        self._pending_trailing_newlines = ""
 
     @staticmethod
     def _structured_value(value) -> dict:
@@ -252,7 +424,6 @@ class _MessageDeltaNormalizer:
 
     def feed(self, value) -> dict | None:
         if value is None:
-            self.discard_pending_trailing_newlines()
             return None
         structured = self._structured_value(value)
         mode = str(structured.get("mode") or "").strip().lower()
@@ -265,14 +436,6 @@ class _MessageDeltaNormalizer:
             return None
         if mode in {"snapshot", "replace", "cumulative"}:
             return self.feed_snapshot(incoming)
-        if self._pending_trailing_newlines:
-            incoming = self._pending_trailing_newlines + incoming
-            self._pending_trailing_newlines = ""
-        visible = incoming.rstrip("\n")
-        self._pending_trailing_newlines = incoming[len(visible):]
-        incoming = visible
-        if not incoming:
-            return None
         current = self.text
         offset = self._protocol_offset(self.text)
         self.text = current + incoming
@@ -296,7 +459,6 @@ class _MessageDeltaNormalizer:
             return None
         offset = self._protocol_offset(self.text)
         self.text = snapshot
-        self._pending_trailing_newlines = ""
         return {
             "mode": "append",
             "text": delta,
@@ -307,35 +469,31 @@ class _MessageDeltaNormalizer:
     def reconcile_final_text(self, value: str) -> dict | None:
         return self.feed_snapshot(str(value or ""))
 
-    def discard_pending_trailing_newlines(self) -> None:
-        self._pending_trailing_newlines = ""
-
     def reset(self) -> None:
         self.text = ""
-        self._pending_trailing_newlines = ""
 
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     if not params.get("_run_registry_reserved"):
         target = str(
-            params.get("stored_session_id")
-            or params.get("storedSessionId")
+            params.get("conversation_session_id")
+            or params.get("conversationSessionId")
             or params.get("session_id")
             or ""
         ).strip()
         sid, session = _resolve_runtime_session(target)
-        stable_session_id = str((session or {}).get("session_key") or target).strip()
-        if not stable_session_id:
-            return _err(rid, 4006, "stored_session_id or session_id required")
+        conversation_session_id = str((session or {}).get("session_key") or target).strip()
+        if not conversation_session_id:
+            return _err(rid, 4006, "conversation_session_id or session_id required")
         return _methods["run.submit"](
             rid,
             {
                 **params,
-                "stored_session_id": stable_session_id,
-                "session_id": stable_session_id,
+                "conversation_session_id": conversation_session_id,
+                "session_id": conversation_session_id,
                 "_legacy_prompt_adapter": True,
-                **({"runtime_session_id": sid} if sid else {}),
+                **({"execution_session_id": sid} if sid else {}),
             },
         )
     return _execute_prompt_submit(rid, params)
@@ -350,6 +508,16 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
     runtime_scope_key = str(params.get("runtime_scope_key") or params.get("runtimeScopeKey") or "").strip()
     client_message_id = str(params.get("client_message_id") or "").strip()
+    current_input_conversation_message_id = str(
+        params.get("current_input_conversation_message_id")
+        or params.get("currentInputConversationMessageId")
+        or ""
+    ).strip()
+    current_input_identity = (
+        {"current_input_conversation_message_id": current_input_conversation_message_id}
+        if current_input_conversation_message_id
+        else {}
+    )
     persist_user_message = str(
         params.get("persist_user_message")
         or params.get("persistUserMessage")
@@ -357,6 +525,18 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
         or params.get("transcriptText")
         or ""
     )
+    user_message_persistence = str(
+        params.get("user_message_persistence")
+        or params.get("userMessagePersistence")
+        or "runtime"
+    ).strip().lower()
+    if user_message_persistence not in {"runtime", "external"}:
+        return _err(rid, 4002, "user_message_persistence must be 'runtime' or 'external'")
+    turn_system_context = str(
+        params.get("turn_system_context")
+        or params.get("turnSystemContext")
+        or ""
+    ).strip()
     raw_dovie_context = params.get("dovie_product_context") or params.get("dovieProductContext") or ""
     dovie_product_context = (
         json.dumps(raw_dovie_context, ensure_ascii=False)
@@ -368,13 +548,13 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    stable_session_id = str(
-        params.get("stored_session_id")
-        or params.get("storedSessionId")
+    conversation_session_id = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or session.get("session_key")
         or sid
     ).strip()
-    effective_runtime_scope_key = runtime_scope_key or stable_session_id
+    effective_runtime_scope_key = runtime_scope_key or conversation_session_id
     approval_policy = str(
         params.get("approval_policy")
         or params.get("approvalPolicy")
@@ -389,9 +569,9 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             from tools.approval import disable_session_yolo, enable_session_yolo
 
             if approval_policy == "full_access":
-                enable_session_yolo(stable_session_id)
+                enable_session_yolo(conversation_session_id)
             else:
-                disable_session_yolo(stable_session_id)
+                disable_session_yolo(conversation_session_id)
         except Exception as e:
             return _err(rid, 5004, str(e))
     with session["history_lock"]:
@@ -410,7 +590,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 rid,
                 _mark_prompt_run_cancelled(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message="cancelled before prompt start",
@@ -421,26 +601,12 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             if not session.get("transient"):
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message="session busy",
                 )
             return _err(rid, 4009, "session busy")
-        # ADR-0001 Phase 1.D: audit-only activity_command for single-agent prompt.
-        # Single-agent chat doubles as Activity (kind=chat) per ADR-0001 Q4.
-        _session_id = stable_session_id
-        if _session_id:
-            record_legacy_activity_command(
-                _db_for_stable_session(stable_session_id),
-                activity_id=f"chat:{_session_id}",
-                kind="start",
-                payload={
-                    "session_id": _session_id,
-                    "text_len": len(str(params.get("text") or "")),
-                },
-                source="prompt.submit",
-            )
         session["running"] = True
         session["active_run_id"] = run_id
         session["active_turn_id"] = turn_id
@@ -450,10 +616,13 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "turn_id": turn_id,
             "run_id": run_id,
             "client_message_id": client_message_id,
+            **current_input_identity,
             "text": text,
             "attachments": submitted_attachments,
             "draft_text": str(params.get("draft_text") or text or ""),
             "persist_user_message": persist_user_message,
+            "user_message_persistence": user_message_persistence,
+            "turn_system_context": turn_system_context,
             "model": requested_model,
             "model_descriptor": model_descriptor,
             "dovie_product_context": dovie_product_context,
@@ -470,23 +639,23 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 flush=True,
             )
         if not session.get("transient"):
-            db = _db_for_stable_session(stable_session_id)
+            db = _db_for_stable_session(conversation_session_id)
             if db is not None:
                 try:
                     normalize_team_mission_conversation_session(
                         db,
-                        session_id=stable_session_id,
+                        session_id=conversation_session_id,
                         metadata={"dovie_product_context": dovie_product_context},
                     )
                 except Exception as exc:
                     logger.warning(
                         "team mission conversation session normalization skipped sid=%s: %s",
-                        stable_session_id,
+                        conversation_session_id,
                         exc,
                     )
             run_control.mark_run_started(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=run_id,
                 turn_id=turn_id,
                 runtime_scope_key=effective_runtime_scope_key,
@@ -495,6 +664,23 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
                 db=db,
+            )
+            _persist_prompt_user_turn(
+                sid=sid,
+                session=session,
+                conversation_session_id=conversation_session_id,
+                runtime_scope_key=effective_runtime_scope_key,
+                run_id=run_id,
+                turn_id=turn_id,
+                client_message_id=client_message_id,
+                text=text,
+                persist_user_message=persist_user_message,
+                user_message_persistence=user_message_persistence,
+                attachments=submitted_attachments,
+                draft_text=str(params.get("draft_text") or text or ""),
+                model=requested_model,
+                model_descriptor=model_descriptor,
+                dovie_product_context=dovie_product_context,
             )
 
     if requested_model:
@@ -514,7 +700,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             if not session.get("transient"):
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=f"model switch failed: {e}",
@@ -541,7 +727,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             or params.get("toolset_mode")
             or params.get("toolsetMode")
         ),
-        persist_session_id=None if session.get("transient") else stable_session_id,
+        persist_session_id=None if session.get("transient") else conversation_session_id,
     )
     _start_agent_build(sid, session)
 
@@ -566,7 +752,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     session["pending_turn"] = None
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=err.get("error", {}).get("message", "agent initialization failed"),
@@ -600,7 +786,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                     session["pending_turn"] = None
                 _mark_prompt_run_failed(
                     run_id=run_id,
-                    stored_session_id=stable_session_id,
+                    conversation_session_id=conversation_session_id,
                     runtime_scope_key=effective_runtime_scope_key,
                     turn_id=turn_id,
                     message=f"runtime auth rebind failed: {e}",
@@ -619,9 +805,12 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "turn_id": turn_id,
                 "run_id": run_id,
                 "client_message_id": client_message_id,
+                **current_input_identity,
                 "attachments": submitted_attachments,
                 "draft_text": str(params.get("draft_text") or text or ""),
                 "persist_user_message": persist_user_message,
+                "user_message_persistence": user_message_persistence,
+                "turn_system_context": turn_system_context,
                 "model": requested_model,
                 "model_descriptor": model_descriptor,
                 "reasoning_config": _turn_reasoning_config(params),
@@ -640,7 +829,7 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "turn_id": turn_id,
             "client_message_id": client_message_id,
             "session_id": sid,
-            "stored_session_id": stable_session_id,
+            "conversation_session_id": conversation_session_id,
             "runtime_scope_key": effective_runtime_scope_key,
         },
     )
@@ -695,7 +884,7 @@ def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict |
     if db is None:
         return ""
     try:
-        messages = db.get_messages_as_conversation(
+        messages = db.messages.all_as_conversation(
             session_id,
             include_ancestors=False,
             include_storage_metadata=True,
@@ -719,6 +908,54 @@ def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict |
         if _turn_matches(message_turn, target):
             latest_message_id = str(message.get("message_id") or "").strip()
     return latest_message_id
+
+
+def _commit_scope_summary_after_compression(
+    *,
+    session: dict,
+    history: list[dict],
+) -> None:
+    run_context = session.get("run_context")
+    if run_context is None:
+        return
+    conversation_session_id = str(
+        getattr(run_context, "conversation_session_id", "") or ""
+    ).strip()
+    snapshot_id = str(
+        getattr(run_context, "activity_context_snapshot_id", "")
+        or getattr(run_context, "context_snapshot_id", "")
+        or ""
+    ).strip()
+    if not conversation_session_id or not snapshot_id:
+        return
+    try:
+        db = _db_for_stable_session(conversation_session_id)
+        memory_service = getattr(db, "conversation_memory", None) if db is not None else None
+        if memory_service is None:
+            return
+        from hermes_agent.domain.context_compaction import (
+            ContextCompactionService,
+            ContextScope,
+        )
+
+        ContextCompactionService(memory_service).checkpoint(
+            ContextScope.from_run_context(run_context),
+            history,
+        )
+    except RuntimeError as exc:
+        logger.info(
+            "context summary CAS lost conversation=%s participant=%s: %s",
+            conversation_session_id,
+            str(getattr(run_context, "participant_id", "") or ""),
+            exc,
+        )
+    except Exception:
+        logger.warning(
+            "context summary commit failed conversation=%s participant=%s",
+            conversation_session_id,
+            str(getattr(run_context, "participant_id", "") or ""),
+            exc_info=True,
+        )
 
 
 def _run_prompt_submit(
@@ -746,10 +983,19 @@ def _run_prompt_submit(
             turn_id=turn_id,
         )
         return
+    user_message_persistence = str(
+        (turn_metadata or {}).get("user_message_persistence") or "runtime"
+    ).strip().lower()
+    turn_system_context = str(
+        (turn_metadata or {}).get("turn_system_context") or ""
+    ).strip()
+    compression_count_before = int(
+        getattr(getattr(agent, "context_compressor", None), "compression_count", 0)
+        or 0
+    )
     delta_normalizer = _MessageDeltaNormalizer()
     message_segment_index = 0
     reasoning_text_by_message_seq: dict[str, str] = {}
-    reasoning_last_chunk_by_message_seq: dict[str, str] = {}
 
     def current_client_message_id() -> str:
         base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
@@ -768,19 +1014,6 @@ def _run_prompt_submit(
             "messageSeqInRun": message_seq,
         }
 
-    def _reasoning_increment(current: str, incoming: str) -> str:
-        if not incoming or incoming == current:
-            return ""
-        if current and current.endswith(incoming):
-            return ""
-        if current and incoming.startswith(current):
-            return incoming[len(current) :]
-        max_overlap = min(len(current), len(incoming))
-        for overlap in range(max_overlap, 0, -1):
-            if current.endswith(incoming[:overlap]):
-                return incoming[overlap:]
-        return incoming
-
     def _emit_reasoning_delta(reasoning_text: str) -> None:
         if is_turn_interrupted():
             return
@@ -790,20 +1023,14 @@ def _run_prompt_submit(
         identity = current_message_identity_payload()
         message_seq = str(identity.get("message_seq_in_run") or "")
         current_reasoning = reasoning_text_by_message_seq.get(message_seq, "")
-        previous_chunk = reasoning_last_chunk_by_message_seq.get(message_seq, "")
-        if incoming == previous_chunk:
-            return
-        delta = _reasoning_increment(current_reasoning, incoming)
-        reasoning_last_chunk_by_message_seq[message_seq] = incoming
-        if not delta:
-            return
-        next_reasoning = current_reasoning + delta
+        next_reasoning = current_reasoning + incoming
         reasoning_text_by_message_seq[message_seq] = next_reasoning
         payload: dict[str, Any] = {
             "source": "provider_reasoning",
-            "text": delta,
-            "delta": delta,
-            "offset": len(current_reasoning),
+            "mode": "append",
+            "text": incoming,
+            "delta": incoming,
+            "offset": _MessageDeltaNormalizer._protocol_offset(current_reasoning),
             "snapshot": next_reasoning,
             **identity,
         }
@@ -824,15 +1051,23 @@ def _run_prompt_submit(
     _log_prompt_stage(session, sid, "after-message-start", run_id=turn_run_id, turn_id=turn_id)
 
     def terminalize_if_still_active(reason: str) -> None:
+        from tui_gateway.process_role import is_worker_process
+
+        # Worker events are asynchronous stdout frames. The worker cannot read
+        # main-process DB state as an acknowledgement that its terminal frame
+        # has been applied; doing so races the pipe and previously attempted an
+        # illegal runs.terminate DB RPC. RunTerminalFrame is the main-side
+        # reconciliation barrier for worker execution.
+        if is_worker_process():
+            return
         if session.get("transient") or not turn_run_id:
             return
-        stored_session_id = str(session.get("session_key") or sid)
-        db = _db_for_stable_session(stored_session_id)
+        conversation_session_id = str(session.get("session_key") or sid)
+        db = _db_for_stable_session(conversation_session_id)
         if db is None:
             return
         try:
-            get_run = getattr(db, "get_run", None)
-            state = get_run(turn_run_id) if callable(get_run) else {}
+            state = db.runs.get(turn_run_id) or {}
         except Exception as exc:
             logger.warning(
                 "[dovie-prompt] terminal fallback state lookup failed sid=%s run_id=%s error=%s",
@@ -854,18 +1089,18 @@ def _run_prompt_submit(
         was_cancelled = bool(turn_run_id and interrupted_run_id == turn_run_id)
         fallback_status = "cancelled" if was_cancelled else "failed"
         logger.warning(
-            "[dovie-prompt] terminal fallback for active run sid=%s stored_session_id=%s "
+            "[dovie-prompt] terminal fallback for active run sid=%s conversation_session_id=%s "
             "run_id=%s turn_id=%s status=%s fallback=%s reason=%s",
             sid,
-            stored_session_id,
+            conversation_session_id,
             turn_run_id,
             turn_id,
             status,
             fallback_status,
             reason,
         )
-        run_control.publish_run_terminal_event(
-            stored_session_id=stored_session_id,
+        run_control.terminate_run(
+            conversation_session_id=conversation_session_id,
             run_id=turn_run_id,
             turn_id=turn_id,
             runtime_scope_key=str(
@@ -874,7 +1109,7 @@ def _run_prompt_submit(
                 or session.get("session_key")
                 or sid
             ),
-            runtime_session_id=sid,
+            execution_session_id=sid,
             status=fallback_status,
             message=reason,
             db=db,
@@ -1022,21 +1257,43 @@ def _run_prompt_submit(
                 interrupt_metadata["turn_id"] = turn_metadata.get("turn_id")
                 interrupt_metadata["run_id"] = turn_metadata.get("run_id")
             assistant_message["metadata"] = interrupt_metadata
-            last_message = next_history[-1] if next_history else {}
-            if (
-                isinstance(last_message, dict)
-                and last_message.get("role") == "assistant"
-                and not last_message.get("tool_calls")
-                and str(last_message.get("content") or "").strip() == partial
-            ):
-                # Already in history (agent's own loop persisted the
-                # partial as the turn closed) — make sure the marker
-                # propagates onto that existing row too.
-                last_message.setdefault("metadata", {})
-                if isinstance(last_message["metadata"], dict):
-                    last_message["metadata"].update(interrupt_metadata)
-                if not last_message.get("finish_reason"):
-                    last_message["finish_reason"] = "interrupted"
+            current_turn_start = max(
+                (
+                    index
+                    for index, message in enumerate(next_history)
+                    if isinstance(message, dict) and is_current_user_message(message)
+                ),
+                default=-1,
+            )
+            last_tool_boundary = max(
+                (
+                    index
+                    for index, message in enumerate(next_history)
+                    if index > current_turn_start
+                    and isinstance(message, dict)
+                    and (
+                        message.get("role") == "tool"
+                        or bool(message.get("tool_calls"))
+                    )
+                ),
+                default=current_turn_start,
+            )
+            existing_partial = next(
+                (
+                    message
+                    for message in reversed(next_history[last_tool_boundary + 1:])
+                    if isinstance(message, dict)
+                    and message.get("role") == "assistant"
+                    and not message.get("tool_calls")
+                    and str(message.get("content") or "").strip() == partial
+                ),
+                None,
+            )
+            if existing_partial is not None:
+                existing_partial.setdefault("metadata", {})
+                if isinstance(existing_partial["metadata"], dict):
+                    existing_partial["metadata"].update(interrupt_metadata)
+                existing_partial["finish_reason"] = "interrupted"
             else:
                 next_history.append(assistant_message)
         with session["history_lock"]:
@@ -1102,7 +1359,11 @@ def _run_prompt_submit(
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
-            clean_prompt = str((turn_metadata or {}).get("persist_user_message") or prompt or "")
+            clean_prompt = (
+                None
+                if user_message_persistence == "external"
+                else str((turn_metadata or {}).get("persist_user_message") or prompt or "")
+            )
 
             if isinstance(prompt, str) and "@" in prompt:
                 _log_prompt_stage(session, sid, "context-reference-preprocess-start", run_id=turn_run_id, turn_id=turn_id)
@@ -1135,7 +1396,10 @@ def _run_prompt_submit(
                     )
                     return
                 prompt = ctx.message
-                if not str((turn_metadata or {}).get("persist_user_message") or "").strip():
+                if (
+                    user_message_persistence != "external"
+                    and not str((turn_metadata or {}).get("persist_user_message") or "").strip()
+                ):
                     clean_prompt = prompt
                 _log_prompt_stage(
                     session,
@@ -1201,7 +1465,7 @@ def _run_prompt_submit(
                 {
                     "stage": "agent-run-start",
                     "sid": sid,
-                    "stored_session_id": session.get("session_key") or sid,
+                    "conversation_session_id": session.get("session_key") or sid,
                     "run_id": turn_run_id,
                     "turn_id": turn_id,
                     "runtime_scope_key": session.get("runtime_scope_key") or "",
@@ -1254,6 +1518,11 @@ def _run_prompt_submit(
             previous_private_run_context = getattr(agent, "_run_context", active_context_missing)
             previous_reasoning_config = getattr(agent, "reasoning_config", active_context_missing)
             previous_reasoning_callback = getattr(agent, "reasoning_callback", active_context_missing)
+            previous_ephemeral_system_prompt = getattr(
+                agent,
+                "ephemeral_system_prompt",
+                active_context_missing,
+            )
             turn_reasoning_config = (
                 (turn_metadata or {}).get("reasoning_config")
                 if isinstance((turn_metadata or {}).get("reasoning_config"), dict)
@@ -1277,6 +1546,15 @@ def _run_prompt_submit(
                     agent._run_context = session.get("run_context")
                 if turn_reasoning_config is not None:
                     agent.reasoning_config = dict(turn_reasoning_config)
+                if turn_system_context:
+                    base_system_context = (
+                        ""
+                        if previous_ephemeral_system_prompt is active_context_missing
+                        else str(previous_ephemeral_system_prompt or "").strip()
+                    )
+                    agent.ephemeral_system_prompt = "\n\n".join(
+                        part for part in (base_system_context, turn_system_context) if part
+                    )
                 agent.reasoning_callback = _emit_reasoning_delta
                 _log_prompt_stage(
                     session,
@@ -1291,6 +1569,12 @@ def _run_prompt_submit(
                     stream_callback=_stream,
                     persist_user_message=clean_prompt,
                     turn_metadata=turn_metadata,
+                    current_input_conversation_message_id=str(
+                        (turn_metadata or {}).get(
+                            "current_input_conversation_message_id"
+                        )
+                        or ""
+                    ),
                 )
                 _log_prompt_stage(
                     session,
@@ -1305,14 +1589,21 @@ def _run_prompt_submit(
                     {
                         "stage": "agent-run-returned",
                         "sid": sid,
-                        "stored_session_id": session.get("session_key") or sid,
+                        "conversation_session_id": session.get("session_key") or sid,
                         "run_id": turn_run_id,
                         "turn_id": turn_id,
                         "result_type": type(result).__name__,
                     },
                 )
             except TypeError as exc:
-                if "turn_metadata" not in str(exc) and "persist_user_message" not in str(exc):
+                if not any(
+                    key in str(exc)
+                    for key in (
+                        "turn_metadata",
+                        "persist_user_message",
+                        "current_input_conversation_message_id",
+                    )
+                ):
                     raise
                 _log_prompt_stage(
                     session,
@@ -1340,7 +1631,7 @@ def _run_prompt_submit(
                     {
                         "stage": "agent-run-returned-compat",
                         "sid": sid,
-                        "stored_session_id": session.get("session_key") or sid,
+                        "conversation_session_id": session.get("session_key") or sid,
                         "run_id": turn_run_id,
                         "turn_id": turn_id,
                         "result_type": type(result).__name__,
@@ -1410,6 +1701,13 @@ def _run_prompt_submit(
                         pass
                 else:
                     agent.reasoning_callback = previous_reasoning_callback
+                if previous_ephemeral_system_prompt is active_context_missing:
+                    try:
+                        delattr(agent, "ephemeral_system_prompt")
+                    except AttributeError:
+                        pass
+                else:
+                    agent.ephemeral_system_prompt = previous_ephemeral_system_prompt
 
             if is_turn_interrupted():
                 result_messages = (
@@ -1457,6 +1755,19 @@ def _run_prompt_submit(
             last_reasoning = None
             status_note = None
             if isinstance(result, dict):
+                compression_count_after = int(
+                    getattr(
+                        getattr(agent, "context_compressor", None),
+                        "compression_count",
+                        0,
+                    )
+                    or 0
+                )
+                if compression_count_after > compression_count_before:
+                    _commit_scope_summary_after_compression(
+                        session=session,
+                        history=[item for item in history if isinstance(item, dict)],
+                    )
                 if isinstance(result.get("messages"), list):
                     with session["history_lock"]:
                         current_version = int(session.get("history_version", 0))
@@ -1600,7 +1911,7 @@ def _run_prompt_submit(
                 {
                     "stage": "message-complete-emit",
                     "sid": sid,
-                    "stored_session_id": session.get("session_key") or sid,
+                    "conversation_session_id": session.get("session_key") or sid,
                     "run_id": turn_run_id,
                     "turn_id": turn_id,
                     "status": status,
@@ -1666,7 +1977,7 @@ def _run_prompt_submit(
                     if _pdb:
                         _session_key = session.get("session_key") or sid
                         try:
-                            if _pdb.set_session_title(_session_key, _pending):
+                            if _pdb.sessions.set_title(_session_key, _pending):
                                 session["pending_title"] = None
                         except ValueError as exc:
                             # Invalid/duplicate title — non-retryable, drop it.
@@ -1749,8 +2060,8 @@ def _run_prompt_submit(
         if goal_followup:
             followup_run_id = uuid.uuid4().hex
             followup_turn_id = uuid.uuid4().hex
-            stable_session_id = str(session.get("session_key") or sid)
-            followup_scope_key = str(session.get("runtime_scope_key") or stable_session_id)
+            conversation_session_id = str(session.get("session_key") or sid)
+            followup_scope_key = str(session.get("runtime_scope_key") or conversation_session_id)
             with session["history_lock"]:
                 if session.get("running"):
                     # User already sent something — their turn wins,
@@ -1766,12 +2077,12 @@ def _run_prompt_submit(
                 session["interrupted_run_id"] = ""
                 session["interrupted_turn_id"] = ""
             reservation = run_control.create_run_if_session_idle(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
-                db=_db_for_stable_session(stable_session_id),
+                db=_db_for_stable_session(conversation_session_id),
             )
             if isinstance(reservation, dict) and reservation.get("conflict"):
                 with session["history_lock"]:
@@ -1781,8 +2092,8 @@ def _run_prompt_submit(
                         session["active_turn_id"] = None
                 return
             run_control.mark_run_started(
-                stored_session_id=stable_session_id,
-                runtime_session_id=sid,
+                conversation_session_id=conversation_session_id,
+                execution_session_id=sid,
                 run_id=followup_run_id,
                 turn_id=followup_turn_id,
                 runtime_scope_key=followup_scope_key,
@@ -1790,7 +2101,7 @@ def _run_prompt_submit(
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
                 },
-                db=_db_for_stable_session(stable_session_id),
+                db=_db_for_stable_session(conversation_session_id),
             )
             try:
                 _run_prompt_submit(

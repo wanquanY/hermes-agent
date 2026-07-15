@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_pool import WorkerPool
-from tui_gateway.services.worker_supervisor import RunWorker
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
+from hermes_agent.orchestration.worker_supervisor import RunWorker
 
 
 class _FakeProcess:
@@ -80,7 +80,7 @@ def _profile(profile_id: str, hermes_home: str, scope_key: str) -> dict:
 @pytest.mark.asyncio
 async def test_worker_pool_distinct_workers_for_distinct_scopes_same_conv() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -111,7 +111,7 @@ async def test_worker_pool_distinct_workers_for_distinct_scopes_same_conv() -> N
 @pytest.mark.asyncio
 async def test_worker_pool_reuses_worker_for_same_scope_same_conv() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         scope = f"member-chat:{conv_id}:member-1"
@@ -131,7 +131,7 @@ async def test_worker_pool_reuses_worker_for_same_scope_same_conv() -> None:
 @pytest.mark.asyncio
 async def test_member_chat_gets_member_profile_worker_not_leader() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-2d2f5ae3"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -165,7 +165,7 @@ async def test_member_chat_gets_member_profile_worker_not_leader() -> None:
 @pytest.mark.asyncio
 async def test_release_without_scope_key_releases_all_conv_workers() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -191,7 +191,7 @@ async def test_release_without_scope_key_releases_all_conv_workers() -> None:
 @pytest.mark.asyncio
 async def test_release_with_scope_key_releases_only_that_worker() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -218,7 +218,7 @@ async def test_release_with_scope_key_releases_only_that_worker() -> None:
 @pytest.mark.asyncio
 async def test_kill_with_scope_key_only_kills_that_worker() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -249,7 +249,7 @@ async def test_kill_with_scope_key_only_kills_that_worker() -> None:
 @pytest.mark.asyncio
 async def test_kill_without_scope_key_kills_all_conv_workers() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"
@@ -282,7 +282,7 @@ async def test_kill_without_scope_key_kills_all_conv_workers() -> None:
 @pytest.mark.asyncio
 async def test_pool_state_keyed_by_compound_tuple() -> None:
     supervisor = _FakeSupervisor()
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     try:
         conv_id = "team-conversation-1"
         leader_scope = f"team:{conv_id}:leader-conversation"

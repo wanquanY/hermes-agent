@@ -17,8 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.model_command import model_command_for
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ def _make_source() -> SessionSource:
 
 def _make_runner():
     """Create a minimal GatewayRunner with stubbed internals."""
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -95,7 +96,7 @@ class TestApplySessionModelOverride:
             "api_mode": "chat_completions",
         }
 
-        model, rt = runner._apply_session_model_override(
+        model, rt = model_command_for(runner).apply_session_model_override(
             sk,
             "anthropic/claude-sonnet-4",
             {"provider": "anthropic", "api_key": "ant-key", "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages"},
@@ -114,7 +115,7 @@ class TestApplySessionModelOverride:
         orig_model = "anthropic/claude-sonnet-4"
         orig_rt = {"provider": "anthropic", "api_key": "key", "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages"}
 
-        model, rt = runner._apply_session_model_override(sk, orig_model, dict(orig_rt))
+        model, rt = model_command_for(runner).apply_session_model_override(sk, orig_model, dict(orig_rt))
 
         assert model == orig_model
         assert rt == orig_rt
@@ -132,7 +133,7 @@ class TestApplySessionModelOverride:
             "api_mode": "chat_completions",
         }
 
-        model, rt = runner._apply_session_model_override(
+        model, rt = model_command_for(runner).apply_session_model_override(
             sk,
             "anthropic/claude-sonnet-4",
             {"provider": "anthropic", "api_key": "ant-key", "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages"},
@@ -157,7 +158,7 @@ class TestApplySessionModelOverride:
             "api_mode": "chat_completions",
         }
 
-        _, rt = runner._apply_session_model_override(
+        _, rt = model_command_for(runner).apply_session_model_override(
             sk,
             "anthropic/claude-sonnet-4",
             {"provider": "anthropic", "api_key": "ant-key", "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages"},
@@ -178,7 +179,7 @@ class TestApplySessionModelOverride:
             "api_mode": "chat_completions",
         }
 
-        model, rt = runner._apply_session_model_override(
+        model, rt = model_command_for(runner).apply_session_model_override(
             sk,
             "anthropic/claude-sonnet-4",
             {"provider": "anthropic", "api_key": "ant-key", "base_url": "url", "api_mode": "anthropic_messages"},
@@ -207,13 +208,13 @@ class TestIsIntentionalModelSwitch:
             "api_mode": "chat_completions",
         }
 
-        assert runner._is_intentional_model_switch(sk, "gpt-5.4") is True
+        assert model_command_for(runner).is_intentional_model_switch(sk, "gpt-5.4") is True
 
     def test_no_override_returns_false(self):
         runner = _make_runner()
         sk = build_session_key(_make_source())
 
-        assert runner._is_intentional_model_switch(sk, "gpt-5.4") is False
+        assert model_command_for(runner).is_intentional_model_switch(sk, "gpt-5.4") is False
 
     def test_different_model_returns_false(self):
         """Agent fell back to a different model than the override."""
@@ -228,7 +229,7 @@ class TestIsIntentionalModelSwitch:
             "api_mode": "chat_completions",
         }
 
-        assert runner._is_intentional_model_switch(sk, "gpt-5.4-mini") is False
+        assert model_command_for(runner).is_intentional_model_switch(sk, "gpt-5.4-mini") is False
 
     def test_wrong_session_key(self):
         runner = _make_runner()
@@ -242,4 +243,4 @@ class TestIsIntentionalModelSwitch:
             "api_mode": "chat_completions",
         }
 
-        assert runner._is_intentional_model_switch(sk, "gpt-5.4") is False
+        assert model_command_for(runner).is_intentional_model_switch(sk, "gpt-5.4") is False

@@ -50,17 +50,17 @@ def plugin_api(tmp_path, monkeypatch):
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # Stash monkeypatch so ``_install_fake_session_db`` can use it to
-    # swap ``sys.modules['hermes_state']`` with auto-restoration. Without
+    # Stash monkeypatch so ``_install_fake_session_store`` can use it to
+    # swap ``sys.modules['hermes_agent.storage.cli_session_store']`` with auto-restoration. Without
     # this, a raw ``sys.modules[...] = fake`` assignment would leak the
     # fake into later tests in the same xdist worker — breaking every
-    # test that does ``from hermes_state import SessionDB``.
+    # test that does ``from hermes_agent.storage.cli_session_store import open_cli_session_store``.
     module._test_monkeypatch = monkeypatch
     yield module
 
 
-class _FakeSessionDB:
-    """Stand-in for hermes_state.SessionDB that records scan calls."""
+class _FakeSessionStore:
+    """Stand-in for session store that records scan calls."""
 
     def __init__(self, session_count: int, scan_delay: float = 0):
         self.session_count = session_count
@@ -69,8 +69,10 @@ class _FakeSessionDB:
         self.last_include_children: Optional[bool] = None
         self.list_calls = 0
         self.messages_calls = 0
+        self.sessions = self
+        self.messages = self
 
-    def list_sessions_rich(
+    def list_rich(
         self,
         source: Optional[str] = None,
         exclude_sources: Optional[List[str]] = None,
@@ -100,7 +102,7 @@ class _FakeSessionDB:
             for i in range(effective)
         ]
 
-    def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
+    def list(self, session_id: str) -> List[Dict[str, Any]]:
         self.messages_calls += 1
         return [
             {"role": "user", "content": f"ask {session_id}"},
@@ -115,16 +117,21 @@ class _FakeSessionDB:
         pass
 
 
-def _install_fake_session_db(plugin_api, fake_db):
-    """Inject a fake SessionDB so ``scan_sessions`` finds it via its local import.
+def _install_fake_session_store(plugin_api, fake_db):
+    """Inject a fake session store so ``scan_sessions`` finds it via its local import.
 
     Uses the monkeypatch stashed on ``plugin_api`` by the fixture, so the
-    ``sys.modules['hermes_state']`` swap is auto-restored at test teardown
+    ``sys.modules['hermes_agent.storage.cli_session_store']`` swap is
+    auto-restored at test teardown
     and cannot leak into unrelated tests in the same xdist worker.
     """
-    fake_module = type(sys)("hermes_state")
-    fake_module.SessionDB = lambda: fake_db
-    plugin_api._test_monkeypatch.setitem(sys.modules, "hermes_state", fake_module)
+    fake_module = type(sys)("hermes_agent.storage.cli_session_store")
+    fake_module.open_cli_session_store = lambda: fake_db
+    plugin_api._test_monkeypatch.setitem(
+        sys.modules,
+        "hermes_agent.storage.cli_session_store",
+        fake_module,
+    )
 
 
 def test_scan_sessions_default_scans_all_history_not_first_200(plugin_api):
@@ -134,8 +141,8 @@ def test_scan_sessions_default_scans_all_history_not_first_200(plugin_api):
     achievement totals, making lifetime badges unreachable. The default
     now passes ``LIMIT -1`` (SQLite "unlimited") to ``list_sessions_rich``.
     """
-    fake_db = _FakeSessionDB(session_count=500)  # > old 200 cap
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=500)  # > old 200 cap
+    _install_fake_session_store(plugin_api, fake_db)
 
     result = plugin_api.scan_sessions()
 
@@ -153,8 +160,8 @@ def test_scan_sessions_default_scans_all_history_not_first_200(plugin_api):
 
 def test_scan_sessions_explicit_positive_limit_is_honored(plugin_api):
     """Callers can still pass a small limit for smoke tests."""
-    fake_db = _FakeSessionDB(session_count=500)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=500)
+    _install_fake_session_store(plugin_api, fake_db)
 
     result = plugin_api.scan_sessions(limit=10)
 
@@ -164,8 +171,8 @@ def test_scan_sessions_explicit_positive_limit_is_honored(plugin_api):
 
 def test_scan_sessions_zero_or_negative_limit_means_unlimited(plugin_api):
     """``limit=0`` and ``limit=-1`` both map to the unlimited path."""
-    fake_db = _FakeSessionDB(session_count=300)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=300)
+    _install_fake_session_store(plugin_api, fake_db)
 
     plugin_api.scan_sessions(limit=0)
     assert fake_db.last_limit == -1
@@ -180,8 +187,8 @@ def test_evaluate_all_first_run_returns_pending_and_starts_background_scan(plugi
     large DBs take minutes — blocking the dashboard request path is not
     acceptable.
     """
-    fake_db = _FakeSessionDB(session_count=50)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=50)
+    _install_fake_session_store(plugin_api, fake_db)
 
     # Wrap _run_scan_and_update_cache so we can release it on demand,
     # simulating a slow cold scan without actually waiting.
@@ -228,8 +235,8 @@ def test_evaluate_all_stale_cache_serves_stale_and_refreshes_in_background(plugi
     the stale data immediately and kicks a background refresh. Users don't
     stare at a loading spinner every time TTL expires.
     """
-    fake_db = _FakeSessionDB(session_count=10, scan_delay=2.0)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=10, scan_delay=2.0)
+    _install_fake_session_store(plugin_api, fake_db)
     stale_generated_at = int(time.time()) - plugin_api.SNAPSHOT_TTL_SECONDS - 60
     stale_payload = {
         "achievements": [],
@@ -265,8 +272,8 @@ def test_evaluate_all_force_runs_synchronously(plugin_api):
     """Manual /rescan (force=True) blocks the caller — users clicking
     the rescan button expect up-to-date data when the call returns.
     """
-    fake_db = _FakeSessionDB(session_count=25)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=25)
+    _install_fake_session_store(plugin_api, fake_db)
 
     result = plugin_api.evaluate_all(force=True)
 
@@ -277,8 +284,8 @@ def test_evaluate_all_force_runs_synchronously(plugin_api):
 
 def test_start_background_scan_is_idempotent_while_running(plugin_api):
     """Multiple concurrent dashboard requests must not spawn duplicate scans."""
-    fake_db = _FakeSessionDB(session_count=5)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=5)
+    _install_fake_session_store(plugin_api, fake_db)
 
     release = threading.Event()
     original_run = plugin_api._run_scan_and_update_cache
@@ -308,8 +315,8 @@ def test_background_scan_publishes_partial_snapshots(plugin_api):
     more badges unlocked instead of staring at zeros for minutes and then
     having everything pop at the end.
     """
-    fake_db = _FakeSessionDB(session_count=750)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=750)
+    _install_fake_session_store(plugin_api, fake_db)
 
     # Record every partial snapshot the scanner publishes.
     partial_snapshots: List[Dict[str, Any]] = []
@@ -355,8 +362,8 @@ def test_partial_snapshots_do_not_persist_unlock_timestamps(plugin_api):
     that appears at 30% scan progress could disappear when a later session
     rebalances the aggregate. Only the final snapshot records ``unlocked_at``.
     """
-    fake_db = _FakeSessionDB(session_count=10)
-    _install_fake_session_db(plugin_api, fake_db)
+    fake_db = _FakeSessionStore(session_count=10)
+    _install_fake_session_store(plugin_api, fake_db)
 
     # Seed empty state, then invoke partial compute directly.
     plugin_api.save_state({"unlocks": {}})

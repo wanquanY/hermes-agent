@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import PlatformConfig, Platform
+from hermes_gateway.config import PlatformConfig, Platform
 
 
 # -- Fake telegram modules (minimal stubs) --------------------------------
@@ -55,7 +55,7 @@ def _inject_fake_telegram(monkeypatch):
 
 
 def _make_adapter():
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = object.__new__(TelegramAdapter)

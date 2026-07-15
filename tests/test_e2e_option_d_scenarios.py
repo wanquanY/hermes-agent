@@ -12,14 +12,14 @@ import pytest_asyncio
 
 from agent.activity_event_bus import ActivityEventBus
 from agent.conversation_loop import _drain_activity_events_for_api
-from hermes_state import SessionDB
-from hermes_team_mission.state.session_views import transform_to_member_perspective
+from hermes_agent.storage.cli_session_store import CliSessionStore, open_cli_session_store
+from hermes_agent.domain.participant_transcript_projector import project_participant_transcript
 from tests.team_mission_gateway_test_support import team_mission_gateway
 from tui_gateway.run_worker import ActivityEventFrame, EventFrame, RunStartFrame, RunTerminalFrame
-from tui_gateway.services.runtime_proxy import RuntimeScope
-from tui_gateway.services.worker_frame_router import WorkerFrameRouter
-from tui_gateway.services.worker_pool import WorkerPool
-from tui_gateway.services.worker_supervisor import RunWorker
+from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.orchestration.worker_frame_router import WorkerFrameRouter
+from hermes_agent.orchestration.worker_lease_manager import WorkerLeaseManager
+from hermes_agent.orchestration.worker_supervisor import RunWorker
 
 
 class _FakeProcess:
@@ -95,14 +95,14 @@ class _Ids:
 
 
 class _FakeLeaderAgent:
-    def __init__(self, db: SessionDB, bus: ActivityEventBus) -> None:
+    def __init__(self, db: CliSessionStore, bus: ActivityEventBus) -> None:
         self._session_db = db
         self.activity_event_bus = bus
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> SessionDB:
-    return SessionDB(tmp_path / "state.db")
+def db(tmp_path: Path) -> CliSessionStore:
+    return open_cli_session_store(tmp_path / "state.db")
 
 
 @pytest.fixture
@@ -111,9 +111,9 @@ def parent_bus() -> ActivityEventBus:
 
 
 @pytest_asyncio.fixture
-async def harness(db: SessionDB, parent_bus: ActivityEventBus, monkeypatch: pytest.MonkeyPatch):
+async def harness(db: CliSessionStore, parent_bus: ActivityEventBus, monkeypatch: pytest.MonkeyPatch):
     supervisor = _FakeSupervisor(parent_bus)
-    pool = WorkerPool(supervisor, reap_tick_s=60)
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
     published_events: list[dict[str, Any]] = []
 
     def publish_event(payload: dict[str, Any], **kwargs: Any) -> list[Any]:
@@ -149,8 +149,8 @@ def _profile_context(tmp_path: Path, profile_id: str = "profile-main") -> dict[s
     }
 
 
-def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str) -> None:
-    db.upsert_agent_profile(
+def _seed_profile(db: CliSessionStore, tmp_path: Path, profile_id: str) -> None:
+    db.profiles.upsert_agent_profile(
         profile_id=profile_id,
         slug=profile_id,
         name=profile_id,
@@ -160,13 +160,13 @@ def _seed_profile(db: SessionDB, tmp_path: Path, profile_id: str) -> None:
     )
 
 
-def _messages(db: SessionDB, session_id: str) -> list[dict[str, Any]]:
-    return db.get_messages_as_conversation(session_id)
+def _messages(db: CliSessionStore, session_id: str) -> list[dict[str, Any]]:
+    return db.messages.all_as_conversation(session_id)
 
 
 async def _submit_plain_chat(
-    db: SessionDB,
-    pool: WorkerPool,
+    db: CliSessionStore,
+    pool: WorkerLeaseManager,
     *,
     conversation_id: str,
     text: str,
@@ -174,41 +174,41 @@ async def _submit_plain_chat(
     profile_context: dict[str, Any],
 ) -> None:
     try:
-        db.create_session(conversation_id, source="tui")
+        db.sessions.create(conversation_id, source="tui")
     except Exception:
         pass
     lease = await pool.get_or_spawn(conversation_id, profile_context)
     try:
-        db.append_message(conversation_id, role="user", content=text)
-        db.append_message(conversation_id, role="assistant", content=reply)
+        db.messages.append(conversation_id, role="user", content=text)
+        db.messages.append(conversation_id, role="assistant", content=reply)
     finally:
         await pool.release(lease.conversation_id)
 
 
 async def _complete_dispatched_run(
-    db: SessionDB,
+    db: CliSessionStore,
     router: WorkerFrameRouter,
     *,
     scope_key: str,
     conversation_id: str | None = None,
     run_id: str,
-    stored_session_id: str,
+    conversation_session_id: str,
     text: str,
     usage: dict[str, Any] | None = None,
 ) -> None:
     try:
-        db.create_session(stored_session_id, source="worker")
+        db.sessions.create(conversation_session_id, source="worker")
     except Exception:
         pass
-    db.append_message(
-        stored_session_id,
+    db.messages.append(
+        conversation_session_id,
         role="assistant",
         content=text,
         metadata={"usage": usage or {"total_tokens": 1}},
     )
     await router.on_event(
         scope_key,
-        conversation_id or stored_session_id,
+        conversation_id or conversation_session_id,
         EventFrame(
             params={
                 "type": "message.complete",
@@ -222,8 +222,8 @@ async def _complete_dispatched_run(
     )
     await router.on_run_terminal(
         scope_key,
-        conversation_id or stored_session_id,
-        RunTerminalFrame(run_id=run_id, stored_session_id=stored_session_id, status="completed"),
+        conversation_id or conversation_session_id,
+        RunTerminalFrame(run_id=run_id, conversation_session_id=conversation_session_id, status="completed"),
     )
 
 
@@ -347,13 +347,13 @@ async def test_e2e_team_mission_member_chat(
             "members": members,
         },
     )
-    harness.db.append_message(
+    harness.db.messages.append(
         "conv-B",
         role="assistant",
         content="I will review the release plan as Alice.",
         metadata={"participant_id": "member:member-alice", "display_name": "Alice"},
     )
-    harness.db.append_message(
+    harness.db.messages.append(
         "conv-B",
         role="assistant",
         content="Bob sees one risk in the test plan.",
@@ -364,23 +364,29 @@ async def test_e2e_team_mission_member_chat(
     run_context = json.loads(captured_submit["run_context_json"])
     assert run_context["conversation_session_id"] == "conv-B"
     assert run_context["participant_id"] == "member:member-alice"
-    assert captured_submit["stored_session_id"] == "conv-B"
+    assert captured_submit["conversation_session_id"] == "conv-B"
     assert captured_submit["runtime_scope_key"] == "member-chat:conversation-B:member-alice"
 
     messages = _messages(harness.db, "conv-B")
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "@Alice please review the release plan."
-    participants = harness.db.list_conversation_participants("conv-B")
-    projection = transform_to_member_perspective(
+    participants = harness.db.participants.list_conversation_participants("conv-B")
+    projection = project_participant_transcript(
         messages,
         viewing_participant_id="member:member-alice",
         participants=participants,
     )
-    assert [(message["role"], message["content"]) for message in projection] == [
-        ("user", "@Alice please review the release plan."),
-        ("assistant", "I will review the release plan as Alice."),
-        ("user", "[Bob] Bob sees one risk in the test plan."),
+    assert [message["role"] for message in projection] == [
+        "user", "assistant", "user"
     ]
+    assert projection[0]["content"] == "@Alice please review the release plan."
+    assert projection[1]["content"] == "I will review the release plan as Alice."
+    assert projection[2]["content"] == (
+        "[assistant | Bob | member:member-bob]\n"
+        "Bob sees one risk in the test plan."
+    )
+    assert "name" not in projection[2]
+    assert projection[2]["metadata"]["speaker_projected_role"] == "user"
 
 
 @pytest.mark.asyncio
@@ -415,12 +421,12 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
         scope_key="profile:profile-worker",
         conversation_id="conv-C-child",
         run_id="run-C",
-        stored_session_id="conv-C-child",
+        conversation_session_id="conv-C-child",
         text="Shard fixed and tests are green.",
         usage={"total_tokens": 42},
     )
 
-    activity = harness.db.get_activity("act-C")
+    activity = harness.db.activities.get("act-C")
     assert activity["status"] == "completed"
     assert activity["result_summary"] == "Shard fixed and tests are green."
     assert json.loads(activity["result_json"])["usage"] == {"total_tokens": 42}
@@ -432,22 +438,22 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
     assert len(injected) == 1
     assert "Async activity act-C" in injected[0]["content"]
     assert "Shard fixed and tests are green." in injected[0]["content"]
-    assert harness.db.get_activity("act-C")["read_at"] is not None
+    assert harness.db.activities.get("act-C")["read_at"] is not None
 
 
 @pytest.mark.asyncio
 async def test_e2e_late_worker_completion_after_activity_cancel_stays_cancelled(harness) -> None:
-    harness.db.create_activity(
+    harness.db.activities.create(
         activity_id="act-cancel",
         conversation_id="conv-cancel-parent",
         kind="agent_dispatch",
     )
-    assert harness.db.update_activity_status("act-cancel", "running", started_at=100.0)
+    assert harness.db.activities.update_status("act-cancel", "running", started_at=100.0)
     harness.router.record_run_start(
         scope_key="profile:worker",
         conversation_id="conv-cancel-child",
         run_id="run-cancel",
-        stored_session_id="conv-cancel-child",
+        conversation_session_id="conv-cancel-child",
         turn_id="turn-cancel",
         dispatch_activity_id="act-cancel",
         activity_kind="agent_dispatch",
@@ -455,18 +461,18 @@ async def test_e2e_late_worker_completion_after_activity_cancel_stays_cancelled(
         parent_conversation_id="conv-cancel-parent",
     )
 
-    assert harness.db.mark_activity_cancelled("act-cancel")
+    assert harness.db.activities.mark_cancelled("act-cancel")
     await _complete_dispatched_run(
         harness.db,
         harness.router,
         scope_key="profile:worker",
         conversation_id="conv-cancel-child",
         run_id="run-cancel",
-        stored_session_id="conv-cancel-child",
+        conversation_session_id="conv-cancel-child",
         text="Late worker completion must not bounce the UI.",
     )
 
-    activity = harness.db.get_activity("act-cancel")
+    activity = harness.db.activities.get("act-cancel")
     assert activity["status"] == "cancelled"
     assert activity["result_summary"] is None
     assert harness.published_events[-1]["payload"]["type"] == "activity.cancelled"
@@ -479,7 +485,7 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
     from tui_gateway.methods.dispatch import dispatch_team_async
 
     def fake_team_mission_create(_rid: str, params: dict[str, Any]) -> dict[str, Any]:
-        harness.db.create_session("mission-D", source="team_mission")
+        harness.db.sessions.create("mission-D", source="team_mission")
         return {
             "jsonrpc": "2.0",
             "id": _rid,
@@ -506,7 +512,7 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
         scope_key="mission-D",
         conversation_id="mission-D",
         run_id="run-D",
-        stored_session_id="mission-D",
+        conversation_session_id="mission-D",
         turn_id="turn-D",
         dispatch_activity_id="act-D",
         activity_kind="team_dispatch",
@@ -514,18 +520,18 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
     )
 
     assert result == {"activity_id": "act-D", "mission_id": "mission-D"}
-    assert harness.db.get_activity("act-D")["target_mission_id"] == "mission-D"
+    assert harness.db.activities.get("act-D")["target_mission_id"] == "mission-D"
 
     await _complete_dispatched_run(
         harness.db,
         harness.router,
         scope_key="mission-D",
         run_id="run-D",
-        stored_session_id="mission-D",
+        conversation_session_id="mission-D",
         text="Team mission completed.",
     )
 
-    activity = harness.db.get_activity("act-D")
+    activity = harness.db.activities.get("act-D")
     assert activity["status"] == "completed"
     assert activity["target_mission_id"] == "mission-D"
     assert activity["result_summary"] == "Team mission completed."
@@ -542,9 +548,9 @@ async def test_e2e_multi_activity_per_conversation(
     from tui_gateway.methods.dispatch import dispatch_agent_async
 
     _seed_profile(harness.db, tmp_path, "profile-worker")
-    harness.db.create_session("conv-E", source="tui")
-    harness.db.append_message("conv-E", role="user", content="Dispatch three async tasks.")
-    harness.db.upsert_session_index(
+    harness.db.sessions.create("conv-E", source="tui")
+    harness.db.messages.append("conv-E", role="user", content="Dispatch three async tasks.")
+    harness.db.session_index.upsert(
         session_id="conv-E",
         title="Concurrent dispatch",
         preview="dispatch",
@@ -583,17 +589,17 @@ async def test_e2e_multi_activity_per_conversation(
                 scope_key="profile:profile-worker",
                 conversation_id=result["conversation_id"],
                 run_id=f"run-E{idx}",
-                stored_session_id=result["conversation_id"],
+                conversation_session_id=result["conversation_id"],
                 text=f"Task {idx} complete.",
             )
             for idx, result in enumerate(dispatches, start=1)
         )
     )
 
-    rows = harness.db.list_activities("conv-E")
+    rows = harness.db.activities.list("conv-E")
     assert [row["activity_id"] for row in rows] == ["act-E1", "act-E2", "act-E3"]
     assert {row["status"] for row in rows} == {"completed"}
-    assert harness.db.get_unread_completion_count(conversation_id="conv-E") == 3
+    assert harness.db.activities.unread_count(conversation_id="conv-E") == 3
     monkeypatch.setattr(server, "_get_db", lambda: harness.db, raising=False)
     index_response = server._methods["session.index.list"](1, {})
     [item] = [
@@ -611,4 +617,4 @@ async def test_e2e_multi_activity_per_conversation(
         "act-E2",
         "act-E3",
     ]
-    assert [row["activity_id"] for row in harness.db.list_unread_completions(conversation_id="conv-E")] == []
+    assert [row["activity_id"] for row in harness.db.activities.list_unread(conversation_id="conv-E")] == []

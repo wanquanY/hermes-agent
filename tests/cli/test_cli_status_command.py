@@ -22,7 +22,7 @@ def _make_cli():
     cli_obj.session_start = datetime(2026, 4, 9, 19, 24)
     cli_obj._agent_running = False
     cli_obj._session_db = MagicMock()
-    cli_obj._session_db.get_session.return_value = None
+    cli_obj._session_db.sessions.get.return_value = None
     return cli_obj
 
 
@@ -65,7 +65,7 @@ def test_show_session_status_prints_gateway_style_summary():
         session_total_tokens=321,
         session_api_calls=4,
     )
-    cli_obj._session_db.get_session.return_value = {
+    cli_obj._session_db.sessions.get.return_value = {
         "title": "My titled session",
         "started_at": 1775791440,
     }
