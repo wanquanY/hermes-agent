@@ -50,3 +50,19 @@
 
 机器门禁完成时间：2026-07-16。Hermes 28,815 passed、0 failed；Doxie
 Gateway contract 与 desktop `test:gates` 退出码 0。阶段 2 等待最终统一验收。
+
+## 阶段 3
+
+- [x] U3、SEC-CRED-01 至 06、SEC-NET-01 至 04 的当前 owner 和上游参考已记录。
+- [x] 非可信、依赖型与 model-driving child env 共用一个显式权限 policy。
+- [x] 动态 Hermes secret 和 Tier 1 credential 不能通过 inherited env 或 overlay 绕过。
+- [x] foreground、background、watcher 和 browser CDP 日志有统一脱敏证据。
+- [x] 真实本地 server 证明同 origin 保留凭据、跨 origin/scheme/port 剥离凭据。
+- [x] installed hook 不能在最终 redirect boundary 重新注入 secret。
+- [x] initial media URL、redirect、IPv6 scope、混合 DNS 地址和空 WS peer 均 fail-closed。
+- [x] direct stream/subscription checkpoint 竞态与 durability 并发基准污染已从根因关闭。
+- [x] Hermes 最终全量复跑与 Doxie 门禁完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 28,855 passed、0 failed；Doxie
+Gateway contract 与 desktop `test:gates` 退出码 0。阶段 3 等待最终统一验收。

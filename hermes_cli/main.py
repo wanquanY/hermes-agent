@@ -1406,8 +1406,11 @@ def _launch_tui(
     tui_dir = PROJECT_ROOT / "ui-tui"
 
     import tempfile
+    from tools.environments.local import hermes_subprocess_env
 
-    env = os.environ.copy()
+    # The Node TUI is a model-driving child: retain provider credentials while
+    # denying control-plane, infrastructure and dynamic Hermes secrets.
+    env = hermes_subprocess_env(inherit_credentials=True)
     active_session_fd, active_session_file = tempfile.mkstemp(
         prefix="hermes-tui-active-session-", suffix=".json"
     )

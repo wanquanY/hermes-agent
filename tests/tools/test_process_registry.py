@@ -16,7 +16,31 @@ from tools.process_registry import (
     ProcessSession,
     FINISHED_TTL_SECONDS,
     MAX_PROCESSES,
+    _redact_process_result,
+    format_process_notification,
 )
+
+
+def test_background_process_env_output_is_redacted_at_tool_boundary():
+    secret = "opaque-background-secret-value"
+    result = _redact_process_result({
+        "command": "printenv",
+        "output": f"CUSTOM_AUTH_TOKEN={secret}",
+    })
+    assert secret not in result["output"]
+
+
+def test_background_notification_redacts_output_and_inline_command_secret():
+    secret = "opaque-background-secret-value"
+    text = format_process_notification({
+        "type": "completion",
+        "session_id": "proc-redact",
+        "command": f"printenv CUSTOM_AUTH_TOKEN={secret}",
+        "output": f"CUSTOM_AUTH_TOKEN={secret}",
+        "exit_code": 0,
+    })
+    assert text is not None
+    assert secret not in text
 
 
 @pytest.fixture()

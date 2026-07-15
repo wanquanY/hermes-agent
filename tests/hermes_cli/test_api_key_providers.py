@@ -1243,9 +1243,7 @@ class TestNovitaProvider:
             call_count["n"] += 1
             return _FakeResp()
 
-        monkeypatch.setattr(
-            models_mod.urllib.request, "urlopen", fake_urlopen
-        )
+        monkeypatch.setattr(models_mod, "_urlopen_model_catalog_request", fake_urlopen)
 
         # First call hits the network.
         first = models_mod._fetch_novita_pricing()

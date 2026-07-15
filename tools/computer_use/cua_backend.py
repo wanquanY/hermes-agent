@@ -37,6 +37,7 @@ from tools.computer_use.backend import (
     ComputerUseBackend,
     UIElement,
 )
+from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,11 @@ def cua_driver_install_hint() -> str:
         'https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"\n'
         "Or run `hermes tools` and enable the Computer Use toolset to install it automatically."
     )
+
+
+def _cua_subprocess_env() -> dict[str, str]:
+    """Build the least-authority environment for the cua-driver MCP child."""
+    return hermes_subprocess_env(inherit_credentials=False)
 
 
 def _parse_windows_from_text(text: str) -> List[Dict[str, Any]]:
@@ -329,7 +335,9 @@ class _CuaDriverSession:
         params = StdioServerParameters(
             command=_CUA_DRIVER_CMD,
             args=_CUA_DRIVER_ARGS,
-            env={**os.environ},
+            # cua-driver only needs process/runtime basics. It must not inherit
+            # provider, gateway, infrastructure or dashboard credentials.
+            env=_cua_subprocess_env(),
         )
         stack = AsyncExitStack()
         read, write = await stack.enter_async_context(stdio_client(params))

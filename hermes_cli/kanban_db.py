@@ -5389,11 +5389,14 @@ def _default_spawn(
         raise ValueError(f"task {task.id} has no assignee")
 
     from hermes_cli.profiles import normalize_profile_name
+    from tools.environments.local import hermes_subprocess_env
 
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
-    env = dict(os.environ)
+    # Kanban workers execute model-authored work. They need provider authority,
+    # but never the parent gateway, infrastructure or auxiliary keyring.
+    env = hermes_subprocess_env(inherit_credentials=True)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root

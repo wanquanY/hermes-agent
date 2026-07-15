@@ -5822,7 +5822,10 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
-        return True
+        # A loopback-only surface cannot authenticate an unidentified peer.
+        # ASGI/proxy transports may omit the tuple; fail closed instead of
+        # treating absence as implicit localhost.
+        return False
     return client_host in _LOOPBACK_HOSTS
 
 
@@ -5886,9 +5889,12 @@ def _resolve_chat_argv(
     dashboard's ``/api/pub`` endpoint (see :func:`pub_ws`).
     """
     from hermes_cli.main import PROJECT_ROOT, _make_tui_argv
+    from tools.environments.local import hermes_subprocess_env
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
-    env = os.environ.copy()
+    # The embedded TUI drives the model and therefore receives provider
+    # credentials, but not Gateway/infra/dashboard secrets.
+    env = hermes_subprocess_env(inherit_credentials=True)
     env.setdefault("NODE_ENV", "production")
     # Browser-embedded chat should prefer stable wheel-based scrollback over
     # native terminal mouse tracking. When mouse tracking is enabled, wheel

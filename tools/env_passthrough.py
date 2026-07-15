@@ -61,10 +61,18 @@ def _is_hermes_provider_credential(name: str) -> bool:
     wrap third-party APIs still work.
     """
     try:
-        from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
-    except Exception:
-        return False
-    return name in _HERMES_PROVIDER_ENV_BLOCKLIST
+        from tools.environments.local import (
+            _HERMES_PROVIDER_ENV_BLOCKLIST,
+            _is_hermes_internal_secret,
+        )
+    except Exception as exc:
+        logger.warning(
+            "env passthrough: credential policy import failed; rejecting %r: %s",
+            name,
+            exc,
+        )
+        return True
+    return _is_hermes_internal_secret(name) or name in _HERMES_PROVIDER_ENV_BLOCKLIST
 
 
 def register_env_passthrough(var_names: Iterable[str]) -> None:
@@ -141,5 +149,4 @@ def get_all_passthrough() -> frozenset[str]:
 def clear_env_passthrough() -> None:
     """Reset the skill-scoped allowlist (e.g. on session reset)."""
     _get_allowed().clear()
-
 

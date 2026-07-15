@@ -217,8 +217,22 @@ async def download_url(
         ValueError:  内容超过大小限制
         httpx.HTTPError: 网络/HTTP 错误
     """
+    from tools.url_safety import async_is_safe_url, redirect_target_from_response
+
+    if not await async_is_safe_url(url):
+        raise ValueError("Blocked unsafe URL (SSRF protection)")
+
+    async def _redirect_guard(response: httpx.Response) -> None:
+        redirect_url = redirect_target_from_response(response)
+        if redirect_url and not await async_is_safe_url(redirect_url):
+            raise ValueError("Blocked redirect to private/internal address")
+
     max_bytes = max_size_mb * 1024 * 1024
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=True,
+        event_hooks={"response": [_redirect_guard]},
+    ) as client:
         # 先 HEAD 检查大小
         try:
             head = await client.head(url)

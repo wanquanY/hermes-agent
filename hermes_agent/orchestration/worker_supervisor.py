@@ -39,6 +39,7 @@ from tui_gateway.run_worker import (
 from tui_gateway.services.runtime_scope import RuntimeScope
 from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_agent.orchestration.worker_db_proxy import serialize_db_value
+from tools.environments.local import hermes_subprocess_env
 
 _log = logging.getLogger(__name__)
 
@@ -544,7 +545,14 @@ class WorkerSupervisor:
     async def _spawn_locked(
         self, scope: RuntimeScope, env_overrides: dict[str, str],
     ) -> RunWorker:
-        env = os.environ.copy()
+        # A run worker hosts the model runtime, so provider credentials are
+        # intentional authority. Gateway, infra, dashboard and dynamic Hermes
+        # secrets are not: route both the parent snapshot and profile overlay
+        # through the canonical two-tier subprocess policy.
+        env = hermes_subprocess_env(
+            inherit_credentials=True,
+            extra_env=env_overrides,
+        )
         # The new worker runs the LLM in-process; HERMES_HOME selects
         # the per-profile data root just like the legacy sub-sidecar.
         if scope.hermes_home:
@@ -554,7 +562,6 @@ class WorkerSupervisor:
             env["DOVIE_CONVERSATION_ID"] = scope.conversation_id
         if scope.agent_profile_id:
             env["DOVIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
-        env.update(env_overrides)
         # stderr inherits the main sidecar's stderr so tracebacks land
         # in the same agent.log as the legacy worker. Phase 5 may rewire
         # this to a per-scope file once we have the file-rotation policy.

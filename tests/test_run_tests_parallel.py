@@ -17,7 +17,6 @@ kernel's process table.
 POSIX-only: Windows has its own grandchild lifecycle (no shared session,
 ``taskkill /F /T`` semantics). Marked accordingly.
 """
-
 from __future__ import annotations
 
 import json
@@ -29,6 +28,18 @@ import time
 from pathlib import Path
 
 import pytest
+
+
+def test_serial_execution_sentinel_is_detected(tmp_path):
+    from scripts.run_tests_parallel import _requires_serial_execution
+
+    serial_file = tmp_path / "test_serial.py"
+    serial_file.write_text("# hermes-test-runner: serial\ndef test_x(): pass\n", encoding="utf-8")
+    parallel_file = tmp_path / "test_parallel.py"
+    parallel_file.write_text("def test_x(): pass\n", encoding="utf-8")
+
+    assert _requires_serial_execution(serial_file) is True
+    assert _requires_serial_execution(parallel_file) is False
 
 
 # Both tests share the same handoff file: the leaker writes here, the

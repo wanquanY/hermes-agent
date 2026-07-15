@@ -2,6 +2,7 @@ import pytest
 
 from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control
+from tui_gateway.services import run_control_events
 from tui_gateway.services import team_mission_activity_events
 from tui_gateway.services.subagent_snapshots import build_subagent_run_snapshots
 
@@ -130,6 +131,74 @@ def test_transient_source_seq_never_advances_the_durable_subscription_cursor(tmp
     assert transport.events[-1]["seq"] == 2
     assert transport.events[-1]["runtime_source_seq"] == 5_752
     db.close()
+
+
+def test_checkpoint_race_does_not_redeliver_live_stream_prefix():
+    subscription = {}
+    common = {
+        "type": "message.delta",
+        "run_id": "run-race",
+        "turn_id": "turn-race",
+        "runtime_scope_key": "profile:default",
+    }
+    run_control_events.remember_stream_delivery(
+        subscription,
+        {**common, "transient": True, "payload": {"mode": "append", "delta": "你"}},
+    )
+    run_control_events.remember_stream_delivery(
+        subscription,
+        {**common, "transient": True, "payload": {"mode": "append", "delta": "好"}},
+    )
+
+    checkpoint = {
+        **common,
+        "seq": 1,
+        "payload": {
+            "mode": "append",
+            "offset": 0,
+            "delta": "你好",
+            "text": "你好",
+            "stream_checkpoint": True,
+        },
+    }
+
+    assert run_control_events.delta_event_for_subscription(subscription, checkpoint) is None
+
+
+def test_checkpoint_race_delivers_only_unseen_utf16_suffix():
+    subscription = {}
+    common = {
+        "type": "message.delta",
+        "run_id": "run-partial",
+        "turn_id": "turn-partial",
+        "runtime_scope_key": "profile:default",
+    }
+    run_control_events.remember_stream_delivery(
+        subscription,
+        {
+            **common,
+            "transient": True,
+            "payload": {"mode": "append", "offset": 0, "delta": "A😀"},
+        },
+    )
+    checkpoint = {
+        **common,
+        "seq": 1,
+        "payload": {
+            "mode": "append",
+            "offset": 0,
+            "delta": "A😀中",
+            "text": "A😀中",
+            "stream_checkpoint": True,
+        },
+    }
+
+    projected = run_control_events.delta_event_for_subscription(subscription, checkpoint)
+
+    assert projected is not None
+    assert projected["seq"] == 1
+    assert projected["payload"]["offset"] == 3
+    assert projected["payload"]["delta"] == "中"
 
 
 def test_team_activity_projection_keeps_transient_source_out_of_cursor_fields():

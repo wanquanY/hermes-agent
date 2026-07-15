@@ -765,6 +765,9 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
         return 1
 
     monkeypatch.setattr(main_mod.subprocess, "call", fake_call)
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "gateway-secret")
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "auxiliary-secret")
 
     with pytest.raises(SystemExit):
         main_mod._launch_tui(
@@ -783,6 +786,9 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+    assert env["OPENAI_API_KEY"] == "provider-secret"
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "AUXILIARY_VISION_API_KEY" not in env
 
 
 def test_launch_tui_exit_code_42_relaunches_update(monkeypatch, main_mod):

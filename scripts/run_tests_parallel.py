@@ -63,6 +63,22 @@ _SKIP_PARTS = {"integration", "e2e"}
 # safety net so a single hung file can't stall the whole suite. Override
 # via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
 _DEFAULT_FILE_TIMEOUT_SECONDS = 600.0  # 10 minutes
+_SERIAL_SENTINEL = "hermes-test-runner: serial"
+
+
+def _requires_serial_execution(path: Path) -> bool:
+    """Return whether a file declares exclusive execution in this runner.
+
+    The runner parallelizes at file granularity. Wall-clock performance tests
+    and other host-resource assertions must not measure unrelated concurrent
+    pytest processes, so they can opt into the serial tail with a source
+    sentinel instead of weakening their thresholds.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return any(_SERIAL_SENTINEL in handle.readline() for _ in range(12))
+    except (OSError, UnicodeError):
+        return False
 
 
 def _count_tests(
@@ -555,11 +571,15 @@ def main() -> int:
     # Count individual tests per file via a single pytest --co pass.
     test_counts = _count_tests(files, repo_root, pytest_passthrough)
     total_tests = sum(test_counts.values())
+    serial_files = [file for file in files if _requires_serial_execution(file)]
+    serial_file_set = set(serial_files)
+    parallel_files = [file for file in files if file not in serial_file_set]
 
     print(
         f"Discovered {len(files)} test files ({total_tests} tests) under "
         f"{[str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]}; "
-        f"running with -j {args.jobs}",
+        f"running with -j {args.jobs}"
+        + (f"; {len(serial_files)} file(s) reserved for the serial tail" if serial_files else ""),
         flush=True,
     )
 
@@ -622,7 +642,7 @@ def main() -> int:
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures: List[Future] = []
-            for file in files:
+            for file in parallel_files:
                 t0 = time.monotonic()
                 fut = pool.submit(
                     _run_one_file,
@@ -639,6 +659,22 @@ def main() -> int:
             # control flow obvious.
             for fut in futures:
                 fut.result() if fut.exception() is None else None
+        for file in serial_files:
+            t0 = time.monotonic()
+            future: Future = Future()
+            try:
+                future.set_result(
+                    _run_one_file(
+                        file,
+                        pytest_passthrough,
+                        repo_root,
+                        args.file_timeout,
+                        basetemp_root,
+                    )
+                )
+            except BaseException as exc:  # keep accounting/reporting uniform
+                future.set_exception(exc)
+            _on_done(file, t0, future)
     finally:
         shutil.rmtree(basetemp_root, ignore_errors=True)
 

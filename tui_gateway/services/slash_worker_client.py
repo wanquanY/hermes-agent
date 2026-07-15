@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 
+from tools.environments.local import hermes_subprocess_env
+
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -49,7 +51,7 @@ class SlashWorker:
             text=True,
             bufsize=1,
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=hermes_subprocess_env(inherit_credentials=True),
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()

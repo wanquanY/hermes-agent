@@ -3278,11 +3278,17 @@ class TestPtyWebSocket:
             "_make_tui_argv",
             lambda project_root, tui_dev=False: (["node", "dist/entry.js"], "/tmp/ui-tui"),
         )
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "gateway-secret")
+        monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "auxiliary-secret")
 
         _argv, _cwd, env = self.ws_module._resolve_chat_argv()
 
         assert env["HERMES_TUI_INLINE"] == "1"
         assert env["HERMES_TUI_DISABLE_MOUSE"] == "1"
+        assert env["OPENAI_API_KEY"] == "provider-secret"
+        assert "TELEGRAM_BOT_TOKEN" not in env
+        assert "AUXILIARY_VISION_API_KEY" not in env
 
     def test_rejects_when_embedded_chat_disabled(self, monkeypatch):
         monkeypatch.setattr(self.ws_module, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", False)

@@ -47,6 +47,18 @@ class TestResolveCdpOverride:
         with patch("tools.browser_tool.requests.get", side_effect=RuntimeError("boom")):
             assert _resolve_cdp_override(HTTP_URL) == HTTP_URL
 
+    def test_logs_redact_cdp_query_and_userinfo_credentials(self, caplog):
+        from tools.browser_tool import _resolve_cdp_override
+
+        token = "opaque-cdp-token-123456"
+        password = "opaque-cdp-password-654321"
+        endpoint = f"http://user:{password}@{HOST}:{PORT}?token={token}"
+        with patch("tools.browser_tool.requests.get", side_effect=RuntimeError(endpoint)):
+            _resolve_cdp_override(endpoint)
+        assert token not in caplog.text
+        assert password not in caplog.text
+        assert "token=***" in caplog.text
+
     def test_normalizes_provider_returned_http_cdp_url_when_creating_session(self, monkeypatch):
         import tools.browser_tool as browser_tool
 

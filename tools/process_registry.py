@@ -1210,6 +1210,7 @@ class ProcessRegistry:
 
         result = {
             "session_id": session.id,
+            "command": session.command,
             "status": "exited" if session.exited else "running",
             "output": "\n".join(selected),
             "total_lines": total_lines,
@@ -1269,6 +1270,7 @@ class ProcessRegistry:
                 self._completion_consumed.add(session_id)
                 result = {
                     "status": "exited",
+                    "command": session.command,
                     "exit_code": session.exit_code,
                     "completion_reason": session.completion_reason,
                     "termination_source": session.termination_source,
@@ -1281,6 +1283,7 @@ class ProcessRegistry:
             if _is_interrupted():
                 result = {
                     "status": "interrupted",
+                    "command": session.command,
                     "output": strip_ansi(session.output_buffer[-1000:]),
                     "note": "User sent a new message -- wait interrupted",
                 }
@@ -1295,6 +1298,7 @@ class ProcessRegistry:
 
         result = {
             "status": "timeout",
+            "command": session.command,
             "output": strip_ansi(session.output_buffer[-1000:]),
         }
         if timeout_note:
@@ -1859,16 +1863,19 @@ def format_process_notification(evt: dict) -> "str | None":
     Handles completion events (notify_on_complete), watch pattern matches,
     and watch disabled events from the unified completion_queue.
     """
+    from agent.redact import redact_sensitive_text, redact_terminal_output
+
     evt_type = evt.get("type", "completion")
     _sid = evt.get("session_id", "unknown")
-    _cmd = evt.get("command", "unknown")
+    raw_command = evt.get("command", "unknown")
+    _cmd = redact_sensitive_text(raw_command)
 
     if evt_type == "watch_disabled":
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _out = redact_terminal_output(evt.get("output", ""), raw_command)
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1885,7 +1892,7 @@ def format_process_notification(evt: dict) -> "str | None":
         return _format_async_delegation(evt)
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = redact_terminal_output(evt.get("output", ""), raw_command)
     _reason = evt.get("completion_reason") or "exited"
     _source = evt.get("termination_source") or ""
     _signal = ""
@@ -1959,6 +1966,22 @@ PROCESS_SCHEMA = {
 }
 
 
+def _redact_process_result(result: dict) -> dict:
+    """Redact every background-process result before it enters tool history."""
+    if not isinstance(result, dict):
+        return result
+    from agent.redact import redact_sensitive_text, redact_terminal_output
+
+    command = result.get("command") or ""
+    for field in ("output", "output_preview"):
+        value = result.get(field)
+        if isinstance(value, str) and value:
+            result[field] = redact_terminal_output(value, command)
+    if isinstance(result.get("command"), str) and result["command"]:
+        result["command"] = redact_sensitive_text(result["command"])
+    return result
+
+
 def _handle_process(args, **kw):
     task_id = kw.get("task_id")
     action = args.get("action", "")
@@ -1971,12 +1994,14 @@ def _handle_process(args, **kw):
         if not session_id:
             return tool_error(f"session_id is required for {action}")
         if action == "poll":
-            return json.dumps(process_registry.poll(session_id), ensure_ascii=False)
+            return json.dumps(_redact_process_result(process_registry.poll(session_id)), ensure_ascii=False)
         elif action == "log":
-            return json.dumps(process_registry.read_log(
-                session_id, offset=args.get("offset", 0), limit=args.get("limit", 200)), ensure_ascii=False)
+            return json.dumps(_redact_process_result(process_registry.read_log(
+                session_id, offset=args.get("offset", 0), limit=args.get("limit", 200))), ensure_ascii=False)
         elif action == "wait":
-            return json.dumps(process_registry.wait(session_id, timeout=args.get("timeout")), ensure_ascii=False)
+            return json.dumps(_redact_process_result(process_registry.wait(
+                session_id, timeout=args.get("timeout")
+            )), ensure_ascii=False)
         elif action == "kill":
             return json.dumps(process_registry.kill_process(session_id), ensure_ascii=False)
         elif action == "write":

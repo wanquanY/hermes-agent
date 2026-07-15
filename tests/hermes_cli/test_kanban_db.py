@@ -1908,6 +1908,9 @@ class TestSharedBoardPaths:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+        monkeypatch.setenv("GH_TOKEN", "github-secret")
+        monkeypatch.setenv("AUXILIARY_REVIEW_API_KEY", "auxiliary-secret")
 
         task = kb.Task(
             id="t_dispatch_env",
@@ -1937,6 +1940,9 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+        assert env["OPENAI_API_KEY"] == "provider-secret"
+        assert "GH_TOKEN" not in env
+        assert "AUXILIARY_REVIEW_API_KEY" not in env
 
 
 # ---------------------------------------------------------------------------

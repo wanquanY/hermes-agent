@@ -66,9 +66,39 @@ import requests
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 from agent.auxiliary_client import call_llm
+from agent.redact import (
+    _redact_url_query_params,
+    _redact_url_userinfo,
+    redact_sensitive_text,
+)
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
+
+_BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "BROWSERBASE_API_KEY",
+    "BROWSERBASE_PROJECT_ID",
+    "BROWSER_USE_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "FIRECRAWL_BROWSER_TTL",
+)
+
+
+def _browser_subprocess_env() -> dict[str, str]:
+    """Return a stripped child env plus the browser worker's narrow authority."""
+    # Keep browser_tool importable in constrained/plugin discovery contexts
+    # that intentionally install only a skeletal environment backend.  The
+    # security boundary is still mandatory at the actual subprocess boundary:
+    # absence of the canonical policy raises instead of falling back to raw
+    # ``os.environ``.
+    from tools.environments.local import hermes_subprocess_env
+
+    env = hermes_subprocess_env(inherit_credentials=False)
+    for key in _BROWSER_PASSTHROUGH_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
 
 try:
     from tools.website_policy import check_website_access
@@ -234,6 +264,14 @@ def _get_extraction_model() -> Optional[str]:
     return os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip() or None
 
 
+def _sanitize_url_for_logs(value: object) -> str:
+    """Redact credentials at the CDP endpoint logging boundary."""
+    text = redact_sensitive_text(value, force=True)
+    if not text:
+        return text
+    return _redact_url_userinfo(_redact_url_query_params(text))
+
+
 def _resolve_cdp_override(cdp_url: str) -> str:
     """Normalize a user-supplied CDP endpoint into a concrete connectable URL.
 
@@ -271,15 +309,27 @@ def _resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        logger.warning("Failed to resolve CDP endpoint %s via %s: %s", raw, version_url, exc)
+        logger.warning(
+            "Failed to resolve CDP endpoint %s via %s: %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(version_url),
+            _sanitize_url_for_logs(exc),
+        )
         return raw
 
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
-        logger.info("Resolved CDP endpoint %s -> %s", raw, ws_url)
+        logger.info(
+            "Resolved CDP endpoint %s -> %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(ws_url),
+        )
         return ws_url
 
-    logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", version_url)
+    logger.warning(
+        "CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint",
+        _sanitize_url_for_logs(version_url),
+    )
     return raw
 
 
@@ -945,7 +995,8 @@ def _run_chrome_fallback_command(
 
     task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
     os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
-    browser_env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": task_socket_dir}
+    browser_env = _browser_subprocess_env()
+    browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
@@ -2135,7 +2186,7 @@ def _run_browser_command(
         logger.debug("browser cmd=%s task=%s socket_dir=%s (%d chars)",
                      command, task_id, task_socket_dir, len(task_socket_dir))
 
-        browser_env = {**os.environ}
+        browser_env = _browser_subprocess_env()
 
         # Ensure subprocesses inherit the same browser-specific PATH fallbacks
         # used during CLI discovery.

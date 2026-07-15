@@ -5,8 +5,22 @@ later phases can prove they didn't break loopback mode.
 """
 import pytest
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 from hermes_cli import web_server
+
+
+def test_empty_websocket_peer_is_rejected_in_loopback_mode(monkeypatch):
+    monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+    assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is False
+    assert web_server._ws_client_is_allowed(
+        SimpleNamespace(client=SimpleNamespace(host=""))
+    ) is False
+
+
+def test_empty_websocket_peer_is_allowed_after_auth_gate(monkeypatch):
+    monkeypatch.setattr(web_server.app.state, "auth_required", True, raising=False)
+    assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is True
 
 
 @pytest.fixture

@@ -263,6 +263,13 @@ _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
     "/private/etc/", "/private/var/",
 )
+# macOS resolves the per-user temporary/cache tree from ``/var/folders`` to
+# ``/private/var/folders``.  It is user-writable application data, not a system
+# configuration tree.  Keep the broad ``/private/var`` denial for system-owned
+# state while allowing this one platform-defined user-data subtree.  Resolved
+# symlink targets are checked independently below, so a link from the allowed
+# tree into ``/private/etc`` or another denied subtree still fails closed.
+_SENSITIVE_PATH_PREFIX_EXCEPTIONS = ("/private/var/folders/",)
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 _hermes_config_resolved: str | None = None
@@ -300,8 +307,10 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+    for candidate in (resolved, normalized):
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIX_EXCEPTIONS):
+            continue
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIXES):
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err

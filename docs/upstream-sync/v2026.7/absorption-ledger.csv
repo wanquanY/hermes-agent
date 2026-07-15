@@ -81,7 +81,7 @@ SEC-CRED-06,security,3,absorb,browser CDP endpoint 日志脱敏,576424cc1,阶段
 SEC-CRED-07,security,0,equivalent,HERMES_TIMEZONE shell 注入防护,84fcbbf6a,阶段0既有 shlex 与 child env 回归通过,本地已有等价 quoting 与 env 转换,
 SEC-NET-01,security,3,absorb,httpx redirect guard 绕过,500c2b1e4,阶段3 redirect mutation 测试通过,高危 SSRF,S8
 SEC-NET-02,security,3,absorb,Yuanbao media URL SSRF,d65468e7f,阶段3统一 URL policy 测试通过,网络边界需统一重演,
-SEC-NET-03,security,3,absorb,IPv6 scope id URL 检查绕过,ed966696e,阶段3 IPv6 与 DNS 重绑定测试通过,网络边界需统一重演,
+SEC-NET-03,security,3,absorb,IPv6 scope id URL 检查绕过,ed966696e,阶段3 IPv6 与 DNS 多地址混合解析测试通过,网络边界需统一重演,
 SEC-NET-04,security,3,absorb,loopback 空 WebSocket peer fail-closed,ed3d12a76,阶段3空 peer 测试通过,网络边界需统一重演,
 SEC-PROMPT-01,security,4,absorb,LSP diagnostic 字段消毒,ea9f8bd16,阶段4不可信诊断测试通过,prompt 边界需统一重演,
 SEC-PROMPT-02,security,4,absorb,AGENTS SOUL Praxis 误伤修正,099df3cd8,阶段4指令来源分类测试通过,prompt 边界需统一重演,

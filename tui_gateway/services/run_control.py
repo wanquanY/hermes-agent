@@ -38,6 +38,7 @@ from tui_gateway.services.run_control_events import (
     event_runtime_scope_key as _event_runtime_scope_key,
     event_turn_id as _event_turn_id,
     payload_status as _payload_status,
+    remember_stream_delivery as _remember_stream_delivery,
     remember_terminal_delivery as _remember_direct_terminal_delivery,
     conversation_session_id as _conversation_session_id,
     stamp_session_identity as _stamp_session_identity,
@@ -408,6 +409,8 @@ def _remember_subscription_delivery(
     _remember_subscription_run(subscription, event)
     if direct or _terminal_delivery_identity(event):
         _remember_direct_terminal_delivery(subscription, event)
+    if direct:
+        _remember_stream_delivery(subscription, event)
 
 
 def _event_activity_id(event: dict[str, Any]) -> str:

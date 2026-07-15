@@ -10,6 +10,7 @@ the first 6 and last 4 characters for debuggability.
 import logging
 import os
 import re
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ _PREFIX_PATTERNS = [
     r"mem0_[A-Za-z0-9]{10,}",           # Mem0 Platform API key
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
+    r"fw_[A-Za-z0-9]{30,}",             # Fireworks AI API key
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
@@ -190,6 +192,16 @@ _URL_WITH_QUERY_RE = re.compile(
 # Catches things like `https://user:token@api.example.com/v1/foo`.
 _URL_USERINFO_RE = re.compile(
     r"(https?|wss?|ftp)://([^/\s:@]+):([^/\s@]+)@",
+)
+
+# Colon-less credential userinfo used by git remotes and transport endpoints:
+# ``https://OPAQUE_TOKEN@host``. The token class cannot cross path/query
+# boundaries and the length floor avoids ordinary short usernames.
+_URL_BARE_TOKEN_RE = re.compile(
+    r"((?:https?|wss?|git|ssh|ftp|ftps|sftp)://)"
+    r"([^\s:@/]{8,})"
+    r"(@[^\s]+)",
+    re.IGNORECASE,
 )
 
 # Form-urlencoded body detection: conservative — only applies when the entire
@@ -407,6 +419,10 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     # Database connection string passwords
     if "://" in text:
         text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+        text = _URL_BARE_TOKEN_RE.sub(
+            lambda m: f"{m.group(1)}{_mask_token(m.group(2))}{m.group(3)}",
+            text,
+        )
 
     # JWT tokens (eyJ... — base64-encoded JSON headers)
     if "eyJ" in text:
@@ -439,6 +455,42 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
 
     return text
+
+
+_ENV_DUMP_COMMANDS = frozenset({"env", "printenv", "set", "export", "declare"})
+
+
+def is_env_dump_command(command: str | None) -> bool:
+    """Return whether any shell segment starts with an environment dump command."""
+    if not command or not isinstance(command, str):
+        return False
+    for segment in re.split(r"[|;&]+", command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        if tokens and tokens[0] in _ENV_DUMP_COMMANDS:
+            return True
+    return False
+
+
+def redact_terminal_output(
+    output: str,
+    command: str | None = None,
+    *,
+    force: bool = False,
+) -> str:
+    """Apply one redaction policy to foreground and background terminal output."""
+    if not output:
+        return output
+    return redact_sensitive_text(
+        output,
+        force=force,
+        code_file=not is_env_dump_command(command),
+    )
 
 
 # Substrings used to gate ``_PREFIX_RE`` execution. If none of these appear in

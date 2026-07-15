@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 2 自动验收完成，正在进入阶段 3 安全治理。
-- 后续阶段：阶段 3-12 按计划连续实施，全部完成后统一用户验收。
+- 当前阶段：阶段 3 自动验收完成，正在进入阶段 4 本地执行、路径与插件安全。
+- 后续阶段：阶段 4-12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -19,6 +19,8 @@
 | `phase-1-acceptance.md` | 阶段 1 自动门禁、实机验收入口、收益与限制 |
 | `phase-2-design.md` | 阶段 2 工具合同、deadline、effect/risk 与计量 owner 设计 |
 | `phase-2-acceptance.md` | 阶段 2 专项、全量、静态与最终实机验收重点 |
+| `phase-3-design.md` | 阶段 3 child env、脱敏、redirect credential 与 SSRF 安全设计 |
+| `phase-3-acceptance.md` | 阶段 3 专项、全量、静态、Doxie 门禁与最终实机验收重点 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -45,7 +47,9 @@ python scripts/upstream_absorption_baseline.py \
 - Doxie Gateway contract 与 `test:gates`：退出码 0。
 - 阶段 2：R1、M1、U2 已实现；专项 271 passed、0 failed；Hermes 全量
   28,815 passed、0 failed；Doxie contract/gates 退出码 0。
+- 阶段 3：U3、SEC-CRED-01 至 06、SEC-NET-01 至 04 已实现；Hermes 全量
+  28,855 passed、0 failed；Doxie contract/gates 退出码 0。
 - 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
-完整命令、结果、收益与实机验收入口见 `phase-1-acceptance.md`；逐项签核见
-`review-checklist.md`。
+各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核
+见 `review-checklist.md`。

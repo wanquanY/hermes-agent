@@ -117,6 +117,158 @@ def remember_terminal_delivery(subscription: dict[str, Any], event: dict[str, An
             identities.discard(value)
 
 
+def _stream_delivery_identity(event: dict[str, Any]) -> tuple[Any, ...] | None:
+    event_type = str(event.get("type") or "").strip()
+    if not event_type.endswith((".delta", ".thinking")):
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    return (
+        event_type,
+        event_run_id(event),
+        event_turn_id(event),
+        event_runtime_scope_key(event),
+        str(
+            payload.get("subagent_id")
+            or payload.get("subagentId")
+            or payload.get("test_run_id")
+            or payload.get("testRunId")
+            or payload.get("stream_id")
+            or payload.get("streamId")
+            or payload.get("segment_id")
+            or payload.get("segmentId")
+            or payload.get("client_message_id")
+            or payload.get("clientMessageId")
+            or event.get("activity_id")
+            or "default"
+        ).strip(),
+    )
+
+
+def _utf16_length(value: str) -> int:
+    return len(str(value or "").encode("utf-16-le")) // 2
+
+
+def _slice_utf16(value: str, start: int) -> str:
+    raw = str(value or "").encode("utf-16-le")
+    return raw[max(0, start) * 2 :].decode("utf-16-le", errors="ignore")
+
+
+def _stream_payload(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    text_stream = (
+        event.get("text_stream")
+        if isinstance(event.get("text_stream"), dict)
+        else payload.get("text_stream")
+        if isinstance(payload.get("text_stream"), dict)
+        else {}
+    )
+    return payload, text_stream
+
+
+def remember_stream_delivery(subscription: dict[str, Any], event: dict[str, Any]) -> None:
+    """Track live stream coverage independently from durable event sequence.
+
+    Token deltas are intentionally transient and therefore have no canonical
+    ``seq``.  A structural boundary later persists one coalesced checkpoint.
+    Without a second cursor, the subscription poller can race that boundary and
+    redeliver the already-rendered prefix before the following structural event
+    advances ``last_seq``.
+    """
+    identity = _stream_delivery_identity(event)
+    if identity is None:
+        return
+    payload, text_stream = _stream_payload(event)
+    text = next(
+        (
+            value
+            for value in (
+                text_stream.get("delta"),
+                text_stream.get("text"),
+                payload.get("delta"),
+                payload.get("text"),
+                payload.get("output"),
+            )
+            if isinstance(value, str)
+        ),
+        "",
+    )
+    if not text:
+        return
+    offsets = subscription.get("direct_stream_offsets")
+    if not isinstance(offsets, dict):
+        offsets = {}
+        subscription["direct_stream_offsets"] = offsets
+    previous = max(0, int(offsets.get(identity) or 0))
+    mode = str(text_stream.get("mode") or payload.get("mode") or "append").strip().lower()
+    raw_offset = text_stream.get("offset", payload.get("offset"))
+    try:
+        offset = max(0, int(raw_offset)) if raw_offset is not None else previous
+    except (TypeError, ValueError):
+        offset = previous
+    end_offset = _utf16_length(text) if mode in {"snapshot", "replace", "cumulative"} else offset + _utf16_length(text)
+    offsets[identity] = max(previous, end_offset)
+
+
+def _project_stream_checkpoint(
+    subscription: dict[str, Any], event: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Suppress/crop a durable append checkpoint already seen live."""
+    identity = _stream_delivery_identity(event)
+    if identity is None:
+        return event
+    payload, text_stream = _stream_payload(event)
+    if not bool(payload.get("stream_checkpoint") or payload.get("streamCheckpoint")):
+        return event
+    mode = str(text_stream.get("mode") or payload.get("mode") or "append").strip().lower()
+    if mode != "append":
+        # Snapshot checkpoints may intentionally rewrite an earlier prefix and
+        # must remain authoritative.
+        return event
+    offsets = subscription.get("direct_stream_offsets")
+    delivered_end = int(offsets.get(identity) or 0) if isinstance(offsets, dict) else 0
+    try:
+        checkpoint_offset = max(
+            0,
+            int(text_stream.get("offset", payload.get("offset", 0)) or 0),
+        )
+    except (TypeError, ValueError):
+        checkpoint_offset = 0
+    text = next(
+        (
+            value
+            for value in (
+                text_stream.get("delta"),
+                text_stream.get("text"),
+                payload.get("delta"),
+                payload.get("text"),
+                payload.get("output"),
+            )
+            if isinstance(value, str)
+        ),
+        "",
+    )
+    checkpoint_end = checkpoint_offset + _utf16_length(text)
+    if delivered_end <= checkpoint_offset:
+        return event
+    if delivered_end >= checkpoint_end:
+        return None
+
+    # The live transport saw only a prefix. Deliver exactly the unseen suffix
+    # while retaining the checkpoint's canonical seq/identity.
+    projected = dict(event)
+    projected_payload = dict(payload)
+    suffix = _slice_utf16(text, delivered_end - checkpoint_offset)
+    projected_payload.update({"offset": delivered_end, "text": suffix, "delta": suffix})
+    if "output" in projected_payload:
+        projected_payload["output"] = suffix
+    projected_text_stream = dict(text_stream)
+    projected_text_stream.update({"offset": delivered_end, "text": suffix, "delta": suffix})
+    projected_payload["text_stream"] = projected_text_stream
+    projected["payload"] = projected_payload
+    projected["text_stream"] = dict(projected_text_stream)
+    return projected
+
+
 def was_terminal_delivered(subscription: dict[str, Any], event: dict[str, Any]) -> bool:
     identity = terminal_delivery_identity(event)
     if not identity:
@@ -131,7 +283,7 @@ def delta_event_for_subscription(
 ) -> dict[str, Any] | None:
     if was_terminal_delivered(subscription, event):
         return None
-    return event
+    return _project_stream_checkpoint(subscription, event)
 
 
 def payload_status(status: str) -> str:
