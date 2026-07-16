@@ -17,6 +17,15 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _async_handle(*, status: str, **identifiers: Any) -> dict[str, Any]:
+    return {
+        **identifiers,
+        "execution_mode": "async",
+        "status": status,
+        "persistent": True,
+    }
+
+
 def _files(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -241,12 +250,12 @@ async def dispatch_agent_async(
             result_summary="profile not found",
             completed_at=time_fn(),
         )
-        return {
-            "activity_id": activity_id,
-            "conversation_id": conversation_id,
-            "status": "failed",
-            "error": "profile not found",
-        }
+        return _async_handle(
+            status="failed",
+            activity_id=activity_id,
+            conversation_id=conversation_id,
+            error="profile not found",
+        )
 
     target_profile_context = _profile_context(profile, conversation_id=conversation_id)
 
@@ -277,12 +286,12 @@ async def dispatch_agent_async(
             result_summary=message,
             completed_at=time_fn(),
         )
-        return {
-            "activity_id": activity_id,
-            "conversation_id": conversation_id,
-            "status": "failed",
-            "error": message,
-        }
+        return _async_handle(
+            status="failed",
+            activity_id=activity_id,
+            conversation_id=conversation_id,
+            error=message,
+        )
 
     started_at = time_fn()
     await run_sqlite_io(
@@ -362,18 +371,18 @@ async def dispatch_agent_async(
             result_summary=message,
             completed_at=time_fn(),
         )
-        return {
-            "activity_id": activity_id,
-            "conversation_id": conversation_id,
-            "status": "failed",
-            "error": message,
-        }
+        return _async_handle(
+            status="failed",
+            activity_id=activity_id,
+            conversation_id=conversation_id,
+            error=message,
+        )
 
-    return {
-        "activity_id": activity_id,
-        "conversation_id": conversation_id,
-        "status": "running",
-    }
+    return _async_handle(
+        status="running",
+        activity_id=activity_id,
+        conversation_id=conversation_id,
+    )
 
 
 async def dispatch_team_async(
@@ -442,12 +451,12 @@ async def dispatch_team_async(
             result_summary=message,
             completed_at=time_fn(),
         )
-        return {
-            "activity_id": activity_id,
-            "mission_id": mission_id,
-            "status": "failed",
-            "error": message,
-        }
+        return _async_handle(
+            status="failed",
+            activity_id=activity_id,
+            mission_id=mission_id,
+            error=message,
+        )
 
     if not target_team_id:
         return await _fail("target_team_id required")
@@ -510,10 +519,11 @@ async def dispatch_team_async(
         target_mission_id=created_mission_id,
         started_at=time_fn(),
     )
-    return {
-        "activity_id": activity_id,
-        "mission_id": created_mission_id,
-    }
+    return _async_handle(
+        status="running",
+        activity_id=activity_id,
+        mission_id=created_mission_id,
+    )
 
 
 def _run_sync(coro, *, method_name: str):

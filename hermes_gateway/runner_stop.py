@@ -65,8 +65,13 @@ async def stop_gateway_runner(
             except Exception as _e:
                 logger.debug("process_registry.kill_all (%s) error: %s", phase, _e)
             try:
-                from tools.async_delegation import interrupt_all as _interrupt_async
-                _async_n = _interrupt_async(reason=f"gateway shutdown ({phase})")
+                from hermes_agent.application.subagent_execution_service import (
+                    subagent_execution_runtime,
+                )
+
+                _async_n = subagent_execution_runtime.interrupt_all(
+                    reason=f"gateway shutdown ({phase})"
+                )
                 if _async_n:
                     logger.info(
                         "Shutdown (%s): interrupted %d background delegation(s)",

@@ -517,10 +517,8 @@ class GatewayAgentTurnRuntime:
             # completions are already handled by the per-process watcher task
             # above, so we only inject watch-type events here.
             #
-            # Async-delegation completions ALSO ride this shared queue but are
-            # owned by GatewayProcessWatcherService.async_delegation_watcher,
-            # which covers both the idle and post-turn cases with a single
-            # consumer — so we leave them on the queue here.
+            # Subagent completion is persisted as typed Activity/Run state and
+            # never enters this process-notification queue.
             try:
                 from tools.process_registry import process_registry as _pr
                 _watch_events = drain_gateway_watch_events(_pr.completion_queue)

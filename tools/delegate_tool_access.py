@@ -126,7 +126,7 @@ def resolve_child_tool_access(
     )
     child_toolsets = strip_blocked_toolsets(child_toolsets)
 
-    if role == "orchestrator":
+    if role == "orchestrator" and "delegate_task" in parent_tool_names:
         child_tool_names.add("delegate_task")
         if "delegation" not in child_toolsets:
             child_toolsets.append("delegation")

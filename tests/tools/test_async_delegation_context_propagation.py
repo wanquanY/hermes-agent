@@ -3,127 +3,73 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any
-
-import pytest
 
 from agent.dovie_attribution import build_dovie_attribution_headers, dovie_child_run_overlay
 from channels.session_context import clear_session_vars, get_session_env, set_session_vars
-from tools import async_delegation as ad
-from tools.process_registry import process_registry
+from hermes_agent.application.subagent_execution_service import (
+    ExecutionMode,
+    SubagentExecutionRuntime,
+    SubagentExecutionService,
+    SubagentTaskSpec,
+)
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
-@pytest.fixture(autouse=True)
-def _clean_state(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("HERMES_DOVIE_PRODUCT_CONTEXT", raising=False)
-    ad._reset_for_tests()
-    while not process_registry.completion_queue.empty():
-        process_registry.completion_queue.get_nowait()
-    tokens = set_session_vars(dovie_product_context="")
-    clear_session_vars(tokens)
-    yield
-    ad._reset_for_tests()
-    while not process_registry.completion_queue.empty():
-        process_registry.completion_queue.get_nowait()
-    tokens = set_session_vars(dovie_product_context="")
-    clear_session_vars(tokens)
+def _runtime_plan(tmp_path):
+    service = SubagentExecutionService(
+        state_store=open_cli_session_store(tmp_path / "state.db"),
+        conversation_session_id="conversation",
+    )
+    plan = service.create_plan(
+        [
+            SubagentTaskSpec(
+                task_index=0,
+                goal="goal",
+                child_session_id="child",
+            )
+        ],
+        mode=ExecutionMode.ASYNC,
+    )
+    return SubagentExecutionRuntime(), service, plan
 
 
-def _drain_one(timeout: float = 5.0) -> dict[str, Any] | None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not process_registry.completion_queue.empty():
-            return process_registry.completion_queue.get_nowait()
-        time.sleep(0.02)
-    return None
+def _wait(runtime: SubagentExecutionRuntime) -> None:
+    deadline = time.monotonic() + 3
+    while runtime.active_count() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runtime.active_count() == 0
 
 
-def test_async_delegation_worker_reads_process_dovie_context_while_turn_active() -> None:
-    seen: dict[str, str] = {}
-    read = threading.Event()
-    tokens = set_session_vars(dovie_product_context="sentinel-async-single")
-
-    def runner() -> dict[str, Any]:
-        seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
-        assert seen["context"] == "sentinel-async-single"
-        read.set()
-        return {
-            "status": "completed",
-            "summary": "ok",
-            "api_calls": 1,
-            "duration_seconds": 0.1,
-            "model": "m",
-        }
-
+def test_async_runtime_carries_session_contextvars(tmp_path) -> None:
+    runtime, service, plan = _runtime_plan(tmp_path)
+    seen = {}
+    tokens = set_session_vars(dovie_product_context="sentinel-async")
     try:
-        result = ad.dispatch_async_delegation(
-            goal="g",
-            context=None,
-            toolsets=None,
-            role="leaf",
-            model="m",
-            session_key="",
-            runner=runner,
-            max_async_children=1,
-        )
-        assert result["status"] == "dispatched"
-        assert read.wait(timeout=2.0)
-        event = _drain_one()
-        assert event is not None
-        assert event["summary"] == "ok"
-        assert seen == {"context": "sentinel-async-single"}
-    finally:
-        clear_session_vars(tokens)
-
-
-def test_async_delegation_batch_worker_reads_process_dovie_context_while_turn_active() -> None:
-    seen: dict[str, str] = {}
-    read = threading.Event()
-    tokens = set_session_vars(dovie_product_context="sentinel-async-batch")
-
-    def runner() -> dict[str, Any]:
-        seen["context"] = get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
-        assert seen["context"] == "sentinel-async-batch"
-        read.set()
-        return {
-            "results": [
+        runtime.submit(
+            plan=plan,
+            service=service,
+            runner=lambda: (
+                seen.update(
+                    context=get_session_env("HERMES_DOVIE_PRODUCT_CONTEXT", "")
+                ),
                 {
-                    "task_index": 0,
-                    "status": "completed",
-                    "summary": "ok",
-                    "api_calls": 1,
-                    "duration_seconds": 0.1,
-                    "model": "m",
-                }
-            ],
-            "total_duration_seconds": 0.1,
-        }
-
-    try:
-        result = ad.dispatch_async_delegation_batch(
-            goals=["g"],
-            context=None,
-            toolsets=None,
-            role="leaf",
-            model="m",
-            session_key="",
-            runner=runner,
-            max_async_children=1,
+                    "results": [
+                        {"task_index": 0, "status": "completed", "summary": "ok"}
+                    ]
+                },
+            )[1],
+            interrupt_fn=None,
+            max_workers=1,
         )
-        assert result["status"] == "dispatched"
-        assert read.wait(timeout=2.0)
-        event = _drain_one()
-        assert event is not None
-        assert event["is_batch"] is True
-        assert event["results"][0]["summary"] == "ok"
-        assert seen == {"context": "sentinel-async-batch"}
+        _wait(runtime)
     finally:
         clear_session_vars(tokens)
+    assert seen == {"context": "sentinel-async"}
 
 
-def test_async_delegation_worker_receives_dovie_overlay_context() -> None:
-    seen: dict[str, str] = {}
-    read = threading.Event()
+def test_async_runtime_carries_dovie_child_overlay(tmp_path) -> None:
+    runtime, service, plan = _runtime_plan(tmp_path)
+    seen = {}
     tokens = set_session_vars(
         dovie_product_context=json.dumps(
             {
@@ -138,44 +84,74 @@ def test_async_delegation_worker_receives_dovie_overlay_context() -> None:
         )
     )
 
-    def runner() -> dict[str, Any]:
+    def runner():
         headers = build_dovie_attribution_headers()
-        seen["agent_run_id"] = headers["X-Dovie-Agent-Run-Id"]
-        seen["executing_agent_profile_id"] = headers[
-            "X-Dovie-Executing-Agent-Profile-Id"
-        ]
-        seen["agent_role"] = headers["X-Dovie-Agent-Role"]
-        read.set()
+        seen.update(
+            agent_run_id=headers["X-Dovie-Agent-Run-Id"],
+            executing_agent_profile_id=headers[
+                "X-Dovie-Executing-Agent-Profile-Id"
+            ],
+            agent_role=headers["X-Dovie-Agent-Role"],
+        )
         return {
-            "status": "completed",
-            "summary": "ok",
-            "api_calls": 1,
-            "duration_seconds": 0.1,
-            "model": "m",
+            "results": [
+                {"task_index": 0, "status": "completed", "summary": "ok"}
+            ]
         }
 
     try:
         with dovie_child_run_overlay("profile-child", "subagent"):
-            result = ad.dispatch_async_delegation(
-                goal="g",
-                context=None,
-                toolsets=None,
-                role="leaf",
-                model="m",
-                session_key="",
+            runtime.submit(
+                plan=plan,
+                service=service,
                 runner=runner,
-                max_async_children=1,
+                interrupt_fn=None,
+                max_workers=1,
             )
-        assert result["status"] == "dispatched"
-        assert read.wait(timeout=2.0)
-        event = _drain_one()
-        assert event is not None
-        assert event["summary"] == "ok"
+        _wait(runtime)
     finally:
         clear_session_vars(tokens)
-
     assert seen == {
         "agent_run_id": "root-run-async",
         "executing_agent_profile_id": "profile-child",
         "agent_role": "subagent",
     }
+
+
+def test_async_runtime_context_isolated_between_dispatches(tmp_path) -> None:
+    runtime_one, service_one, plan_one = _runtime_plan(tmp_path / "one")
+    runtime_two, service_two, plan_two = _runtime_plan(tmp_path / "two")
+    seen: list[str] = []
+    lock = threading.Lock()
+
+    def dispatch(runtime, service, plan, value):
+        def runner():
+            with lock:
+                seen.append(get_session_env("HERMES_SESSION_KEY", ""))
+            return {
+                "results": [
+                    {
+                        "task_index": 0,
+                        "status": "completed",
+                        "summary": value,
+                    }
+                ]
+            }
+
+        tokens = set_session_vars(session_key=value)
+        try:
+            runtime.submit(
+                plan=plan,
+                service=service,
+                runner=runner,
+                interrupt_fn=None,
+                max_workers=1,
+            )
+        finally:
+            clear_session_vars(tokens)
+
+    dispatch(runtime_one, service_one, plan_one, "one")
+    dispatch(runtime_two, service_two, plan_two, "two")
+    _wait(runtime_one)
+    _wait(runtime_two)
+    assert sorted(seen) == ["one", "two"]

@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 7 自动验收完成，正在进入阶段 8 Subagent 同步/异步统一生命周期。
-- 后续阶段：阶段 8-12 按计划连续实施，全部完成后统一用户验收。
+- 当前阶段：阶段 8 自动验收完成，正在进入阶段 9 Codex / Responses 深度吸收。
+- 后续阶段：阶段 9-12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -29,6 +29,8 @@
 | `phase-6-acceptance.md` | 阶段 6 稳定状态机、worker IPC、全量与 Doxie 联调证据 |
 | `phase-7-design.md` | 阶段 7 单一 approval gate、硬 deny、rule key、reason 与脱敏设计 |
 | `phase-7-acceptance.md` | 阶段 7 Approval 跨 surface、全量与 Doxie 联调证据 |
+| `phase-8-design.md` | 阶段 8 Subagent 统一 Activity/Run 生命周期、取消与有界上下文设计 |
+| `phase-8-acceptance.md` | 阶段 8 同步/异步、fan-out、spill、全量与 Doxie 联调证据 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -67,6 +69,10 @@ python scripts/upstream_absorption_baseline.py \
 - 阶段 7：A1-A5 已按当前架构吸收；审批编排归一为单一 gate，用户 deny 成为
   backend-independent hard boundary，rule key、拒绝原因和展示脱敏跨 surface 一致；
   Hermes 全量 29,016 passed、0 failed；Doxie contract/gates 退出码 0。
+- 阶段 8：C2、CB3、D2 已按当前架构吸收；同步/异步 delegation 共用唯一
+  `SubagentExecutionService`、Activity/Run 与 typed event，移除 synthetic completion message；
+  hook 与 fan-in summary 具备安全有界 spill；Hermes 阶段聚合 626 passed、0 failed，
+  全量 29,044 passed、0 failed；Doxie contract/gates 退出码 0。
 - 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
 各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核

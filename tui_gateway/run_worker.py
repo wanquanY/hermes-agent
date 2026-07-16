@@ -1013,6 +1013,14 @@ async def _main_async() -> int:
         await proto.run()
     finally:
         try:
+            from hermes_agent.application.subagent_execution_service import (
+                subagent_execution_runtime,
+            )
+
+            subagent_execution_runtime.interrupt_all(reason="worker shutdown")
+        except Exception:
+            pass
+        try:
             await backend.shutdown()
         except Exception:
             pass

@@ -93,7 +93,13 @@ async def test_dispatch_team_returns_activity_id_and_mission_id(tmp_path: Path) 
         time_fn=lambda: 123.0,
     )
 
-    assert result == {"activity_id": "act-1", "mission_id": "mission-1"}
+    assert result == {
+        "activity_id": "act-1",
+        "mission_id": "mission-1",
+        "execution_mode": "async",
+        "persistent": True,
+        "status": "running",
+    }
     assert db.activities.get("act-1")["status"] == "running"
 
 
@@ -132,6 +138,8 @@ async def test_dispatch_team_missing_team_id_marks_activity_failed(tmp_path: Pat
     assert result == {
         "activity_id": "act-1",
         "mission_id": "mission-1",
+        "execution_mode": "async",
+        "persistent": True,
         "status": "failed",
         "error": "target_team_id required",
     }

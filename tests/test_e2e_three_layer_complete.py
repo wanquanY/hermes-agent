@@ -499,6 +499,8 @@ async def test_e2e_async_agent_dispatch_three_layer(
     assert result == {
         "activity_id": "activity-dispatch",
         "conversation_id": "conversation-child",
+        "execution_mode": "async",
+        "persistent": True,
         "status": "running",
     }
     assert activity is not None

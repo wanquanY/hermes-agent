@@ -1410,6 +1410,10 @@ DEFAULT_CONFIG = {
                                  # "low", "minimal", "none" (empty = inherit parent's level)
         "max_concurrent_children": 3,  # max parallel children per batch; floor of 1 enforced, no ceiling
         "max_async_children": 3,  # max concurrent background (background=true) subagents; new dispatches rejected at capacity
+        # Full child summaries are safely spilled when the static ceiling or
+        # the parent's dynamic context-headroom budget is exceeded. 0 disables
+        # only this static ceiling; the dynamic budget remains authoritative.
+        "max_summary_chars": 24000,
         # Orchestrator role controls (see tools/delegate_tool.py:_get_max_spawn_depth
         # and _get_orchestrator_enabled).  Values are clamped to [1, 3] with a
         # warning log if out of range.

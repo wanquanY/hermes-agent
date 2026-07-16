@@ -410,7 +410,13 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
         time_fn=lambda: 100.0,
     )
 
-    assert result == {"activity_id": "act-C", "conversation_id": "conv-C-child", "status": "running"}
+    assert result == {
+        "activity_id": "act-C",
+        "conversation_id": "conv-C-child",
+        "execution_mode": "async",
+        "persistent": True,
+        "status": "running",
+    }
     assert harness.supervisor.sent_run_starts[0][0] == "profile:profile-worker"
     assert harness.supervisor.sent_run_starts[0][1] == "conv-C-child"
     assert harness.supervisor.sent_run_starts[0][2].prompt == "Investigate the failure"
@@ -519,7 +525,13 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
         parent_scope_key="conv-D",
     )
 
-    assert result == {"activity_id": "act-D", "mission_id": "mission-D"}
+    assert result == {
+        "activity_id": "act-D",
+        "mission_id": "mission-D",
+        "execution_mode": "async",
+        "persistent": True,
+        "status": "running",
+    }
     assert harness.db.activities.get("act-D")["target_mission_id"] == "mission-D"
 
     await _complete_dispatched_run(

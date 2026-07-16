@@ -566,12 +566,6 @@ async def start_gateway_runner(runner) -> bool:
     # turn so the agent kicks off the new chat.
     asyncio.create_task(session_handoff_runtime_for(self).handoff_watcher())
 
-    # Start background async-delegation watcher — drains completion events
-    # from delegate_task(background=true) subagents and injects each
-    # result back into its originating session as a new turn, covering the
-    # idle case where the subagent finishes with no agent turn running.
-    asyncio.create_task(process_watcher_for(self).async_delegation_watcher())
-
     logger.info("Press Ctrl+C to stop")
 
     return True

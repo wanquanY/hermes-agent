@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class GatewayProcessWatcherService:
-    """Background process notification and async delegation watcher service."""
+    """Background process notification watcher service."""
 
     def __init__(self, runner):
         self._runner = runner
@@ -116,53 +116,6 @@ class GatewayProcessWatcherService:
             await adapter.send(source.chat_id, synth_text, metadata=metadata)
         except Exception as e:
             logger.error("Watch notification delivery error: %s", e)
-
-    def enrich_async_delegation_routing(self, evt: dict) -> None:
-        """Fill platform/chat_id/thread_id/chat_type on an async-delegation event."""
-        if evt.get("platform"):
-            return
-        parsed = parse_session_key(evt.get("session_key", "") or "")
-        if not parsed:
-            return
-        evt["platform"] = parsed.get("platform", "")
-        evt["chat_type"] = parsed.get("chat_type", "")
-        evt["chat_id"] = parsed.get("chat_id", "")
-        if parsed.get("thread_id"):
-            evt["thread_id"] = parsed["thread_id"]
-
-    async def async_delegation_watcher(self, interval: float = 2.0) -> None:
-        """Drain async-delegation completions and inject them as new turns."""
-        await asyncio.sleep(3)
-        from tools.process_registry import process_registry as _pr
-
-        runner = self._runner
-        while runner._running:
-            try:
-                requeue = []
-                async_events = []
-                while not _pr.completion_queue.empty():
-                    try:
-                        evt = _pr.completion_queue.get_nowait()
-                    except Exception:
-                        break
-                    if evt.get("type") == "async_delegation":
-                        async_events.append(evt)
-                    else:
-                        requeue.append(evt)
-                for evt in requeue:
-                    _pr.completion_queue.put(evt)
-                for evt in async_events:
-                    self.enrich_async_delegation_routing(evt)
-                    synth_text = format_gateway_process_notification(evt)
-                    if not synth_text:
-                        continue
-                    try:
-                        await self.inject_watch_notification(synth_text, evt)
-                    except Exception as e:
-                        logger.error("Async delegation injection error: %s", e)
-            except Exception as e:
-                logger.debug("Async delegation watcher error: %s", e)
-            await asyncio.sleep(interval)
 
     async def run_process_watcher(self, watcher: dict) -> None:
         """Periodically check a background process and push updates to the user."""

@@ -366,11 +366,32 @@ def build_turn_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
+        try:
+            from tools.hook_output_spill import (
+                get_spill_config as _get_hook_spill_config,
+                spill_if_oversized as _spill_hook_context,
+            )
+
+            _hook_spill_config = _get_hook_spill_config()
+        except Exception:
+            _spill_hook_context = None
+            _hook_spill_config = None
         for r in _pre_results:
+            piece = ""
             if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
+                piece = str(r["context"])
             elif isinstance(r, str) and r.strip():
-                _ctx_parts.append(r)
+                piece = r
+            if not piece:
+                continue
+            if _spill_hook_context is not None:
+                piece = _spill_hook_context(
+                    piece,
+                    session_id=agent.session_id,
+                    source="pre_llm_call hook context",
+                    config=_hook_spill_config,
+                )
+            _ctx_parts.append(piece)
         if _ctx_parts:
             plugin_user_context = "\n\n".join(_ctx_parts)
     except Exception as exc:

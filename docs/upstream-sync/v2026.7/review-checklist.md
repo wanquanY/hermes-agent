@@ -120,3 +120,16 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 6 等待最终统
 
 机器门禁完成时间：2026-07-16。Hermes 29,016 passed、0 failed；静态、分层、
 账本/单一 owner 与 Doxie desktop `test:gates` 全绿。阶段 7 等待最终统一验收。
+
+## 阶段 8
+
+- [x] C2、CB3、D2 的 hook spill、delegation headroom 与执行模式 owner 已记录。
+- [x] sync/async 共用唯一 `SubagentExecutionService`、Activity/Run 和 terminal contract。
+- [x] async 单任务、fan-out、root/child cancel、backpressure、shutdown 与 orphan 恢复有行为证据。
+- [x] synthetic completion message、进程内业务 registry 与 completion queue 已移除。
+- [x] hook/summary spill 安全、有界、可清理，预算幂等且 fan-out 顺序稳定。
+- [x] Hermes 全量、静态/分层/zero-debt 与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。阶段聚合 626 passed；Hermes 29,044 passed、
+0 failed；Doxie Gateway contract 与 desktop `test:gates` 退出码 0。阶段 8 等待最终统一验收。
