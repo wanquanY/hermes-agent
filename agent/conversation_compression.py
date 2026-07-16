@@ -393,7 +393,21 @@ def compress_context(
     # The check itself sets ``agent._compression_warning`` so the
     # status-callback replay machinery still emits the warning to the user
     # the first time it would matter.
-    if not getattr(agent, "_compression_feasibility_checked", False):
+    _codex_app_server = getattr(agent, "api_mode", None) == "codex_app_server"
+    if _codex_app_server and not force:
+        from agent.codex_compaction import codex_app_server_compaction_mode
+
+        _codex_mode = codex_app_server_compaction_mode(agent)
+        if _codex_mode in {"native", "off"}:
+            logger.info(
+                "codex app-server compaction initiation skipped: mode=%s force=false",
+                _codex_mode,
+            )
+            _prompt = getattr(agent, "_cached_system_prompt", None)
+            if not _prompt:
+                _prompt = agent._build_system_prompt(system_message)
+            return messages, _prompt
+    if not _codex_app_server and not getattr(agent, "_compression_feasibility_checked", False):
         # Mark as checked only after the probe completes. If the check
         # raises (e.g. a fatal aux-context ValueError that aborts the
         # session), leaving the flag unset is harmless; a non-fatal
@@ -522,6 +536,20 @@ def compress_context(
     except BaseException:
         _release_lease()
         raise
+
+    if _codex_app_server:
+        try:
+            from agent.codex_compaction import compact_codex_app_server_context
+
+            return compact_codex_app_server_context(
+                agent,
+                messages,
+                system_message,
+                approx_tokens=approx_tokens,
+                task_id=task_id,
+            )
+        finally:
+            _release_lease()
 
     # Notify external memory provider before compression discards context
     memory_preservation_context = ""

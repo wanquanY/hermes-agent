@@ -1216,7 +1216,8 @@ def test_normalize_codex_response_marks_commentary_only_message_as_incomplete(mo
     )
 
     assert finish_reason == "incomplete"
-    assert "inspect the repository" in (assistant_message.content or "")
+    assert assistant_message.content == ""
+    assert "inspect the repository" in (assistant_message.reasoning or "")
 
 
 def test_normalize_codex_response_preserves_message_status_for_replay(monkeypatch):
@@ -1581,7 +1582,7 @@ def test_run_conversation_codex_continues_after_commentary_phase_message(monkeyp
     assert any(
         msg.get("role") == "assistant"
         and msg.get("finish_reason") == "incomplete"
-        and "inspect the repo structure" in (msg.get("content") or "")
+        and "inspect the repo structure" in (msg.get("reasoning") or "")
         for msg in result["messages"]
     )
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1" for msg in result["messages"])

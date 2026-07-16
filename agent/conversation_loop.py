@@ -925,6 +925,11 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    verification_attempts = 0
+    verification_requirement_prompt = ""
+    verification_grace_remaining = 0
+    pending_verification_response = None
+    preserved_verification_fallback = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Per-turn file-mutation verifier state.  Keyed by resolved path;
@@ -1151,10 +1156,20 @@ def run_conversation(
                         _injections.append(_fenced)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
+                if verification_requirement_prompt:
+                    _injections.append(
+                        "<hermes_runtime_context type=\"verification_requirement\">\n"
+                        f"{verification_requirement_prompt}\n"
+                        "</hermes_runtime_context>"
+                    )
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                    elif isinstance(_base, list):
+                        api_msg["content"] = list(_base) + [
+                            {"type": "text", "text": "\n\n".join(_injections)}
+                        ]
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
@@ -1519,6 +1534,15 @@ def run_conversation(
                     from unittest.mock import Mock
                     if isinstance(getattr(agent, "client", None), Mock):
                         _use_streaming = False
+
+                # Final provider boundary. Request overrides, hooks and future
+                # middleware must not be able to reintroduce route-unsafe replay
+                # fields after the initial build-time normalization.
+                if agent.api_mode == "codex_responses":
+                    api_kwargs = agent._get_transport().preflight_kwargs(
+                        api_kwargs,
+                        allow_stream=False,
+                    )
 
                 if _use_streaming:
                     _log_dovie_turn_stage(agent, "streaming-api-call-start")
@@ -4151,6 +4175,35 @@ def run_conversation(
                 agent._session_messages = messages
                 
                 # Continue loop for next response
+                try:
+                    from agent.verification_runtime import (
+                        completion_requirement_for_agent,
+                        hold_verification_stream,
+                        release_verification_stream,
+                    )
+
+                    next_verification = completion_requirement_for_agent(
+                        agent,
+                        attempt=verification_attempts,
+                    )
+                    if next_verification is not None:
+                        verification_requirement_prompt = next_verification.prompt()
+                        hold_verification_stream(agent)
+                    else:
+                        verification_requirement_prompt = ""
+                        release_verification_stream(agent, deliver=False)
+                except Exception:
+                    logger.warning("verification post-tool decision failed", exc_info=True)
+                if (
+                    verification_requirement_prompt
+                    and verification_grace_remaining > 0
+                    and (
+                        api_call_count >= agent.max_iterations
+                        or agent.iteration_budget.remaining <= 0
+                    )
+                ):
+                    agent._budget_grace_call = True
+                    verification_grace_remaining -= 1
                 continue
             
             else:
@@ -4460,6 +4513,64 @@ def run_conversation(
                     length_continue_retries = 0
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
+
+                # A final answer after workspace edits is accepted only when
+                # the application-owned aggregate has fresh passing evidence.
+                # The requirement is injected into the provider-bound copy of
+                # the original user input on the next iteration; canonical
+                # messages and state.db never receive a synthetic role event.
+                try:
+                    from agent.verification_runtime import (
+                        completion_requirement_for_agent,
+                    )
+
+                    verification_requirement = completion_requirement_for_agent(
+                        agent,
+                        attempt=verification_attempts,
+                    )
+                except Exception as verification_error:
+                    logger.warning(
+                        "verification completion guard failed",
+                        exc_info=verification_error,
+                    )
+                    verification_requirement = None
+                if verification_requirement is not None:
+                    verification_attempts += 1
+                    verification_requirement_prompt = verification_requirement.prompt()
+                    verification_grace_remaining = 1
+                    agent._budget_grace_call = True
+                    pending_verification_response = final_response
+                    final_response = None
+                    try:
+                        from agent.verification_runtime import (
+                            hold_verification_stream,
+                            release_verification_stream,
+                        )
+
+                        release_verification_stream(agent, deliver=False)
+                        hold_verification_stream(agent)
+                    except Exception:
+                        logger.debug("verification stream reset failed", exc_info=True)
+                    logger.info(
+                        "Rejected unverified final response: session=%s root=%s "
+                        "generation=%d status=%s attempt=%d/%d",
+                        getattr(agent, "session_id", None) or "none",
+                        verification_requirement.workspace_root,
+                        verification_requirement.edit_generation,
+                        verification_requirement.status,
+                        verification_requirement.attempt,
+                        verification_requirement.max_attempts,
+                    )
+                    agent._stream_needs_break = True
+                    continue
+
+                try:
+                    from agent.verification_runtime import release_verification_stream
+
+                    release_verification_stream(agent, deliver=True)
+                except Exception:
+                    logger.debug("verification stream release failed", exc_info=True)
+                pending_verification_response = None
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
@@ -4534,10 +4645,32 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
-    if final_response is None and (
+    budget_exhausted = (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
+    )
+    if (
+        final_response is None
+        and pending_verification_response
+        and budget_exhausted
+        and not interrupted
+        and _turn_exit_reason in {"unknown", "budget_exhausted"}
     ):
+        # Preserve the withheld model answer only when the verification
+        # continuation itself consumed the remaining budget. Provider errors,
+        # interrupts and unrelated exits retain their real terminal outcome.
+        final_response = pending_verification_response
+        _turn_exit_reason = (
+            f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        )
+        preserved_verification_fallback = True
+        try:
+            from agent.verification_runtime import release_verification_stream
+
+            release_verification_stream(agent, deliver=False)
+        except Exception:
+            pass
+    elif final_response is None and budget_exhausted:
         # Budget exhausted — ask the model for a summary via one extra
         # API call with tools stripped.  _handle_max_iterations injects a
         # user message and makes a single toolless request.
@@ -4587,6 +4720,17 @@ def run_conversation(
                     exc_info=True,
                 )
 
+    # A failed/interrupted/exhausted turn must never carry a withheld answer
+    # into the next user turn. Accepted and genuine budget-fallback paths have
+    # already released the hold above; this is the terminal safety net.
+    if getattr(agent, "_verification_stream_hold", False):
+        try:
+            from agent.verification_runtime import release_verification_stream
+
+            release_verification_stream(agent, deliver=False)
+        except Exception:
+            logger.debug("verification stream terminal cleanup failed", exc_info=True)
+
     # Determine if conversation completed successfully
     completed = final_response is not None and api_call_count < agent.max_iterations
 
@@ -4604,6 +4748,16 @@ def run_conversation(
     agent._drop_trailing_empty_response_scaffolding(messages)
     if interrupted:
         close_interrupted_tool_sequence(messages, final_response)
+    elif preserved_verification_fallback and (
+        not messages or messages[-1].get("role") != "assistant"
+    ):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": final_response,
+                "finish_reason": "verification_budget_fallback",
+            }
+        )
     agent._persist_session(messages, conversation_history)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────

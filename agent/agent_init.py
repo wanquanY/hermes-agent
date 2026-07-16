@@ -1247,6 +1247,32 @@ def init_agent(
     _agent_section = _agent_cfg.get("agent", {})
     if not isinstance(_agent_section, dict):
         _agent_section = {}
+    _verification_cfg = _agent_section.get("verification", {})
+    if not isinstance(_verification_cfg, dict):
+        _verification_cfg = {}
+    _verification_guard_raw = os.getenv(
+        "HERMES_VERIFICATION_COMPLETION_GUARD",
+        str(_verification_cfg.get("completion_guard", "auto")),
+    )
+    _verification_guard_token = str(_verification_guard_raw).strip().lower()
+    if _verification_guard_token in {"1", "true", "yes", "on"}:
+        agent.verification_completion_guard = True
+    elif _verification_guard_token in {"0", "false", "no", "off"}:
+        agent.verification_completion_guard = False
+    else:
+        agent.verification_completion_guard = "auto"
+    try:
+        agent.verification_max_attempts = max(
+            0,
+            int(
+                os.getenv(
+                    "HERMES_VERIFICATION_MAX_ATTEMPTS",
+                    str(_verification_cfg.get("max_attempts", 1)),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        agent.verification_max_attempts = 1
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
     # Universal task-completion guidance toggle.  Default True.  Surfaced
@@ -1339,6 +1365,11 @@ def init_agent(
     compression_in_place = str(
         _compression_cfg.get("in_place", False)
     ).lower() in {"true", "1", "yes"}
+    codex_app_server_auto_compaction = str(
+        _compression_cfg.get("codex_app_server_auto", "native") or "native"
+    ).strip().lower()
+    if codex_app_server_auto_compaction not in {"native", "hermes", "off"}:
+        codex_app_server_auto_compaction = "native"
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1572,6 +1603,7 @@ def init_agent(
         )
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
+    agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).

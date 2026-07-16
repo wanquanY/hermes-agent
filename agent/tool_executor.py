@@ -566,6 +566,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     )
                 except Exception as _ver_err:
                     logging.debug("file-mutation verifier record failed: %s", _ver_err)
+                try:
+                    from agent.verification_runtime import record_tool_verification
+
+                    record_tool_verification(
+                        agent,
+                        function_name,
+                        function_args,
+                        function_result,
+                        is_error=is_error,
+                    )
+                except Exception as _evidence_err:
+                    logging.debug("verification evidence record failed: %s", _evidence_err)
 
             if not blocked and agent.tool_progress_callback:
                 try:
@@ -1028,6 +1040,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
             except Exception as _ver_err:
                 logging.debug("file-mutation verifier record failed: %s", _ver_err)
+            try:
+                from agent.verification_runtime import record_tool_verification
+
+                record_tool_verification(
+                    agent,
+                    function_name,
+                    function_args,
+                    function_result,
+                    is_error=_is_error_result,
+                )
+            except Exception as _evidence_err:
+                logging.debug("verification evidence record failed: %s", _evidence_err)
 
         if not _execution_blocked and agent.tool_progress_callback:
             try:

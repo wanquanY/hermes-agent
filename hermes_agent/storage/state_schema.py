@@ -90,6 +90,36 @@ CREATE TABLE IF NOT EXISTS session_runtime_stability (
     updated_at REAL NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS verification_workspace_state (
+    scope_id TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    edit_generation INTEGER NOT NULL DEFAULT 0 CHECK (edit_generation >= 0),
+    last_verified_generation INTEGER NOT NULL DEFAULT -1,
+    last_event_id INTEGER,
+    changed_paths_json TEXT NOT NULL DEFAULT '[]',
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope_id, workspace_root)
+);
+
+CREATE TABLE IF NOT EXISTS verification_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_id TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    edit_generation INTEGER NOT NULL CHECK (edit_generation >= 0),
+    command TEXT NOT NULL,
+    canonical_command TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    evidence_scope TEXT NOT NULL CHECK (evidence_scope IN ('targeted', 'full')),
+    status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+    exit_code INTEGER NOT NULL,
+    cwd TEXT NOT NULL,
+    output_summary TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_evidence_scope_root
+    ON verification_evidence(scope_id, workspace_root, id DESC);
+
 -- Control-plane denormalized session index. One row per user-visible session.
 -- Status fields are a WRITE-TIME projection so the sidebar read path is a single
 -- indexed query (no recursive CTE / live merge / per-session approval / per-profile

@@ -217,6 +217,57 @@ class TestRunTurn:
         # turn_id propagated for downstream session-DB linkage
         assert r.turn_id == "turn-fake-001"
 
+    def test_manual_compaction_waits_for_typed_boundary_and_usage(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/started", threadId="thread-fake-001", turn={"id": "compact-1"}
+        )
+        client.queue_notification(
+            "item/completed",
+            threadId="thread-fake-001",
+            turnId="compact-1",
+            item={"id": "item-compact", "type": "contextCompaction"},
+        )
+        client.queue_notification(
+            "thread/tokenUsage/updated",
+            threadId="thread-fake-001",
+            tokenUsage={
+                "last": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 20,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 2,
+                    "totalTokens": 127,
+                }
+            },
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-1", "status": "completed"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert ("thread/compact/start", {"threadId": "thread-fake-001"}) in client.requests
+        assert result.compacted is True
+        assert result.interrupted is False
+        assert result.turn_id == "compact-1"
+        assert result.token_usage_last["totalTokens"] == 127
+
+    def test_manual_compaction_rejects_interrupted_terminal(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-2", "status": "interrupted"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert result.interrupted is True
+        assert result.error == "compact turn interrupted"
+
     def test_token_usage_notification_is_captured(self):
         client = FakeClient()
         client.queue_notification(

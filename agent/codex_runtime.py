@@ -734,6 +734,12 @@ def _forward_codex_tool_event(agent: Any, note: Dict[str, Any]) -> None:
                 logger.debug("codex tool_start forward raised", exc_info=True)
         return
     if method == "item/completed":
+        try:
+            from agent.verification_runtime import record_codex_item_verification
+
+            record_codex_item_verification(agent, item)
+        except Exception:
+            logger.debug("codex verification event forward raised", exc_info=True)
         cb = getattr(agent, "tool_complete_callback", None)
         if callable(cb):
             output = ""
@@ -803,6 +809,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
             agent,
             None,
             attribution=attribution,
+            update_context=True,
         )
         return {"model": usage_model} if usage_model else {}
 
@@ -855,7 +862,12 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     }
 
 
-def _record_codex_app_server_compaction(agent, turn) -> bool:
+def _record_codex_app_server_compaction(
+    agent,
+    turn,
+    *,
+    approx_tokens: int | None = None,
+) -> bool:
     """Project a Codex-owned compaction through the shared verdict seam."""
     if not getattr(turn, "compacted", False):
         return False
@@ -870,6 +882,7 @@ def _record_codex_app_server_compaction(agent, turn) -> bool:
         compressor.compression_count = int(
             getattr(compressor, "compression_count", 0) or 0
         ) + 1
+        compressor.last_compression_rough_tokens = int(approx_tokens or 0)
         recorder = getattr(compressor, "record_completed_compaction", None)
         if callable(recorder):
             recorder(used_fallback=False)
@@ -952,17 +965,9 @@ def run_codex_app_server_turn(
         # Without this the projector only emits messages on item/completed
         # and the run reads as "运行中" until codex finishes.
         #
-        # ``agent._stream_callback`` is what tui_gateway.prompt wires the
-        # per-turn ``_stream`` closure onto via run_conversation(stream_callback=...);
-        # it's set *before* our branch runs (conversation_loop line ~611)
-        # so we can capture the live reference at session-construct time.
-
-        def _stream_cb() -> Any:
-            cb = getattr(agent, "_stream_callback", None)
-            if callable(cb):
-                return cb
-            cb = getattr(agent, "stream_delta_callback", None)
-            return cb if callable(cb) else None
+        # ``agent._fire_stream_delta`` owns callback fan-out, sanitization and
+        # verification buffering for every runtime, so app-server events must
+        # enter through that same seam rather than calling a UI callback here.
 
         # Turn-local counter: per-turn number of agentMessage items we've
         # forwarded so far. Codex resets its turn state via turn/started so
@@ -972,24 +977,27 @@ def run_codex_app_server_turn(
         # the reconciliation pass sees a length mismatch and re-emits the
         # full text as a duplicate delta.
         _msg_state: Dict[str, int] = {"agent_message_started": 0}
+        from agent.transports.codex_event_projector import CodexEventProjector
+
+        _stream_projector = CodexEventProjector()
 
         def _forward_codex_stream(note: Dict[str, Any]) -> None:
             method = str(note.get("method", "") or "")
             params = note.get("params") or {}
+            stream_projection = _stream_projector.project(note)
 
             if method == "turn/started":
                 _msg_state["agent_message_started"] = 0
 
             # 1) Per-token streaming: pipe agentMessage delta text into hermes.
-            if method == "item/agentMessage/delta":
-                delta = params.get("delta")
-                if not isinstance(delta, str) or not delta:
-                    return
-                cb = _stream_cb()
-                if cb is None:
-                    return
+            if stream_projection.reasoning_delta:
+                agent._fire_reasoning_delta(stream_projection.reasoning_delta)
+                return
+
+            if stream_projection.content_delta:
+                delta = stream_projection.content_delta
                 try:
-                    cb(delta)
+                    agent._fire_stream_delta(delta)
                 except Exception:
                     logger.debug("codex stream forwarder raised", exc_info=True)
                 return
@@ -1002,15 +1010,13 @@ def run_codex_app_server_turn(
                 if str(item.get("type") or "") == "agentMessage":
                     _msg_state["agent_message_started"] += 1
                     if _msg_state["agent_message_started"] > 1:
-                        cb = _stream_cb()
-                        if cb is not None:
-                            try:
-                                cb("\n\n")
-                            except Exception:
-                                logger.debug(
-                                    "codex segment-separator forward raised",
-                                    exc_info=True,
-                                )
+                        try:
+                            agent._fire_stream_delta("\n\n")
+                        except Exception:
+                            logger.debug(
+                                "codex segment-separator forward raised",
+                                exc_info=True,
+                            )
 
             # NOTE: earlier revisions called stream_callback(None) here to
             # close the UI segment on every item/completed(agentMessage).
@@ -1078,6 +1084,12 @@ def run_codex_app_server_turn(
         )
     except Exception as exc:
         logger.exception("codex app-server turn failed")
+        try:
+            from agent.verification_runtime import release_verification_stream
+
+            release_verification_stream(agent, deliver=False)
+        except Exception:
+            logger.debug("codex verification stream failure cleanup failed", exc_info=True)
         # Crash → unconditionally drop the session so the next turn
         # respawns from scratch instead of reusing a dead client.
         try:
@@ -1106,6 +1118,88 @@ def run_codex_app_server_turn(
             )
         except Exception as exc:
             logger.warning("codex team context watermark persist failed: %r", exc)
+
+    # Codex owns its thread and completes tool use + final text in one RPC
+    # turn. If edits landed without fresh evidence, continue that same thread
+    # with one typed runtime requirement before projecting/persisting a final
+    # assistant message. The internal requirement is never added to Hermes'
+    # canonical transcript.
+    verification_attempts = 0
+    api_calls = 1
+    while not turn.interrupted and turn.error is None:
+        try:
+            from agent.verification_runtime import completion_requirement_for_agent
+
+            verification_requirement = completion_requirement_for_agent(
+                agent,
+                attempt=verification_attempts,
+            )
+        except Exception:
+            logger.warning("codex verification completion decision failed", exc_info=True)
+            verification_requirement = None
+        if verification_requirement is None:
+            break
+        verification_attempts += 1
+        logger.info(
+            "Rejected unverified Codex final response: session=%s root=%s "
+            "generation=%d status=%s attempt=%d/%d",
+            getattr(agent, "session_id", None) or "none",
+            verification_requirement.workspace_root,
+            verification_requirement.edit_generation,
+            verification_requirement.status,
+            verification_requirement.attempt,
+            verification_requirement.max_attempts,
+        )
+
+        # Account for the rejected protocol turn, but keep its plain assistant
+        # text out of the visible transcript. Tool-call/result projections are
+        # durable evidence and remain in order ahead of the continuation.
+        _record_codex_app_server_usage(agent, turn)
+        _record_codex_app_server_compaction(agent, turn)
+        try:
+            from agent.verification_runtime import (
+                hold_verification_stream,
+                release_verification_stream,
+            )
+
+            release_verification_stream(agent, deliver=False)
+            hold_verification_stream(agent)
+        except Exception:
+            logger.debug("codex verification stream reset failed", exc_info=True)
+        prior_tool_messages = [
+            message
+            for message in turn.projected_messages
+            if message.get("role") != "assistant" or message.get("tool_calls")
+        ]
+        prior_tool_iterations = int(turn.tool_iterations or 0)
+        try:
+            continued = agent._codex_session.run_turn(
+                user_input=verification_requirement.prompt(),
+                model_override=codex_app_server_turn_model(agent),
+            )
+        except Exception as exc:
+            logger.exception("codex verification continuation failed")
+            turn.error = f"Codex verification continuation failed: {exc}"
+            turn.interrupted = True
+            break
+        api_calls += 1
+        continued.projected_messages = prior_tool_messages + list(
+            continued.projected_messages or ()
+        )
+        continued.tool_iterations = prior_tool_iterations + int(
+            continued.tool_iterations or 0
+        )
+        turn = continued
+
+    try:
+        from agent.verification_runtime import release_verification_stream
+
+        release_verification_stream(
+            agent,
+            deliver=not turn.interrupted and turn.error is None,
+        )
+    except Exception:
+        logger.debug("codex verification stream release failed", exc_info=True)
 
     # If the turn signalled the underlying client is wedged (deadline
     # blown, post-tool watchdog tripped, OAuth refresh died, subprocess
@@ -1172,7 +1266,7 @@ def run_codex_app_server_turn(
     )
     usage_result = _record_codex_app_server_usage(agent, turn)
     _record_codex_app_server_compaction(agent, turn)
-    api_calls = 1
+    # ``api_calls`` includes bounded verification continuations above.
 
     # Now check the skill nudge AFTER iters were incremented — same
     # pattern the chat_completions path uses (line ~15432).
@@ -1283,6 +1377,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         if agent._interrupt_requested:
             raise InterruptedError("Agent interrupted before Codex stream retry")
         collected_output_items: list = []
+        from agent.responses_stream_projector import ResponsesStreamProjector
+
+        stream_projector = ResponsesStreamProjector()
         try:
             with active_client.responses.stream(**api_kwargs) as stream:
                 for event in stream:
@@ -1294,13 +1391,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     agent._touch_activity("receiving stream response")
                     if agent._interrupt_requested:
                         break
-                    event_type = getattr(event, "type", "")
-                    # Fire callbacks on text content deltas (suppress during tool calls)
-                    if "output_text.delta" in event_type or event_type == "response.output_text.delta":
-                        delta_text = getattr(event, "delta", "")
-                        if delta_text:
-                            agent._codex_streamed_text_parts.append(delta_text)
-                        if delta_text and not has_tool_calls:
+                    projection = stream_projector.project(event)
+                    event_type = projection.event_type
+                    if projection.content_delta:
+                        agent._codex_streamed_text_parts.append(projection.content_delta)
+                        if not has_tool_calls:
                             if not first_delta_fired:
                                 first_delta_fired = True
                                 if on_first_delta:
@@ -1308,23 +1403,17 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                                         on_first_delta()
                                     except Exception:
                                         pass
-                            agent._fire_stream_delta(delta_text)
-                    # Track tool calls to suppress text streaming
-                    elif "function_call" in event_type:
+                            agent._fire_stream_delta(projection.content_delta)
+                    elif projection.reasoning_delta:
+                        agent._fire_reasoning_delta(projection.reasoning_delta)
+                    if projection.has_tool_call:
                         has_tool_calls = True
-                    # Fire reasoning callbacks
-                    elif "reasoning" in event_type and "delta" in event_type:
-                        reasoning_text = getattr(event, "delta", "")
-                        if reasoning_text:
-                            agent._fire_reasoning_delta(reasoning_text)
                     # Collect completed output items — some backends
                     # (chatgpt.com/backend-api/codex) stream valid items
                     # via response.output_item.done but the SDK's
                     # get_final_response() returns an empty output list.
-                    elif event_type == "response.output_item.done":
-                        done_item = getattr(event, "item", None)
-                        if done_item is not None:
-                            collected_output_items.append(done_item)
+                    if projection.completed_item is not None:
+                        collected_output_items.append(projection.completed_item)
                     # Log non-completed terminal events for diagnostics
                     elif event_type in {"response.incomplete", "response.failed"}:
                         resp_obj = getattr(event, "response", None)
@@ -1467,12 +1556,14 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     collected_output_items: list = []
     collected_text_deltas: list = []
     has_tool_calls = False
+    from agent.responses_stream_projector import ResponsesStreamProjector
+
+    stream_projector = ResponsesStreamProjector()
     try:
         for event in stream_or_response:
             agent._touch_activity("receiving stream response")
-            event_type = getattr(event, "type", None)
-            if not event_type and isinstance(event, dict):
-                event_type = event.get("type")
+            projection = stream_projector.project(event)
+            event_type = projection.event_type
 
             # ``error`` SSE frames carry the provider's real failure
             # reason (subscription / quota / model-not-available /
@@ -1489,42 +1580,28 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
             # APIError-shaped exception so ``_summarize_api_error``
             # and the credential-pool entitlement detector see the
             # real text instead of a generic RuntimeError.
-            if event_type == "error":
-                err_message = getattr(event, "message", None)
-                if not err_message and isinstance(event, dict):
-                    err_message = event.get("message")
-                err_code = getattr(event, "code", None)
-                if not err_code and isinstance(event, dict):
-                    err_code = event.get("code")
-                err_param = getattr(event, "param", None)
-                if not err_param and isinstance(event, dict):
-                    err_param = event.get("param")
-                err_message = (err_message or "stream emitted error event").strip()
+            if projection.error_message:
                 from run_agent import _StreamErrorEvent
-                raise _StreamErrorEvent(err_message, code=err_code, param=err_param)
+                raise _StreamErrorEvent(
+                    projection.error_message.strip(),
+                    code=projection.error_code or None,
+                    param=projection.error_param or None,
+                )
 
             # Collect output items and text deltas for backfill
-            if event_type == "response.output_item.done":
-                done_item = getattr(event, "item", None)
-                if done_item is None and isinstance(event, dict):
-                    done_item = event.get("item")
-                if done_item is not None:
-                    collected_output_items.append(done_item)
-            elif event_type in {"response.output_text.delta",}:
-                delta = getattr(event, "delta", "")
-                if not delta and isinstance(event, dict):
-                    delta = event.get("delta", "")
-                if delta:
-                    collected_text_deltas.append(delta)
-            elif event_type and "function_call" in event_type:
+            if projection.completed_item is not None:
+                collected_output_items.append(projection.completed_item)
+            if projection.content_delta:
+                collected_text_deltas.append(projection.content_delta)
+            if projection.reasoning_delta:
+                agent._fire_reasoning_delta(projection.reasoning_delta)
+            if projection.has_tool_call:
                 has_tool_calls = True
 
             if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
                 continue
 
-            terminal_response = getattr(event, "response", None)
-            if terminal_response is None and isinstance(event, dict):
-                terminal_response = event.get("response")
+            terminal_response = projection.terminal_response
             if terminal_response is not None:
                 # Backfill empty output from collected stream events
                 _out = getattr(terminal_response, "output", None)

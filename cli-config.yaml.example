@@ -399,6 +399,13 @@ compression:
   # head messages, matching the pre-feature behaviour.
   protect_first_n: 3
 
+  # Codex app-server owns its actual thread context. "native" lets Codex
+  # compact automatically and disables duplicate Hermes threshold compaction;
+  # "hermes" lets Hermes thresholds initiate thread/compact/start; "off"
+  # disables automatic initiation. Manual /compress always uses native thread
+  # compaction and never calls the legacy auxiliary summarizer.
+  codex_app_server_auto: native
+
   # To pin a specific model/provider for compression summaries, use the
   # auxiliary section below (auxiliary.compression.provider / model).
 
@@ -574,6 +581,17 @@ skills:
 # Agent Behavior
 # =============================================================================
 agent:
+  # Persist edit/verification evidence per conversation + workspace. When a
+  # coding turn has unverified edits, Hermes may continue internally once to
+  # run a known test/lint/type/build command before accepting a final answer.
+  # The requirement is API-call-only and never appears as a fake transcript
+  # user/system message. "auto" enables it for coding/programmatic surfaces and
+  # disables it for human messaging surfaces; true/false force either policy.
+  # Set max_attempts to 0 to keep evidence without gating.
+  verification:
+    completion_guard: auto
+    max_attempts: 1
+
   # Maximum tool-calling iterations per conversation
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration

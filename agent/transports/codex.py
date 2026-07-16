@@ -9,6 +9,10 @@ from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
+from agent.responses_route_policy import (
+    ResponsesRoutePolicy,
+    resolve_responses_route_policy,
+)
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -23,33 +27,27 @@ class ResponsesApiTransport(ProviderTransport):
     # response are stamped with the endpoint that minted them. Plain class
     # attribute default; mutated on the instance, not the class.
     _last_issuer_kind: Optional[str] = None
+    _last_route_policy: Optional[ResponsesRoutePolicy] = None
 
     @property
     def api_mode(self) -> str:
         return "codex_responses"
 
+    def resolve_route_policy(self, params: Dict[str, Any]) -> ResponsesRoutePolicy:
+        return resolve_responses_route_policy(params)
+
     def _resolve_issuer_kind(self, params: Dict[str, Any]) -> str:
-        """Classify the current Responses endpoint from transport params."""
-        from agent.codex_responses_adapter import _classify_responses_issuer
-        return _classify_responses_issuer(
-            is_xai_responses=bool(params.get("is_xai_responses")),
-            is_github_responses=bool(params.get("is_github_responses")),
-            is_codex_backend=bool(params.get("is_codex_backend")),
-            base_url=params.get("base_url"),
-        )
+        return self.resolve_route_policy(params).issuer_kind
 
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
         """Convert OpenAI chat messages to Responses API input items."""
         from agent.codex_responses_adapter import _chat_messages_to_responses_input
-        issuer = self._resolve_issuer_kind(kwargs)
-        self._last_issuer_kind = issuer
+        policy = self.resolve_route_policy(kwargs)
+        self._last_route_policy = policy
+        self._last_issuer_kind = policy.issuer_kind
         return _chat_messages_to_responses_input(
             messages,
-            is_xai_responses=bool(kwargs.get("is_xai_responses")),
-            replay_encrypted_reasoning=bool(
-                kwargs.get("replay_encrypted_reasoning", True)
-            ),
-            current_issuer_kind=issuer,
+            route_policy=policy,
         )
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
@@ -111,7 +109,9 @@ class ResponsesApiTransport(ProviderTransport):
         # items captured from the response, and passed to the input
         # converter so foreign-issuer reasoning blocks in history are
         # dropped before the API rejects them.
-        issuer_kind = self._resolve_issuer_kind(params)
+        route_policy = self.resolve_route_policy(params)
+        issuer_kind = route_policy.issuer_kind
+        self._last_route_policy = route_policy
         self._last_issuer_kind = issuer_kind
 
         # Resolve reasoning effort
@@ -143,9 +143,7 @@ class ResponsesApiTransport(ProviderTransport):
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(
                 payload_messages,
-                is_xai_responses=is_xai_responses,
-                replay_encrypted_reasoning=replay_encrypted_reasoning,
-                current_issuer_kind=issuer_kind,
+                route_policy=route_policy,
             ),
             "tools": response_tools,
             "store": False,
@@ -326,13 +324,29 @@ class ResponsesApiTransport(ProviderTransport):
             return False
         return True
 
-    def preflight_kwargs(self, api_kwargs: Any, *, allow_stream: bool = False) -> dict:
+    def preflight_kwargs(
+        self,
+        api_kwargs: Any,
+        *,
+        allow_stream: bool = False,
+        route_policy: ResponsesRoutePolicy | None = None,
+        is_github_responses: bool = False,
+    ) -> dict:
         """Validate and sanitize Codex API kwargs before the call.
 
         Normalizes input items, strips unsupported fields, validates structure.
         """
         from agent.codex_responses_adapter import _preflight_codex_api_kwargs
-        return _preflight_codex_api_kwargs(api_kwargs, allow_stream=allow_stream)
+        policy = route_policy or self._last_route_policy
+        if policy is None:
+            policy = resolve_responses_route_policy(
+                {"is_github_responses": is_github_responses}
+            )
+        return _preflight_codex_api_kwargs(
+            api_kwargs,
+            allow_stream=allow_stream,
+            route_policy=policy,
+        )
 
     def map_finish_reason(self, raw_reason: str) -> str:
         """Map Codex response.status to OpenAI finish_reason.

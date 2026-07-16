@@ -775,6 +775,115 @@ class CodexAppServerSession:
         self._compaction_in_flight = False
         return result
 
+    def compact_thread(
+        self,
+        *,
+        turn_timeout: float = 600.0,
+        notification_poll_timeout: float = 0.25,
+    ) -> TurnResult:
+        """Run one native ``thread/compact/start`` operation to completion."""
+        result = TurnResult()
+        try:
+            self.ensure_started()
+        except (CodexAppServerError, TimeoutError) as exc:
+            result.error = self._format_error_with_stderr(
+                "codex app-server startup failed", exc
+            )
+            result.should_retire = True
+            return result
+
+        assert self._client is not None and self._thread_id is not None
+        result.thread_id = self._thread_id
+        self._interrupt_event.clear()
+        self._compaction_in_flight = True
+
+        try:
+            self._client.request(
+                "thread/compact/start",
+                {"threadId": self._thread_id},
+                timeout=10,
+            )
+        except (CodexAppServerError, TimeoutError) as exc:
+            result.error = self._format_error_with_stderr(
+                "thread/compact/start failed", exc
+            )
+            result.should_retire = isinstance(exc, TimeoutError)
+            self._compaction_in_flight = False
+            return result
+
+        deadline = time.monotonic() + max(float(turn_timeout), 0.1)
+        turn_complete = False
+        try:
+            while time.monotonic() < deadline and not turn_complete:
+                if self._interrupt_event.is_set():
+                    self._issue_interrupt(result.turn_id)
+                    result.interrupted = True
+                    result.error = result.error or "compact turn interrupted"
+                    break
+                if not self._client.is_alive():
+                    result.error = self._format_error_with_stderr(
+                        "codex app-server subprocess exited during compaction",
+                        tail_lines=20,
+                    )
+                    result.should_retire = True
+                    break
+
+                server_request = self._client.take_server_request(timeout=0)
+                if server_request is not None:
+                    self._handle_server_request(server_request)
+                    continue
+
+                note = self._client.take_notification(
+                    timeout=notification_poll_timeout
+                )
+                if note is None:
+                    continue
+                if self._on_event is not None:
+                    try:
+                        self._on_event(note)
+                    except Exception:
+                        logger.debug("on_event callback raised", exc_info=True)
+
+                _apply_protocol_model_notification(result, note)
+                _apply_token_usage_notification(result, note)
+                _apply_compaction_notification(result, note)
+                self._track_compaction_state(note)
+
+                method = str(note.get("method") or "")
+                params = note.get("params") or {}
+                if method == "turn/started":
+                    turn = params.get("turn") or {}
+                    result.turn_id = turn.get("id") or result.turn_id
+                elif method == "turn/completed":
+                    turn_complete = True
+                    turn = params.get("turn") or {}
+                    result.turn_id = turn.get("id") or result.turn_id
+                    status = str(turn.get("status") or "completed")
+                    if status == "interrupted":
+                        result.interrupted = True
+                        result.error = result.error or "compact turn interrupted"
+                    elif status != "completed":
+                        error = turn.get("error")
+                        message = (
+                            error.get("message")
+                            if isinstance(error, dict)
+                            else str(error or status)
+                        )
+                        result.error = self._format_error_with_stderr(
+                            f"compact turn ended status={status}", message
+                        )
+
+            if not turn_complete and not result.interrupted and not result.error:
+                self._issue_interrupt(result.turn_id)
+                result.interrupted = True
+                result.error = self._format_error_with_stderr(
+                    f"compact turn timed out after {turn_timeout}s"
+                )
+                result.should_retire = True
+        finally:
+            self._compaction_in_flight = False
+        return result
+
     # ---------- internals ----------
 
     def _issue_interrupt(self, turn_id: Optional[str]) -> None:

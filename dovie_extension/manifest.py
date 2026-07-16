@@ -201,6 +201,8 @@ REQUIRED_GATEWAY_METHODS = {
     "session.branch",
     "session.status",
     "session.usage",
+    "project.facts",
+    "verification.status",
     "activity.list",
     "activity.get",
     "activity.cancel",

@@ -64,6 +64,8 @@ class ProjectionResult:
     messages: list[dict] = field(default_factory=list)
     is_tool_iteration: bool = False
     final_text: Optional[str] = None  # Set when an agentMessage completes
+    content_delta: str = ""
+    reasoning_delta: str = ""
 
 
 class CodexEventProjector:
@@ -80,6 +82,11 @@ class CodexEventProjector:
         only `item/completed` and `turn/completed` materialize messages."""
         method = notification.get("method", "")
         params = notification.get("params", {}) or {}
+
+        if method == "item/agentMessage/delta":
+            return ProjectionResult(content_delta=str(params.get("delta") or ""))
+        if method == "item/reasoning/delta":
+            return ProjectionResult(reasoning_delta=str(params.get("delta") or ""))
 
         # We only materialize messages on `item/completed`. Streaming deltas
         # (`item/<type>/outputDelta`, `item/<type>/delta`) are display-only and

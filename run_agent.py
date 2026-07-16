@@ -4048,6 +4048,11 @@ class AIAgent:
                 text = text.lstrip("\n")
         if not text:
             return
+        if getattr(self, "_verification_stream_hold", False):
+            self._verification_stream_buffer = (
+                str(getattr(self, "_verification_stream_buffer", "") or "") + text
+            )
+            return
         callbacks = self._stream_delta_callbacks()
         delivered = False
         for cb in callbacks:

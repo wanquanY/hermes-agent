@@ -242,6 +242,8 @@ _READ_ONLY_DB_METHODS = frozenset(
         "session.most_recent",
         "session.status",
         "session.usage",
+        "project.facts",
+        "verification.status",
         "team_mission.conversation.list",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",

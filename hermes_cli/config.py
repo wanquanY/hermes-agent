@@ -651,6 +651,14 @@ DEFAULT_CONFIG = {
         #   "on"             — force the prompt posture everywhere.
         #   "off"            — disable entirely.
         "coding_context": "auto",
+        # Provider-independent edit verification. Successful file mutations
+        # open a new edit generation; the agent gets one bounded internal
+        # continuation when no fresh passing test/lint/type/build evidence
+        # exists. No synthetic transcript message is persisted.
+        "verification": {
+            "completion_guard": "auto",
+            "max_attempts": 1,
+        },
         # Staged inactivity warning: send a warning to the user at this
         # threshold before escalating to a full timeout.  The warning fires
         # once per run and does not interrupt the agent.  0 = disable warning.
@@ -961,6 +969,9 @@ DEFAULT_CONFIG = {
                                       # trigger to 85% when the global threshold is lower.
                                       # Codex caps these families at 272K, while direct API,
                                       # OpenRouter, and Copilot retain their larger windows.
+        "codex_app_server_auto": "native",  # native | hermes | off. Only the app-server
+                                      # owns its real thread context; manual compaction
+                                      # always uses thread/compact/start.
         "in_place": False,            # When True, compaction rewrites the message
                                       # list and rebuilds the system prompt WITHOUT
                                       # rotating the session id — the conversation

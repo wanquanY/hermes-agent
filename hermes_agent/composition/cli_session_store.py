@@ -35,6 +35,7 @@ from hermes_agent.application.team_mission_audit_service import TeamMissionAudit
 from hermes_agent.application.team_mission_maintenance_service import (
     TeamMissionMaintenanceService,
 )
+from hermes_agent.application.verification_service import VerificationService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.team_missions import TeamMissionReadModel
 from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
@@ -47,6 +48,7 @@ from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
+from hermes_agent.repositories.verification_repo import VerificationRepository
 from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
@@ -106,6 +108,10 @@ class CliSessionStore(TeamMissionStateMixin):
         )
         self.runtime_stability = SessionRuntimeStabilityService(
             RuntimeStabilityRepository(conn),
+            self._unit_of_work,
+        )
+        self.verification = VerificationService(
+            VerificationRepository(conn),
             self._unit_of_work,
         )
         self.profiles = AgentProfileRepoImpl(conn)
