@@ -45,7 +45,7 @@ U6,capability,5,absorb,close handoff 与 flush serialization,475922f2ce12;0b4225
 U7,capability,9,absorb,Copilot Responses replay 与 native compaction usage,b9146a47bc86;bce17bf6a2e2;8121dbb1660a;8c62a922965a;ec6982fbcf11,阶段9 route policy 与 usage 测试通过,本地缺少完整 route-specific replay 链,
 U8,capability,10,absorb,MCP ResourceLink EmbeddedResource Audio materialization,1d98f8dd95ab;284a3cd47e8b,阶段10多 content block 测试通过,本地会丢失这些 MCP content block,
 U9,capability,12,absorb,terminal cwd skill slug patch hunk 正确性,7e84d2b5a43d;370ebf2d3509;dfeedf613dcd,阶段12三项独立回归通过,本地缺少对应行为证明,
-U10,capability,11,absorb,automation claim 与 exactly-once,dabae386ef19;9b72995a1dc6;ffa525754da4;cd5371876117;9884b4faad0f,阶段11多进程 claim 与 JWKS 生命周期测试通过,需吸收到 Hermes automation 内核而非复制上游产品面,
+U10,capability,11,absorb,automation claim 与 exactly-once,dabae386ef19;9b72995a1dc6;ffa525754da4;cd5371876117;9884b4faad0f,阶段11多进程 claim/heartbeat 通过；Chronos 缺席按设计 skip-with-reason,需吸收到 Hermes automation 内核而非复制上游产品面,
 U11,capability,11,absorb,active-work drain 与 quiesce,1da89a5f3dd4;8f18fa104f1b;021ee3454646;915f1bf1bc2f,阶段11 API TUI worker 共用 drain 测试通过,本地需要 transport-neutral 生命周期协议,
 U12,capability,12,absorb,mixed tool batch segmentation,271a9d8ec6ad,阶段12风险分段并发与排序测试通过,必须在 R1 与 U2 后吸收,
 D1,decision,2,equivalent,MoA 保持工具形态并统一计量,architecture-decision,阶段2实现符合已批准决策,架构决策已经在执行计划冻结,

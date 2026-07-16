@@ -27,6 +27,7 @@ from cron.jobs import (
     get_job,
     list_jobs,
     mark_job_run,
+    new_fire_claim_owner,
     parse_schedule,
     pause_job,
     remove_job,
@@ -357,15 +358,21 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
         from cron.scheduler import run_one_job
 
         # At-most-once claim: bail without running if a tick/other fire owns it.
-        if not claim_job_for_fire(job_id):
+        owner = new_fire_claim_owner()
+        if not claim_job_for_fire(job_id, owner=owner):
             return {"claimed": False, "success": False,
                     "error": "Job is already being fired by the scheduler; not run again."}
 
         # run_one_job records last_run_at/last_status via mark_job_run (which
         # also clears the fire claim) and returns True iff it processed the job.
-        processed = run_one_job(job)
+        claimed_job = dict(job)
+        claimed_job["_run_claim_owner"] = owner
+        claimed_job["run_claim"] = {"by": owner}
+        processed = run_one_job(claimed_job)
         refreshed = get_job(job_id) or {}
-        ok = refreshed.get("last_status") == "ok"
+        # A completed one-shot can be removed by its repeat contract; in that
+        # case the owner-bound run result is the terminal source of truth.
+        ok = bool(processed) if not refreshed else refreshed.get("last_status") == "ok"
         return {
             "claimed": True,
             "success": bool(processed and ok),
@@ -375,7 +382,7 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
         try:
-            mark_job_run(job_id, False, str(e))
+            mark_job_run(job_id, False, str(e), expected_owner=locals().get("owner"))
         except Exception:
             pass
         return {"claimed": True, "success": False, "error": str(e)}

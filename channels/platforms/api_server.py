@@ -91,6 +91,11 @@ from channels.platforms.api_server_support import (
     security_headers_middleware,
 )
 from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_agent.application.active_work_registry import (
+    ActiveWorkState,
+    WorkRejected,
+    get_process_active_work_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
+        self._active_work_registry = get_process_active_work_registry()
         extra = config.extra or {}
         self._host: str = extra.get("host", os.getenv("API_SERVER_HOST", DEFAULT_HOST))
         raw_port = extra.get("port")
@@ -157,8 +163,10 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         # the cap. Bounds CPU / memory / upstream-LLM-quota exhaustion
         # from a request flood (#7483).
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()
-        # Number of in-flight runs on the non-streaming chat/responses paths
-        # (the /v1/runs path tracks its own in-flight set via _run_streams).
+        # Number of in-flight runs on the non-streaming chat/responses paths.
+        # Structured /v1/runs executions are tracked by _active_run_tasks;
+        # _run_streams can outlive execution while clients consume retained
+        # terminal events and therefore is not a liveness signal.
         self._inflight_agent_runs: int = 0
 
     @staticmethod
@@ -883,6 +891,12 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
             fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
+            except WorkRejected as exc:
+                return web.json_response(
+                    _openai_error(str(exc), err_type="server_error", code=exc.code),
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
@@ -892,6 +906,12 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         else:
             try:
                 result, usage = await _compute_completion()
+            except WorkRejected as exc:
+                return web.json_response(
+                    _openai_error(str(exc), err_type="server_error", code=exc.code),
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
@@ -1244,13 +1264,25 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         The cap bounds total in-flight agent activity across every
         agent-serving endpoint: the non-streaming chat/responses paths
         (tracked by ``_inflight_agent_runs``) plus the ``/v1/runs`` streaming
-        path (tracked by ``_run_streams``). A configured value of 0 disables
-        the cap entirely.
+        path (tracked by ``_active_run_tasks``). Retained SSE queues are not
+        counted because they can outlive execution. A configured value of 0
+        disables the cap entirely.
         """
+        if self._active_work_registry.state is not ActiveWorkState.ACCEPTING:
+            return web.json_response(
+                _openai_error(
+                    "Runtime is draining and is not accepting new work",
+                    err_type="server_error",
+                    code=WorkRejected.code,
+                ),
+                status=503,
+                headers={"Retry-After": "1"},
+            )
+
         limit = self._max_concurrent_runs
         if limit <= 0:
             return None
-        inflight = self._inflight_agent_runs + len(self._run_streams)
+        inflight = self._inflight_agent_runs + len(self._active_run_tasks)
         if inflight >= limit:
             return web.json_response(
                 _openai_error(
@@ -1320,6 +1352,26 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        runtime_agent_ref = agent_ref if agent_ref is not None else [None]
+
+        def _cancel_api_work() -> None:
+            agent = runtime_agent_ref[0]
+            if agent is not None:
+                try:
+                    agent.interrupt("API runtime drain timeout")
+                except Exception:
+                    logger.debug("API drain interrupt failed", exc_info=True)
+            if task is not None and not task.done():
+                loop.call_soon_threadsafe(task.cancel)
+
+        work_lease = self._active_work_registry.register(
+            kind="api_agent_run",
+            surface="api_server",
+            work_id=f"api:{session_id or uuid.uuid4().hex}:{uuid.uuid4().hex}",
+            metadata={"session_id": session_id or ""},
+            cancel=_cancel_api_work,
+        )
 
         def _run():
             from channels.session_context import clear_session_vars
@@ -1339,8 +1391,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                 )
-                if agent_ref is not None:
-                    agent_ref[0] = agent
+                runtime_agent_ref[0] = agent
                 effective_task_id = session_id or str(uuid.uuid4())
                 result = agent.run_conversation(
                     user_message=user_message,
@@ -1367,6 +1418,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
             return await loop.run_in_executor(None, _run)
         finally:
             self._inflight_agent_runs -= 1
+            work_lease.release()
 
     # ------------------------------------------------------------------
     # BasePlatformAdapter interface

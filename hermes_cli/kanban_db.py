@@ -3813,6 +3813,10 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    skipped_locked: bool = False
+    """True when another process owns this board's dispatcher tick."""
+    dispatch_lock_error: Optional[str] = None
+    """Structured fail-closed reason when the lock primitive/path failed."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -4803,6 +4807,50 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
 
 
 def dispatch_once(
+    conn: sqlite3.Connection,
+    *,
+    spawn_fn=None,
+    ttl_seconds: Optional[int] = None,
+    dry_run: bool = False,
+    max_spawn: Optional[int] = None,
+    max_in_progress: Optional[int] = None,
+    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    stale_timeout_seconds: int = 0,
+    board: Optional[str] = None,
+) -> DispatchResult:
+    """Run one dispatcher tick under a non-blocking board single-writer lease."""
+
+    from hermes_cli.kanban_dispatch_lock import dispatch_tick_lock
+
+    try:
+        db_path = kanban_db_path(board=board)
+    except Exception as exc:
+        reason = f"board_path_error:{type(exc).__name__}:{exc}"
+        _log.error("kanban dispatch failed closed: %s", reason)
+        return DispatchResult(skipped_locked=True, dispatch_lock_error=reason)
+
+    with dispatch_tick_lock(db_path) as decision:
+        if not decision.acquired:
+            return DispatchResult(
+                skipped_locked=True,
+                dispatch_lock_error=(
+                    decision.reason if decision.reason != "contended" else None
+                ),
+            )
+        return _dispatch_once_locked(
+            conn,
+            spawn_fn=spawn_fn,
+            ttl_seconds=ttl_seconds,
+            dry_run=dry_run,
+            max_spawn=max_spawn,
+            max_in_progress=max_in_progress,
+            failure_limit=failure_limit,
+            stale_timeout_seconds=stale_timeout_seconds,
+            board=board,
+        )
+
+
+def _dispatch_once_locked(
     conn: sqlite3.Connection,
     *,
     spawn_fn=None,

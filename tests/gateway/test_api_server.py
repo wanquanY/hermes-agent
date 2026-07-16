@@ -24,6 +24,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.api_server import (
     APIServerAdapter,
@@ -427,15 +428,21 @@ class TestConcurrencyCap:
         assert resp.status == 429
         assert resp.headers.get("Retry-After")
 
-    def test_cap_counts_both_buckets(self):
-        # /v1/runs (tracked by _run_streams) + chat/responses (inflight)
+    def test_cap_counts_only_live_execution_buckets(self):
+        # /v1/runs tasks + chat/responses executions are both live work.
         adapter = _make_adapter()
         adapter._max_concurrent_runs = 4
         adapter._inflight_agent_runs = 2
-        adapter._run_streams = {"r1": object(), "r2": object()}
+        adapter._active_run_tasks = {"r1": object(), "r2": object()}
         resp = adapter._concurrency_limited_response()
         assert resp is not None
         assert resp.status == 429
+
+    def test_retained_streams_do_not_consume_execution_capacity(self):
+        adapter = _make_adapter()
+        adapter._max_concurrent_runs = 1
+        adapter._run_streams = {"completed": object()}
+        assert adapter._concurrency_limited_response() is None
 
     def test_zero_disables_cap(self):
         adapter = _make_adapter()
@@ -457,7 +464,9 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
     if cors_origins is not None:
         extra["cors_origins"] = cors_origins
     config = PlatformConfig(enabled=True, extra=extra)
-    return APIServerAdapter(config)
+    adapter = APIServerAdapter(config)
+    adapter._active_work_registry = ActiveWorkRegistry()
+    return adapter
 
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:

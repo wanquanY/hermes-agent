@@ -162,3 +162,20 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 6 等待最终统
 机器门禁完成时间：2026-07-16。Hermes 1585 files、29,104 passed、0 failed；
 observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` 退出码 0。
 阶段 10 等待最终统一验收。
+
+## 阶段 11
+
+- [x] U10、U11、RT3 的 execution claim、single writer 与 active-work owner 已记录。
+- [x] Cron claim/heartbeat/completion 全部 compare owner，recurring next-run 与 claim 原子推进。
+- [x] drain timeout 保留执行 owner，不把仍可能产生副作用的 Python 线程伪装成 terminal。
+- [x] 同 board Kanban dispatcher 单 writer、不同 board 并行，锁异常 fail closed。
+- [x] Gateway、API、cron 与 TUI worker 共用 active-work registry，drain 后结构化拒绝新 work。
+- [x] `deadline_expired` 与 cancel 后 remaining 分离，clean marker 不再覆盖非优雅 shutdown。
+- [x] API terminal run 与 SSE retention 解耦，迟到客户端不影响进程 liveness。
+- [x] Chronos JWKS 因当前无 provider 按 `skip-with-reason` 关闭，未引入 dead code。
+- [x] Hermes 全量、静态/分层/observability 与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 1,589 files、29,129 passed、0 failed；
+observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` 退出码 0。
+阶段 11 等待最终统一验收。

@@ -9,6 +9,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from hermes_agent.application.active_work_registry import WorkRejected
+
 try:
     from aiohttp import web
 except ImportError:  # pragma: no cover - optional dependency gate
@@ -835,6 +837,12 @@ class APIServerResponsesMixin:
             )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
+            except WorkRejected as exc:
+                return web.json_response(
+                    _openai_error(str(exc), err_type="server_error", code=exc.code),
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
@@ -844,6 +852,12 @@ class APIServerResponsesMixin:
         else:
             try:
                 result, usage = await _compute_response()
+            except WorkRejected as exc:
+                return web.json_response(
+                    _openai_error(str(exc), err_type="server_error", code=exc.code),
+                    status=503,
+                    headers={"Retry-After": "1"},
+                )
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(

@@ -9,6 +9,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from hermes_agent.application.active_work_registry import WorkRejected
+
 try:
     from aiohttp import web
 except ImportError:  # pragma: no cover - optional dependency gate
@@ -174,6 +176,51 @@ class APIServerRunsMixin:
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
         created_at = time.time()
+        run_control: Dict[str, Any] = {"agent": None, "task": None}
+
+        def _persist_drain_timeout() -> None:
+            def _persist() -> None:
+                self._set_run_status(
+                    run_id,
+                    "cancelled",
+                    error="runtime drain timeout",
+                    last_event="run.cancelled",
+                )
+                q.put_nowait({
+                    "event": "run.cancelled",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "reason": "runtime_drain_timeout",
+                })
+
+            loop.call_soon_threadsafe(_persist)
+
+        def _cancel_run_for_drain() -> None:
+            agent = run_control.get("agent")
+            if agent is not None:
+                try:
+                    agent.interrupt("API runtime drain timeout")
+                except Exception:
+                    logger.debug("run %s drain interrupt failed", run_id, exc_info=True)
+            task = run_control.get("task")
+            if task is not None and not task.done():
+                loop.call_soon_threadsafe(task.cancel)
+
+        try:
+            work_lease = self._active_work_registry.register(
+                kind="api_structured_run",
+                surface="api_server",
+                work_id=f"api-run:{run_id}",
+                metadata={"run_id": run_id, "session_id": session_id},
+                persist_timeout=_persist_drain_timeout,
+                cancel=_cancel_run_for_drain,
+            )
+        except WorkRejected as exc:
+            return web.json_response(
+                _openai_error(str(exc), code=exc.code),
+                status=503,
+                headers={"Retry-After": "1"},
+            )
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = created_at
         self._run_approval_sessions[run_id] = approval_session_key
@@ -213,6 +260,7 @@ class APIServerRunsMixin:
                     gateway_session_key=gateway_session_key,
                 )
                 self._active_run_agents[run_id] = agent
+                run_control["agent"] = agent
 
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
                     event = dict(approval_data or {})
@@ -369,8 +417,17 @@ class APIServerRunsMixin:
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                work_lease.release()
 
-        task = asyncio.create_task(_run_and_close())
+        try:
+            task = asyncio.create_task(_run_and_close())
+        except Exception:
+            work_lease.release()
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            self._run_approval_sessions.pop(run_id, None)
+            raise
+        run_control["task"] = task
         self._active_run_tasks[run_id] = task
         try:
             self._background_tasks.add(task)

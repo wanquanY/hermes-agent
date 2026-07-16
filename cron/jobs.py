@@ -13,7 +13,10 @@ import tempfile
 import threading
 import os
 import re
+import socket
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -23,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 from hermes_time import now as _hermes_now
 from utils import atomic_replace
+from hermes_agent.storage.process_lock import exclusive_process_lock
 
 try:
     from croniter import croniter
@@ -41,9 +45,68 @@ JOBS_FILE = CRON_DIR / "jobs.json"
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
 # Required when tick() runs jobs in parallel threads — without this,
 # concurrent mark_job_run / advance_next_run calls can clobber each other.
-_jobs_file_lock = threading.Lock()
+_jobs_file_lock = threading.RLock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+
+
+def _jobs_lock_file() -> Path:
+    return JOBS_FILE.with_name(".jobs.lock")
+
+
+@contextmanager
+def _jobs_lock():
+    """Serialize jobs.json read-modify-write cycles across threads/processes."""
+
+    with _jobs_file_lock:
+        with exclusive_process_lock(_jobs_lock_file()) as lease:
+            if not lease.acquired:  # blocking acquisition must never contend
+                raise RuntimeError("cron jobs lock was not acquired")
+            yield
+
+
+def new_fire_claim_owner() -> str:
+    """Return a unique, host-identifiable execution-attempt owner."""
+
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
+
+
+def _claim_time(claim: Any) -> Optional[datetime]:
+    if not isinstance(claim, dict):
+        return None
+    raw = claim.get("at")
+    if not raw:
+        return None
+    try:
+        return _ensure_aware(datetime.fromisoformat(str(raw)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_claim_is_fresh(claim: Any, *, ttl_seconds: float) -> bool:
+    claimed_at = _claim_time(claim)
+    if claimed_at is None:
+        # An unreadable claim is not proof of a dead owner. Fail closed to
+        # avoid duplicate side effects and require operator repair.
+        return isinstance(claim, dict)
+    return (_hermes_now() - claimed_at).total_seconds() <= max(1.0, ttl_seconds)
+
+
+def _job_running_in_this_process(job_id: str) -> bool:
+    """Fail closed when the scheduler running-set cannot prove a job dead."""
+
+    try:
+        from cron.scheduler import get_running_job_ids
+
+        return job_id in get_running_job_ids()
+    except Exception:
+        logger.warning(
+            "Cron running-set liveness check failed for job %r; keeping its "
+            "claim to avoid duplicating a possibly live execution",
+            job_id,
+            exc_info=True,
+        )
+        return True
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
@@ -664,9 +727,10 @@ def create_job(
         "profile": normalized_profile,
     }
 
-    jobs = load_jobs()
-    jobs.append(job)
-    save_jobs(jobs)
+    with _jobs_lock():
+        jobs = load_jobs()
+        jobs.append(job)
+        save_jobs(jobs)
 
     return job
 
@@ -727,6 +791,11 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
 
 
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    with _jobs_lock():
+        return _update_job_locked(job_id, updates)
+
+
+def _update_job_locked(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
     jobs = load_jobs()
     for i, job in enumerate(jobs):
@@ -841,11 +910,15 @@ def remove_job(job_id: str) -> bool:
     if not job:
         return False
     canonical_id = job["id"]
-    jobs = load_jobs()
-    original_len = len(jobs)
-    jobs = [j for j in jobs if j["id"] != canonical_id]
+    with _jobs_lock():
+        jobs = load_jobs()
+        original_len = len(jobs)
+        jobs = [j for j in jobs if j["id"] != canonical_id]
+        if len(jobs) < original_len:
+            save_jobs(jobs)
+        else:
+            return False
     if len(jobs) < original_len:
-        save_jobs(jobs)
         # Clean up output directory to prevent orphaned dirs accumulating
         job_output_dir = OUTPUT_DIR / canonical_id
         if job_output_dir.exists():
@@ -856,7 +929,8 @@ def remove_job(job_id: str) -> bool:
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None,
+                 expected_owner: Optional[str] = None) -> bool:
     """
     Mark a job as having been run.
     
@@ -866,11 +940,32 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
     """
-    with _jobs_file_lock:
+    with _jobs_lock():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                claim = job.get("run_claim")
+                if isinstance(claim, dict):
+                    if not expected_owner or claim.get("by") != expected_owner:
+                        logger.warning(
+                            "mark_job_run rejected stale/unowned completion for %s "
+                            "(expected=%r actual=%r)",
+                            job_id,
+                            expected_owner,
+                            claim.get("by"),
+                        )
+                        return False
+                elif expected_owner:
+                    logger.warning(
+                        "mark_job_run rejected completion for %s because owned "
+                        "claim %r is no longer current",
+                        job_id,
+                        expected_owner,
+                    )
+                    return False
                 now = _hermes_now().isoformat()
+                job.pop("run_claim", None)
+                job.pop("drain_timeout_at", None)
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
@@ -890,7 +985,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         # Remove the job (limit reached)
                         jobs.pop(i)
                         save_jobs(jobs)
-                        return
+                        return True
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
@@ -925,9 +1020,10 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                     job["state"] = "scheduled"
 
                 save_jobs(jobs)
-                return
+                return True
 
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
+        return False
 
 
 def advance_next_run(job_id: str) -> bool:
@@ -942,7 +1038,7 @@ def advance_next_run(job_id: str) -> bool:
 
     Returns True if next_run_at was advanced, False otherwise.
     """
-    with _jobs_file_lock:
+    with _jobs_lock():
         jobs = load_jobs()
         for job in jobs:
             if job["id"] == job_id:
@@ -967,7 +1063,7 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     the job is fast-forwarded to the next future run instead of firing
     immediately.  This prevents a burst of missed jobs on gateway restart.
     """
-    with _jobs_file_lock:
+    with _jobs_lock():
         return _get_due_jobs_locked()
 
 
@@ -982,6 +1078,24 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     for job in jobs:
         if not job.get("enabled", True):
             continue
+
+        claim = job.get("run_claim")
+        if isinstance(claim, dict):
+            ttl = float(claim.get("ttl_seconds") or 300)
+            if _run_claim_is_fresh(claim, ttl_seconds=ttl):
+                continue
+            if _job_running_in_this_process(str(job.get("id") or "")):
+                logger.info(
+                    "Job '%s' has an expired claim but is still running in "
+                    "this process; keeping the execution owner",
+                    job.get("name", job.get("id", "?")),
+                )
+                continue
+            logger.warning(
+                "Job '%s' reclaiming expired execution owner %r",
+                job.get("name", job.get("id", "?")),
+                claim.get("by"),
+            )
 
         next_run = job.get("next_run_at")
         if not next_run:
@@ -1152,7 +1266,7 @@ def rewrite_skill_refs(
     if not consolidated and not pruned_set:
         return {"rewrites": [], "jobs_updated": 0, "jobs_scanned": 0}
 
-    with _jobs_file_lock:
+    with _jobs_lock():
         jobs = load_jobs()
         rewrites: List[Dict[str, Any]] = []
         changed = False
@@ -1206,17 +1320,86 @@ def rewrite_skill_refs(
         }
 
 
-# --- claim_job_for_fire backfill (single-machine no-op) ---
-# Backfilled because the dovie fork hasn't absorbed upstream `b01eee0c7
-# feat(cron): store-level CAS claim for multi-machine at-most-once fire`
-# (a multi-machine concern dovie's single-host desktop runtime doesn't have)
-# but DID absorb `bba6718b5 fix(cron): execute job immediately on
-# action='run'`, which imports claim_job_for_fire as its at-most-once gate.
-# On a single host the CAS is trivially satisfied — we always win.
-def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
-    """Single-machine no-op CAS claim. Always wins.
+def claim_job_for_fire(
+    job_id: str,
+    *,
+    claim_ttl_seconds: int = 300,
+    owner: Optional[str] = None,
+) -> bool:
+    """Atomically claim one execution attempt and advance recurring schedule."""
 
-    Multi-machine gateways need the real upstream implementation; absorb
-    `b01eee0c7` if/when dovie deploys hermes across multiple replicas.
+    ttl = max(1, int(claim_ttl_seconds))
+    stable_owner = str(owner or new_fire_claim_owner())
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job.get("id") != job_id:
+                continue
+            claim = job.get("run_claim")
+            if isinstance(claim, dict):
+                if _run_claim_is_fresh(claim, ttl_seconds=float(claim.get("ttl_seconds") or ttl)):
+                    return False
+                if _job_running_in_this_process(job_id):
+                    return False
+            now = _hermes_now()
+            job["run_claim"] = {
+                "by": stable_owner,
+                "at": now.isoformat(),
+                "ttl_seconds": ttl,
+            }
+            if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
+                next_run = compute_next_run(job["schedule"], now.isoformat())
+                if next_run:
+                    job["next_run_at"] = next_run
+            job["state"] = "running"
+            save_jobs(jobs)
+            return True
+    return False
+
+
+def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
+    """Refresh only the execution claim owned by ``expected_owner``."""
+
+    if not expected_owner:
+        return False
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job.get("id") != job_id:
+                continue
+            claim = job.get("run_claim")
+            if not isinstance(claim, dict) or claim.get("by") != expected_owner:
+                return False
+            claim["at"] = _hermes_now().isoformat()
+            save_jobs(jobs)
+            return True
+    return False
+
+
+def record_job_drain_timeout(job_id: str, *, expected_owner: str) -> bool:
+    """Persist a drain deadline without releasing the execution owner.
+
+    Python worker threads cannot be killed safely. Clearing the claim here
+    would let another scheduler enter the same execution body while the old
+    thread can still perform external side effects. Keep the owner until the
+    execution finishes normally or its heartbeat becomes stale after process
+    exit; the next process can then reclaim it through the ordinary TTL path.
     """
-    return True
+
+    if not expected_owner:
+        return False
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job.get("id") != job_id:
+                continue
+            claim = job.get("run_claim")
+            if not isinstance(claim, dict) or claim.get("by") != expected_owner:
+                return False
+            job["last_status"] = "error"
+            job["last_error"] = "runtime drain timeout"
+            job["drain_timeout_at"] = _hermes_now().isoformat()
+            job["state"] = "running"
+            save_jobs(jobs)
+            return True
+    return False

@@ -20,6 +20,7 @@ from typing import AsyncIterator
 
 import pytest
 
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
 from tui_gateway.run_worker import (
     EventFrame,
     FrameDecodeError,
@@ -448,6 +449,47 @@ async def test_handler_dispatches_run_start_to_backend() -> None:
     assert active == set()  # cleared after start finished
     terms = [f for f in sink.decoded() if f.get("op") == "run.terminal"]
     assert terms == [{"op": "run.terminal", "run_id": "r1", "status": "completed"}]
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_run_start_after_runtime_begins_draining() -> None:
+    backend = _RecordingBackend()
+    registry = ActiveWorkRegistry()
+    registry.begin_drain()
+    handler = _build_default_handler(
+        backend,
+        _RecordingResponder(),
+        set(),
+        active_work_registry=registry,
+    )
+    sink = _Sink()
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps(
+                    {
+                        "op": "run.start",
+                        "run_id": "r-draining",
+                        "turn_id": "t1",
+                        "conversation_session_id": "s1",
+                        "prompt": "hi",
+                    }
+                ),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=sink.write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    assert backend.starts == []
+    terms = [frame for frame in sink.decoded() if frame.get("op") == "run.terminal"]
+    assert len(terms) == 1
+    assert terms[0]["run_id"] == "r-draining"
+    assert terms[0]["status"] == "failed"
+    assert "runtime is draining" in terms[0]["message"]
 
 
 @pytest.mark.asyncio

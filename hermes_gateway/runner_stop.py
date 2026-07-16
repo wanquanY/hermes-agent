@@ -131,15 +131,35 @@ async def stop_gateway_runner(
                 logger.debug("pre-drain mark_resume_pending failed for %s: %s", _sk, _e)
 
         _drain_started_at = time.monotonic()
-        active_agents, timed_out = await self._drain_active_agents(timeout)
+        active_work_registry = getattr(self, "_active_work_registry", None)
+        if active_work_registry is None:
+            active_agents, timed_out = await self._drain_active_agents(timeout)
+            active_work_remaining = self._running_agent_count()
+        else:
+            active_agents = self._snapshot_running_agents()
+            drain_report = await active_work_registry.drain(
+                timeout=timeout,
+                cancel_grace=5.0,
+            )
+            # Crossing the graceful deadline is a non-clean shutdown even if
+            # forced cancellation then releases every lease. Preserve resume
+            # markers and skip the clean-shutdown marker in that case.
+            timed_out = bool(drain_report.deadline_expired)
+            active_work_remaining = len(drain_report.timed_out)
+            if drain_report.callback_errors:
+                logger.warning(
+                    "Gateway active-work drain callback errors: %s",
+                    drain_report.callback_errors,
+                )
         logger.info(
             "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
-            "timed_out=%s, active_at_start=%d, active_now=%d)",
+            "timed_out=%s, active_at_start=%d, active_now=%d, active_work_now=%d)",
             _phase_elapsed(),
             time.monotonic() - _drain_started_at,
             timed_out,
             len(active_agents),
             self._running_agent_count(),
+            active_work_remaining,
         )
 
         if not timed_out:

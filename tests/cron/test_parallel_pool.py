@@ -21,9 +21,9 @@ def isolated_scheduler(tmp_path, monkeypatch):
 
 
 def _patch_job_io(monkeypatch, sched) -> None:
-    monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
+    monkeypatch.setattr(sched, "claim_job_for_fire", lambda *_a, **_kw: True)
     monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
-    monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+    monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: True)
     monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
     monkeypatch.setattr(sched, "_deliver_dovie_bound_result", lambda *_a, **_kw: None)
 

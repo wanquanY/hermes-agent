@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 10 自动验收完成，正在进入阶段 11 Automation 与进程生命周期。
-- 后续阶段：阶段 11-12 按计划连续实施，全部完成后统一用户验收。
+- 当前阶段：阶段 11 自动验收完成，正在进入阶段 12 正确性尾项与本轮关闭。
+- 后续阶段：阶段 12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -35,6 +35,8 @@
 | `phase-9-acceptance.md` | 阶段 9 Codex/Responses/verification 专项证据与阶段 10 已关闭红项来源 |
 | `phase-10-design.md` | 阶段 10 MCP canonical identity、富内容、initialize 与恢复状态机设计 |
 | `phase-10-acceptance.md` | 阶段 10 MCP 专项、全量、静态、Doxie 门禁与统一实机验收重点 |
+| `phase-11-design.md` | 阶段 11 Automation claim、Kanban single writer 与 active-work drain 设计 |
+| `phase-11-acceptance.md` | 阶段 11 多进程所有权、进程排空、全量与 Doxie 验收证据 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -85,6 +87,10 @@ python scripts/upstream_absorption_baseline.py \
   rich/error content 统一 materialize，四类 transport initialize 有界收敛，parked server
   单 owner/backoff 自恢复；Hermes 全量 29,104 passed、0 failed，静态/分层/观测门禁与
   Doxie desktop `test:gates` 全绿。
+- 阶段 11：U10、U11、RT3 已按当前架构吸收；cron execution owner/heartbeat、Kanban
+  board-scoped single writer 与 transport-neutral active-work drain 共用明确生命周期边界；
+  Chronos JWKS 因本地无 provider 按 `skip-with-reason` 关闭。Hermes 全量 29,129 passed、
+  0 failed；Doxie desktop `test:gates` 退出码 0。
 - 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
 各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核

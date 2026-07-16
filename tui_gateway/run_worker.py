@@ -781,14 +781,63 @@ def _build_default_handler(
     backend: WorkerRunBackend,
     responder: WorkerInteractiveResponder,
     active_runs: set[str],
+    active_work_registry=None,
 ) -> FrameHandler:
     """Wraps a backend + responder into the ``FrameHandler`` shape the
     run loop expects."""
 
+    if active_work_registry is None:
+        from hermes_agent.application.active_work_registry import ActiveWorkRegistry
+
+        active_work_registry = ActiveWorkRegistry()
+
     async def handler(proto: WorkerProtocol, frame: IncomingFrame) -> None:
         if isinstance(frame, RunStartFrame):
+            from hermes_agent.application.active_work_registry import WorkRejected
+
             session_tokens: list[Any] = []
             clear_session_vars = None
+            loop = asyncio.get_running_loop()
+
+            def _cancel_worker_run() -> None:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(backend.cancel(frame.run_id))
+                )
+
+            def _persist_worker_timeout():
+                return proto.emit(
+                    RunTerminalFrame(
+                        run_id=frame.run_id,
+                        status="cancelled",
+                        conversation_session_id=frame.conversation_session_id,
+                        turn_id=frame.turn_id,
+                        message="runtime drain timeout",
+                    )
+                )
+
+            try:
+                work_lease = active_work_registry.register(
+                    kind="tui_worker_run",
+                    surface="tui_worker",
+                    work_id=f"tui-worker:{frame.run_id}",
+                    metadata={
+                        "run_id": frame.run_id,
+                        "conversation_session_id": frame.conversation_session_id,
+                    },
+                    persist_timeout=_persist_worker_timeout,
+                    cancel=_cancel_worker_run,
+                )
+            except WorkRejected as exc:
+                await proto.emit(
+                    RunTerminalFrame(
+                        run_id=frame.run_id,
+                        status="failed",
+                        conversation_session_id=frame.conversation_session_id,
+                        turn_id=frame.turn_id,
+                        message=str(exc),
+                    )
+                )
+                return
             active_runs.add(frame.run_id)
             try:
                 from channels.session_context import (
@@ -825,6 +874,7 @@ def _build_default_handler(
                     except Exception:
                         pass
                 active_runs.discard(frame.run_id)
+                work_lease.release()
         elif isinstance(frame, RunCancelFrame):
             await backend.cancel(frame.run_id)
         elif isinstance(frame, InteractiveResponseFrame):
@@ -965,6 +1015,12 @@ async def _main_async() -> int:
     db_proxy = WorkerDBProxy(_StdoutJsonRpcWriter())
     rpc_proxy = WorkerRpcProxy(_StdoutJsonRpcWriter())
     activity_bus = ActivityEventBus()
+    from hermes_agent.application.active_work_registry import (
+        get_process_active_work_registry,
+    )
+
+    active_work_registry = get_process_active_work_registry()
+    active_work_registry.start_accepting()
     set_default_worker_db_proxy(db_proxy)
     set_default_worker_rpc_proxy(rpc_proxy)
     set_default_activity_event_bus(activity_bus)
@@ -991,7 +1047,12 @@ async def _main_async() -> int:
     proto = WorkerProtocol(
         lines_in=_stdin_lines(),
         emit=_stdout_writer(),
-        handler=_build_default_handler(backend, responder, active_runs),
+        handler=_build_default_handler(
+            backend,
+            responder,
+            active_runs,
+            active_work_registry=active_work_registry,
+        ),
         db_reply_handler=_handle_jsonrpc_reply,
     )
     bootstrap_ms = round((time.perf_counter() - bootstrap_started) * 1000, 3)
@@ -1012,6 +1073,25 @@ async def _main_async() -> int:
     try:
         await proto.run()
     finally:
+        try:
+            drain_report = await active_work_registry.drain(
+                timeout=5.0,
+                cancel_grace=5.0,
+            )
+            if drain_report.deadline_expired:
+                await proto.emit_log(
+                    "warn",
+                    "run_worker: active work exceeded the graceful drain deadline: "
+                    f"{drain_report.deadline_expired}",
+                )
+            if drain_report.timed_out:
+                await proto.emit_log(
+                    "error",
+                    f"run_worker: active work remained after cancellation: "
+                    f"{drain_report.timed_out}",
+                )
+        except Exception as exc:
+            await proto.emit_log("error", f"run_worker: active-work drain failed: {exc}")
         try:
             from hermes_agent.application.subagent_execution_service import (
                 subagent_execution_runtime,

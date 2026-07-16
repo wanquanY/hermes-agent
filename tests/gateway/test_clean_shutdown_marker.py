@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig, SessionResetPolicy
 from hermes_gateway.session import SessionEntry, SessionSource, SessionStore
 
@@ -134,6 +135,54 @@ class TestCleanShutdownMarker:
             asyncio.get_event_loop().run_until_complete(runner.stop())
 
         assert marker.exists(), ".clean_shutdown marker should exist after graceful stop"
+
+    @pytest.mark.asyncio
+    async def test_forced_registry_drain_does_not_write_clean_marker(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setattr("hermes_gateway.runner_stop._hermes_home", tmp_path)
+        marker = tmp_path / ".clean_shutdown"
+
+        from hermes_gateway.runner import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        runner._restart_requested = False
+        runner._restart_detached = False
+        runner._restart_via_service = False
+        runner._restart_task_started = False
+        runner._running = True
+        runner._draining = False
+        runner._stop_task = None
+        runner._running_agents = {}
+        runner._running_agents_ts = {}
+        runner._pending_messages = {}
+        runner._pending_approvals = {}
+        runner._background_tasks = set()
+        runner._shutdown_event = MagicMock()
+        runner._restart_drain_timeout = 0.0
+        runner._exit_code = None
+        runner._exit_reason = None
+        runner.adapters = {}
+        runner.config = GatewayConfig()
+        runner._active_work_registry = ActiveWorkRegistry()
+        lease = runner._active_work_registry.register(
+            kind="api_run",
+            surface="api",
+            work_id="run-forced",
+        )
+        lease.set_callbacks(cancel=lease.release)
+
+        with patch("hermes_gateway.runner.GatewayRunner._finalize_shutdown_agents"), \
+             patch("channels.runtime_status.remove_pid_file"), \
+             patch("tools.process_registry.process_registry") as mock_proc_reg, \
+             patch("tools.terminal_tool.cleanup_all_environments"), \
+             patch("tools.browser_tool.cleanup_all_browsers"):
+            mock_proc_reg.kill_all = MagicMock()
+            await runner.stop()
+
+        assert not marker.exists()
 
     def test_marker_skips_suspension_on_startup(self, tmp_path, monkeypatch):
         """If .clean_shutdown exists, suspend_recently_active should NOT be called."""

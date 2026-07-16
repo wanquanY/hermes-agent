@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
 from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
 from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
@@ -122,6 +123,25 @@ async def test_sentinel_cleaned_up_after_handler_returns():
     assert session_key not in runner._running_agents, (
         "Sentinel must be removed after handler completes"
     )
+    assert runner._active_work_registry.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_drain_rejects_new_turn_before_sentinel_allocation():
+    runner = _make_runner()
+    runner._active_work_registry = ActiveWorkRegistry()
+    runner._active_work_registry.begin_drain()
+    event = _make_event()
+    session_key = build_session_key(event.source)
+    inner = AsyncMock(return_value="unexpected")
+
+    with patch.object(GatewayRunner, "_handle_message_with_agent", inner):
+        result = await runner._handle_message(event)
+
+    assert isinstance(result, str)
+    assert session_key not in runner._running_agents
+    assert runner._active_work_registry.snapshot() == ()
+    inner.assert_not_awaited()
 
 
 # ------------------------------------------------------------------

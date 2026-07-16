@@ -18,6 +18,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from hermes_agent.application.active_work_registry import (
+    ActiveWorkRegistry,
+    ActiveWorkState,
+)
 from hermes_gateway.config import PlatformConfig
 from channels.platforms.api_server import (
     APIServerAdapter,
@@ -38,6 +42,7 @@ def _make_adapter(api_key: str = "") -> APIServerAdapter:
         extra["key"] = api_key
     config = PlatformConfig(enabled=True, extra=extra)
     adapter = APIServerAdapter(config)
+    adapter._active_work_registry = ActiveWorkRegistry()
     return adapter
 
 
@@ -152,6 +157,49 @@ class TestStartRun:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post("/v1/runs", json={"input": ""})
         assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_start_rejected_while_runtime_is_draining(self, adapter):
+        adapter._active_work_registry.begin_drain()
+        app = _create_runs_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/runs", json={"input": "hello"})
+            payload = await resp.json()
+
+        assert resp.status == 503
+        assert payload["error"]["code"] == "runtime_draining"
+        assert resp.headers["Retry-After"] == "1"
+        assert adapter._active_work_registry.state is ActiveWorkState.DRAINING
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
+    async def test_terminal_run_releases_work_before_stream_consumption(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await resp.json())["run_id"]
+
+                for _ in range(50):
+                    if run_id not in adapter._active_run_tasks:
+                        break
+                    await asyncio.sleep(0.02)
+
+                assert run_id not in adapter._active_run_tasks
+                assert adapter._active_work_registry.snapshot() == ()
+                assert run_id in adapter._run_streams
+
+                adapter._max_concurrent_runs = 1
+                assert adapter._concurrency_limited_response() is None
 
     @pytest.mark.asyncio
     async def test_start_invalid_history_does_not_allocate_run(self, adapter):
