@@ -199,6 +199,37 @@ class StreamConsumerFinalMixin:
             self._final_response_sent = True
         return True
 
+    async def _suppress_silence_marker(self) -> None:
+        """Best-effort retract previews for an intentional-silence turn."""
+
+        stale_ids = set(self._preview_message_ids)
+        if self._message_id and self._message_id != "__no_edit__":
+            stale_ids.add(self._message_id)
+        delete_fn = getattr(self.adapter, "delete_message", None)
+        if delete_fn is not None:
+            for stale_id in stale_ids:
+                if not stale_id or stale_id == "__no_edit__":
+                    continue
+                try:
+                    await delete_fn(self.chat_id, stale_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Silence-marker preview cleanup failed (%s): %s",
+                        stale_id,
+                        exc,
+                    )
+        self._preview_message_ids = set()
+        self._message_id = None
+        self._accumulated = ""
+        self._last_sent_text = ""
+        self._already_sent = False
+        self._final_response_sent = False
+        self._final_content_delivered = False
+        logger.info(
+            "Suppressed streamed intentional-silence marker (chat=%s)",
+            self.chat_id,
+        )
+
     async def _send_or_edit(
         self, text: str, *, finalize: bool = False, is_turn_final: bool = True,
     ) -> bool:

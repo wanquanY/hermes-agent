@@ -779,12 +779,15 @@ def restore_primary_runtime(agent) -> bool:
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
         agent._client_kwargs = dict(rt["client_kwargs"])
-        agent._use_prompt_caching = rt["use_prompt_caching"]
-        # Default to native layout when the restored snapshot predates the
-        # native-vs-proxy split (older sessions saved before this PR).
-        agent._use_native_cache_layout = rt.get(
-            "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+        # Re-evaluate the live global toggle instead of restoring a stale
+        # snapshot that could re-enable cache markers after config changed.
+        agent._use_prompt_caching, agent._use_native_cache_layout = (
+            agent._anthropic_prompt_cache_policy(
+                provider=rt["provider"],
+                base_url=rt["base_url"],
+                api_mode=rt["api_mode"],
+                model=rt["model"],
+            )
         )
 
         # ── Rebuild client for the primary provider ──
@@ -1050,6 +1053,11 @@ def anthropic_prompt_cache_policy(
     these providers serve zero cache hits, re-billing the full prompt
     on every turn.
     """
+    from agent.prompt_caching import resolve_prompt_caching_enabled
+
+    if not resolve_prompt_caching_enabled():
+        return False, False
+
     eff_provider = (provider if provider is not None else agent.provider) or ""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
@@ -1128,8 +1136,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # Treat client_kwargs as read-only. Callers pass agent._client_kwargs (or shallow
     # copies of it) in; any in-place mutation leaks back into the stored dict and is
     # reused on subsequent requests. #10933 hit this by injecting an httpx.Client
-    # transport that was torn down after the first request, so the next request
-    # wrapped a closed transport and raised "Cannot send a request, as the client
+    # that was torn down after the first request, so the next request wrapped a
+    # closed pool and raised "Cannot send a request, as the client
     # has been closed" on every retry. The revert resolved that specific path; this
     # copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
@@ -1184,12 +1192,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
                 agent._client_log_context(),
             )
             return client
-    # Inject TCP keepalives so the kernel detects dead provider connections
-    # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
-    # this, a peer that drops mid-stream leaves the socket in a state where
-    # epoll_wait never fires, ``httpx`` read timeout may not trigger, and
-    # the agent hangs until manually killed.  Probes after 30s idle, retry
-    # every 10s, give up after 3 → dead peer detected within ~60s.
+    # Inject the canonical provider HTTP pool. Idle connections are reaped
+    # before common reverse-proxy deadlines without replacing httpx/OS socket
+    # defaults; this preserves TCP_NODELAY and stable TLS/SSE chunk handling.
     #
     # Safety against #10933: the ``client_kwargs = dict(client_kwargs)``
     # above means this injection only lands in the local per-call copy,

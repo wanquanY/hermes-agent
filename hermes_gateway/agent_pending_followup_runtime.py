@@ -15,6 +15,7 @@ from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.interrupt_control import is_control_interrupt_message
 from hermes_gateway.media_context import build_media_placeholder
 from hermes_gateway.pending_events import dequeue_pending_event
+from hermes_gateway.response_filters import is_intentional_silence_agent_result
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,12 @@ class AgentPendingFollowupRuntime:
             )
         )
         first_response = result.get("final_response", "")
+        if is_intentional_silence_agent_result(result, first_response):
+            logger.info(
+                "Queued follow-up for session %s: suppressing intentional-silence marker.",
+                context.session_key or "?",
+            )
+            return
         if first_response and not already_streamed and adapter:
             try:
                 logger.info(

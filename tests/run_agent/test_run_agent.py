@@ -2506,7 +2506,7 @@ class TestParallelScopePathNormalization:
 
 
 class TestMcpParallelToolBatch:
-    """Integration test: _should_parallelize_tool_batch respects MCP parallel flag."""
+    """MCP transport concurrency never implies effect-free business calls."""
 
     def test_mcp_tools_default_sequential(self):
         """MCP tools without supports_parallel_tool_calls are sequential."""
@@ -2515,8 +2515,8 @@ class TestMcpParallelToolBatch:
         tc2 = _mock_tool_call(name="mcp__github__search_code", arguments='{"q":"test"}', call_id="c2")
         assert not _should_parallelize_tool_batch([tc1, tc2])
 
-    def test_mcp_tools_parallel_when_server_opted_in(self):
-        """MCP tools from a parallel-safe server can run concurrently."""
+    def test_transport_parallel_opt_in_does_not_bypass_effect_gate(self):
+        """Server capacity is not proof that two external effects may reorder."""
         from run_agent import _should_parallelize_tool_batch
         from tools.mcp_tool import _mcp_tool_server_names, _parallel_safe_servers, _lock
         with _lock:
@@ -2526,15 +2526,15 @@ class TestMcpParallelToolBatch:
         try:
             tc1 = _mock_tool_call(name="mcp__github__list_repos", arguments='{"org":"openai"}', call_id="c1")
             tc2 = _mock_tool_call(name="mcp__github__search_code", arguments='{"q":"test"}', call_id="c2")
-            assert _should_parallelize_tool_batch([tc1, tc2])
+            assert not _should_parallelize_tool_batch([tc1, tc2])
         finally:
             with _lock:
                 _parallel_safe_servers.discard("github")
                 _mcp_tool_server_names.pop("mcp__github__list_repos", None)
                 _mcp_tool_server_names.pop("mcp__github__search_code", None)
 
-    def test_mixed_mcp_and_builtin_parallel(self):
-        """MCP parallel tools mixed with built-in parallel-safe tools."""
+    def test_unknown_mcp_effect_is_barrier_for_safe_builtin(self):
+        """A safe builtin cannot cross an unknown MCP effect barrier."""
         from run_agent import _should_parallelize_tool_batch
         from tools.mcp_tool import _mcp_tool_server_names, _parallel_safe_servers, _lock
         with _lock:
@@ -2543,7 +2543,7 @@ class TestMcpParallelToolBatch:
         try:
             tc1 = _mock_tool_call(name="mcp__docs__search", arguments='{"query":"api"}', call_id="c1")
             tc2 = _mock_tool_call(name="web_search", arguments='{"query":"test"}', call_id="c2")
-            assert _should_parallelize_tool_batch([tc1, tc2])
+            assert not _should_parallelize_tool_batch([tc1, tc2])
         finally:
             with _lock:
                 _parallel_safe_servers.discard("docs")

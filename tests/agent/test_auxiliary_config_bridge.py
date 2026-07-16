@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -239,22 +239,24 @@ class TestGatewayBridgeCodeParity:
 class TestVisionModelOverride:
     """Test that AUXILIARY_VISION_MODEL env var overrides the default model in the handler."""
 
-    def test_env_var_overrides_default(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_env_var_overrides_default(self, monkeypatch):
         monkeypatch.setenv("AUXILIARY_VISION_MODEL", "openai/gpt-4o")
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
+        with patch("tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock) as mock_tool:
             mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
+            await _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
             call_args = mock_tool.call_args
             # 3rd positional arg = model
             assert call_args[0][2] == "openai/gpt-4o"
 
-    def test_default_model_when_no_override(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_default_model_when_no_override(self, monkeypatch):
         monkeypatch.delenv("AUXILIARY_VISION_MODEL", raising=False)
         from tools.vision_tools import _handle_vision_analyze
-        with patch("tools.vision_tools.vision_analyze_tool", new_callable=MagicMock) as mock_tool:
+        with patch("tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock) as mock_tool:
             mock_tool.return_value = '{"success": true}'
-            _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
+            await _handle_vision_analyze({"image_url": "http://test.jpg", "question": "test"})
             call_args = mock_tool.call_args
             # With no AUXILIARY_VISION_MODEL env var, model should be None
             # (the centralized call_llm router picks the provider default)
@@ -278,6 +280,8 @@ class TestDefaultConfigShape:
         assert "model" in vision
         assert vision["provider"] == "auto"
         assert vision["model"] == ""
+        assert vision["max_concurrency"] == 4
+        assert vision["max_queue"] == 256
 
     def test_web_extract_task_structure(self):
         from hermes_cli.config import DEFAULT_CONFIG

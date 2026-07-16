@@ -179,3 +179,24 @@ observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` �
 机器门禁完成时间：2026-07-16。Hermes 1,589 files、29,129 passed、0 failed；
 observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` 退出码 0。
 阶段 11 等待最终统一验收。
+
+## 阶段 12
+
+- [x] U9、U12、RT4、B2、B3、B4、B6 的当前 owner、上游来源与收益已记录。
+- [x] terminal/file cwd 按 environment + session 隔离，显式 gateway session 不读取共享 cwd。
+- [x] core/skill slug collision 与 inert patch 按明确规则 fail closed。
+- [x] mixed batch 只并行 effect-free segment，未知/MCP/plugin/terminal/交互调用保持 barrier。
+- [x] sync/async provider client 共用 pool limit、idle expiry、proxy/no-proxy 且无 socket override。
+- [x] vision active/queue budget、100 fanout、queue full、取消与 permit 回收有行为证据。
+- [x] `NO_REPLY`/`[SILENT]` 持久化但不投影为页面系统消息或回复气泡。
+- [x] fallback exhaustion cooldown 使用 monotonic，prompt caching toggle 覆盖 restore/fallback。
+- [x] GMI 静态回退测试隔离真实网络，标准全量不再依赖外部 catalog 状态。
+- [x] 阶段聚合、Hermes 全量、静态/分层/observability 与 Doxie `test:gates` 完成。
+- [ ] 用户按 `phase-12-acceptance.md` 完成 Phase 1-12 统一实机场景并明确批准。
+- [ ] 真实 OpenResty/Cloudflare 类反向代理长连接验证完成。
+- [ ] 真实 macOS 强杀/reopen 与 24 小时 session/stream/cron soak 完成。
+
+机器门禁完成时间：2026-07-16。阶段聚合 464 passed、10 skipped；Hermes 1,592 files、
+29,188 passed、0 failed；observability 86 passed、13 skipped、1 xfailed；Doxie desktop
+`test:gates` 退出码 0。阶段 1-12 代码和自动门禁完成，等待最终统一实机验收；尚未
+push 或合并回主开发分支。

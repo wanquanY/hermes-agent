@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
+    tool_may_have_side_effect,
 )
 from tools.threat_patterns import scan_for_threats
 
@@ -102,49 +103,94 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
 
 
 def _should_parallelize_tool_batch(tool_calls) -> bool:
-    """Return True when a tool-call batch is safe to run concurrently."""
+    """Return True when a whole tool-call batch is safe to run concurrently."""
     if len(tool_calls) <= 1:
         return False
 
-    tool_names = [tc.function.name for tc in tool_calls]
-    if any(name in _NEVER_PARALLEL_TOOLS for name in tool_names):
-        return False
+    segments = _plan_tool_batch_segments(tool_calls)
+    return len(segments) == 1 and segments[0][0] == "parallel"
 
+
+def _plan_tool_batch_segments(tool_calls) -> List[tuple[str, list[Any]]]:
+    """Plan ordered parallel runs separated by side-effect barriers.
+
+    Unknown/plugin/MCP tools fail closed to the sequential path even when an
+    MCP server advertises transport-level parallelism: that capability says
+    the server can accept concurrent calls, not that the calls are free of
+    externally visible effects.  Known file mutations may share a parallel run
+    only when all reserved paths are independent.  A later call never crosses
+    an earlier barrier.
+    """
+
+    segments: list[list[Any]] = []
+    current: list[Any] = []
     reserved_paths: list[Path] = []
+
+    def close_parallel() -> None:
+        nonlocal current, reserved_paths
+        if current:
+            segments.append(["parallel", current])
+            current = []
+            reserved_paths = []
+
+    def add_sequential(tool_call: Any) -> None:
+        close_parallel()
+        if segments and segments[-1][0] == "sequential":
+            segments[-1][1].append(tool_call)
+        else:
+            segments.append(["sequential", [tool_call]])
+
     for tool_call in tool_calls:
         tool_name = tool_call.function.name
+        if tool_name in _NEVER_PARALLEL_TOOLS:
+            add_sequential(tool_call)
+            continue
+
         try:
             function_args = json.loads(tool_call.function.arguments)
         except Exception:
-            logging.debug(
-                "Could not parse args for %s — defaulting to sequential; raw=%s",
+            logger.debug(
+                "Could not parse args for %s; using a sequential barrier",
                 tool_name,
-                tool_call.function.arguments[:200],
             )
-            return False
+            add_sequential(tool_call)
+            continue
         if not isinstance(function_args, dict):
-            logging.debug(
-                "Non-dict args for %s (%s) — defaulting to sequential",
-                tool_name,
-                type(function_args).__name__,
-            )
-            return False
+            add_sequential(tool_call)
+            continue
 
         if tool_name in _PATH_SCOPED_TOOLS:
             scoped_path = _extract_parallel_scope_path(tool_name, function_args)
             if scoped_path is None:
-                return False
-            if any(_paths_overlap(scoped_path, existing) for existing in reserved_paths):
-                return False
+                add_sequential(tool_call)
+                continue
+            if any(_paths_overlap(scoped_path, path) for path in reserved_paths):
+                close_parallel()
             reserved_paths.append(scoped_path)
+            current.append(tool_call)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
-            # Check if it's an MCP tool from a server that opted into parallel calls.
-            if not _is_mcp_tool_parallel_safe(tool_name):
-                return False
+        if tool_name in _PARALLEL_SAFE_TOOLS and not tool_may_have_side_effect(
+            tool_name
+        ):
+            current.append(tool_call)
+            continue
 
-    return True
+        # Unknown effects are a barrier. MCP transport concurrency alone is
+        # insufficient evidence that reordering external effects is safe.
+        add_sequential(tool_call)
+
+    close_parallel()
+
+    normalized: list[list[Any]] = []
+    for kind, calls in segments:
+        if kind == "parallel" and len(calls) < 2:
+            kind = "sequential"
+        if normalized and kind == "sequential" and normalized[-1][0] == kind:
+            normalized[-1][1].extend(calls)
+        else:
+            normalized.append([kind, calls])
+    return [(str(kind), list(calls)) for kind, calls in normalized]
 
 
 def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optional[Path]:
@@ -405,6 +451,7 @@ __all__ = [
     "_REDIRECT_OVERWRITE",
     "_is_destructive_command",
     "_should_parallelize_tool_batch",
+    "_plan_tool_batch_segments",
     "_extract_parallel_scope_path",
     "_paths_overlap",
     "_is_multimodal_tool_result",

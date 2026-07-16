@@ -8,7 +8,7 @@ the native layout on OpenRouter) surfaces loudly.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from run_agent import AIAgent
 
@@ -309,6 +309,63 @@ class TestExplicitOverrides:
         )
         assert (should, native) == (True, False)
 
+
+class TestPromptCachingGlobalToggle:
+    def test_disabled_blocks_native_openrouter_and_third_party(self):
+        candidates = [
+            _make_agent(
+                provider="anthropic",
+                base_url="https://api.anthropic.com",
+                api_mode="anthropic_messages",
+                model="claude-sonnet-4-6",
+            ),
+            _make_agent(),
+            _make_agent(
+                provider="custom",
+                base_url="https://proxy.example.test/anthropic",
+                api_mode="anthropic_messages",
+                model="claude-sonnet-4-6",
+            ),
+        ]
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"prompt_caching": {"enabled": False}},
+        ):
+            assert [agent._anthropic_prompt_cache_policy() for agent in candidates] == [
+                (False, False),
+                (False, False),
+                (False, False),
+            ]
+
+    def test_disabled_survives_switch_and_fallback_override_evaluation(self):
+        agent = _make_agent(
+            provider="anthropic",
+            base_url="https://api.anthropic.com",
+            api_mode="anthropic_messages",
+            model="claude-opus-4-6",
+        )
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"prompt_caching": {"enabled": False}},
+        ):
+            assert agent._anthropic_prompt_cache_policy(
+                provider="openrouter",
+                base_url="https://openrouter.ai/api/v1",
+                api_mode="chat_completions",
+                model="anthropic/claude-sonnet-4.6",
+            ) == (False, False)
+
+    def test_enabled_default_preserves_existing_policy(self):
+        with patch("hermes_cli.config.load_config", return_value={}):
+            assert _make_agent()._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_malformed_section_fails_safe_to_enabled(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"prompt_caching": "disabled"},
+        ):
+            assert _make_agent()._anthropic_prompt_cache_policy() == (True, False)
+
     def test_fallback_target_evaluated_independently(self):
         # Starting on native Anthropic but falling back to OpenRouter.
         agent = _make_agent(
@@ -329,4 +386,3 @@ class TestExplicitOverrides:
 # ─────────────────────────────────────────────────────────────────────
 # Long-lived prefix cache policy (cross-session 1h tier)
 # ─────────────────────────────────────────────────────────────────────
-

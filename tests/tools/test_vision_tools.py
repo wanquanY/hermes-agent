@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.vision_tools import (
+    VisionCapacityExceeded,
+    _resolve_vision_capacity,
+    _vision_concurrency_slot,
     _validate_image_url,
     _handle_vision_analyze,
     _determine_mime_type,
@@ -22,6 +25,7 @@ from tools.vision_tools import (
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
     vision_analyze_tool,
+    vision_concurrency_snapshot,
     check_vision_requirements,
 )
 
@@ -192,26 +196,26 @@ class TestHandleVisionAnalyze:
             # Clean up the coroutine to avoid RuntimeWarning
             result.close()
 
-    def test_prompt_contains_question(self):
+    @pytest.mark.asyncio
+    async def test_prompt_contains_question(self):
         """The full prompt should incorporate the user's question."""
         with patch(
             "tools.vision_tools.vision_analyze_tool", new_callable=AsyncMock
         ) as mock_tool:
             mock_tool.return_value = json.dumps({"result": "ok"})
-            coro = _handle_vision_analyze(
+            await _handle_vision_analyze(
                 {
                     "image_url": "https://example.com/img.png",
                     "question": "Describe the cat",
                 }
             )
-            # Clean up coroutine
-            coro.close()
             call_args = mock_tool.call_args
             full_prompt = call_args[0][1]  # second positional arg
             assert "Describe the cat" in full_prompt
             assert "Fully describe and explain" in full_prompt
 
-    def test_uses_auxiliary_vision_model_env(self):
+    @pytest.mark.asyncio
+    async def test_uses_auxiliary_vision_model_env(self):
         """AUXILIARY_VISION_MODEL env var should override DEFAULT_VISION_MODEL."""
         with (
             patch(
@@ -220,15 +224,15 @@ class TestHandleVisionAnalyze:
             patch.dict(os.environ, {"AUXILIARY_VISION_MODEL": "custom/model-v1"}),
         ):
             mock_tool.return_value = json.dumps({"result": "ok"})
-            coro = _handle_vision_analyze(
+            await _handle_vision_analyze(
                 {"image_url": "https://example.com/img.png", "question": "test"}
             )
-            coro.close()
             call_args = mock_tool.call_args
             model = call_args[0][2]  # third positional arg
             assert model == "custom/model-v1"
 
-    def test_falls_back_to_default_model(self):
+    @pytest.mark.asyncio
+    async def test_falls_back_to_default_model(self):
         """Without AUXILIARY_VISION_MODEL, model should be None (let call_llm resolve default)."""
         with (
             patch(
@@ -239,10 +243,9 @@ class TestHandleVisionAnalyze:
             # Ensure AUXILIARY_VISION_MODEL is not set
             os.environ.pop("AUXILIARY_VISION_MODEL", None)
             mock_tool.return_value = json.dumps({"result": "ok"})
-            coro = _handle_vision_analyze(
+            await _handle_vision_analyze(
                 {"image_url": "https://example.com/img.png", "question": "test"}
             )
-            coro.close()
             call_args = mock_tool.call_args
             model = call_args[0][2]
             # With no AUXILIARY_VISION_MODEL set, model should be None
@@ -258,6 +261,105 @@ class TestHandleVisionAnalyze:
             result = _handle_vision_analyze({})
             assert isinstance(result, Awaitable)
             result.close()
+
+
+class TestVisionConcurrencyCapacity:
+    """The process-wide vision budget is bounded and cancellation-safe."""
+
+    def test_capacity_resolution_prefers_env_then_config(self, monkeypatch):
+        monkeypatch.setenv("HERMES_VISION_MAX_CONCURRENCY", "7")
+        monkeypatch.setenv("HERMES_VISION_MAX_QUEUE", "19")
+        assert _resolve_vision_capacity() == (7, 19)
+
+    def test_malformed_capacity_config_falls_back_safely(self, monkeypatch):
+        monkeypatch.delenv("HERMES_VISION_MAX_CONCURRENCY", raising=False)
+        monkeypatch.delenv("HERMES_VISION_MAX_QUEUE", raising=False)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"vision": "invalid"}},
+        ):
+            active, queued = _resolve_vision_capacity()
+        assert 1 <= active <= 4
+        assert queued == 256
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_never_exceed_active_cap(self, monkeypatch):
+        import threading
+        import tools.vision_tools as vision
+
+        monkeypatch.setattr(vision, "_VISION_MAX_CONCURRENCY", 3)
+        monkeypatch.setattr(vision, "_VISION_MAX_QUEUE", 128)
+        monkeypatch.setattr(vision, "_vision_concurrency_semaphore", threading.BoundedSemaphore(3))
+        monkeypatch.setattr(vision, "_vision_waiting", 0)
+        monkeypatch.setattr(vision, "_vision_active", 0)
+        monkeypatch.setattr(vision, "_vision_peak_active", 0)
+
+        async def fake_analyze(_args, **_kwargs):
+            await asyncio.sleep(0.005)
+            return "ok"
+
+        monkeypatch.setattr(vision, "_handle_vision_analyze_unbounded", fake_analyze)
+        results = await asyncio.gather(*(
+            vision._handle_vision_analyze({"image_url": str(index), "question": ""})
+            for index in range(100)
+        ))
+
+        assert results == ["ok"] * 100
+        snapshot = vision_concurrency_snapshot()
+        assert snapshot["peak_active"] == 3
+        assert snapshot["active"] == snapshot["waiting"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_does_not_consume_a_permit(self, monkeypatch):
+        import threading
+        import tools.vision_tools as vision
+
+        semaphore = threading.BoundedSemaphore(1)
+        assert semaphore.acquire(blocking=False)
+        monkeypatch.setattr(vision, "_VISION_MAX_CONCURRENCY", 1)
+        monkeypatch.setattr(vision, "_VISION_MAX_QUEUE", 4)
+        monkeypatch.setattr(vision, "_vision_concurrency_semaphore", semaphore)
+        monkeypatch.setattr(vision, "_vision_waiting", 0)
+        monkeypatch.setattr(vision, "_vision_active", 0)
+        monkeypatch.setattr(vision, "_vision_peak_active", 0)
+
+        async def wait_for_slot():
+            async with _vision_concurrency_slot():
+                pytest.fail("cancelled waiter must not enter the active region")
+
+        task = asyncio.create_task(wait_for_slot())
+        await asyncio.sleep(0.04)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        semaphore.release()
+
+        async with _vision_concurrency_slot():
+            assert vision_concurrency_snapshot()["active"] == 1
+        assert vision_concurrency_snapshot()["waiting"] == 0
+
+    @pytest.mark.asyncio
+    async def test_full_queue_fails_before_underlying_handler(self, monkeypatch):
+        import threading
+        import tools.vision_tools as vision
+
+        semaphore = threading.BoundedSemaphore(1)
+        assert semaphore.acquire(blocking=False)
+        monkeypatch.setattr(vision, "_VISION_MAX_CONCURRENCY", 1)
+        monkeypatch.setattr(vision, "_VISION_MAX_QUEUE", 1)
+        monkeypatch.setattr(vision, "_vision_concurrency_semaphore", semaphore)
+        monkeypatch.setattr(vision, "_vision_waiting", 1)
+        underlying = AsyncMock(return_value="unexpected")
+        monkeypatch.setattr(vision, "_handle_vision_analyze_unbounded", underlying)
+
+        with pytest.raises(VisionCapacityExceeded):
+            async with _vision_concurrency_slot():
+                pass
+        result = json.loads(await vision._handle_vision_analyze({}))
+        assert result["success"] is False
+        assert "queue is full" in result["error"]
+        underlying.assert_not_awaited()
+        semaphore.release()
 
 
 # ---------------------------------------------------------------------------

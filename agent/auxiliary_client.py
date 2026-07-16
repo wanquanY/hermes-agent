@@ -98,6 +98,12 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        if "http_client" not in kwargs:
+            from agent.process_bootstrap import build_provider_http_client
+
+            http_client = build_provider_http_client(kwargs.get("base_url", ""))
+            if http_client is not None:
+                kwargs["http_client"] = http_client
         return _attach_dovie_attribution(_load_openai_cls()(*args, **kwargs))
 
     def __instancecheck__(self, obj):
@@ -3231,6 +3237,14 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
                     async_kwargs["default_headers"] = dict(_ph_async.default_headers)
         except Exception:
             pass
+    from agent.process_bootstrap import build_provider_http_client
+
+    async_http_client = build_provider_http_client(
+        async_kwargs.get("base_url", ""),
+        async_mode=True,
+    )
+    if async_http_client is not None:
+        async_kwargs["http_client"] = async_http_client
     return _attach_dovie_attribution(AsyncOpenAI(**async_kwargs)), model
 
 

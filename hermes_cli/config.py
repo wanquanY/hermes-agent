@@ -1005,6 +1005,7 @@ DEFAULT_CONFIG = {
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
     "prompt_caching": {
+        "enabled": True,
         "cache_ttl": "5m",
     },
 
@@ -1084,6 +1085,8 @@ DEFAULT_CONFIG = {
             "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
+            "max_concurrency": 4,  # process-wide active vision jobs (env: HERMES_VISION_MAX_CONCURRENCY)
+            "max_queue": 256,      # bounded waiting jobs; excess requests fail before payload allocation
         },
         "web_extract": {
             "provider": "auto",

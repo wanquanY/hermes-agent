@@ -168,6 +168,31 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
     except Exception:
         container_key = task_id
 
+    try:
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+        from tools.approval import get_current_session_key
+
+        explicit_session_key = str(get_current_session_key(default="") or "").strip()
+        session_key = explicit_session_key or resolve_terminal_session_key(task_id)
+        session_cwd = terminal_cwd_registry.get(
+            container_key,
+            session_key,
+        )
+        if session_cwd:
+            return session_cwd
+        # A gateway conversation has an independent logical cwd.  Until that
+        # conversation records one, fall back to its configured workspace —
+        # never to the cwd left behind by another conversation in the shared
+        # environment object. Standalone callers without session context keep
+        # the legacy live-env fallback below.
+        if explicit_session_key and explicit_session_key != container_key:
+            return None
+    except Exception:
+        pass
+
     with _file_ops_lock:
         cached = _file_ops_cache.get(container_key) or _file_ops_cache.get(task_id)
     if cached is not None:

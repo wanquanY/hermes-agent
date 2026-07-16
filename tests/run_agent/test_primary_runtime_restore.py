@@ -223,6 +223,31 @@ class TestRestorePrimaryRuntime:
 
         assert agent._use_prompt_caching == original_caching
 
+    def test_restore_rechecks_live_prompt_caching_kill_switch(self):
+        agent = _make_agent()
+        agent._fallback_activated = True
+        agent._primary_runtime.update({
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_mode": "chat_completions",
+            "model": "anthropic/claude-sonnet-4.6",
+            "use_prompt_caching": True,
+            "use_native_cache_layout": False,
+        })
+        agent._use_prompt_caching = True
+
+        with (
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"prompt_caching": {"enabled": False}},
+            ),
+            patch.object(agent, "_create_openai_client", return_value=MagicMock()),
+        ):
+            assert agent._restore_primary_runtime()
+
+        assert not agent._use_prompt_caching
+        assert not agent._use_native_cache_layout
+
     def test_restore_survives_exception(self):
         """If client rebuild fails, the method returns False gracefully."""
         agent = _make_agent()

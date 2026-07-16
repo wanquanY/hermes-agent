@@ -12,6 +12,9 @@ FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
 # state or Hermes session state. Unknown, plugin, and MCP tools stay
 # effect-capable by default.
 NO_EFFECT_TOOL_NAMES = frozenset({
+    "ha_get_state",
+    "ha_list_entities",
+    "ha_list_services",
     "read_file",
     "search_files",
     "session_search",

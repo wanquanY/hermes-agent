@@ -74,6 +74,12 @@ from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
 
+# A short cross-turn gate after a non-rate-limit fallback chain is exhausted.
+# This prevents an immediate new turn from replaying every provider and
+# re-marshalling a large context again. Rate-limit/billing failures retain the
+# existing 60-second window.
+_FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
+
 
 def _log_dovie_stream_stage(agent, stage: str, **fields: Any) -> None:
     run_id = str(getattr(agent, "_hermes_active_run_id", "") or "")
@@ -936,6 +942,15 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if (not fallback_already_active) or (primary_provider and current_provider == primary_provider):
             agent._rate_limited_until = time.monotonic() + 60
     if agent._fallback_index >= len(agent._fallback_chain):
+        if (
+            agent._fallback_chain
+            and reason not in {FailoverReason.rate_limit, FailoverReason.billing}
+        ):
+            existing = getattr(agent, "_rate_limited_until", 0) or 0
+            agent._rate_limited_until = max(
+                existing,
+                time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S,
+            )
         return False
 
     fb = agent._fallback_chain[agent._fallback_index]
@@ -943,7 +958,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     fb_provider = (fb.get("provider") or "").strip().lower()
     fb_model = (fb.get("model") or "").strip()
     if not fb_provider or not fb_model:
-        return agent._try_activate_fallback()  # skip invalid, try next
+        return agent._try_activate_fallback(reason=reason)  # skip invalid, try next
 
     # Skip entries that resolve to the current (provider, model) — falling
     # back to the same backend that just failed loops the failure. Compare
@@ -958,7 +973,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback skip: chain entry %s/%s matches current provider/model",
             fb_provider, fb_model,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
     if (
         fb_base_url_for_dedup
         and current_base_url
@@ -969,7 +984,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback skip: chain entry base_url %s matches current backend",
             fb_base_url_for_dedup,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
 
     # Use centralized router for client construction.
     # raw_codex=True because the main agent needs direct responses.stream()
@@ -1000,7 +1015,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             logging.warning(
                 "Fallback to %s failed: provider not configured",
                 fb_provider)
-            return agent._try_activate_fallback()  # try next in chain
+            return agent._try_activate_fallback(reason=reason)  # try next in chain
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
 
@@ -1156,7 +1171,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         return True
     except Exception as e:
         logging.error("Failed to activate fallback %s: %s", fb_model, e)
-        return agent._try_activate_fallback()  # try next in chain
+        return agent._try_activate_fallback(reason=reason)  # try next in chain
 
 
 

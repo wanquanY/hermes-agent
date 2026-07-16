@@ -33,6 +33,7 @@ from hermes_gateway.process_notifications import (
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.response_normalization import normalize_empty_agent_response
 from hermes_gateway.resume_pending import should_clear_resume_pending_after_turn
+from hermes_gateway.response_filters import is_intentional_silence_agent_result
 from hermes_gateway.session_context import build_session_context, build_session_context_prompt
 from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
@@ -398,6 +399,10 @@ class GatewayAgentTurnRuntime:
                 return None
 
             response = agent_result.get("final_response") or ""
+            _intentional_silence = is_intentional_silence_agent_result(
+                agent_result,
+                response,
+            )
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
@@ -443,10 +448,11 @@ class GatewayAgentTurnRuntime:
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            response = normalize_empty_agent_response(
-                agent_result, response, history_len=len(history),
-            )
-            response = sanitize_gateway_final_response(source.platform, response)
+            if not _intentional_silence:
+                response = normalize_empty_agent_response(
+                    agent_result, response, history_len=len(history),
+                )
+                response = sanitize_gateway_final_response(source.platform, response)
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -464,7 +470,7 @@ class GatewayAgentTurnRuntime:
                 )
             except Exception:
                 _show_reasoning_effective = getattr(runner, "_show_reasoning", False)
-            if _show_reasoning_effective and response:
+            if _show_reasoning_effective and response and not _intentional_silence:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
                     # Collapse long reasoning to keep messages readable
@@ -494,7 +500,12 @@ class GatewayAgentTurnRuntime:
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
-            if _footer_line and response and not agent_result.get("already_sent"):
+            if (
+                _footer_line
+                and response
+                and not _intentional_silence
+                and not agent_result.get("already_sent")
+            ):
                 response = f"{response}\n\n{_footer_line}"
 
             # Emit agent:end hook
@@ -543,6 +554,12 @@ class GatewayAgentTurnRuntime:
                 agent_result=agent_result,
                 agent_messages=agent_messages,
             )
+            if _intentional_silence:
+                # Persist the control marker above so the model retains its
+                # own decision, then erase only the outbound representation.
+                response = ""
+                _footer_line = ""
+                agent_result.pop("already_sent", None)
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))

@@ -357,6 +357,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     try:
         from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
         from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+        from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
 
@@ -398,7 +399,25 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
                     if not cmd_name:
                         continue
-                    _skill_commands[f"/{cmd_name}"] = {
+                    if resolve_command(cmd_name) is not None:
+                        logger.warning(
+                            "Skill %r maps to core slash command '/%s'; "
+                            "auto-registration skipped (use skill_view instead)",
+                            name,
+                            cmd_name,
+                        )
+                        continue
+                    cmd_key = f"/{cmd_name}"
+                    if cmd_key in _skill_commands:
+                        logger.warning(
+                            "Skill %r maps to slash command %s already owned by %r; "
+                            "keeping the first skill",
+                            name,
+                            cmd_key,
+                            _skill_commands[cmd_key]["name"],
+                        )
+                        continue
+                    _skill_commands[cmd_key] = {
                         "name": name,
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),

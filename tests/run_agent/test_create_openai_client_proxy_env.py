@@ -14,10 +14,12 @@ challenge`` 403s against ``chatgpt.com/backend-api/codex`` once they upgraded
 past #11277. The fix forwards the proxy URL explicitly to ``httpx.Client``
 while keeping the keepalive-enabled transport in place.
 
-This test pins that the constructed ``httpx.Client`` mounts an ``HTTPProxy``
-pool when a proxy env var is set, AND that the socket-level keepalive
-transport is still installed on the no-proxy default path.
+This test pins proxy routing and the pool-level idle expiry. Hermes must not
+replace httpx's OS socket defaults with custom ``socket_options``.
 """
+import http.server
+import threading
+import time
 from unittest.mock import patch
 
 import httpx
@@ -142,7 +144,76 @@ def test_create_openai_client_no_proxy_when_env_unset(mock_openai, monkeypatch):
         "No proxy env set but httpx.Client still mounted HTTPProxy; "
         "pools were %r" % (pool_types,)
     )
+    pool = http_client._transport._pool
+    assert pool._keepalive_expiry == 20.0
+    assert pool._max_keepalive_connections == 20
+    assert pool._max_connections == 100
     http_client.close()
+
+
+def test_provider_pool_limits_are_configurable_without_socket_overrides(monkeypatch):
+    from agent.process_bootstrap import build_provider_http_client
+
+    monkeypatch.setenv("HERMES_PROVIDER_HTTPX_KEEPALIVE_EXPIRY", "7.5")
+    monkeypatch.setenv("HERMES_PROVIDER_HTTPX_MAX_KEEPALIVE", "3")
+    monkeypatch.setenv("HERMES_PROVIDER_HTTPX_MAX_CONNECTIONS", "11")
+    client = build_provider_http_client("https://api.example.test/v1")
+    try:
+        pool = client._transport._pool
+        assert pool._keepalive_expiry == 7.5
+        assert pool._max_keepalive_connections == 3
+        assert pool._max_connections == 11
+        assert not hasattr(client._transport, "_socket_options")
+    finally:
+        client.close()
+
+
+def test_pool_survives_accelerated_idle_connection_churn(monkeypatch):
+    """Exercise repeated idle reap/reconnect cycles against a local HTTP/1.1 origin."""
+
+    from agent.process_bootstrap import build_provider_http_client
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        connections = 0
+
+        def setup(self):
+            type(self).connections += 1
+            super().setup()
+
+        def do_GET(self):
+            body = b'ok'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    for key in (
+        "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+        "https_proxy", "http_proxy", "all_proxy",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_PROVIDER_HTTPX_KEEPALIVE_EXPIRY", "0.01")
+    client = build_provider_http_client(f"http://127.0.0.1:{server.server_port}")
+    try:
+        for _ in range(30):
+            assert client.get(
+                f"http://127.0.0.1:{server.server_port}/health"
+            ).text == "ok"
+            time.sleep(0.015)
+        assert Handler.connections > 1
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
 
 
 def test_get_proxy_for_base_url_returns_none_when_host_bypassed(monkeypatch):

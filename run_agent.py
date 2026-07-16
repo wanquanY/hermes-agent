@@ -3357,28 +3357,9 @@ class AIAgent:
 
     @staticmethod
     def _build_keepalive_http_client(base_url: str = "") -> Any:
-        try:
-            import httpx as _httpx
-            import socket as _socket
+        from agent.process_bootstrap import build_provider_http_client
 
-            _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
-            if hasattr(_socket, "TCP_KEEPIDLE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
-            elif hasattr(_socket, "TCP_KEEPALIVE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
-            # When a custom transport is provided, httpx won't auto-read proxy
-            # from env vars (allow_env_proxies = trust_env and transport is None).
-            # Explicitly read proxy settings while still honoring NO_PROXY for
-            # loopback / local endpoints such as a locally hosted sub2api.
-            _proxy = _get_proxy_for_base_url(base_url)
-            return _httpx.Client(
-                transport=_httpx.HTTPTransport(socket_options=_sock_opts),
-                proxy=_proxy,
-            )
-        except Exception:
-            return None
+        return build_provider_http_client(base_url)
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
@@ -4854,13 +4835,38 @@ class AIAgent:
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
-            if not _should_parallelize_tool_batch(tool_calls):
+            if len(tool_calls) <= 1:
                 return self._execute_tool_calls_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
 
-            return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id, api_call_count
+            from agent.tool_dispatch_helpers import _plan_tool_batch_segments
+
+            segments = _plan_tool_batch_segments(tool_calls)
+            if len(segments) == 1:
+                if segments[0][0] == "parallel":
+                    return self._execute_tool_calls_concurrent(
+                        assistant_message,
+                        messages,
+                        effective_task_id,
+                        api_call_count,
+                    )
+                return self._execute_tool_calls_sequential(
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    api_call_count,
+                )
+
+            from agent.tool_executor import execute_tool_calls_segmented
+
+            return execute_tool_calls_segmented(
+                self,
+                assistant_message,
+                messages,
+                effective_task_id,
+                api_call_count,
+                segments=segments,
             )
         finally:
             self._executing_tools = False
