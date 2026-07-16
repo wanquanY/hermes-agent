@@ -1552,6 +1552,16 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     if not tool_name:
         return None
 
+    # Historical sessions may replay the old ambiguous
+    # ``mcp_server_tool`` spelling. Registry resolution is the single read
+    # migration seam; successful resolution always returns the canonical
+    # ``mcp__server__tool`` name and nothing writes the legacy spelling back.
+    from tools.registry import registry
+
+    migrated = registry.resolve_name(tool_name)
+    if migrated in agent.valid_tool_names:
+        return migrated
+
     def _norm(s: str) -> str:
         return s.lower().replace("-", "_").replace(" ", "_")
 

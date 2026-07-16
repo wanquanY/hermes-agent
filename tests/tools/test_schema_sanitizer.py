@@ -397,7 +397,7 @@ def test_strip_responses_format_tools():
     # Responses-format: {"name": "...", "parameters": {...}, "type": "function"}
     tools = [
         {
-            "name": "mcp_firecrawl_search",
+            "name": "mcp__firecrawl__search",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -560,7 +560,7 @@ def test_strip_slash_enum_responses_format():
     """Responses-format tools (no `function` wrapper) are also handled."""
     tools = [{
         "type": "function",
-        "name": "mcp_prime_lab_train_model",
+        "name": "mcp__prime_lab__train_model",
         "parameters": {
             "type": "object",
             "properties": {

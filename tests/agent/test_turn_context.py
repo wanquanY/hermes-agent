@@ -234,15 +234,15 @@ def test_between_turns_refresh_adds_late_tool_when_servers_registered():
     """R1: a tool that registered since build lands in this turn's snapshot."""
     agent = _FakeAgent()
 
-    new_def = {"type": "function", "function": {"name": "mcp_x_tool", "description": "", "parameters": {}}}
+    new_def = {"type": "function", "function": {"name": "mcp__x__tool", "description": "", "parameters": {}}}
 
     import model_tools
     with patch("tools.mcp_tool.has_registered_mcp_tools", return_value=True), \
          patch.object(model_tools, "get_tool_definitions", return_value=[new_def]):
         _build(agent)
 
-    assert "mcp_x_tool" in agent.valid_tool_names
-    assert any(t["function"]["name"] == "mcp_x_tool" for t in agent.tools)
+    assert "mcp__x__tool" in agent.valid_tool_names
+    assert any(t["function"]["name"] == "mcp__x__tool" for t in agent.tools)
 
 
 def test_between_turns_refresh_skipped_when_no_servers():

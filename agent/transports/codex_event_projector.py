@@ -222,9 +222,13 @@ class CodexEventProjector:
         )
 
     def _project_mcp_tool_call(self, item: dict, item_id: str) -> ProjectionResult:
+        from tools.mcp_identity import canonical_mcp_tool_name
+
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        call_id = _deterministic_call_id(f"mcp_{server}_{tool}", item_id)
+        call_id = _deterministic_call_id(
+            canonical_mcp_tool_name(server, tool), item_id
+        )
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}

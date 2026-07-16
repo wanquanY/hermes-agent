@@ -194,6 +194,53 @@ class TestAnthropicTransport:
         assert tc.id == "toolu_123"
         assert '"command"' in tc.arguments
 
+    def test_oauth_wire_name_round_trip_keeps_canonical_native_mcp(self, transport):
+        from tools.mcp_identity import canonical_mcp_tool_name
+        from tools.registry import registry
+
+        canonical = canonical_mcp_tool_name("linear", "get_issue")
+        registry.register(
+            name=canonical,
+            toolset="mcp-linear",
+            schema={"name": canonical, "description": "get", "parameters": {}},
+            handler=lambda args: "ok",
+        )
+        try:
+            response = SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_mcp",
+                        name=canonical,
+                        input={"id": "LIN-1"},
+                    )
+                ],
+                stop_reason="tool_use",
+            )
+            normalized = transport.normalize_response(
+                response, strip_tool_prefix=True
+            )
+            assert normalized.tool_calls[0].name == canonical
+        finally:
+            registry.deregister(canonical)
+
+    def test_oauth_wire_name_round_trip_restores_bare_hermes_tool(self, transport):
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_terminal",
+                    name="mcp__terminal",
+                    input={"command": "pwd"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        normalized = transport.normalize_response(
+            response, strip_tool_prefix=True
+        )
+        assert normalized.tool_calls[0].name == "terminal"
+
     def test_normalize_response_thinking(self, transport):
         """Test normalization preserves thinking content."""
         r = SimpleNamespace(

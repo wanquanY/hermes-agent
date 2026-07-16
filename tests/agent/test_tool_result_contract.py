@@ -10,7 +10,7 @@ def test_read_only_allowlist_and_unknown_default_are_conservative():
     assert tool_may_have_side_effect("web_search") is False
     assert tool_may_have_side_effect("read_file") is False
     assert tool_may_have_side_effect("terminal") is True
-    assert tool_may_have_side_effect("mcp_future_plugin") is True
+    assert tool_may_have_side_effect("mcp__future__plugin") is True
 
 
 def test_effect_disposition_is_internal_and_narrowly_typed():

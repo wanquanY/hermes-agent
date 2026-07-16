@@ -21,6 +21,7 @@ import logging
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
@@ -177,6 +178,7 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
+        self._legacy_mcp_name_warnings: set[str] = set()
         # Durable plugin package policy. Authorization is bound to the module
         # that defines a handler, so delayed threads and direct registry imports
         # cannot escape the decision made at plugin discovery.
@@ -207,6 +209,18 @@ class ToolRegistry:
         """Return a stable snapshot of toolset availability checks."""
         return self._snapshot_state()[1]
 
+    @contextmanager
+    def atomic_mutation(self):
+        """Hold the registry write lock across a multi-entry replacement.
+
+        Individual register/deregister calls remain re-entrant. Readers see
+        either the old or the complete new snapshot, never a half-published
+        dynamic MCP tool list.
+        """
+
+        with self._lock:
+            yield
+
     def _evaluate_toolset_check(self, toolset: str, check: Callable | None) -> bool:
         """Run a toolset check, treating missing or failing checks as unavailable/available."""
         if not check:
@@ -217,10 +231,34 @@ class ToolRegistry:
             logger.debug("Toolset %s check raised; marking unavailable", toolset)
             return False
 
-    def get_entry(self, name: str) -> Optional[ToolEntry]:
-        """Return a registered tool entry by name, or None."""
+    def _resolve_name_locked(self, name: str) -> str | None:
+        if name in self._tools:
+            return name
+        from tools.mcp_identity import resolve_legacy_mcp_tool_name
+
+        resolved = resolve_legacy_mcp_tool_name(name, self._tools)
+        if resolved is not None and name not in self._legacy_mcp_name_warnings:
+            self._legacy_mcp_name_warnings.add(name)
+            logger.warning(
+                "Migrating legacy MCP tool name '%s' to canonical '%s'; "
+                "legacy names are read-only and will not be written again",
+                name,
+                resolved,
+            )
+        return resolved
+
+    def resolve_name(self, name: str) -> str | None:
+        """Resolve a registered name through the one legacy MCP read seam."""
+
         with self._lock:
-            return self._tools.get(name)
+            return self._resolve_name_locked(name)
+
+    def get_entry(self, name: str) -> Optional[ToolEntry]:
+        """Return a registered tool entry by canonical or legacy-read name."""
+
+        with self._lock:
+            resolved = self._resolve_name_locked(name)
+            return self._tools.get(resolved) if resolved is not None else None
 
     def get_registered_toolset_names(self) -> List[str]:
         """Return sorted unique toolset names present in the registry."""
@@ -452,8 +490,15 @@ class ToolRegistry:
         # same check_fn within one definitions pass without re-reading the
         # TTL clock.
         check_results: Dict[Callable, bool] = {}
-        entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
-        for name in sorted(tool_names):
+        with self._lock:
+            entries_by_name = dict(self._tools)
+            resolved_names = {
+                resolved
+                for requested_name in tool_names
+                if (resolved := self._resolve_name_locked(requested_name))
+                is not None
+            }
+        for name in sorted(resolved_names):
             entry = entries_by_name.get(name)
             if not entry:
                 continue

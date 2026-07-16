@@ -366,10 +366,10 @@ async def _noop_callback() -> tuple[str, str | None]:
 
 
 @pytest.mark.asyncio
-async def test_initialize_prefetches_oauth_metadata_when_missing(
+async def test_expired_refreshable_token_prefetches_missing_oauth_metadata(
     tmp_path, monkeypatch
 ):
-    """Cold-load must pre-flight PRM + ASM discovery so ``_refresh_token``
+    """An expired refreshable cold-load prefetches PRM + ASM so ``_refresh_token``
     has the correct ``token_endpoint`` before the first refresh attempt.
 
     Without this, the SDK's ``_refresh_token`` falls back to
@@ -414,6 +414,10 @@ async def test_initialize_prefetches_oauth_metadata_when_missing(
             token_endpoint_auth_method="none",
         )
     )
+    token_path = tmp_path / "mcp-tokens" / "srv.json"
+    token_payload = json.loads(token_path.read_text())
+    token_payload["expires_at"] = time.time() - 60
+    token_path.write_text(json.dumps(token_payload))
 
     # Route the AsyncClient used inside _prefetch_oauth_metadata through a
     # MockTransport that mimics BetterStack's split-origin discovery:

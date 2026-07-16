@@ -313,7 +313,7 @@ def _detect_claude_code_version() -> str:
 
 
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-_MCP_TOOL_PREFIX = "mcp_"
+_MCP_TOOL_PREFIX = "mcp__"
 
 
 def _get_claude_code_version() -> str:
@@ -2122,11 +2122,15 @@ def build_anthropic_kwargs(
                 text = text.replace("Nous Research", "Anthropic")
                 block["text"] = text
 
-        # 3. Prefix tool names with mcp_ (Claude Code convention)
+        # 3. Normalize every name onto Anthropic's double-underscore OAuth
+        #    wire convention. Canonical native MCP names are already correct;
+        #    legacy replayed names are promoted without being double-prefixed.
+        from tools.mcp_identity import to_anthropic_oauth_wire_name
+
         if anthropic_tools:
             for tool in anthropic_tools:
                 if "name" in tool:
-                    tool["name"] = _MCP_TOOL_PREFIX + tool["name"]
+                    tool["name"] = to_anthropic_oauth_wire_name(tool["name"])
 
         # 4. Prefix tool names in message history (tool_use and tool_result blocks)
         for msg in anthropic_messages:
@@ -2135,8 +2139,9 @@ def build_anthropic_kwargs(
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "tool_use" and "name" in block:
-                            if not block["name"].startswith(_MCP_TOOL_PREFIX):
-                                block["name"] = _MCP_TOOL_PREFIX + block["name"]
+                            block["name"] = to_anthropic_oauth_wire_name(
+                                block["name"]
+                            )
                         elif block.get("type") == "tool_result" and "tool_use_id" in block:
                             pass  # tool_result uses ID, not name
 

@@ -133,3 +133,32 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 6 等待最终统
 
 机器门禁完成时间：2026-07-16。阶段聚合 626 passed；Hermes 29,044 passed、
 0 failed；Doxie Gateway contract 与 desktop `test:gates` 退出码 0。阶段 8 等待最终统一验收。
+
+## 阶段 9
+
+- [x] U7、CX1、CX2、CX4 的 route、compaction、reasoning、usage 与 verification owner 已记录。
+- [x] OpenAI/Copilot 主调用、auxiliary 与 fallback 共用 Responses route policy。
+- [x] Codex native compaction 不回落 legacy compressor，lease/transcript/usage 仍归统一事实源。
+- [x] app-server reasoning delta 经统一 event projector，实时与最终 transcript 无重复。
+- [x] verification aggregate、provider attribution、prompt caching 与 delegation headroom 有行为证据。
+- [x] 阶段 9 专项与相邻协议门禁完成；MCP OAuth 阻塞明确转入且已由阶段 10 关闭。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。阶段聚合 766 passed、0 failed；阶段 10 已关闭标准全量中
+发现的 MCP OAuth discovery 阻塞。阶段 9 等待最终统一验收。
+
+## 阶段 10
+
+- [x] R3、U8、RT1、RT2 的 canonical identity、rich content 与 lifecycle owner 已记录。
+- [x] 所有新写入只使用 `mcp__server__tool`；legacy 只在唯一 registry read seam 迁移且歧义 fail closed。
+- [x] Text/Image/Audio/ResourceLink/EmbeddedResource/structured/error content 共用 materializer。
+- [x] stdio、SSE、streamable/legacy HTTP initialize 有 deadline，cancel/timeout 后资源收敛。
+- [x] parked server 单 owner、指数 backoff、自恢复和原子 registry replace 有故障注入证据。
+- [x] 有效 OAuth token 不做推测性 discovery，失效 token 的 refresh/discovery 有总 deadline。
+- [x] 严格异步委派 `<1s` 合同保留，并由标准 runner 串行尾测避免 CPU 竞争污染。
+- [x] Hermes 全量、静态/分层/observability 与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 1585 files、29,104 passed、0 failed；
+observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` 退出码 0。
+阶段 10 等待最终统一验收。

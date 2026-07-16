@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 9 专项自动验收完成，正在进入阶段 10 MCP 协议兼容与恢复。
-- 后续阶段：阶段 10-12 按计划连续实施，全部完成后统一用户验收。
+- 当前阶段：阶段 10 自动验收完成，正在进入阶段 11 Automation 与进程生命周期。
+- 后续阶段：阶段 11-12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -32,7 +32,9 @@
 | `phase-8-design.md` | 阶段 8 Subagent 统一 Activity/Run 生命周期、取消与有界上下文设计 |
 | `phase-8-acceptance.md` | 阶段 8 同步/异步、fan-out、spill、全量与 Doxie 联调证据 |
 | `phase-9-design.md` | 阶段 9 Responses route、Codex compaction、reasoning 与 verification 设计 |
-| `phase-9-acceptance.md` | 阶段 9 Codex/Responses/verification 专项证据与阶段 10 待关闭全量红项 |
+| `phase-9-acceptance.md` | 阶段 9 Codex/Responses/verification 专项证据与阶段 10 已关闭红项来源 |
+| `phase-10-design.md` | 阶段 10 MCP canonical identity、富内容、initialize 与恢复状态机设计 |
+| `phase-10-acceptance.md` | 阶段 10 MCP 专项、全量、静态、Doxie 门禁与统一实机验收重点 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -77,8 +79,12 @@ python scripts/upstream_absorption_baseline.py \
   全量 29,044 passed、0 failed；Doxie contract/gates 退出码 0。
 - 阶段 9：U7、CX1、CX2、CX4 已按当前架构吸收；route policy、native compaction、
   reasoning projector 与 verification aggregate 专项聚合 766 passed、0 failed；运行期
-  catalog cache-only 修正 112 passed。标准全量发现的 MCP OAuth discovery 阻塞明确转入
-  阶段 10 RT1 关闭，未伪装为绿灯。
+  catalog cache-only 修正 112 passed。标准全量发现的 MCP OAuth discovery 阻塞已由阶段 10
+  的有界 lifecycle 与 cache-first OAuth 启动边界从根因关闭。
+- 阶段 10：R3、U8、RT1、RT2 已按当前架构吸收；MCP 使用无歧义 canonical identity，
+  rich/error content 统一 materialize，四类 transport initialize 有界收敛，parked server
+  单 owner/backoff 自恢复；Hermes 全量 29,104 passed、0 failed，静态/分层/观测门禁与
+  Doxie desktop `test:gates` 全绿。
 - 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
 各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核

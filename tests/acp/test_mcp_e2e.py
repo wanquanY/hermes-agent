@@ -76,12 +76,12 @@ class TestMcpRegistrationE2E:
 
         def mock_register(config_map):
             registered_configs.update(config_map)
-            return ["mcp_test_fs_read", "mcp_test_fs_write", "mcp_test_api_search"]
+            return ["mcp__test_fs__read", "mcp__test_fs__write", "mcp__test_api__search"]
 
         fake_tools = [
-            {"function": {"name": "mcp_test_fs_read"}},
-            {"function": {"name": "mcp_test_fs_write"}},
-            {"function": {"name": "mcp_test_api_search"}},
+            {"function": {"name": "mcp__test_fs__read"}},
+            {"function": {"name": "mcp__test_fs__write"}},
+            {"function": {"name": "mcp__test_api__search"}},
             {"function": {"name": "terminal"}},
         ]
 
@@ -108,7 +108,7 @@ class TestMcpRegistrationE2E:
         # Verify agent tool surface was refreshed
         assert state.agent.tools == fake_tools
         assert state.agent.valid_tool_names == {
-            "mcp_test_fs_read", "mcp_test_fs_write", "mcp_test_api_search", "terminal"
+            "mcp__test_fs__read", "mcp__test_fs__write", "mcp__test_api__search", "terminal"
         }
 
     @pytest.mark.asyncio
@@ -265,9 +265,9 @@ class TestMcpSanitizationE2E:
         registered_configs = {}
         def mock_register(config_map):
             registered_configs.update(config_map)
-            return ["mcp_ai_exa_exa_search"]
+            return ["mcp__ai_exa_exa__search"]
 
-        fake_tools = [{"function": {"name": "mcp_ai_exa_exa_search"}}]
+        fake_tools = [{"function": {"name": "mcp__ai_exa_exa__search"}}]
 
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=fake_tools):
@@ -278,7 +278,7 @@ class TestMcpSanitizationE2E:
         # Raw server name preserved as config key
         assert "ai.exa/exa" in registered_configs
         # Agent tools refreshed with sanitized name
-        assert "mcp_ai_exa_exa_search" in state.agent.valid_tool_names
+        assert "mcp__ai_exa_exa__search" in state.agent.valid_tool_names
 
 
 class TestSessionLifecycleMcpE2E:

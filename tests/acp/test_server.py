@@ -1548,7 +1548,7 @@ class TestRegisterSessionMcpServers:
         registered_config = {}
         def capture_register(config_map):
             registered_config.update(config_map)
-            return ["mcp_test_server_tool1"]
+            return ["mcp__test_server__tool1"]
 
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=capture_register), \
              patch("model_tools.get_tool_definitions", return_value=[]):
@@ -1611,11 +1611,11 @@ class TestRegisterSessionMcpServers:
         )
 
         fake_tools = [
-            {"function": {"name": "mcp_srv_search"}},
+            {"function": {"name": "mcp__srv__search"}},
             {"function": {"name": "terminal"}},
         ]
 
-        with patch("tools.mcp_tool.register_mcp_servers", return_value=["mcp_srv_search"]), \
+        with patch("tools.mcp_tool.register_mcp_servers", return_value=["mcp__srv__search"]), \
              patch("model_tools.get_tool_definitions", return_value=fake_tools) as mock_defs:
             await agent._register_session_mcp_servers(state, [server])
 
@@ -1626,7 +1626,7 @@ class TestRegisterSessionMcpServers:
         )
         assert state.agent.enabled_toolsets == ["hermes-acp", "mcp-srv"]
         assert state.agent.tools == fake_tools
-        assert state.agent.valid_tool_names == {"mcp_srv_search", "terminal"}
+        assert state.agent.valid_tool_names == {"mcp__srv__search", "terminal"}
         # _invalidate_system_prompt should have been called
         state.agent._invalidate_system_prompt.assert_called_once()
 

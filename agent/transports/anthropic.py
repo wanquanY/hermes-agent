@@ -88,7 +88,6 @@ class AnthropicTransport(ProviderTransport):
         from agent.transports.types import ToolCall
 
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
-        _MCP_PREFIX = "mcp_"
 
         text_parts = []
         reasoning_parts = []
@@ -105,8 +104,13 @@ class AnthropicTransport(ProviderTransport):
                     reasoning_details.append(block_dict)
             elif block.type == "tool_use":
                 name = block.name
-                if strip_tool_prefix and name.startswith(_MCP_PREFIX):
-                    name = name[len(_MCP_PREFIX):]
+                if strip_tool_prefix:
+                    from tools.mcp_identity import from_anthropic_oauth_wire_name
+                    from tools.registry import registry
+
+                    name = from_anthropic_oauth_wire_name(
+                        name, registry.get_all_tool_names()
+                    )
                 tool_calls.append(
                     ToolCall(
                         id=block.id,

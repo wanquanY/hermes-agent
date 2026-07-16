@@ -51,6 +51,15 @@ def test_wall_clock_background_process_regression_runs_in_serial_tail():
     assert _requires_serial_execution(timing_sensitive) is True
 
 
+def test_async_delegation_latency_contract_runs_in_serial_tail():
+    from scripts.run_tests_parallel import _requires_serial_execution
+
+    repo_root = Path(__file__).resolve().parent.parent
+    timing_sensitive = repo_root / "tests/tools/test_async_delegation.py"
+
+    assert _requires_serial_execution(timing_sensitive) is True
+
+
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
 # so concurrent invocations of the suite don't clobber each other.

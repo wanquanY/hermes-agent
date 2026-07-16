@@ -1,4 +1,11 @@
-"""Integration tests for Activity-backed asynchronous delegation."""
+"""Integration tests for Activity-backed asynchronous delegation.
+
+hermes-test-runner: serial
+
+The first test enforces a wall-clock return-time contract.  It must measure
+the delegation path itself, not CPU contention from unrelated pytest
+processes in the per-file parallel runner.
+"""
 
 from __future__ import annotations
 

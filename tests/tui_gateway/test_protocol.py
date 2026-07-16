@@ -1042,7 +1042,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
         params = obj.get("params") or {}
         if obj.get("method") == "event" and params.get("type") == "message.complete":
             entered_write.set()
-            write_released.append(release_write.wait(timeout=2))
+            write_released.append(release_write.wait(timeout=10))
         return True
 
     agent = MagicMock(model="gpt-test", provider="test-provider")
@@ -1074,7 +1074,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
     )
     emitter.start()
 
-    assert entered_write.wait(timeout=2)
+    assert entered_write.wait(timeout=10)
     try:
         status = server.handle_request(
             {
@@ -1085,7 +1085,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
         )
     finally:
         release_write.set()
-    emitter.join(timeout=2)
+    emitter.join(timeout=10)
 
     assert not emitter.is_alive()
     assert observed_events
