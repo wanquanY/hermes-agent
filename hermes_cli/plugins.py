@@ -1468,28 +1468,30 @@ def clear_thread_tool_whitelist() -> None:
     _thread_tool_whitelist.allowed = None
 
 
-def get_pre_tool_call_block_message(
+@dataclass(frozen=True)
+class PreToolCallDirective:
+    """Validated policy directive returned by a ``pre_tool_call`` hook."""
+
+    action: Optional[str] = None
+    message: Optional[str] = None
+    rule_key: Optional[str] = None
+
+
+def _get_pre_tool_call_directive(
     tool_name: str,
     args: Optional[Dict[str, Any]],
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
-) -> Optional[str]:
-    """Check ``pre_tool_call`` hooks for a blocking directive.
-
-    Plugins that need to enforce policy (rate limiting, security
-    restrictions, approval workflows) can return::
-
-        {"action": "block", "message": "Reason the tool was blocked"}
-
-    from their ``pre_tool_call`` callback.  The first valid block
-    directive wins.  Invalid or irrelevant hook return values are
-    silently ignored so existing observer-only hooks are unaffected.
-    """
+) -> PreToolCallDirective:
+    """Validate the first blocking or human-approval plugin directive."""
     allowed = getattr(_thread_tool_whitelist, "allowed", None)
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
-        return fmt.format(tool_name=tool_name)
+        return PreToolCallDirective(
+            action="block",
+            message=fmt.format(tool_name=tool_name),
+        )
 
     hook_results = invoke_hook(
         "pre_tool_call",
@@ -1499,17 +1501,114 @@ def get_pre_tool_call_block_message(
         session_id=session_id,
         tool_call_id=tool_call_id,
     )
-
     for result in hook_results:
         if not isinstance(result, dict):
             continue
-        if result.get("action") != "block":
+        action = result.get("action")
+        if action not in {"block", "approve"}:
             continue
         message = result.get("message")
-        if isinstance(message, str) and message:
-            return message
+        if not isinstance(message, str) or not message.strip():
+            continue
+        rule_key = result.get("rule_key") if action == "approve" else None
+        if isinstance(rule_key, str):
+            rule_key = rule_key.strip() or None
+        else:
+            rule_key = None
+        return PreToolCallDirective(
+            action=action,
+            message=message.strip(),
+            rule_key=rule_key,
+        )
+    return PreToolCallDirective()
 
-    return None
+
+def get_pre_tool_call_directive(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> tuple[Optional[str], Optional[str]]:
+    """Return the validated ``(action, message)`` plugin policy directive."""
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    return directive.action, directive.message
+
+
+def get_pre_tool_call_block_message(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> Optional[str]:
+    """Resolve the unique pre-tool policy seam and return a block if denied.
+
+    Plugins that need to enforce policy (rate limiting, security
+    restrictions, approval workflows) can return::
+
+        {"action": "block", "message": "Reason the tool was blocked"}
+        {"action": "approve", "message": "Why approval is needed",
+         "rule_key": "stable-policy-key"}
+
+    ``approve`` never means allow: it escalates through the same human gate,
+    persistence and fail-closed transport state used by command approval.
+    The historical function name remains as a compatibility ABI.
+    """
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    if directive.action == "block":
+        return directive.message
+    if directive.action != "approve":
+        return None
+
+    from tools.approval_gate import request_tool_approval
+
+    result = request_tool_approval(
+        tool_name,
+        directive.message or "Plugin policy requires approval.",
+        rule_key=directive.rule_key or "",
+    )
+    if result.get("approved") is True:
+        return None
+    return str(result.get("message") or "BLOCKED: tool approval was not granted.")
+
+
+def resolve_pre_tool_block(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> Optional[str]:
+    """Execution-facing wrapper that fails closed on policy seam errors."""
+    try:
+        return get_pre_tool_call_block_message(
+            tool_name,
+            args,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "pre_tool_call policy resolution failed for %s: %s",
+            tool_name,
+            exc,
+            exc_info=True,
+        )
+        return "BLOCKED: pre-tool approval policy failed closed."
 
 
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:

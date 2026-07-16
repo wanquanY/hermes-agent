@@ -730,8 +730,18 @@ class RealInteractiveResponder(WorkerInteractiveResponder):
                 return True
         elif frame.kind == "approval":
             from tools.approval import resolve_gateway_approval
-            choice = answer_text or "once"
-            if resolve_gateway_approval(frame.request_id, choice) > 0:
+            if isinstance(answer, dict):
+                choice = str(answer.get("choice") or "once")
+                reason = answer.get("reason") if choice == "deny" else None
+            else:
+                choice = answer_text or "once"
+                reason = None
+            resolve_kwargs = {"reason": reason} if reason is not None else {}
+            if resolve_gateway_approval(
+                frame.request_id,
+                choice,
+                **resolve_kwargs,
+            ) > 0:
                 return True
         return _resolve_generic_pending(frame.request_id, answer_text)
 

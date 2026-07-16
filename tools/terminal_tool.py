@@ -254,6 +254,11 @@ def _get_approval_callback():
     return getattr(_callback_tls, "approval", None)
 
 
+def get_approval_callback():
+    """Return the active thread-scoped approval UI callback."""
+    return _get_approval_callback()
+
+
 def set_sudo_password_callback(cb):
     """Register a callback for sudo password prompts (used by CLI).
 

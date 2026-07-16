@@ -510,6 +510,18 @@ class TestApprovalRespondRequestId:
         assert entry.event.is_set()
         assert entry.result == "once"
 
+    def test_approval_respond_relays_bounded_deny_reason(self):
+        entry = self._create_blocked_approval(request_id="appr-reason")
+        handler = _get_method("approval.respond")
+        result = handler(1, {
+            "request_id": "appr-reason",
+            "choice": "deny",
+            "reason": "use staging instead",
+        })
+        assert result["result"]["status"] == "resolved"
+        assert entry.result == "deny"
+        assert entry.reason == "use staging instead"
+
     def test_approval_respond_already_resolved_returns_4409(self):
         self._create_blocked_approval(request_id="appr-1")
         handler = _get_method("approval.respond")

@@ -327,6 +327,7 @@ def _(rid, params: dict) -> dict:
     ).strip()
     choice = params.get("choice", "deny")
     resolve_all = params.get("all", False)
+    reason = params.get("reason") if choice == "deny" else None
 
     # ── request_id-addressed resolution (preferred) ──────────────────
     if request_id:
@@ -362,7 +363,10 @@ def _(rid, params: dict) -> dict:
         session_key = found.get("session_key") or ""
         try:
             count = resolve_gateway_approval(
-                request_id, choice, resolve_all=resolve_all,
+                request_id,
+                choice,
+                resolve_all=resolve_all,
+                reason=reason,
             )
         except Exception as e:
             return _err(rid, 5004, str(e))
@@ -387,7 +391,10 @@ def _(rid, params: dict) -> dict:
         from tools.approval import resolve_gateway_approval
 
         count = resolve_gateway_approval(
-            session_key, choice, resolve_all=resolve_all,
+            session_key,
+            choice,
+            resolve_all=resolve_all,
+            reason=reason,
         )
     except Exception as e:
         return _err(rid, 5004, str(e))

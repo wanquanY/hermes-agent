@@ -1608,6 +1608,9 @@ DEFAULT_CONFIG = {
         "mode": "manual",
         "timeout": 60,
         "cron_mode": "deny",
+        # Case-insensitive shell globs that are blocked before yolo, smart
+        # approval, mode=off and permanent allowlists. Example: ["git push *"]
+        "deny": [],
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system

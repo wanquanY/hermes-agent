@@ -1627,19 +1627,36 @@ Control how Hermes handles potentially dangerous commands:
 ```yaml
 approvals:
   mode: manual   # manual | smart | off
+  deny: []       # unconditional case-insensitive command globs
 ```
 
 | Mode | Behavior |
 |------|----------|
 | `manual` (default) | Prompt the user before executing any flagged command. In the CLI, shows an interactive approval dialog. In messaging, queues a pending approval request. |
 | `smart` | Use an auxiliary LLM to assess whether a flagged command is actually dangerous. Low-risk commands are auto-approved with session-level persistence. Genuinely risky commands are escalated to the user. |
-| `off` | Skip all approval checks. Equivalent to `HERMES_YOLO_MODE=true`. **Use with caution.** |
+| `off` | Skip approval prompts. The hardline blocklist and `approvals.deny` remain enforced. Equivalent to `HERMES_YOLO_MODE=true`. **Use with caution.** |
 
 Smart mode is particularly useful for reducing approval fatigue — it lets the agent work more autonomously on safe operations while still catching genuinely destructive commands.
 
 :::warning
-Setting `approvals.mode: off` disables all safety checks for terminal commands. Only use this in trusted, sandboxed environments.
+Setting `approvals.mode: off` disables approval prompts for terminal commands;
+the hardline blocklist and `approvals.deny` remain enforced. Only use this in
+trusted, sandboxed environments.
 :::
+
+`approvals.deny` is an always-on user policy floor. Matching is
+case-insensitive and happens before yolo, smart approval, `mode: off`, and the
+permanent allowlist:
+
+```yaml
+approvals:
+  deny:
+    - "git push *"
+    - "terraform destroy*"
+```
+
+A matching command is blocked without creating a pending approval and cannot
+be approved from another surface.
 
 ## Checkpoints
 

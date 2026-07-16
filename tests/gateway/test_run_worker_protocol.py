@@ -696,6 +696,30 @@ async def test_real_responder_approval_blank_answer_defaults_to_once(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_real_responder_approval_dict_relays_deny_reason(monkeypatch) -> None:
+    captured = {}
+
+    def fake_resolve(session_key, choice, resolve_all: bool = False, reason=None) -> int:
+        captured.update(session_key=session_key, choice=choice, reason=reason)
+        return 1
+
+    import tools.approval as approval_mod
+    monkeypatch.setattr(approval_mod, "resolve_gateway_approval", fake_resolve)
+    responder = RealInteractiveResponder()
+    ok = await responder.resolve(InteractiveResponseFrame(
+        kind="approval",
+        request_id="req-deny",
+        answer={"choice": "deny", "reason": "wrong environment"},
+    ))
+    assert ok is True
+    assert captured == {
+        "session_key": "req-deny",
+        "choice": "deny",
+        "reason": "wrong environment",
+    }
+
+
+@pytest.mark.asyncio
 async def test_real_responder_unknown_kind_returns_false() -> None:
     # Kind validation happens in decode_incoming for inbound frames, but
     # the responder is also reachable from the constructor path. Guard

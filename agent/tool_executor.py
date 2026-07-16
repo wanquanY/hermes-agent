@@ -225,8 +225,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         block_result = None
         blocked_by_guardrail = False
         try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
+            from hermes_cli.plugins import resolve_pre_tool_block
+            block_message = resolve_pre_tool_block(
                 function_name, function_args, task_id=effective_task_id or "",
             )
         except Exception:
@@ -701,8 +701,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Check plugin hooks for a block directive before executing.
         _block_msg: Optional[str] = None
         try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            _block_msg = get_pre_tool_call_block_message(
+            from hermes_cli.plugins import resolve_pre_tool_block
+            _block_msg = resolve_pre_tool_block(
                 function_name, function_args, task_id=effective_task_id or "",
             )
         except Exception:

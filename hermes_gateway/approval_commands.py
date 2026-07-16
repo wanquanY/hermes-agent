@@ -76,7 +76,8 @@ class GatewayApprovalCommandMixin:
         Signals blocked agent thread(s) with a 'deny' result so they receive
         a definitive BLOCKED message, same as the CLI deny flow.
 
-        ``/deny`` denies the oldest; ``/deny all`` denies everything.
+        ``/deny`` denies the oldest; ``/deny all`` denies everything. Any
+        remaining text is a bounded reason relayed to the waiting agent.
         """
         source = event.source
         session_key = self._session_key_for_source(source)
@@ -91,10 +92,19 @@ class GatewayApprovalCommandMixin:
                 return t("gateway.deny.stale")
             return t("gateway.deny.no_pending")
 
-        args = event.get_command_args().strip().lower()
-        resolve_all = "all" in args
+        raw_args = event.get_command_args().strip()
+        parts = raw_args.split(maxsplit=1)
+        resolve_all = bool(parts and parts[0].lower() == "all")
+        reason = parts[1] if resolve_all and len(parts) > 1 else (
+            raw_args if not resolve_all else None
+        )
 
-        count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all)
+        count = resolve_gateway_approval(
+            session_key,
+            "deny",
+            resolve_all=resolve_all,
+            reason=reason,
+        )
         if not count:
             return t("gateway.deny.no_pending")
 

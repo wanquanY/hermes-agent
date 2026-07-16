@@ -204,7 +204,8 @@ class AgentInteractionCallbacks:
             f"```\n{command_preview}\n```\n"
             f"Reason: {description}\n\n"
             f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-            f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+            f"for the session, `/approve always` to approve permanently, or "
+            f"`/deny [reason]` to cancel with guidance for the agent."
         )
         try:
             fut = safe_schedule_threadsafe(

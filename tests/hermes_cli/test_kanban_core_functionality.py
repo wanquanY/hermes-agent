@@ -444,12 +444,14 @@ def test_daemon_runs_and_stops(kanban_home):
 def test_daemon_keeps_going_after_tick_exception(kanban_home, monkeypatch):
     """A tick that raises shouldn't kill the loop."""
     calls = [0]
+    second_tick = threading.Event()
     orig_dispatch = kb.dispatch_once
 
     def _boom(conn, **kw):
         calls[0] += 1
         if calls[0] == 1:
             raise RuntimeError("simulated tick failure")
+        second_tick.set()
         return orig_dispatch(conn, **kw)
 
     monkeypatch.setattr(kb, "dispatch_once", _boom)
@@ -460,11 +462,15 @@ def test_daemon_keeps_going_after_tick_exception(kanban_home, monkeypatch):
 
     t = threading.Thread(target=_runner, daemon=True)
     t.start()
-    time.sleep(0.3)
-    stop.set()
-    t.join(timeout=2.0)
-    # At minimum, second-tick+ should have run.
-    assert calls[0] >= 2
+    try:
+        # Synchronize on the behavior under test instead of assuming the
+        # daemon process receives two scheduling slices within 300 ms. The
+        # latter becomes flaky under the full per-file parallel test load.
+        assert second_tick.wait(timeout=2.0)
+        assert calls[0] >= 2
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
 
 
 # ---------------------------------------------------------------------------

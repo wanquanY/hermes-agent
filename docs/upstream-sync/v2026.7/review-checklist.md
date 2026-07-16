@@ -84,3 +84,39 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 3 等待最终统
 机器门禁完成时间：2026-07-16。阶段聚合 1,642 passed、3 skipped；Hermes
 28,931 passed、0 failed；Doxie Gateway contract 与 desktop `test:gates` 退出码 0。
 阶段 4 等待最终统一验收。
+
+## 阶段 5
+
+- [x] R2、U6、RT5、RT6、RT7 的 identity、turn persistence、tool protocol 与 resume owner 已记录。
+- [x] cross-wired run、tool id/argument sanitization、orphan trimming 和 resume freshness 有行为证据。
+- [x] RT8 由当前子会话脱钩保留语义 supersede，理由与回归已记录。
+- [x] Hermes 全量、静态/分层与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 28,962 passed、0 failed；Doxie
+Gateway contract 与 desktop `test:gates` 退出码 0。阶段 5 等待最终统一验收。
+
+## 阶段 6
+
+- [x] U5、M4、C1 的 compression、stream-stale 与 interrupt queue owner 已记录。
+- [x] compression verdict/lease 与 stream breaker 可跨 turn、restart、rotation 和 worker IPC 恢复。
+- [x] legacy/Codex compaction 共享完成 seam，压缩期间普通输入 FIFO 且 control path 可中断。
+- [x] C2 保留 Phase 8，B2/B3 保留 Phase 12，没有重复计入阶段收益。
+- [x] Hermes 全量、静态/分层与 Doxie `test:gates` 完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 28,994 passed、0 failed；Doxie
+Gateway contract 与 desktop `test:gates` 退出码 0。阶段 6 等待最终统一验收。
+
+## 阶段 7
+
+- [x] A1-A5 的单一 gate、rule key、硬 deny、reason 与脱敏 owner 已记录。
+- [x] model/registry/sequential/concurrent/runtime helper 只经统一 pre-tool policy seam。
+- [x] plugin approve 只升级人审；无 responder、notify/hook/gate 异常 fail closed。
+- [x] session 隔离、permanent persistence、explicit/reason-hash key 有行为测试。
+- [x] hard deny 先于 yolo/off/allowlist/backend skip，且零 pending/handler。
+- [x] CLI、Gateway、TUI、worker、MCP、Team Mission 与 Doxie 合同门禁完成。
+- [ ] 用户在 Phase 1-12 全部完成后统一执行实机场景并明确批准。
+
+机器门禁完成时间：2026-07-16。Hermes 29,016 passed、0 failed；静态、分层、
+账本/单一 owner 与 Doxie desktop `test:gates` 全绿。阶段 7 等待最终统一验收。
