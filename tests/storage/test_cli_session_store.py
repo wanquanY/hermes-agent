@@ -73,6 +73,23 @@ def test_cli_session_store_exposes_persisted_compression_leases(tmp_path):
     assert store.compression_leases.release("s1", "foreground") is True
 
 
+def test_cli_session_store_exposes_runtime_stability_aggregate(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+    store.sessions.create("s1", "tui")
+
+    store.runtime_stability.write_compression(
+        "s1",
+        ineffective_count=1,
+        fallback_streak=2,
+        verdict_pending=True,
+    )
+
+    state = store.runtime_stability.get("s1")
+    assert state.compression_ineffective_count == 1
+    assert state.compression_fallback_streak == 2
+    assert state.compression_verdict_pending is True
+
+
 def test_cli_session_store_title_resume_and_handoff(tmp_path):
     store = open_cli_session_store(tmp_path / "state.db")
 

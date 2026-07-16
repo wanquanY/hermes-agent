@@ -1,5 +1,7 @@
 """Regression tests for issue #8340.
 
+hermes-test-runner: serial
+
 When a user command backgrounds a child process (``cmd &``, ``setsid cmd &
 disown``, etc.), the backgrounded grandchild inherits the write-end of our
 stdout pipe via fork().  Before the fix, the drain thread's blocking

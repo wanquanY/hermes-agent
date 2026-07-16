@@ -583,6 +583,22 @@ class AIAgent:
         # Context engine reset (works for both built-in compressor and plugins)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
+            current_session_id = str(getattr(self, "session_id", "") or "").strip()
+            if current_session_id:
+                self.context_compressor.on_session_start(
+                    current_session_id,
+                    session_db=getattr(self, "_session_db", None),
+                    platform=getattr(self, "platform", None) or "cli",
+                    model=getattr(self, "model", ""),
+                    context_length=getattr(
+                        self.context_compressor,
+                        "context_length",
+                        0,
+                    ),
+                )
+        self._stream_stale_failures = 0
+        self._stream_stale_retry_after = 0.0
+        self._stream_stale_route_hash = ""
 
     def _ensure_lmstudio_runtime_loaded(self, config_context_length: Optional[int] = None) -> None:
         """

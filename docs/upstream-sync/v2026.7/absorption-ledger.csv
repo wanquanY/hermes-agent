@@ -6,7 +6,7 @@ R4,capability,1,absorb,SQLite off-event-loop,022548036;811df74a1,阶段1事件�
 M1,capability,2,absorb,MoA reference 与 aggregator 统一计量,aa605b66c;3bdb23de1,阶段2五次调用产生五条可归属 usage,当前 MoA 调用丢弃 usage,
 M2,capability,0,equivalent,reasoning token 双源,3a122ba4a,账本校验与既有 usage pricing 回归通过,b49f60b82 已覆盖两类 token details,
 M3,capability,0,equivalent,compressor session-end 状态清理,c71f81695,账本校验与既有 session-end 回归通过,b301d3bd 已清理完整状态,
-M4,capability,6,absorb,跨 turn stream-stale breaker,985e19c11;d43863f00;2985d16be,阶段6跨 turn 持久化 breaker 测试通过,本地只有单 turn stale timeout,
+M4,capability,6,absorb,跨 turn stream-stale breaker,985e19c11;d43863f00;2985d16be,阶段6 streaming/non-streaming restart/half-open/reset 测试通过,本地只有单 turn stale timeout,
 B1,branch,1,superseded,gateway DB off-event-loop,fix/gateway-db-off-event-loop,由 R4 的阶段1验收覆盖,R4 是当前架构下的统一 owner,R4
 B2,branch,12,absorb,stream silence marker 不外泄,fix/stream-silence-marker-leak,阶段12 UI 投影与全量门禁通过,本地缺少对应行为证明,
 B3,branch,12,absorb,fallback cooldown 使用 monotonic,fix/flaky-fallback-cooldown-timing,阶段12时钟跳变测试通过,本地缺少对应行为证明,
@@ -26,7 +26,7 @@ A2,capability,7,absorb,tool 级持久审批 rule key,36308f066,阶段7 session �
 A3,capability,7,absorb,用户 deny 配置硬拦,e2fe529ef,阶段7 deny 零 handler 调用测试通过,本地缺少统一 deny 前置门禁,
 A4,capability,7,absorb,deny reason 回传 agent,cb6c47af0,阶段7长度与 transport 一致性测试通过,本地审批拒绝缺少稳定原因合同,
 A5,capability,7,absorb,Approval 用户可见 prompt 脱敏,4a7a6fd40,阶段7 secret mutation 测试通过,本地显示边界脱敏不完整,
-C1,capability,6,absorb,compression 期间 interrupt 降级为 queue,5eaccf580,阶段6 CLI 与 gateway 中断竞态测试通过,保护状态已有定义但无消费者,
+C1,capability,6,absorb,compression 期间 interrupt 降级为 queue,5eaccf580,阶段6 legacy/Codex FIFO queue 与正常 interrupt 恢复测试通过,保护状态已有定义但无消费者,
 C2,capability,8,absorb,hook 大输出 spill to disk,eab208db7,阶段8大小上限与清理测试通过,本地缺少有界 hook context,
 C3,capability,0,skip-with-reason,live reasoning 默认开启,0800af0b8;a124d1676,账本 skip reason 复核通过,产品默认值不作为本轮架构能力吸收项,
 CX1,capability,9,absorb,Codex native compaction,d1c8c0341;87b65e24a,阶段9 native compaction 生命周期测试通过,本地 Codex 路径仍有 legacy compressor 耦合,
@@ -40,7 +40,7 @@ U1,capability,1,absorb,macOS SQLite synchronous FULL,9aba95b05317,阶段1真实 
 U2,capability,2,absorb,registry result 与 effect contract,f8361d29c8e2;5e50f18b3041;a0a6cd80f5c7;b9b463f3bd65,阶段2 registry 到 replay 纵向测试通过,本地缺少完整 producer contract,
 U3,capability,3,absorb,catalog redirect credential policy,a061788d4356;5415b77658e9;6e75ba7fa066;1f46145e0391;d83cd6f7c3ac,阶段3 same-origin 与跨 origin 测试通过,本地缺少唯一 redirect policy,
 U4,capability,1,superseded,gateway 同步 DB 调用族,24ea21993f81;08e9dcf182a9;9d38a2309ece;b3f77f5c8270;94c2a4016bed;d23990f527cb,由 R4 的阶段1验收覆盖,R4 已提升为统一 async SessionStore port,R4
-U5,capability,6,absorb,compaction anti-thrash 与 fail-closed breaker,76381e2a8e3a;32f30d2a4f95;83000c7295a0;5ce827cac9f9;af7dceaf77bb;2627933f337b;8f29c9f4e302;fd461b58cad4,阶段6完整状态机与持久化测试通过,本地仅有已被上游证明不充分的旧计数器,
+U5,capability,6,absorb,compaction anti-thrash 与 fail-closed breaker,76381e2a8e3a;32f30d2a4f95;83000c7295a0;5ce827cac9f9;af7dceaf77bb;2627933f337b;8f29c9f4e302;fd461b58cad4,阶段6 threshold/真实usage/restart/rotation/lease fail-closed 测试通过,本地仅有已被上游证明不充分的旧计数器,
 U6,capability,5,absorb,close handoff 与 flush serialization,475922f2ce12;0b422559f3b2;50aebcbcffad;69fd846ef86c;8341d775a97f,阶段5五组会话竞态测试通过,当前重构缺少等价证明,
 U7,capability,9,absorb,Copilot Responses replay 与 native compaction usage,b9146a47bc86;bce17bf6a2e2;8121dbb1660a;8c62a922965a;ec6982fbcf11,阶段9 route policy 与 usage 测试通过,本地缺少完整 route-specific replay 链,
 U8,capability,10,absorb,MCP ResourceLink EmbeddedResource Audio materialization,1d98f8dd95ab;284a3cd47e8b,阶段10多 content block 测试通过,本地会丢失这些 MCP content block,

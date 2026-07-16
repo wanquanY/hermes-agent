@@ -57,6 +57,12 @@ from agent.tool_dispatch_helpers import (
     _multimodal_text_summary,
 )
 from agent.retry_utils import jittered_backoff
+from agent.runtime_stability import (
+    check_stream_stale_circuit,
+    record_stream_stale_failure,
+    record_stream_success,
+    reset_stream_stale_circuit,
+)
 from agent.tool_guardrails import (
     ToolGuardrailDecision,
     append_toolguard_guidance,
@@ -175,6 +181,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    check_stream_stale_circuit(agent)
     result = {"response": None, "error": None}
     request_client_holder = {"client": None}
     request_client_lock = threading.Lock()
@@ -342,6 +349,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"codex time-to-first-byte exceeded {_ttfb_timeout:.0f}s",
+            )
             agent._touch_activity(
                 f"codex stream killed after {int(_elapsed)}s with no first byte"
             )
@@ -383,6 +394,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     _close_request_client_once("stale_call_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"non-streaming response stale after {_elapsed:.0f}s",
+            )
             agent._touch_activity(
                 f"stale non-streaming call killed after {int(_elapsed)}s"
             )
@@ -410,6 +425,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
             raise InterruptedError("Agent interrupted during API call")
     if result["error"] is not None:
         raise result["error"]
+    if result["response"] is not None:
+        record_stream_success(agent)
     return result["response"]
 
 
@@ -1135,6 +1152,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        reset_stream_stale_circuit(agent, reason="fallback_activated")
         return True
     except Exception as e:
         logging.error("Failed to activate fallback %s: %s", fb_model, e)
@@ -1410,6 +1428,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     """
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
+    check_stream_stale_circuit(agent)
     _log_dovie_stream_stage(
         agent,
         "interruptible-stream-entry",
@@ -1496,6 +1515,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 raise InterruptedError("Agent interrupted during Bedrock API call")
         if result["error"] is not None:
             raise result["error"]
+        if result["response"] is not None:
+            record_stream_success(agent)
         return result["response"]
 
     result = {"response": None, "error": None, "partial_tool_names": []}
@@ -2458,6 +2479,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 _close_request_client_once("stale_stream_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"stream response stale after {_stale_elapsed:.0f}s",
+            )
             # Rebuild the primary client too — its connection pool
             # may hold dead sockets from the same provider outage.
             try:
@@ -2547,7 +2572,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 role="assistant", content=_partial_text, tool_calls=None,
                 reasoning_content=None,
             )
-            return SimpleNamespace(
+            partial_response = SimpleNamespace(
                 id=PARTIAL_STREAM_STUB_ID,
                 model=getattr(agent, "model", "unknown"),
                 choices=[SimpleNamespace(
@@ -2556,7 +2581,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 usage=None,
                 _dropped_tool_names=_partial_names or None,
             )
+            record_stream_success(agent)
+            return partial_response
         raise result["error"]
+    if result["response"] is not None:
+        record_stream_success(agent)
     return result["response"]
 
 # ── Provider fallback ──────────────────────────────────────────────────

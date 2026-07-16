@@ -5,6 +5,7 @@ when the agent is working on a task. See PR fix for the @Lonely__MH report.
 """
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -173,11 +174,11 @@ class TestBusySessionAck:
         agent = MagicMock()
         runner._running_agents[sk] = agent
 
-        with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event"):
-            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         # VERIFY: Agent was NOT interrupted
         agent.interrupt.assert_not_called()
+        assert adapter._pending_messages[sk] is event
 
         # VERIFY: Ack sent with queue-specific wording
         adapter._send_with_retry.assert_called_once()
@@ -202,15 +203,14 @@ class TestBusySessionAck:
         agent.steer = MagicMock(return_value=True)
         runner._running_agents[sk] = agent
 
-        with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event") as mock_merge:
-            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         # VERIFY: Agent was steered, NOT interrupted
         agent.steer.assert_called_once_with("also check the tests")
         agent.interrupt.assert_not_called()
 
         # VERIFY: No queueing — successful steer must NOT replay as next turn
-        mock_merge.assert_not_called()
+        assert sk not in adapter._pending_messages
 
         # VERIFY: Ack mentions steer wording
         adapter._send_with_retry.assert_called_once()
@@ -239,8 +239,8 @@ class TestBusySessionAck:
 
         agent.steer.assert_called_once()
         agent.interrupt.assert_not_called()
-        # Fell back to queue semantics: event was merged into pending messages
-        mock_merge.assert_called_once()
+        # Fell back to queue semantics: event occupies the FIFO head slot.
+        assert adapter._pending_messages[sk] is event
 
         # Ack uses queue-mode wording (not steer, not interrupt)
         call_kwargs = adapter._send_with_retry.call_args
@@ -262,11 +262,10 @@ class TestBusySessionAck:
         # Agent is still being set up — sentinel in place
         runner._running_agents[sk] = sentinel
 
-        with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event") as mock_merge:
-            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
-        # Event was queued instead of steered
-        mock_merge.assert_called_once()
+        # Event was queued instead of steered.
+        assert adapter._pending_messages[sk] is event
 
         call_kwargs = adapter._send_with_retry.call_args
         content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
@@ -436,6 +435,119 @@ class TestBusySessionAck:
         result = await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
         assert result is False  # not handled, let default path try
 
+    @pytest.mark.asyncio
+    async def test_local_compression_marker_demotes_interrupt_to_fifo_queue(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        first = _make_event(text="first follow-up")
+        second = MessageEvent(
+            text="second follow-up",
+            message_type=MessageType.TEXT,
+            source=first.source,
+            message_id="msg2",
+        )
+        sk = build_session_key(first.source)
+        agent = MagicMock()
+        agent._compression_in_flight = True
+        agent.session_id = "session-1"
+        runner._running_agents[sk] = agent
+        runner.adapters[first.source.platform] = adapter
+
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(first, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(second, sk)
+
+        agent.interrupt.assert_not_called()
+        assert adapter._pending_messages[sk] is first
+        assert runner._queued_events[sk] == [second]
+        content = adapter._send_with_retry.call_args_list[0].kwargs["content"]
+        assert "Compressing context safely" in content
+        assert "queued for the next turn" in content
+        assert "/stop" in content
+
+    @pytest.mark.asyncio
+    async def test_durable_compression_lease_demotes_interrupt(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="follow-up")
+        sk = build_session_key(event.source)
+        leases = MagicMock()
+        leases.holder.return_value = "compressor:worker-1"
+        agent = MagicMock()
+        agent._compression_in_flight = False
+        agent.session_id = "session-1"
+        agent._session_db = SimpleNamespace(compression_leases=leases)
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+
+        leases.holder.assert_called_once_with("session-1")
+        agent.interrupt.assert_not_called()
+        assert adapter._pending_messages[sk] is event
+
+    @pytest.mark.asyncio
+    async def test_codex_native_compaction_demotes_interrupt(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="follow-up during native compaction")
+        sk = build_session_key(event.source)
+        agent = MagicMock()
+        agent._compression_in_flight = False
+        agent._codex_session = SimpleNamespace(is_compacting=True)
+        agent.session_id = "session-1"
+        agent._session_db = None
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+
+        agent.interrupt.assert_not_called()
+        assert adapter._pending_messages[sk] is event
+
+    @pytest.mark.asyncio
+    async def test_compression_probe_error_fails_closed(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="follow-up")
+        sk = build_session_key(event.source)
+        leases = MagicMock()
+        leases.holder.side_effect = RuntimeError("database unavailable")
+        agent = MagicMock()
+        agent._compression_in_flight = False
+        agent.session_id = "session-1"
+        agent._session_db = SimpleNamespace(compression_leases=leases)
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+
+        agent.interrupt.assert_not_called()
+        assert adapter._pending_messages[sk] is event
+
+    @pytest.mark.asyncio
+    async def test_no_compression_marker_or_lease_keeps_interrupt_mode(self):
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="interrupt now")
+        sk = build_session_key(event.source)
+        leases = MagicMock()
+        leases.holder.return_value = None
+        agent = MagicMock()
+        agent._compression_in_flight = False
+        agent.session_id = "session-1"
+        agent._session_db = SimpleNamespace(compression_leases=leases)
+        runner._running_agents[sk] = agent
+        runner.adapters[event.source.platform] = adapter
+
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+
+        agent.interrupt.assert_called_once_with("interrupt now")
+
 
 class TestBusySessionOnboardingHint:
     """First-touch hint appended to the busy-ack the first time it fires."""
@@ -544,8 +656,7 @@ class TestBusySessionOnboardingHint:
         agent = MagicMock()
         runner._running_agents[sk] = agent
 
-        with patch("hermes_gateway.busy_session_runtime.merge_pending_message_event"):
-            await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
+        await busy_session_runtime_for(runner).handle_active_session_busy_message(event, sk)
 
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
         assert "Queued for the next turn" in content

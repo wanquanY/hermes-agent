@@ -42,6 +42,13 @@ EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
     "list_team_mission_events",
     "list_team_mission_run_events",
     "list_unread_completions",
+    # Runtime stability is discovered dynamically and then invoked through
+    # the component proxy, so the AST scanner cannot see these method names.
+    "runtime_stability.carry_forward",
+    "runtime_stability.clear_stream_stale",
+    "runtime_stability.get",
+    "runtime_stability.record_stream_stale_failure",
+    "runtime_stability.write_compression",
     "sessions.update_cwd",
     "update_session_meta",
     "update_session_model",
@@ -112,7 +119,7 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         # Component discovery is not a root DB method call. Calls on the
         # returned component are scanned separately as
         # `participants.<method>`.
-        if name_arg.value == "participants":
+        if name_arg.value in {"participants", "runtime_stability"}:
             return
         if _is_public_db_method_name(name_arg.value):
             self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))

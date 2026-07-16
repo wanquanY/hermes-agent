@@ -6752,6 +6752,11 @@ class HermesCLI:
         if last_user_idx is None:
             print("(._.) No user message found to retry.")
             return None
+
+        if self.agent is not None:
+            from agent.runtime_stability import reset_stream_stale_circuit
+
+            reset_stream_stale_circuit(self.agent, reason="cli_retry")
         
         # Extract the message text and remove everything from that point forward
         last_message = self.conversation_history[last_user_idx].get("content", "")

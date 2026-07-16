@@ -39,6 +39,17 @@ class GatewayConversationEditingCommandService:
         if not last_user_msg:
             return t("gateway.retry.no_previous")
 
+        stability = getattr(
+            getattr(self._runner, "_session_db", None),
+            "runtime_stability",
+            None,
+        )
+        if stability is not None:
+            await run_sqlite_io(
+                stability.clear_stream_stale,
+                session_entry.session_id,
+            )
+
         await run_sqlite_io(
             self._runner.session_store.rewrite_transcript,
             session_entry.session_id,

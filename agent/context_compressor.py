@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm, _is_connection_error, aux_interrupt_protection
@@ -34,6 +35,13 @@ from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
+
+
+def _stability_value(state: Any, name: str, default: Any) -> Any:
+    """Read local domain snapshots and worker-RPC dictionary projections."""
+    if isinstance(state, Mapping):
+        return state.get(name, default)
+    return getattr(state, name, default)
 
 HISTORICAL_TASK_HEADING = "## Historical Task Snapshot"
 HISTORICAL_IN_PROGRESS_HEADING = "## Historical In-Progress State"
@@ -146,6 +154,12 @@ _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
 # Absolute ceiling for summary tokens (even on very large context windows)
 _SUMMARY_TOKENS_CEILING = 12_000
+
+# Small and medium windows should use most of their available input budget
+# before compaction. A 50% trigger interacts badly with the incompressible
+# system/tool floor and can compact every turn without restoring headroom.
+_SMALL_CTX_WINDOW_LIMIT = 512_000
+_SMALL_CTX_THRESHOLD_PERCENT = 0.75
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -619,6 +633,9 @@ class ContextCompressor(ContextEngine):
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        self._fallback_compression_streak = 0
+        self._verify_compaction_cleared_threshold = False
+        self._last_compression_made_progress = False
         self._summary_failure_cooldown_until = 0.0  # transient errors must not block a fresh session
         self.last_real_prompt_tokens = 0
         self.last_compression_rough_tokens = 0
@@ -647,6 +664,9 @@ class ContextCompressor(ContextEngine):
         self._last_aux_model_failure_model = None
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
+        self._fallback_compression_streak = 0
+        self._verify_compaction_cleared_threshold = False
+        self._last_compression_made_progress = False
         self._summary_failure_cooldown_until = 0.0
         self._last_compress_aborted = False
         self._last_summary_auth_failure = False
@@ -656,6 +676,178 @@ class ContextCompressor(ContextEngine):
         self.last_compression_rough_tokens = 0
         self.last_rough_tokens_when_real_prompt_fit = 0
         self.awaiting_real_usage_after_compression = False
+
+    def bind_session_state(
+        self,
+        session_db: Any = None,
+        session_id: str = "",
+        *,
+        old_session_id: str = "",
+    ) -> None:
+        """Bind and restore the persisted stability state for one session."""
+        self._session_db = session_db
+        self._session_id = str(session_id or "").strip()
+        service = getattr(session_db, "runtime_stability", None)
+        if service is None or not self._session_id:
+            return
+        try:
+            if old_session_id and old_session_id != self._session_id:
+                service.carry_forward(old_session_id, self._session_id)
+            state = service.get(self._session_id)
+        except Exception:
+            logger.warning(
+                "compression stability restore failed for session=%s",
+                self._session_id,
+                exc_info=True,
+            )
+            return
+        self._ineffective_compression_count = int(
+            _stability_value(state, "compression_ineffective_count", 0) or 0
+        )
+        self._fallback_compression_streak = int(
+            _stability_value(state, "compression_fallback_streak", 0) or 0
+        )
+        self._verify_compaction_cleared_threshold = bool(
+            _stability_value(state, "compression_verdict_pending", False)
+        )
+        remaining = max(
+            0.0,
+            float(
+                _stability_value(
+                    state,
+                    "compression_failure_cooldown_until",
+                    0.0,
+                )
+                or 0.0
+            )
+            - time.time(),
+        )
+        self._summary_failure_cooldown_until = time.monotonic() + remaining
+        self._last_summary_error = (
+            str(_stability_value(state, "compression_failure_error", "") or "")
+            or None
+        )
+
+    def on_session_start(self, session_id: str, **kwargs) -> None:
+        """Restore stability state for new, resumed, or compression child sessions."""
+        super().on_session_start(session_id, **kwargs)
+        self.bind_session_state(
+            kwargs.get("session_db", getattr(self, "_session_db", None)),
+            session_id,
+            old_session_id=str(kwargs.get("old_session_id") or ""),
+        )
+
+    def _persist_compression_state(self) -> None:
+        service = getattr(getattr(self, "_session_db", None), "runtime_stability", None)
+        session_id = getattr(self, "_session_id", "")
+        if service is None or not session_id:
+            return
+        remaining = max(
+            0.0,
+            self._summary_failure_cooldown_until - time.monotonic(),
+        )
+        try:
+            service.write_compression(
+                session_id,
+                ineffective_count=self._ineffective_compression_count,
+                fallback_streak=self._fallback_compression_streak,
+                verdict_pending=self._verify_compaction_cleared_threshold,
+                cooldown_until=time.time() + remaining if remaining else 0.0,
+                error=self._last_summary_error or "",
+            )
+        except Exception:
+            # Stability persistence must not turn a successful model response
+            # into a failed turn; the in-memory breaker remains active.
+            logger.warning(
+                "compression stability persist failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    def _record_ineffective_compression(self) -> None:
+        self._ineffective_compression_count += 1
+        self._last_compression_savings_pct = 0.0
+        self._verify_compaction_cleared_threshold = False
+        self._persist_compression_state()
+
+    def record_completed_compaction(self, *, used_fallback: bool = False) -> None:
+        """Arm the real-usage verdict for a completed compaction boundary."""
+        self._verify_compaction_cleared_threshold = True
+        if used_fallback:
+            self._fallback_compression_streak += 1
+        elif self._fallback_compression_streak:
+            self._fallback_compression_streak = 0
+        self._persist_compression_state()
+
+    def get_active_compression_failure_cooldown(self) -> Optional[Dict[str, Any]]:
+        remaining = self._summary_failure_cooldown_until - time.monotonic()
+        if remaining <= 0:
+            return None
+        return {
+            "cooldown_until": time.time() + remaining,
+            "remaining_seconds": remaining,
+            "error": self._last_summary_error,
+        }
+
+    def _record_compression_failure_cooldown(
+        self,
+        cooldown_seconds: float,
+        error: Optional[str],
+    ) -> None:
+        self._summary_failure_cooldown_until = (
+            time.monotonic() + max(0.0, float(cooldown_seconds))
+        )
+        self._last_summary_error = error
+        self._persist_compression_state()
+
+    def _clear_compression_failure_cooldown(self) -> None:
+        self._summary_failure_cooldown_until = 0.0
+        self._last_summary_error = None
+        self._persist_compression_state()
+
+    _MIN_CTX_TRIGGER_RATIO = 0.85
+
+    @staticmethod
+    def _coerce_max_tokens(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return None
+        return normalized if normalized > 0 else None
+
+    @staticmethod
+    def _effective_threshold_percent(
+        context_length: int,
+        threshold_percent: float,
+    ) -> float:
+        if context_length and context_length < _SMALL_CTX_WINDOW_LIMIT:
+            return max(threshold_percent, _SMALL_CTX_THRESHOLD_PERCENT)
+        return threshold_percent
+
+    @staticmethod
+    def _compute_threshold_tokens(
+        context_length: int,
+        threshold_percent: float,
+        max_tokens: int | None = None,
+    ) -> int:
+        effective_window = context_length - (max_tokens or 0)
+        if effective_window <= 0:
+            effective_window = context_length
+        floored = max(
+            int(effective_window * threshold_percent),
+            MINIMUM_CONTEXT_LENGTH,
+        )
+        if effective_window > 0 and floored >= effective_window:
+            return max(
+                1,
+                min(
+                    int(effective_window * ContextCompressor._MIN_CTX_TRIGGER_RATIO),
+                    effective_window - 1,
+                ),
+            )
+        return floored
 
     def update_model(
         self,
@@ -667,15 +859,33 @@ class ContextCompressor(ContextEngine):
         api_mode: str = "",
     ) -> None:
         """Update model info after a model switch or fallback activation."""
+        runtime_changed = any(
+            (
+                model != self.model,
+                provider != self.provider,
+                base_url != self.base_url,
+                api_mode != self.api_mode,
+            )
+        )
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
-        self.threshold_tokens = max(
-            int(context_length * self.threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+        configured = getattr(
+            self,
+            "_configured_threshold_percent",
+            self.threshold_percent,
+        )
+        self.threshold_percent = self._effective_threshold_percent(
+            context_length,
+            configured,
+        )
+        self.threshold_tokens = self._compute_threshold_tokens(
+            context_length,
+            self.threshold_percent,
+            getattr(self, "max_tokens", None),
         )
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
@@ -706,6 +916,11 @@ class ContextCompressor(ContextEngine):
         self.last_compression_rough_tokens = 0
         self.awaiting_real_usage_after_compression = False
         self._ineffective_compression_count = 0
+        self._verify_compaction_cleared_threshold = False
+        self._last_compression_made_progress = False
+        if runtime_changed:
+            self._fallback_compression_streak = 0
+        self._persist_compression_state()
 
     def __init__(
         self,
@@ -722,13 +937,14 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        max_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.provider = provider
         self.api_mode = api_mode
-        self.threshold_percent = threshold_percent
+        self._configured_threshold_percent = threshold_percent
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
@@ -738,6 +954,7 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+        self.max_tokens = self._coerce_max_tokens(max_tokens)
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
@@ -749,9 +966,14 @@ class ContextCompressor(ContextEngine):
         # the percentage would suggest a lower value.  This prevents premature
         # compression on small-context models while keeping the percentage sane
         # for models right at the minimum.
-        self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
+        self.threshold_percent = self._effective_threshold_percent(
+            self.context_length,
+            threshold_percent,
+        )
+        self.threshold_tokens = self._compute_threshold_tokens(
+            self.context_length,
+            self.threshold_percent,
+            self.max_tokens,
         )
         self.compression_count = 0
 
@@ -768,7 +990,7 @@ class ContextCompressor(ContextEngine):
                 "threshold=%d (%.0f%%) target_ratio=%.0f%% tail_budget=%d "
                 "provider=%s base_url=%s",
                 model, self.context_length, self.threshold_tokens,
-                threshold_percent * 100, self.summary_target_ratio * 100,
+                self.threshold_percent * 100, self.summary_target_ratio * 100,
                 self.tail_token_budget,
                 provider or "none", base_url or "none",
             )
@@ -788,7 +1010,12 @@ class ContextCompressor(ContextEngine):
         # Anti-thrashing: track whether last compression was effective
         self._last_compression_savings_pct: float = 100.0
         self._ineffective_compression_count: int = 0
+        self._fallback_compression_streak: int = 0
+        self._verify_compaction_cleared_threshold: bool = False
+        self._last_compression_made_progress: bool = False
         self._summary_failure_cooldown_until: float = 0.0
+        self._session_db: Any = None
+        self._session_id: str = ""
         self._last_summary_error: Optional[str] = None
         # When summary generation fails and a static fallback is inserted,
         # record how many turns were unrecoverably dropped so callers
@@ -826,9 +1053,28 @@ class ContextCompressor(ContextEngine):
             if self.last_prompt_tokens < self.threshold_tokens:
                 if self.awaiting_real_usage_after_compression and self.last_compression_rough_tokens > 0:
                     self.last_rough_tokens_when_real_prompt_fit = self.last_compression_rough_tokens
+                self._ineffective_compression_count = 0
             else:
                 self.last_rough_tokens_when_real_prompt_fit = 0
+
+            if self._verify_compaction_cleared_threshold:
+                if self.last_prompt_tokens >= self.threshold_tokens:
+                    self._ineffective_compression_count += 1
+                    if not self.quiet_mode:
+                        logger.warning(
+                            "Compaction did not clear threshold: %d real tokens "
+                            ">= %d; ineffective_compression_count=%d",
+                            self.last_prompt_tokens,
+                            self.threshold_tokens,
+                            self._ineffective_compression_count,
+                        )
+                else:
+                    self._ineffective_compression_count = 0
+        # A usage-less response cannot leave a verdict armed for an unrelated
+        # future turn. Consume it exactly once and persist the result.
+        self._verify_compaction_cleared_threshold = False
         self.awaiting_real_usage_after_compression = False
+        self._persist_compression_state()
 
     def should_defer_preflight_to_real_usage(self, rough_tokens: int) -> bool:
         """Return True when a high rough preflight estimate is known-noisy.
@@ -870,14 +1116,23 @@ class ContextCompressor(ContextEngine):
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         if tokens < self.threshold_tokens:
             return False
-        # Anti-thrashing: back off if recent compressions were ineffective
-        if self._ineffective_compression_count >= 2:
+        cooldown = self.get_active_compression_failure_cooldown()
+        if cooldown is not None:
+            return False
+        # Anti-thrashing: back off if recent compactions were ineffective or
+        # repeatedly used deterministic fallback summaries.
+        if (
+            self._ineffective_compression_count >= 2
+            or self._fallback_compression_streak >= 2
+        ):
             if not self.quiet_mode:
                 logger.warning(
-                    "Compression skipped — last %d compressions saved <10%% each. "
+                    "Compression skipped — repeated attempts did not restore "
+                    "healthy context (ineffective=%d fallback=%d). "
                     "Consider /new to start a fresh session, or /compress <topic> "
                     "for focused compression.",
                     self._ineffective_compression_count,
+                    self._fallback_compression_streak,
                 )
             return False
         return True
@@ -1353,7 +1608,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         self._last_aux_model_failure_error = _err_text
         self._last_aux_model_failure_model = self.summary_model
         self.summary_model = ""  # empty = use main model
-        self._summary_failure_cooldown_until = 0.0  # no cooldown — retry immediately
+        self._clear_compression_failure_cooldown()
 
     def _generate_summary(
         self,
@@ -1378,11 +1633,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         the middle turns without a summary rather than inject a useless
         placeholder.
         """
-        now = time.monotonic()
-        if now < self._summary_failure_cooldown_until:
+        cooldown = self.get_active_compression_failure_cooldown()
+        if cooldown is not None:
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
-                self._summary_failure_cooldown_until - now,
+                cooldown["remaining_seconds"],
             )
             return None
 
@@ -1589,15 +1844,16 @@ Preserve the checkpoint facts above with their original ownership and provenance
             summary = redact_sensitive_text(content.strip())
             # Store for iterative updates on next compaction
             self._previous_summary = summary
-            self._summary_failure_cooldown_until = 0.0
+            self._clear_compression_failure_cooldown()
             self._summary_model_fallen_back = False
-            self._last_summary_error = None
             self._last_summary_auth_failure = False
             return self._with_summary_prefix(summary)
         except RuntimeError:
             # No provider configured — long cooldown, unlikely to self-resolve
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            self._last_summary_error = "no auxiliary LLM provider configured"
+            self._record_compression_failure_cooldown(
+                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+                "no auxiliary LLM provider configured",
+            )
             logger.warning("Context compression: no provider available for "
                             "summary. Middle turns will be dropped without summary "
                             "for %d seconds.",
@@ -1717,11 +1973,13 @@ Preserve the checkpoint facts above with their original ownership and provenance
             # streaming premature-close) — shorter cooldown for JSON decode and
             # streaming-closed since those conditions can self-resolve quickly.
             _transient_cooldown = 30 if (_is_json_decode or _is_streaming_closed) else 60
-            self._summary_failure_cooldown_until = time.monotonic() + _transient_cooldown
             err_text = str(e).strip() or e.__class__.__name__
             if len(err_text) > 220:
                 err_text = err_text[:217].rstrip() + "..."
-            self._last_summary_error = err_text
+            self._record_compression_failure_cooldown(
+                _transient_cooldown,
+                err_text,
+            )
             logger.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",
@@ -2300,25 +2558,29 @@ Preserve the checkpoint facts above with their original ownership and provenance
         # after compress() returns to decide whether to surface a warning.
         self._last_summary_dropped_count = 0
         self._last_summary_fallback_used = False
-        self._last_summary_error = None
         self._last_aux_model_failure_error = None
         self._last_aux_model_failure_model = None
         self._last_compress_aborted = False
         self._last_summary_auth_failure = False
+        self._last_compression_made_progress = False
 
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
         # this, /compress would silently no-op for 30-60s after a failure.
-        if force and self._summary_failure_cooldown_until > 0.0:
-            self._summary_failure_cooldown_until = 0.0
+        if force:
+            self._clear_compression_failure_cooldown()
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
         if n_messages <= _min_for_compress:
+            self._record_ineffective_compression()
             if not self.quiet_mode:
                 logger.warning(
-                    "Cannot compress: only %d messages (need > %d)",
-                    n_messages, _min_for_compress,
+                    "Cannot compress: only %d messages (need > %d); "
+                    "ineffective_compression_count=%d",
+                    n_messages,
+                    _min_for_compress,
+                    self._ineffective_compression_count,
                 )
             return messages
 
@@ -2345,8 +2607,7 @@ Preserve the checkpoint facts above with their original ownership and provenance
             # an ineffective compression the anti-thrashing guard in
             # should_compress() never fires and every subsequent turn
             # re-triggers a no-op compression loop.  (#40803)
-            self._ineffective_compression_count += 1
-            self._last_compression_savings_pct = 0.0
+            self._record_ineffective_compression()
             if not self.quiet_mode:
                 logger.warning(
                     "Compression skipped: compress_start (%d) >= compress_end (%d) "
@@ -2552,16 +2813,16 @@ Preserve the checkpoint facts above with their original ownership and provenance
         # Port of Kilo-Org/kilocode#9434.
         compressed = _strip_historical_media(compressed)
 
+        pre_estimate = estimate_messages_tokens_rough(messages)
         new_estimate = estimate_messages_tokens_rough(compressed)
-        saved_estimate = display_tokens - new_estimate
-
-        # Anti-thrashing: track compression effectiveness
-        savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
+        saved_estimate = pre_estimate - new_estimate
+        savings_pct = (
+            saved_estimate / pre_estimate * 100
+            if pre_estimate > 0
+            else 0
+        )
         self._last_compression_savings_pct = savings_pct
-        if savings_pct < 10:
-            self._ineffective_compression_count += 1
-        else:
-            self._ineffective_compression_count = 0
+        self._last_compression_made_progress = len(compressed) < n_messages
 
         if not self.quiet_mode:
             logger.info(

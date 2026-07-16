@@ -49,6 +49,7 @@ WORKER_DB_COMPONENT_NAMES = frozenset(
         "metadata",
         "participants",
         "profiles",
+        "runtime_stability",
         "runs",
         "run_event_maintenance",
         "session_index",

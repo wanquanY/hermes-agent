@@ -44,6 +44,7 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
         "messages_fts_trigram",
         "run_events",
         "session_runtime_state",
+        "session_runtime_stability",
         "tool_events",
         "team_mission_events",
         "v3_activities",
@@ -93,6 +94,7 @@ def test_half_upgraded_database_runs_pending_owner_migrations(
         assert {
             "session_system_prompts",
             "session_runtime_state",
+            "session_runtime_stability",
             "tool_events",
             "activity_commands",
         }.issubset(_table_names(db_path))

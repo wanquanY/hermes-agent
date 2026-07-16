@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from typing import Any, Optional
 
-from channels.platforms.base import MessageEvent, merge_pending_message_event
+from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.config import Platform
@@ -83,7 +84,60 @@ class GatewayBusySessionRuntimeService:
         adapter = self._runner.adapters.get(event.source.platform)
         if not adapter:
             return
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
+        pending = getattr(adapter, "_pending_messages", None)
+        existing = pending.get(session_key) if isinstance(pending, dict) else None
+        if existing is not None and (
+            bool(getattr(existing, "media_urls", None))
+            or bool(getattr(event, "media_urls", None))
+            or getattr(existing, "message_type", None) != MessageType.TEXT
+            or event.message_type != MessageType.TEXT
+        ):
+            merge_pending_message_event(
+                adapter._pending_messages,
+                session_key,
+                event,
+                merge_text=event.message_type == MessageType.TEXT,
+            )
+            return
+        self.enqueue_fifo(session_key, event, adapter)
+
+    async def compression_in_flight(self, running_agent: Any) -> bool:
+        """Probe local and durable compression state, failing closed on I/O."""
+        if running_agent is None or running_agent is AGENT_PENDING_SENTINEL:
+            return False
+        # Require the concrete boolean marker. Dynamic mocks/proxies can
+        # manufacture a truthy attribute on demand, which must not silently
+        # demote ordinary interrupts in either tests or production adapters.
+        if getattr(running_agent, "_compression_in_flight", False) is True:
+            return True
+        codex_session = getattr(running_agent, "_codex_session", None)
+        if getattr(codex_session, "is_compacting", False) is True:
+            return True
+        raw_session_id = getattr(running_agent, "session_id", "")
+        if not isinstance(raw_session_id, str):
+            return False
+        session_id = raw_session_id.strip()
+        leases = getattr(
+            getattr(running_agent, "_session_db", None),
+            "compression_leases",
+            None,
+        )
+        # Attribute/type absence represents an old or deliberately narrow test
+        # double, not an unknown production state.
+        if not session_id or leases is None or not hasattr(leases, "holder"):
+            return False
+        try:
+            return bool(await asyncio.to_thread(leases.holder, session_id))
+        except (AttributeError, TypeError):
+            return False
+        except Exception:
+            logger.warning(
+                "Compression lease probe failed for session %s; treating "
+                "compression as active to preserve the session boundary",
+                session_id,
+                exc_info=True,
+            )
+            return True
 
     async def handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         runner = self._runner
@@ -107,6 +161,18 @@ class GatewayBusySessionRuntimeService:
 
         running_agent = runner._running_agents.get(session_key)
         effective_mode = runner._busy_input_mode
+        compression_demoted = False
+        if (
+            effective_mode == "interrupt"
+            and await self.compression_in_flight(running_agent)
+        ):
+            logger.info(
+                "Demoting busy interrupt to FIFO queue for session %s while "
+                "context compression is in flight",
+                session_key,
+            )
+            effective_mode = "queue"
+            compression_demoted = True
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
@@ -126,7 +192,7 @@ class GatewayBusySessionRuntimeService:
                 effective_mode = "queue"
 
         if not steered:
-            merge_pending_message_event(adapter._pending_messages, session_key, event)
+            self.queue_or_replace_pending_event(session_key, event)
 
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
@@ -155,6 +221,13 @@ class GatewayBusySessionRuntimeService:
             message = (
                 f"⏩ Steered into current run{status_detail}. "
                 f"Your message arrives after the next tool call."
+            )
+        elif compression_demoted:
+            message = (
+                f"🗜️ Compressing context safely{status_detail} — your message "
+                "is queued for the next turn so it cannot interrupt the "
+                "session boundary. Use /stop if you need to terminate the "
+                "current task."
             )
         elif is_queue_mode:
             message = (

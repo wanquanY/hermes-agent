@@ -855,6 +855,51 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     }
 
 
+def _record_codex_app_server_compaction(agent, turn) -> bool:
+    """Project a Codex-owned compaction through the shared verdict seam."""
+    if not getattr(turn, "compacted", False):
+        return False
+    compressor = getattr(agent, "context_compressor", None)
+    logger.info(
+        "codex app-server compaction observed: session=%s thread=%s turn=%s",
+        getattr(agent, "session_id", None) or "none",
+        getattr(turn, "thread_id", None) or "",
+        getattr(turn, "turn_id", None) or "",
+    )
+    if compressor is not None:
+        compressor.compression_count = int(
+            getattr(compressor, "compression_count", 0) or 0
+        ) + 1
+        recorder = getattr(compressor, "record_completed_compaction", None)
+        if callable(recorder):
+            recorder(used_fallback=False)
+    agent._last_compaction_in_place = False
+    try:
+        if getattr(agent, "event_callback", None):
+            agent.event_callback(
+                "session:compress",
+                {
+                    "platform": getattr(agent, "platform", None) or "",
+                    "session_id": getattr(agent, "session_id", None) or "",
+                    "old_session_id": "",
+                    "in_place": False,
+                    "compression_count": getattr(
+                        compressor,
+                        "compression_count",
+                        0,
+                    )
+                    if compressor is not None
+                    else 0,
+                    "runtime": "codex_app_server",
+                    "thread_id": getattr(turn, "thread_id", None) or "",
+                    "turn_id": getattr(turn, "turn_id", None) or "",
+                },
+            )
+    except Exception:
+        logger.debug("event_callback error on codex session:compress", exc_info=True)
+    return True
+
+
 def run_codex_app_server_turn(
     agent,
     *,
@@ -1126,6 +1171,7 @@ def run_codex_app_server_turn(
         getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
     )
     usage_result = _record_codex_app_server_usage(agent, turn)
+    _record_codex_app_server_compaction(agent, turn)
     api_calls = 1
 
     # Now check the skill nudge AFTER iters were incremented — same

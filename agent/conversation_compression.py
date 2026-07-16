@@ -417,6 +417,10 @@ def compress_context(
         focus_topic,
     )
     agent._emit_status(COMPACTION_STATUS)
+    # Set only after the status callback returns. A callback exception occurs
+    # before lease ownership exists and therefore must not strand a stale
+    # in-memory marker that makes the gateway queue every later follow-up.
+    agent._compression_in_flight = True
 
     # ── Compression lock ────────────────────────────────────────────────
     # Atomic, state.db-backed lock per session_id.  Without this, two
@@ -445,78 +449,92 @@ def compress_context(
     _lease_holder: Optional[str] = None
     _lease_service = None
     _lease_refresher: Optional[_CompressionLeaseRefresher] = None
+
+    def _release_lease() -> None:
+        """Release the old-session lease and clear the local probe marker."""
+        nonlocal _lease_holder
+        try:
+            if _lease_refresher is not None:
+                _lease_refresher.stop()
+            if _lease_service is not None and _lease_session_id and _lease_holder:
+                try:
+                    _lease_service.release(_lease_session_id, _lease_holder)
+                except Exception:
+                    logger.warning(
+                        "compression lease release failed: session=%s holder=%s",
+                        _lease_session_id,
+                        _lease_holder,
+                        exc_info=True,
+                    )
+        finally:
+            _lease_holder = None
+            agent._compression_in_flight = False
+
     try:
         _lease_ttl = float(
             getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0
         )
     except (TypeError, ValueError):
         _lease_ttl = 300.0
-    if _lease_store is not None and _lease_session_id:
-        # Missing durable lease ownership is a deployment error. Proceeding
-        # unlocked can create two canonical continuation sessions.
-        _lease_service = _lease_store.compression_leases
-        _lease_holder = _compression_lock_holder(agent)
-        if not _lease_service.try_acquire(
-            _lease_session_id, _lease_holder, ttl_seconds=_lease_ttl
-        ):
-            existing = _lease_service.holder(_lease_session_id)
-            logger.warning(
-                "compression skipped: another path is compressing session=%s "
-                "(holder=%s) — returning messages unchanged to avoid session fork",
-                _lease_session_id,
-                existing,
-            )
-            _lease_holder = None
-            # Surface to the user once — quiet for downstream auto-compress loops
-            if (
-                getattr(agent, "_last_compression_lock_warning_sid", None)
-                != _lease_session_id
+    try:
+        if _lease_store is not None and _lease_session_id:
+            # Missing durable lease ownership is a deployment error. Proceeding
+            # unlocked can create two canonical continuation sessions.
+            _lease_service = _lease_store.compression_leases
+            _lease_holder = _compression_lock_holder(agent)
+            if not _lease_service.try_acquire(
+                _lease_session_id, _lease_holder, ttl_seconds=_lease_ttl
             ):
-                agent._last_compression_lock_warning_sid = _lease_session_id
-                try:
-                    agent._emit_warning(
-                        "⚠ Skipping concurrent compression — another path "
-                        "is already compressing this session. Will retry "
-                        "after it finishes."
-                    )
-                except Exception:
-                    pass
-            _existing_sp = getattr(agent, "_cached_system_prompt", None)
-            if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
-            return messages, _existing_sp
-        _lease_refresher = _CompressionLeaseRefresher(
-            _lease_service,
-            _lease_session_id,
-            _lease_holder,
-            _lease_ttl,
-            getattr(agent, "_compression_lock_refresh_interval", None),
-        ).start()
-
-    def _release_lease() -> None:
-        """Release the lease keyed on the pre-rotation session id."""
-        if _lease_refresher is not None:
-            _lease_refresher.stop()
-        if _lease_service is not None and _lease_session_id and _lease_holder:
-            try:
-                _lease_service.release(_lease_session_id, _lease_holder)
-            except Exception:
+                existing = _lease_service.holder(_lease_session_id)
                 logger.warning(
-                    "compression lease release failed: session=%s holder=%s",
+                    "compression skipped: another path is compressing session=%s "
+                    "(holder=%s) — returning messages unchanged to avoid session fork",
                     _lease_session_id,
-                    _lease_holder,
-                    exc_info=True,
+                    existing,
                 )
+                _lease_holder = None
+                # Surface once; downstream auto-compress loops remain quiet.
+                if (
+                    getattr(agent, "_last_compression_lock_warning_sid", None)
+                    != _lease_session_id
+                ):
+                    agent._last_compression_lock_warning_sid = _lease_session_id
+                    try:
+                        agent._emit_warning(
+                            "⚠ Skipping concurrent compression — another path "
+                            "is already compressing this session. Will retry "
+                            "after it finishes."
+                        )
+                    except Exception:
+                        pass
+                _existing_sp = getattr(agent, "_cached_system_prompt", None)
+                if not _existing_sp:
+                    _existing_sp = agent._build_system_prompt(system_message)
+                _release_lease()
+                return messages, _existing_sp
+            _lease_refresher = _CompressionLeaseRefresher(
+                _lease_service,
+                _lease_session_id,
+                _lease_holder,
+                _lease_ttl,
+                getattr(agent, "_compression_lock_refresh_interval", None),
+            ).start()
+    except BaseException:
+        _release_lease()
+        raise
 
     # Notify external memory provider before compression discards context
     memory_preservation_context = ""
-    if agent._memory_manager:
-        try:
+    try:
+        if agent._memory_manager:
             memory_preservation_context = (
                 agent._memory_manager.on_pre_compress(messages) or ""
             )
-        except Exception:
-            pass
+    except Exception:
+        pass
+    except BaseException:
+        _release_lease()
+        raise
 
     try:
         try:
@@ -547,52 +565,67 @@ def compress_context(
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
-        if getattr(agent, "_last_compression_summary_warning", None) != _err:
-            agent._last_compression_summary_warning = _err
-            agent._emit_warning(
-                f"⚠ Compression aborted: {_err}. "
-                "No messages were dropped — conversation continues unchanged. "
-                "Run /compress to retry, or /new to start a fresh session."
-            )
-        _existing_sp = getattr(agent, "_cached_system_prompt", None)
-        if not _existing_sp:
-            _existing_sp = agent._build_system_prompt(system_message)
-        _release_lease()  # compression aborted — no rotation will happen
-        return messages, _existing_sp
-
-    summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
-    if summary_error:
-        if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
-            agent._last_compression_summary_warning = summary_error
-            agent._emit_warning(
-                f"⚠ Compression summary failed: {summary_error}. "
-                "Inserted a fallback context marker."
-            )
-    else:
-        # No hard failure — but did the configured aux model error out
-        # and get recovered by retrying on main?  Surface that so users
-        # know their auxiliary.compression.model setting is broken even
-        # though compression succeeded.
-        _aux_fail_model = getattr(agent.context_compressor, "_last_aux_model_failure_model", None)
-        _aux_fail_err = getattr(agent.context_compressor, "_last_aux_model_failure_error", None)
-        if _aux_fail_model:
-            # Dedup on (model, error) so we don't spam on every compaction
-            _aux_key = (_aux_fail_model, _aux_fail_err)
-            if getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
-                agent._last_aux_fallback_warning_key = _aux_key
+        try:
+            if getattr(agent, "_last_compression_summary_warning", None) != _err:
+                agent._last_compression_summary_warning = _err
                 agent._emit_warning(
-                    f"ℹ Configured compression model '{_aux_fail_model}' failed "
-                    f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
-                    "check auxiliary.compression.model in config.yaml."
+                    f"⚠ Compression aborted: {_err}. "
+                    "No messages were dropped — conversation continues unchanged. "
+                    "Run /compress to retry, or /new to start a fresh session."
                 )
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            return messages, _existing_sp
+        finally:
+            _release_lease()  # no rotation happened
 
-    todo_snapshot = agent._todo_store.format_for_injection()
-    if todo_snapshot:
-        compressed.append({"role": "user", "content": todo_snapshot})
+    try:
+        summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
+        if summary_error:
+            if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
+                agent._last_compression_summary_warning = summary_error
+                agent._emit_warning(
+                    f"⚠ Compression summary failed: {summary_error}. "
+                    "Inserted a fallback context marker."
+                )
+        else:
+            # No hard failure — but did the configured aux model error out
+            # and get recovered by retrying on main. Surface the bad setting.
+            _aux_fail_model = getattr(
+                agent.context_compressor,
+                "_last_aux_model_failure_model",
+                None,
+            )
+            _aux_fail_err = getattr(
+                agent.context_compressor,
+                "_last_aux_model_failure_error",
+                None,
+            )
+            if _aux_fail_model:
+                _aux_key = (_aux_fail_model, _aux_fail_err)
+                if getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
+                    agent._last_aux_fallback_warning_key = _aux_key
+                    agent._emit_warning(
+                        f"ℹ Configured compression model '{_aux_fail_model}' failed "
+                        f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
+                        "check auxiliary.compression.model in config.yaml."
+                    )
+    except BaseException:
+        _release_lease()
+        raise
 
-    agent._invalidate_system_prompt()
-    new_system_prompt = agent._build_system_prompt(system_message)
-    agent._cached_system_prompt = new_system_prompt
+    try:
+        todo_snapshot = agent._todo_store.format_for_injection()
+        if todo_snapshot:
+            compressed.append({"role": "user", "content": todo_snapshot})
+
+        agent._invalidate_system_prompt()
+        new_system_prompt = agent._build_system_prompt(system_message)
+        agent._cached_system_prompt = new_system_prompt
+    except BaseException:
+        _release_lease()
+        raise
 
     if agent._session_db:
         try:
@@ -674,6 +707,9 @@ def compress_context(
                 agent._last_flushed_db_idx = 0
         except Exception as e:
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+        except BaseException:
+            _release_lease()
+            raise
 
     # Notify the context engine that the session_id rotated because of
     # compression (not a fresh /new). Plugin engines (e.g. hermes-lcm) use
@@ -688,9 +724,34 @@ def compress_context(
                 boundary_reason="compression",
                 old_session_id=_old_sid,
                 conversation_id=getattr(agent, "_gateway_session_key", None),
+                session_db=agent._session_db,
             )
     except Exception as _ce_err:
         logger.debug("context engine on_session_start (compression): %s", _ce_err)
+    except BaseException:
+        _release_lease()
+        raise
+
+    if getattr(agent.context_compressor, "_last_compression_made_progress", False):
+        record_boundary = getattr(
+            agent.context_compressor,
+            "record_completed_compaction",
+            None,
+        )
+        if callable(record_boundary):
+            try:
+                record_boundary(
+                    used_fallback=bool(
+                        getattr(
+                            agent.context_compressor,
+                            "_last_summary_fallback_used",
+                            False,
+                        )
+                    )
+                )
+            except BaseException:
+                _release_lease()
+                raise
 
     # Notify memory providers of the compression-driven session_id rotation
     # so provider-cached per-session state (Hindsight's _document_id,
@@ -711,15 +772,22 @@ def compress_context(
             )
     except Exception as _me_err:
         logger.debug("memory manager on_session_switch (compression): %s", _me_err)
+    except BaseException:
+        _release_lease()
+        raise
 
     # Warn on repeated compressions (quality degrades with each pass)
     _cc = agent.context_compressor.compression_count
-    if _cc >= 2:
-        agent._vprint(
-            f"{agent.log_prefix}⚠️  Session compressed {_cc} times — "
-            f"accuracy may degrade. Consider /new to start fresh.",
-            force=True,
-        )
+    try:
+        if _cc >= 2:
+            agent._vprint(
+                f"{agent.log_prefix}⚠️  Session compressed {_cc} times — "
+                f"accuracy may degrade. Consider /new to start fresh.",
+                force=True,
+            )
+    except BaseException:
+        _release_lease()
+        raise
 
     # Emit session:compress event so hooks (e.g. MemPalace sync) can ingest
     # the completed old session before its details are lost.
@@ -734,6 +802,14 @@ def compress_context(
             })
         except Exception as e:
             logger.debug("event_callback error on session:compress: %s", e)
+        except BaseException:
+            _release_lease()
+            raise
+
+    # The canonical transcript/session boundary and persisted verdict are now
+    # complete. Release before non-critical diagnostics so any later estimator
+    # failure cannot strand the durable lease until TTL expiry.
+    _release_lease()
 
     # Keep the post-compression rough estimate for diagnostics, but do not
     # treat it as provider-reported prompt usage. Schema-heavy rough estimates
@@ -777,7 +853,6 @@ def compress_context(
     # file dedup) ran. A concurrent path that wakes up the moment we
     # release will see the NEW session_id in state.db / SessionEntry and
     # acquire on that — no race against our just-finished work.
-    _release_lease()
     return compressed, new_system_prompt
 
 

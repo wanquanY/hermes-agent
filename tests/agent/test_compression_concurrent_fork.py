@@ -236,6 +236,59 @@ def test_missing_lease_subsystem_fails_closed(tmp_path: Path) -> None:
 
     agent.context_compressor.compress.assert_not_called()
     assert agent.session_id == parent_sid
+    assert agent._compression_in_flight is False
+
+
+def test_post_compress_warning_error_releases_lease_and_marker(tmp_path: Path) -> None:
+    """Any host callback failure after rewrite must not strand ownership."""
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
+    parent_sid = "POST_COMPRESS_WARNING_ERROR"
+    db.sessions.create(parent_sid, source="discord")
+    agent = _build_agent_with_db(db, parent_sid)
+    agent.context_compressor._last_summary_error = "summary unavailable"
+    agent._emit_warning = MagicMock(side_effect=RuntimeError("warning failed"))
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    with pytest.raises(RuntimeError, match="warning failed"):
+        agent._compress_context(messages, "sys", approx_tokens=120_000)
+
+    assert db.compression_leases.holder(parent_sid) is None
+    assert agent._compression_in_flight is False
+    assert agent.session_id == parent_sid
+
+
+def test_post_compress_todo_error_releases_lease_and_marker(tmp_path: Path) -> None:
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
+    parent_sid = "POST_COMPRESS_TODO_ERROR"
+    db.sessions.create(parent_sid, source="discord")
+    agent = _build_agent_with_db(db, parent_sid)
+    agent._todo_store.format_for_injection = MagicMock(
+        side_effect=RuntimeError("todo failed")
+    )
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    with pytest.raises(RuntimeError, match="todo failed"):
+        agent._compress_context(messages, "sys", approx_tokens=120_000)
+
+    assert db.compression_leases.holder(parent_sid) is None
+    assert agent._compression_in_flight is False
+    assert agent.session_id == parent_sid
+
+
+def test_status_callback_error_never_sets_compression_marker(tmp_path: Path) -> None:
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
+    parent_sid = "STATUS_CALLBACK_ERROR"
+    db.sessions.create(parent_sid, source="discord")
+    agent = _build_agent_with_db(db, parent_sid)
+    agent._emit_status = MagicMock(side_effect=RuntimeError("status failed"))
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    with pytest.raises(RuntimeError, match="status failed"):
+        agent._compress_context(messages, "sys", approx_tokens=120_000)
+
+    assert db.compression_leases.holder(parent_sid) is None
+    assert agent._compression_in_flight is False
+    agent.context_compressor.compress.assert_not_called()
 
 
 def test_review_fork_disables_compression_to_prevent_stale_parent_fork() -> None:

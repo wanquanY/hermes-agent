@@ -831,6 +831,9 @@ def restore_primary_runtime(agent) -> bool:
             "Primary runtime restored for new turn: %s (%s)",
             agent.model, agent.provider,
         )
+        from agent.runtime_stability import reset_stream_stale_circuit
+
+        reset_stream_stale_circuit(agent, reason="primary_restored")
         return True
     except Exception as e:
         logging.warning("Failed to restore primary runtime: %s", e)
@@ -1422,6 +1425,9 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "Model switched in-place: %s (%s) -> %s (%s)",
         old_model, old_provider, new_model, new_provider,
     )
+    from agent.runtime_stability import reset_stream_stale_circuit
+
+    reset_stream_stale_circuit(agent, reason="model_switched")
 
 
 

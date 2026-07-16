@@ -76,6 +76,7 @@ class TurnResult:
     model_context_window: Optional[int] = None
     requested_model: Optional[str] = None
     actual_model: Optional[str] = None
+    compacted: bool = False
     # Hint to the caller that the underlying codex subprocess is likely
     # wedged (turn-level timeout fired, post-tool watchdog tripped, or
     # token-refresh failure killed the child). The caller should retire
@@ -235,6 +236,9 @@ class CodexAppServerSession:
         # approval params don't carry the changeset, so we cache here
         # to surface a real summary in the approval prompt (quirk #4).
         self._pending_file_changes: dict[str, str] = {}
+        # Read concurrently by the gateway busy-input path while this session
+        # is driven in the agent executor thread.
+        self._compaction_in_flight = False
         self._closed = False
 
     # ---------- lifecycle ----------
@@ -365,6 +369,7 @@ class CodexAppServerSession:
         if self._closed:
             return
         self._closed = True
+        self._compaction_in_flight = False
         if self._client is not None:
             try:
                 self._client.close()
@@ -385,6 +390,11 @@ class CodexAppServerSession:
         """Idempotent: signal the active turn loop to issue turn/interrupt
         and unwind. Called by AIAgent's _interrupt_requested path."""
         self._interrupt_event.set()
+
+    @property
+    def is_compacting(self) -> bool:
+        """Whether Codex has an active native contextCompaction item."""
+        return self._compaction_in_flight
 
     # ---------- diagnostics ----------
 
@@ -458,6 +468,7 @@ class CodexAppServerSession:
         # the caller can render — instead of bubbling raw codex exceptions
         # up to AIAgent.run_conversation.
         result = TurnResult()
+        self._compaction_in_flight = False
         try:
             self.ensure_started()
         except (CodexAppServerError, TimeoutError) as exc:
@@ -626,6 +637,8 @@ class CodexAppServerSession:
                     mark_notification(pending)
                     _apply_protocol_model_notification(result, pending)
                     _apply_token_usage_notification(result, pending)
+                    _apply_compaction_notification(result, pending)
+                    self._track_compaction_state(pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
                     if proj.messages:
@@ -670,6 +683,8 @@ class CodexAppServerSession:
 
             _apply_protocol_model_notification(result, note)
             _apply_token_usage_notification(result, note)
+            _apply_compaction_notification(result, note)
+            self._track_compaction_state(note)
 
             # Track in-progress fileChange items so the approval bridge
             # can surface a real change summary when codex requests
@@ -757,6 +772,7 @@ class CodexAppServerSession:
                 )
             result.should_retire = True
 
+        self._compaction_in_flight = False
         return result
 
     # ---------- internals ----------
@@ -935,6 +951,26 @@ class CodexAppServerSession:
         elif method == "item/completed":
             self._pending_file_changes.pop(item_id, None)
 
+    def _track_compaction_state(self, note: dict) -> None:
+        """Expose Codex-native compaction to gateway interrupt arbitration."""
+        method = str(note.get("method") or "")
+        if method in {
+            "turn/completed",
+            "turn/interrupted",
+            "turn/error",
+            "turn/failed",
+        }:
+            self._compaction_in_flight = False
+            return
+        params = note.get("params") or {}
+        item = params.get("item") or {}
+        if not isinstance(item, dict) or item.get("type") != "contextCompaction":
+            return
+        if method == "item/started":
+            self._compaction_in_flight = True
+        elif method == "item/completed":
+            self._compaction_in_flight = False
+
     def _lookup_pending_file_change(self, item_id: str) -> Optional[str]:
         """Look up an in-progress fileChange item by id and summarize its
         changes for the approval prompt. Returns None when we don't have
@@ -1010,6 +1046,28 @@ def _apply_token_usage_notification(result: TurnResult, note: dict) -> None:
     window = token_usage.get("modelContextWindow")
     if isinstance(window, int) and window > 0:
         result.model_context_window = window
+
+
+def _apply_compaction_notification(result: TurnResult, note: dict) -> None:
+    """Capture native Codex context-compaction boundaries."""
+    if not isinstance(note, dict):
+        return
+    method = str(note.get("method") or "")
+    params = note.get("params") or {}
+    if not isinstance(params, dict):
+        return
+    if method == "thread/compacted":
+        result.compacted = True
+        result.thread_id = params.get("threadId") or result.thread_id
+        result.turn_id = params.get("turnId") or result.turn_id
+        return
+    if method not in {"item/started", "item/completed"}:
+        return
+    item = params.get("item") or {}
+    if isinstance(item, dict) and item.get("type") == "contextCompaction":
+        result.compacted = True
+        result.thread_id = params.get("threadId") or result.thread_id
+        result.turn_id = params.get("turnId") or result.turn_id
 
 
 def _approval_choice_to_codex_decision(choice: str) -> str:

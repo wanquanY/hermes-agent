@@ -4,8 +4,8 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 5 自动验收完成，正在进入阶段 6 Compression 与流稳定状态机。
-- 后续阶段：阶段 6-12 按计划连续实施，全部完成后统一用户验收。
+- 当前阶段：阶段 6 自动验收完成，正在进入阶段 7 Approval 统一治理。
+- 后续阶段：阶段 7-12 按计划连续实施，全部完成后统一用户验收。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
 
@@ -25,6 +25,8 @@
 | `phase-4-acceptance.md` | 阶段 4 安全专项、运行期元数据性能、全量与 Doxie 验收证据 |
 | `phase-5-design.md` | 阶段 5 RunIdentity、turn persistence、tool protocol 与 resume 生命周期设计 |
 | `phase-5-acceptance.md` | 阶段 5 身份、竞态、tool protocol、全量与 Doxie 联调证据 |
+| `phase-6-design.md` | 阶段 6 compression verdict、stream-stale breaker 与 interrupt queue 设计 |
+| `phase-6-acceptance.md` | 阶段 6 稳定状态机、worker IPC、全量与 Doxie 联调证据 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -58,6 +60,8 @@ python scripts/upstream_absorption_baseline.py \
   Doxie contract/gates 退出码 0。
 - 阶段 5：R2、U6、RT5、RT6、RT7 已按当前架构吸收；RT8 由子会话脱钩保留
   supersede；Hermes 全量 28,962 passed、0 failed；Doxie contract/gates 退出码 0。
+- 阶段 6：U5、M4、C1 已按当前架构吸收；C2 保留在阶段 8，B2/B3 保留在阶段 12；
+  Hermes 全量 28,994 passed、0 failed；Doxie contract/gates 退出码 0。
 - 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
 
 各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核
