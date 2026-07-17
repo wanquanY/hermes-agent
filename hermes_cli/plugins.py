@@ -72,6 +72,10 @@ except ImportError:  # pragma: no cover – yaml is optional at import time
 logger = logging.getLogger(__name__)
 
 
+class PluginToolOverrideError(PermissionError):
+    """A plugin requested privileged tool replacement without authorization."""
+
+
 # ---------------------------------------------------------------------------
 # Plugin developer debug logging
 # ---------------------------------------------------------------------------
@@ -241,6 +245,7 @@ class PluginManifest:
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
+    capabilities: frozenset[str] = field(default_factory=frozenset)
     source: str = ""        # "user", "project", or "entrypoint"
     path: Optional[str] = None
     # Plugin kind — see plugins.py module docstring for semantics.
@@ -336,7 +341,7 @@ class PluginContext:
         """
         from tools.registry import registry
 
-        registry.register(
+        registered = registry.register(
             name=name,
             toolset=toolset,
             schema=schema,
@@ -348,11 +353,27 @@ class PluginContext:
             emoji=emoji,
             override=override,
         )
+        if not registered:
+            return
         self._manager._plugin_tool_names.add(name)
         logger.debug(
             "Plugin %s registered tool: %s%s",
             self.manifest.name, name, " (override)" if override else "",
         )
+
+    def _tool_override_allowed(self) -> bool:
+        if "tool_override" not in self.manifest.capabilities:
+            return False
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+        except Exception:
+            return False
+        plugin_id = self.manifest.key or self.manifest.name
+        entries = (config.get("plugins") or {}).get("entries") or {}
+        entry = entries.get(plugin_id) or {}
+        return entry.get("allow_tool_override") is True
 
     # -- message injection --------------------------------------------------
 
@@ -1111,6 +1132,11 @@ class PluginManager:
                 "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s",
                 key, name, kind, source, plugin_dir,
             )
+            raw_capabilities = data.get("capabilities", [])
+            if not isinstance(raw_capabilities, list) or not all(
+                isinstance(capability, str) for capability in raw_capabilities
+            ):
+                raise ValueError("plugin capabilities must be a list of strings")
             return PluginManifest(
                 name=name,
                 version=str(data.get("version", "")),
@@ -1119,6 +1145,7 @@ class PluginManager:
                 requires_env=data.get("requires_env", []),
                 provides_tools=data.get("provides_tools", []),
                 provides_hooks=data.get("provides_hooks", []),
+                capabilities=frozenset(raw_capabilities),
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
@@ -1171,6 +1198,22 @@ class PluginManager:
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
             manifest.key or manifest.name, manifest.source, manifest.kind, manifest.path,
         )
+
+        plugin_id = manifest.key or manifest.name
+        if manifest.source in {"user", "project", "bundled"}:
+            slug = plugin_id.replace("/", "__").replace("-", "_")
+            module_namespace = f"{_NS_PARENT}.{slug}"
+        else:
+            module_namespace = str(manifest.path or "").partition(":")[0].strip()
+        if module_namespace:
+            from tools.registry import registry as _registry
+
+            _registry.register_plugin_override_policy(
+                module_namespace,
+                plugin_id=plugin_id,
+                capability_declared="tool_override" in manifest.capabilities,
+                operator_opt_in=PluginContext(manifest, self)._tool_override_allowed(),
+            )
 
         try:
             if manifest.source in {"user", "project", "bundled"}:
@@ -1425,28 +1468,30 @@ def clear_thread_tool_whitelist() -> None:
     _thread_tool_whitelist.allowed = None
 
 
-def get_pre_tool_call_block_message(
+@dataclass(frozen=True)
+class PreToolCallDirective:
+    """Validated policy directive returned by a ``pre_tool_call`` hook."""
+
+    action: Optional[str] = None
+    message: Optional[str] = None
+    rule_key: Optional[str] = None
+
+
+def _get_pre_tool_call_directive(
     tool_name: str,
     args: Optional[Dict[str, Any]],
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
-) -> Optional[str]:
-    """Check ``pre_tool_call`` hooks for a blocking directive.
-
-    Plugins that need to enforce policy (rate limiting, security
-    restrictions, approval workflows) can return::
-
-        {"action": "block", "message": "Reason the tool was blocked"}
-
-    from their ``pre_tool_call`` callback.  The first valid block
-    directive wins.  Invalid or irrelevant hook return values are
-    silently ignored so existing observer-only hooks are unaffected.
-    """
+) -> PreToolCallDirective:
+    """Validate the first blocking or human-approval plugin directive."""
     allowed = getattr(_thread_tool_whitelist, "allowed", None)
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
-        return fmt.format(tool_name=tool_name)
+        return PreToolCallDirective(
+            action="block",
+            message=fmt.format(tool_name=tool_name),
+        )
 
     hook_results = invoke_hook(
         "pre_tool_call",
@@ -1456,17 +1501,114 @@ def get_pre_tool_call_block_message(
         session_id=session_id,
         tool_call_id=tool_call_id,
     )
-
     for result in hook_results:
         if not isinstance(result, dict):
             continue
-        if result.get("action") != "block":
+        action = result.get("action")
+        if action not in {"block", "approve"}:
             continue
         message = result.get("message")
-        if isinstance(message, str) and message:
-            return message
+        if not isinstance(message, str) or not message.strip():
+            continue
+        rule_key = result.get("rule_key") if action == "approve" else None
+        if isinstance(rule_key, str):
+            rule_key = rule_key.strip() or None
+        else:
+            rule_key = None
+        return PreToolCallDirective(
+            action=action,
+            message=message.strip(),
+            rule_key=rule_key,
+        )
+    return PreToolCallDirective()
 
-    return None
+
+def get_pre_tool_call_directive(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> tuple[Optional[str], Optional[str]]:
+    """Return the validated ``(action, message)`` plugin policy directive."""
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    return directive.action, directive.message
+
+
+def get_pre_tool_call_block_message(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> Optional[str]:
+    """Resolve the unique pre-tool policy seam and return a block if denied.
+
+    Plugins that need to enforce policy (rate limiting, security
+    restrictions, approval workflows) can return::
+
+        {"action": "block", "message": "Reason the tool was blocked"}
+        {"action": "approve", "message": "Why approval is needed",
+         "rule_key": "stable-policy-key"}
+
+    ``approve`` never means allow: it escalates through the same human gate,
+    persistence and fail-closed transport state used by command approval.
+    The historical function name remains as a compatibility ABI.
+    """
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    if directive.action == "block":
+        return directive.message
+    if directive.action != "approve":
+        return None
+
+    from tools.approval_gate import request_tool_approval
+
+    result = request_tool_approval(
+        tool_name,
+        directive.message or "Plugin policy requires approval.",
+        rule_key=directive.rule_key or "",
+    )
+    if result.get("approved") is True:
+        return None
+    return str(result.get("message") or "BLOCKED: tool approval was not granted.")
+
+
+def resolve_pre_tool_block(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> Optional[str]:
+    """Execution-facing wrapper that fails closed on policy seam errors."""
+    try:
+        return get_pre_tool_call_block_message(
+            tool_name,
+            args,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "pre_tool_call policy resolution failed for %s: %s",
+            tool_name,
+            exc,
+            exc_info=True,
+        )
+        return "BLOCKED: pre-tool approval policy failed closed."
 
 
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:

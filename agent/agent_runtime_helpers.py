@@ -386,6 +386,7 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             tc_id = msg.get("tool_call_id")
             if tc_id and tc_id in known_tool_ids:
                 filtered.append(msg)
+                known_tool_ids.discard(tc_id)
             else:
                 repairs += 1
         else:
@@ -778,12 +779,15 @@ def restore_primary_runtime(agent) -> bool:
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
         agent._client_kwargs = dict(rt["client_kwargs"])
-        agent._use_prompt_caching = rt["use_prompt_caching"]
-        # Default to native layout when the restored snapshot predates the
-        # native-vs-proxy split (older sessions saved before this PR).
-        agent._use_native_cache_layout = rt.get(
-            "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+        # Re-evaluate the live global toggle instead of restoring a stale
+        # snapshot that could re-enable cache markers after config changed.
+        agent._use_prompt_caching, agent._use_native_cache_layout = (
+            agent._anthropic_prompt_cache_policy(
+                provider=rt["provider"],
+                base_url=rt["base_url"],
+                api_mode=rt["api_mode"],
+                model=rt["model"],
+            )
         )
 
         # ── Rebuild client for the primary provider ──
@@ -830,6 +834,9 @@ def restore_primary_runtime(agent) -> bool:
             "Primary runtime restored for new turn: %s (%s)",
             agent.model, agent.provider,
         )
+        from agent.runtime_stability import reset_stream_stale_circuit
+
+        reset_stream_stale_circuit(agent, reason="primary_restored")
         return True
     except Exception as e:
         logging.warning("Failed to restore primary runtime: %s", e)
@@ -992,7 +999,10 @@ def dump_api_request_debug(
             dump_payload["error"] = error_info
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
+        from hermes_agent.domain.safe_identifiers import safe_filename_component
+
+        safe_session_id = safe_filename_component(agent.session_id)
+        dump_file = agent.logs_dir / f"request_dump_{safe_session_id}_{timestamp}.json"
         dump_file.write_text(
             json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
@@ -1043,6 +1053,11 @@ def anthropic_prompt_cache_policy(
     these providers serve zero cache hits, re-billing the full prompt
     on every turn.
     """
+    from agent.prompt_caching import resolve_prompt_caching_enabled
+
+    if not resolve_prompt_caching_enabled():
+        return False, False
+
     eff_provider = (provider if provider is not None else agent.provider) or ""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
@@ -1121,8 +1136,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # Treat client_kwargs as read-only. Callers pass agent._client_kwargs (or shallow
     # copies of it) in; any in-place mutation leaks back into the stored dict and is
     # reused on subsequent requests. #10933 hit this by injecting an httpx.Client
-    # transport that was torn down after the first request, so the next request
-    # wrapped a closed transport and raised "Cannot send a request, as the client
+    # that was torn down after the first request, so the next request wrapped a
+    # closed pool and raised "Cannot send a request, as the client
     # has been closed" on every retry. The revert resolved that specific path; this
     # copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
@@ -1177,12 +1192,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
                 agent._client_log_context(),
             )
             return client
-    # Inject TCP keepalives so the kernel detects dead provider connections
-    # instead of letting them sit silently in CLOSE-WAIT (#10324).  Without
-    # this, a peer that drops mid-stream leaves the socket in a state where
-    # epoll_wait never fires, ``httpx`` read timeout may not trigger, and
-    # the agent hangs until manually killed.  Probes after 30s idle, retry
-    # every 10s, give up after 3 → dead peer detected within ~60s.
+    # Inject the canonical provider HTTP pool. Idle connections are reaped
+    # before common reverse-proxy deadlines without replacing httpx/OS socket
+    # defaults; this preserves TCP_NODELAY and stable TLS/SSE chunk handling.
     #
     # Safety against #10933: the ``client_kwargs = dict(client_kwargs)``
     # above means this injection only lands in the local per-call copy,
@@ -1418,6 +1430,9 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "Model switched in-place: %s (%s) -> %s (%s)",
         old_model, old_provider, new_model, new_provider,
     )
+    from agent.runtime_stability import reset_stream_stale_circuit
+
+    reset_stream_stale_circuit(agent, reason="model_switched")
 
 
 
@@ -1434,8 +1449,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     block_message: Optional[str] = None
     if not pre_tool_block_checked:
         try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
+            from hermes_cli.plugins import resolve_pre_tool_block
+            block_message = resolve_pre_tool_block(
                 function_name, function_args, task_id=effective_task_id or "",
             )
         except Exception:
@@ -1542,6 +1557,16 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     if not tool_name:
         return None
 
+    # Historical sessions may replay the old ambiguous
+    # ``mcp_server_tool`` spelling. Registry resolution is the single read
+    # migration seam; successful resolution always returns the canonical
+    # ``mcp__server__tool`` name and nothing writes the legacy spelling back.
+    from tools.registry import registry
+
+    migrated = registry.resolve_name(tool_name)
+    if migrated in agent.valid_tool_names:
+        return migrated
+
     def _norm(s: str) -> str:
         return s.lower().replace("-", "_").replace(" ", "_")
 
@@ -1609,6 +1634,52 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
         filtered.append(msg)
     messages = filtered
 
+    # Normalize tool protocol structure on the provider-bound copy only.
+    # Canonical history remains byte-stable while strict providers never see
+    # empty arrays or a duplicated call/result id.
+    seen_call_ids: set[str] = set()
+    seen_result_ids: set[str] = set()
+    normalized: List[Dict[str, Any]] = []
+    removed_references = 0
+    for msg in messages:
+        role = msg.get("role")
+        if role == "assistant" and "tool_calls" in msg:
+            raw_tool_calls = msg.get("tool_calls")
+            if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+                normalized.append({key: value for key, value in msg.items() if key != "tool_calls"})
+                removed_references += 1
+                continue
+            kept_tool_calls = []
+            for tool_call in raw_tool_calls:
+                call_id = _ra().AIAgent._get_tool_call_id_static(tool_call)
+                if call_id and call_id in seen_call_ids:
+                    removed_references += 1
+                    continue
+                if call_id:
+                    seen_call_ids.add(call_id)
+                kept_tool_calls.append(tool_call)
+            if not kept_tool_calls:
+                normalized.append({key: value for key, value in msg.items() if key != "tool_calls"})
+            elif len(kept_tool_calls) != len(raw_tool_calls):
+                normalized.append({**msg, "tool_calls": kept_tool_calls})
+            else:
+                normalized.append(msg)
+            continue
+        if role == "tool":
+            result_id = str(msg.get("tool_call_id") or "").strip()
+            if result_id and result_id in seen_result_ids:
+                removed_references += 1
+                continue
+            if result_id:
+                seen_result_ids.add(result_id)
+        normalized.append(msg)
+    messages = normalized
+    if removed_references:
+        _ra().logger.debug(
+            "Pre-call sanitizer: normalized %d empty or duplicate tool reference(s)",
+            removed_references,
+        )
+
     surviving_call_ids: set = set()
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1646,12 +1717,27 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 for tc in msg.get("tool_calls") or []:
                     cid = _ra().AIAgent._get_tool_call_id_static(tc)
                     if cid in missing_results:
-                        patched.append({
-                            "role": "tool",
-                            "name": _ra().AIAgent._get_tool_call_name_static(tc),
-                            "content": "[Result unavailable — see context summary above]",
-                            "tool_call_id": cid,
-                        })
+                        from agent.tool_dispatch_helpers import make_tool_result_message
+                        from agent.tool_result_classification import tool_may_have_side_effect
+
+                        name = _ra().AIAgent._get_tool_call_name_static(tc)
+                        disposition = (
+                            "unknown" if tool_may_have_side_effect(name) else "none"
+                        )
+                        content = (
+                            "[Result unavailable — this tool may have executed; "
+                            "inspect current state before retrying]"
+                            if disposition == "unknown"
+                            else "[Result unavailable — read-only tool had no effect]"
+                        )
+                        patched.append(
+                            make_tool_result_message(
+                                name,
+                                content,
+                                cid,
+                                effect_disposition=disposition,
+                            )
+                        )
         messages = patched
         _ra().logger.debug(
             "Pre-call sanitizer: added %d stub tool result(s)",

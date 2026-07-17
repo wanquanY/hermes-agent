@@ -8,11 +8,15 @@ of 4000+ models across 109+ providers.  Provides:
   (reasoning, tools, vision, PDF, audio), modalities, knowledge cutoff,
   open-weights flag, family grouping, deprecation status
 
-Data resolution order (like TypeScript OpenCode):
-  1. Bundled snapshot (ships with the package — offline-first)
+Data resolution order:
+  1. In-process cache
   2. Disk cache (~/.hermes/models_dev_cache.json)
-  3. Network fetch (https://models.dev/api.json)
-  4. Background refresh every 60 minutes
+  3. Network fetch (https://models.dev/api.json), only when the caller owns
+     catalog discovery
+
+Agent construction uses the cache-only mode. Interactive model setup and
+explicit catalog refresh own network discovery, so starting a turn never
+blocks on a third-party metadata service.
 
 Other modules should import the dataclasses and query functions from here
 rather than parsing the raw JSON themselves.
@@ -235,7 +239,11 @@ def _save_disk_cache(data: Dict[str, Any]) -> None:
         logger.debug("Failed to save models.dev disk cache: %s", e)
 
 
-def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
+def fetch_models_dev(
+    force_refresh: bool = False,
+    *,
+    allow_network: bool = True,
+) -> Dict[str, Any]:
     """Fetch models.dev registry. Cache hierarchy: in-mem → disk → network.
 
     Returns the full registry dict keyed by provider ID, or empty dict on failure.
@@ -249,6 +257,10 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
       3. Network fetch → on success, save to disk + in-mem and return.
       4. Network fails → fall back to ANY available disk cache (even stale)
          with a short 5 min in-mem grace period before retrying network.
+
+    When ``allow_network=False``, any in-memory or disk snapshot is returned
+    regardless of age and no HTTP request is made. This is the runtime-safe
+    path used while constructing agents.
 
     When ``force_refresh=True`` (used by ``hermes config refresh``, the
     \"refresh model catalog\" code path), stages 1 and 2 are skipped. The
@@ -286,6 +298,17 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
                 )
                 return _models_dev_cache
 
+    # Runtime consumers must be deterministic and must not turn agent
+    # construction into an implicit metadata request. A stale catalog is
+    # still more authoritative than a name-based fallback, so cache-only
+    # mode accepts any on-disk snapshot before returning empty.
+    if not allow_network:
+        if not _models_dev_cache:
+            _models_dev_cache = _load_disk_cache()
+            if _models_dev_cache:
+                _models_dev_cache_time = time.time() - _MODELS_DEV_CACHE_TTL + 300
+        return _models_dev_cache
+
     # Stage 3: network fetch.
     try:
         response = requests.get(MODELS_DEV_URL, timeout=15)
@@ -316,7 +339,12 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
     return _models_dev_cache
 
 
-def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
+def lookup_models_dev_context(
+    provider: str,
+    model: str,
+    *,
+    allow_network: bool = True,
+) -> Optional[int]:
     """Look up context_length for a provider+model combo in models.dev.
 
     Returns the context window in tokens, or None if not found.
@@ -326,7 +354,7 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
     if not mdev_provider_id:
         return None
 
-    data = fetch_models_dev()
+    data = fetch_models_dev(allow_network=allow_network)
     provider_data = data.get(mdev_provider_id)
     if not isinstance(provider_data, dict):
         return None
@@ -408,7 +436,11 @@ class ModelCapabilities:
     model_family: str = ""
 
 
-def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
+def _get_provider_models(
+    provider: str,
+    *,
+    allow_network: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Resolve a Hermes provider ID to its models dict from models.dev.
 
     Returns the models dict or None if the provider is unknown or has no data.
@@ -417,7 +449,7 @@ def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
     if not mdev_provider_id:
         return None
 
-    data = fetch_models_dev()
+    data = fetch_models_dev(allow_network=allow_network)
     provider_data = data.get(mdev_provider_id)
     if not isinstance(provider_data, dict):
         return None
@@ -570,14 +602,18 @@ def _should_hide_from_provider_catalog(provider: str, model_id: str) -> bool:
     return False
 
 
-def list_agentic_models(provider: str) -> List[str]:
+def list_agentic_models(
+    provider: str,
+    *,
+    allow_network: bool = False,
+) -> List[str]:
     """Return model IDs suitable for agentic use from models.dev.
 
     Filters for tool_call=True and excludes noise (TTS, embedding,
     dated preview snapshots, live/streaming, image-only models).
     Returns an empty list on any failure.
     """
-    models = _get_provider_models(provider)
+    models = _get_provider_models(provider, allow_network=allow_network)
     if models is None:
         return []
 
@@ -669,7 +705,11 @@ def _parse_provider_info(provider_id: str, raw: Dict[str, Any]) -> ProviderInfo:
 # Provider-level queries
 # ---------------------------------------------------------------------------
 
-def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
+def get_provider_info(
+    provider_id: str,
+    *,
+    allow_network: bool = False,
+) -> Optional[ProviderInfo]:
     """Get full provider metadata from models.dev.
 
     Accepts either a Hermes provider ID (e.g. "kilocode") or a models.dev
@@ -678,7 +718,7 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
     # Resolve Hermes ID → models.dev ID
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
 
-    data = fetch_models_dev()
+    data = fetch_models_dev(allow_network=allow_network)
     raw = data.get(mdev_id)
     if not isinstance(raw, dict):
         return None
@@ -691,7 +731,10 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
 # ---------------------------------------------------------------------------
 
 def get_model_info(
-    provider_id: str, model_id: str
+    provider_id: str,
+    model_id: str,
+    *,
+    allow_network: bool = False,
 ) -> Optional[ModelInfo]:
     """Get full model metadata from models.dev.
 
@@ -700,7 +743,7 @@ def get_model_info(
     """
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
 
-    data = fetch_models_dev()
+    data = fetch_models_dev(allow_network=allow_network)
     pdata = data.get(mdev_id)
     if not isinstance(pdata, dict):
         return None

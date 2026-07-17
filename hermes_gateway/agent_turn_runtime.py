@@ -12,13 +12,14 @@ import time
 
 from hermes_agent.gateway.runtime_config import (
     load_gateway_runtime_config,
-    resolve_gateway_model,
     resolve_runtime_agent_kwargs,
 )
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.agent_turn_context import agent_turn_context_for
 from hermes_gateway.agent_turn_hygiene import agent_turn_hygiene_for
+from hermes_gateway.agent_turn_persistence import agent_turn_persistence_for
 from hermes_gateway.bootstrap import home_target_env_var
 from hermes_gateway.config import Platform
 from hermes_gateway.gateway_runtime_config import runtime_config_for
@@ -32,11 +33,11 @@ from hermes_gateway.process_notifications import (
 from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.response_normalization import normalize_empty_agent_response
 from hermes_gateway.resume_pending import should_clear_resume_pending_after_turn
+from hermes_gateway.response_filters import is_intentional_silence_agent_result
 from hermes_gateway.session_context import build_session_context, build_session_context_prompt
 from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 from hermes_gateway.voice_runtime import voice_runtime_for
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,10 @@ class GatewayAgentTurnRuntime:
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's
         # last-active topic so a cross-topic Reply or stripped plain reply
         # doesn't fragment the conversation across sessions.
-        recovered = session_navigation_for(runner).recover_telegram_topic_thread_id(source)
+        recovered = await run_sqlite_io(
+            session_navigation_for(runner).recover_telegram_topic_thread_id,
+            source,
+        )
         if recovered is not None:
             logger.info(
                 "telegram topic recovery: chat=%s user=%s %r -> %s",
@@ -96,15 +100,26 @@ class GatewayAgentTurnRuntime:
             except Exception:
                 logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
-        session_entry = runner.session_store.get_or_create_session(source)
+        session_entry = await run_sqlite_io(
+            runner.session_store.get_or_create_session,
+            source,
+        )
         session_key = session_entry.session_key
         runner._cache_session_source(session_key, source)
-        if session_navigation_for(runner).is_telegram_topic_lane(source):
+        if await run_sqlite_io(
+            session_navigation_for(runner).is_telegram_topic_lane,
+            source,
+        ):
             try:
-                binding = runner._session_db.telegram_topics.get_telegram_topic_binding(
-                    chat_id=str(source.chat_id),
-                    thread_id=str(source.thread_id),
-                ) if runner._session_db else None
+                binding = (
+                    await run_sqlite_io(
+                        runner._session_db.telegram_topics.get_telegram_topic_binding,
+                        chat_id=str(source.chat_id),
+                        thread_id=str(source.thread_id),
+                    )
+                    if runner._session_db
+                    else None
+                )
             except Exception:
                 logger.debug("Failed to read Telegram topic binding", exc_info=True)
                 binding = None
@@ -116,12 +131,20 @@ class GatewayAgentTurnRuntime:
                     # lane session is ended cleanly. Mutating session_entry in
                     # place here created a split-brain state where the JSON
                     # index pointed at one id but code downstream used another.
-                    switched = runner.session_store.switch_session(session_key, bound_session_id)
+                    switched = await run_sqlite_io(
+                        runner.session_store.switch_session,
+                        session_key,
+                        bound_session_id,
+                    )
                     if switched is not None:
                         session_entry = switched
             else:
                 try:
-                    session_navigation_for(runner).record_telegram_topic_binding(source, session_entry)
+                    await run_sqlite_io(
+                        session_navigation_for(runner).record_telegram_topic_binding,
+                        source,
+                        session_entry,
+                    )
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
         if getattr(session_entry, "was_auto_reset", False):
@@ -270,7 +293,10 @@ class GatewayAgentTurnRuntime:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
         # Load conversation history from transcript
-        history = runner.session_store.load_transcript(session_entry.session_id)
+        history = await run_sqlite_io(
+            runner.session_store.load_transcript,
+            session_entry.session_id,
+        )
         
         history = await agent_turn_hygiene_for(runner).compress_if_needed(
             history=history,
@@ -373,6 +399,10 @@ class GatewayAgentTurnRuntime:
                 return None
 
             response = agent_result.get("final_response") or ""
+            _intentional_silence = is_intentional_silence_agent_result(
+                agent_result,
+                response,
+            )
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
@@ -406,7 +436,10 @@ class GatewayAgentTurnRuntime:
             if session_key and should_clear_resume_pending_after_turn(agent_result):
                 runner._clear_restart_failure_count(session_key)
                 try:
-                    runner.session_store.clear_resume_pending(session_key)
+                    await run_sqlite_io(
+                        runner.session_store.clear_resume_pending,
+                        session_key,
+                    )
                 except Exception as _e:
                     logger.debug(
                         "clear_resume_pending failed for %s: %s",
@@ -415,10 +448,11 @@ class GatewayAgentTurnRuntime:
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            response = normalize_empty_agent_response(
-                agent_result, response, history_len=len(history),
-            )
-            response = sanitize_gateway_final_response(source.platform, response)
+            if not _intentional_silence:
+                response = normalize_empty_agent_response(
+                    agent_result, response, history_len=len(history),
+                )
+                response = sanitize_gateway_final_response(source.platform, response)
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -436,7 +470,7 @@ class GatewayAgentTurnRuntime:
                 )
             except Exception:
                 _show_reasoning_effective = getattr(runner, "_show_reasoning", False)
-            if _show_reasoning_effective and response:
+            if _show_reasoning_effective and response and not _intentional_silence:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
                     # Collapse long reasoning to keep messages readable
@@ -466,7 +500,12 @@ class GatewayAgentTurnRuntime:
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
-            if _footer_line and response and not agent_result.get("already_sent"):
+            if (
+                _footer_line
+                and response
+                and not _intentional_silence
+                and not agent_result.get("already_sent")
+            ):
                 response = f"{response}\n\n{_footer_line}"
 
             # Emit agent:end hook
@@ -489,10 +528,8 @@ class GatewayAgentTurnRuntime:
             # completions are already handled by the per-process watcher task
             # above, so we only inject watch-type events here.
             #
-            # Async-delegation completions ALSO ride this shared queue but are
-            # owned by GatewayProcessWatcherService.async_delegation_watcher,
-            # which covers both the idle and post-turn cases with a single
-            # consumer — so we leave them on the queue here.
+            # Subagent completion is persisted as typed Activity/Run state and
+            # never enters this process-notification queue.
             try:
                 from tools.process_registry import process_registry as _pr
                 _watch_events = drain_gateway_watch_events(_pr.completion_queue)
@@ -506,175 +543,23 @@ class GatewayAgentTurnRuntime:
             except Exception as e:
                 logger.debug("Watch queue drain error: %s", e)
 
-            # NOTE: Dangerous command approvals are now handled inline by the
-            # blocking gateway approval mechanism in tools/approval.py.  The agent
-            # thread blocks until the user responds with /approve or /deny, so by
-            # the time we reach here the approval has already been resolved.  The
-            # old post-loop pop_pending + approval_hint code was removed in favour
-            # of the blocking approach that mirrors CLI's synchronous input().
-            
-            # Save the full conversation to the transcript, including tool calls.
-            # This preserves the complete agent loop (tool_calls, tool results,
-            # intermediate reasoning) so sessions can be resumed with full context
-            # and transcripts are useful for debugging and training data.
-            #
-            # IMPORTANT: For context-overflow failures (compression exhausted,
-            # generic 400 on large sessions) we must NOT persist the user's
-            # message — doing so would grow the session further and cause the
-            # same failure on the next attempt, an infinite loop. (#1630, #9893)
-            #
-            # Transient failures (429, timeout, connection error, provider 5xx)
-            # are different: the session is not oversized, and silently dropping
-            # the user message causes severe context loss on retry — the agent
-            # forgets what was just asked.  Persist the user turn so the
-            # conversation is preserved. (#7100)
-            agent_failed_early = bool(agent_result.get("failed"))
-            _err_str_for_classify = str(agent_result.get("error", "")).lower()
-            # Use specific multi-word phrases (not bare "exceed" or "token")
-            # to avoid false positives on transient errors like "rate limit
-            # exceeded" or "invalid auth token". Matches run_agent.py's
-            # own context-length classifier.
-            is_context_overflow_failure = agent_failed_early and (
-                bool(agent_result.get("compression_exhausted"))
-                or any(p in _err_str_for_classify for p in (
-                    "context length", "context size", "context window",
-                    "maximum context", "token limit", "too many tokens",
-                    "reduce the length", "exceeds the limit",
-                    "request entity too large", "prompt is too long",
-                    "payload too large", "input is too long",
-                ))
-                or ("400" in _err_str_for_classify and len(history) > 50)
+            response = await agent_turn_persistence_for(runner).persist(
+                event=event,
+                source=source,
+                session_entry=session_entry,
+                session_key=session_key,
+                history=history,
+                message_text=message_text,
+                response=response,
+                agent_result=agent_result,
+                agent_messages=agent_messages,
             )
-            if is_context_overflow_failure:
-                logger.info(
-                    "Skipping transcript persistence for context-overflow "
-                    "failure in session %s to prevent session growth loop.",
-                    session_entry.session_id,
-                )
-            elif agent_failed_early:
-                logger.info(
-                    "Transient agent failure in session %s — persisting user "
-                    "message so conversation context is preserved on retry.",
-                    session_entry.session_id,
-                )
-
-            # When compression is exhausted, the session is permanently too
-            # large to process.  Auto-reset it so the next message starts
-            # fresh instead of replaying the same oversized context in an
-            # infinite fail loop.  (#9893)
-            if agent_result.get("compression_exhausted") and session_entry and session_key:
-                logger.info(
-                    "Auto-resetting session %s after compression exhaustion.",
-                    session_entry.session_id,
-                )
-                runner.session_store.reset_session(session_key)
-                agent_cache_for(runner).evict_cached_agent(session_key)
-                runner._session_model_overrides.pop(session_key, None)
-                runtime_config_for(runner).set_session_reasoning_override(session_key, None)
-                if hasattr(runner, "_pending_model_notes"):
-                    runner._pending_model_notes.pop(session_key, None)
-                response = (response or "") + (
-                    "\n\n🔄 Session auto-reset — the conversation exceeded the "
-                    "maximum context size and could not be compressed further. "
-                    "Your next message will start a fresh session."
-                )
-
-            ts = datetime.now().isoformat()
-            
-            # If this is a fresh session (no history), write the full tool
-            # definitions as the first entry so the transcript is self-describing
-            # -- the same list of dicts sent as tools=[...] in the API request.
-            if is_context_overflow_failure:
-                pass  # Skip all transcript writes — don't grow a broken session
-            elif not history:
-                tool_defs = agent_result.get("tools", [])
-                runner.session_store.append_to_transcript(
-                    session_entry.session_id,
-                    {
-                        "role": "session_meta",
-                        "tools": tool_defs or [],
-                        "model": resolve_gateway_model(),
-                        "platform": source.platform.value if source.platform else "",
-                        "timestamp": ts,
-                    }
-                )
-            
-            # The agent already persisted these messages to SQLite via
-            # _flush_messages_to_session_db(), so skip the DB write here
-            # to prevent the duplicate-write bug (#860 / #42039).
-            agent_persisted = runner._session_db is not None
-
-            # Find only the NEW messages from this turn (skip history we loaded).
-            # Use the filtered history length (history_offset) that was actually
-            # passed to the agent, not len(history) which includes session_meta
-            # entries that were stripped before the agent saw them.
-            if is_context_overflow_failure:
-                pass  # handled above — skip all transcript writes
-            elif agent_failed_early:
-                # Transient failure (429/timeout/5xx): persist only the user
-                # message so the next message can load a transcript that
-                # reflects what was said.  Skip the assistant error text since
-                # it's a gateway-generated hint, not model output. (#7100)
-                _user_entry = {"role": "user", "content": message_text, "timestamp": ts}
-                if event.message_id:
-                    _user_entry["message_id"] = str(event.message_id)
-                runner.session_store.append_to_transcript(
-                    session_entry.session_id,
-                    _user_entry,
-                    skip_db=agent_persisted,
-                )
-            else:
-                history_len = agent_result.get("history_offset", len(history))
-                new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
-
-                # If no new messages found (edge case), fall back to simple user/assistant
-                if not new_messages:
-                    _user_entry = {"role": "user", "content": message_text, "timestamp": ts}
-                    if event.message_id:
-                        _user_entry["message_id"] = str(event.message_id)
-                    runner.session_store.append_to_transcript(
-                        session_entry.session_id,
-                        _user_entry,
-                        skip_db=agent_persisted,
-                    )
-                    if response:
-                        runner.session_store.append_to_transcript(
-                            session_entry.session_id,
-                            {"role": "assistant", "content": response, "timestamp": ts},
-                            skip_db=agent_persisted,
-                        )
-                else:
-                    # Attach the inbound platform message_id to the first user
-                    # entry written this turn so platform-level quote-resolution
-                    # (e.g. Yuanbao QuoteContextMiddleware's transcript fallback)
-                    # can find earlier @bot messages by their original message_id.
-                    _user_msg_id_attached = False
-                    for msg in new_messages:
-                        # Skip system messages (they're rebuilt each run)
-                        if msg.get("role") == "system":
-                            continue
-                        # Add timestamp to each message for debugging
-                        entry = {**msg, "timestamp": ts}
-                        if (
-                            not _user_msg_id_attached
-                            and msg.get("role") == "user"
-                            and event.message_id
-                            and "message_id" not in entry
-                        ):
-                            entry["message_id"] = str(event.message_id)
-                            _user_msg_id_attached = True
-                        runner.session_store.append_to_transcript(
-                            session_entry.session_id, entry,
-                            skip_db=agent_persisted,
-                        )
-            
-            # Token counts and model are now persisted by the agent directly.
-            # Keep only last_prompt_tokens here for context-window tracking and
-            # compression decisions.
-            runner.session_store.update_session(
-                session_entry.session_key,
-                last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
-            )
+            if _intentional_silence:
+                # Persist the control marker above so the model retains its
+                # own decision, then erase only the outbound representation.
+                response = ""
+                _footer_line = ""
+                agent_result.pop("already_sent", None)
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))

@@ -1068,11 +1068,13 @@ def connect(
             # startup threads do not race before _INITIALIZED_PATHS is populated.
             # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
             # falls back to DELETE with one WARNING so kanban stays usable there.
-            from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+            from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 
-            apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA foreign_keys=ON")
+            configure_sqlite_connection(
+                conn,
+                db_label=f"kanban.db ({path.name})",
+                busy_timeout_ms=30_000,
+            )
             needs_init = resolved not in _INITIALIZED_PATHS
             if needs_init:
                 # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
@@ -3811,6 +3813,10 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    skipped_locked: bool = False
+    """True when another process owns this board's dispatcher tick."""
+    dispatch_lock_error: Optional[str] = None
+    """Structured fail-closed reason when the lock primitive/path failed."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -4812,6 +4818,50 @@ def dispatch_once(
     stale_timeout_seconds: int = 0,
     board: Optional[str] = None,
 ) -> DispatchResult:
+    """Run one dispatcher tick under a non-blocking board single-writer lease."""
+
+    from hermes_cli.kanban_dispatch_lock import dispatch_tick_lock
+
+    try:
+        db_path = kanban_db_path(board=board)
+    except Exception as exc:
+        reason = f"board_path_error:{type(exc).__name__}:{exc}"
+        _log.error("kanban dispatch failed closed: %s", reason)
+        return DispatchResult(skipped_locked=True, dispatch_lock_error=reason)
+
+    with dispatch_tick_lock(db_path) as decision:
+        if not decision.acquired:
+            return DispatchResult(
+                skipped_locked=True,
+                dispatch_lock_error=(
+                    decision.reason if decision.reason != "contended" else None
+                ),
+            )
+        return _dispatch_once_locked(
+            conn,
+            spawn_fn=spawn_fn,
+            ttl_seconds=ttl_seconds,
+            dry_run=dry_run,
+            max_spawn=max_spawn,
+            max_in_progress=max_in_progress,
+            failure_limit=failure_limit,
+            stale_timeout_seconds=stale_timeout_seconds,
+            board=board,
+        )
+
+
+def _dispatch_once_locked(
+    conn: sqlite3.Connection,
+    *,
+    spawn_fn=None,
+    ttl_seconds: Optional[int] = None,
+    dry_run: bool = False,
+    max_spawn: Optional[int] = None,
+    max_in_progress: Optional[int] = None,
+    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    stale_timeout_seconds: int = 0,
+    board: Optional[str] = None,
+) -> DispatchResult:
     """Run one dispatcher tick.
 
     Steps:
@@ -5387,11 +5437,14 @@ def _default_spawn(
         raise ValueError(f"task {task.id} has no assignee")
 
     from hermes_cli.profiles import normalize_profile_name
+    from tools.environments.local import hermes_subprocess_env
 
     profile_arg = normalize_profile_name(task.assignee)
 
     prompt = f"work kanban task {task.id}"
-    env = dict(os.environ)
+    # Kanban workers execute model-authored work. They need provider authority,
+    # but never the parent gateway, infrastructure or auxiliary keyring.
+    env = hermes_subprocess_env(inherit_credentials=True)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root

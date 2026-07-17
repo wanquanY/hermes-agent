@@ -170,8 +170,12 @@ class APIServerSessionsMixin:
             return web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
 
         raw_id = body.get("id") or body.get("session_id")
-        session_id = str(raw_id).strip() if raw_id else f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        if not session_id or re.search(r'[\r\n\x00]', session_id):
+        raw_session_id = raw_id if raw_id else f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        try:
+            from hermes_agent.domain.safe_identifiers import validate_external_session_id
+
+            session_id = validate_external_session_id(raw_session_id)
+        except ValueError:
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
         if len(session_id) > self._MAX_SESSION_HEADER_LEN:
             return web.json_response(_openai_error("Session ID too long", code="invalid_session_id"), status=400)
@@ -279,8 +283,12 @@ class APIServerSessionsMixin:
         if err:
             return err
         db = self._ensure_session_db()
-        fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
-        if not fork_id or re.search(r'[\r\n\x00]', fork_id):
+        raw_fork_id = body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        try:
+            from hermes_agent.domain.safe_identifiers import validate_external_session_id
+
+            fork_id = validate_external_session_id(raw_fork_id)
+        except ValueError:
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
         if db.sessions.get(fork_id):
             return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)

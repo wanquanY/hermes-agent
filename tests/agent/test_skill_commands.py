@@ -377,6 +377,37 @@ class TestScanSkillCommands:
         assert "/sonarr-v3v4-api" in result
         assert any("/" in k[1:] for k in result) is False  # no unescaped /
 
+    def test_core_command_collision_is_not_auto_registered(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "status")
+            result = scan_skill_commands()
+
+        assert "/status" not in result
+
+    def test_core_alias_collision_is_not_auto_registered(self, tmp_path):
+        from hermes_cli.commands import COMMAND_REGISTRY
+
+        alias = next(
+            alias
+            for command in COMMAND_REGISTRY
+            for alias in command.aliases
+            if alias != command.name
+        )
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, alias)
+            result = scan_skill_commands()
+
+        assert f"/{alias}" not in result
+
+    def test_distinct_names_with_same_normalized_slug_are_first_wins(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "git_helper")
+            _make_skill(tmp_path, "git-helper")
+            result = scan_skill_commands()
+
+        assert list(result) == ["/git-helper"]
+        assert result["/git-helper"]["name"] in {"git_helper", "git-helper"}
+
 
 class TestResolveSkillCommandKey:
     """Telegram bot-command names disallow hyphens, so the menu registers

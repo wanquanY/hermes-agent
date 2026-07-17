@@ -49,3 +49,37 @@ def test_scoped_worker_db_component_call_preserves_conversation_identity(
 
     assert result == "ok"
     assert calls == [("runs.append_event", "conversation-session-1")]
+
+
+def test_runtime_stability_is_a_worker_db_component(monkeypatch) -> None:
+    proxy = WorkerDBProxy(_UnusedWriter())
+    calls: list[str] = []
+
+    def capture(method, _args, _kwargs, *, conversation_session_id):
+        assert conversation_session_id == ""
+        calls.append(method)
+        return {"stream_stale_failures": 2}
+
+    monkeypatch.setattr(proxy, "_call", capture)
+
+    result = proxy.runtime_stability.get("session-1")
+
+    assert result == {"stream_stale_failures": 2}
+    assert calls == ["runtime_stability.get"]
+
+
+def test_verification_is_a_worker_db_component(monkeypatch) -> None:
+    proxy = WorkerDBProxy(_UnusedWriter())
+    calls: list[str] = []
+
+    def capture(method, _args, _kwargs, *, conversation_session_id):
+        assert conversation_session_id == ""
+        calls.append(method)
+        return {"status": "passed"}
+
+    monkeypatch.setattr(proxy, "_call", capture)
+
+    result = proxy.verification.status("session-1", "/workspace")
+
+    assert result == {"status": "passed"}
+    assert calls == ["verification.status"]

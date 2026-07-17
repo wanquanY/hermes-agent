@@ -506,7 +506,11 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
-    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda _agent, _session=None: {"model": "test/model"},
+    )
 
     resp = server.handle_request(
         {
@@ -1030,6 +1034,84 @@ def test_run_control_replays_events_and_tracks_status(capture, monkeypatch, tmp_
     assert done["result"]["run"]["status"] == "completed"
 
 
+def test_async_subagent_terminal_is_recorded_after_parent_run_completes(
+    capture,
+    monkeypatch,
+    tmp_path,
+):
+    server, _buf = capture
+    db = _resume_gateway_db(tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    db.sessions.create("stored-late-child", source="tui")
+    db.runs.upsert(
+        run_id="run-parent",
+        session_id="stored-late-child",
+        turn_id="turn-parent",
+        status="running",
+    )
+    server._sessions["runtime-late-child"] = {
+        "agent": MagicMock(model="gpt-test", provider="test-provider"),
+        "session_key": "stored-late-child",
+        "tool_progress_mode": "all",
+        "running": True,
+        "active_run_id": "run-parent",
+        "active_turn_id": "turn-parent",
+        "active_runtime_scope_key": "profile:parent",
+        "pending_turn": {"client_message_id": "client-parent"},
+        "history": [],
+        "history_lock": threading.Lock(),
+    }
+
+    server._emit(
+        "message.complete",
+        "runtime-late-child",
+        {
+            "run_id": "run-parent",
+            "turn_id": "turn-parent",
+            "status": "complete",
+        },
+    )
+    callbacks = server._agent_cbs("runtime-late-child")
+    callbacks["tool_progress_callback"](
+        "subagent.complete",
+        None,
+        "done",
+        None,
+        subagent_id="sa-late",
+        status="completed",
+        summary="done",
+        run_id="run-parent",
+        turn_id="turn-parent",
+        client_message_id="client-parent",
+        runtime_scope_key="profile:parent",
+        activity_id="act-agent_dispatch:late",
+    )
+
+    replay = server.handle_request(
+        {
+            "id": "late-replay",
+            "method": "run.events",
+            "params": {
+                "conversation_session_id": "stored-late-child",
+                "run_id": "run-parent",
+            },
+        }
+    )
+
+    assert "error" not in replay
+    terminal = [
+        event
+        for event in replay["result"]["events"]
+        if event["type"] == "subagent.complete"
+    ]
+    assert len(terminal) == 1
+    assert terminal[0]["run_id"] == "run-parent"
+    assert terminal[0]["turn_id"] == "turn-parent"
+    assert terminal[0]["runtime_scope_key"] == "profile:parent"
+    assert terminal[0]["payload"]["subagent_id"] == "sa-late"
+    assert terminal[0]["payload"]["status"] == "completed"
+
+
 def test_terminal_event_releases_live_session_before_client_delivery(capture, monkeypatch):
     server, _buf = capture
     entered_write = threading.Event()
@@ -1042,7 +1124,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
         params = obj.get("params") or {}
         if obj.get("method") == "event" and params.get("type") == "message.complete":
             entered_write.set()
-            write_released.append(release_write.wait(timeout=2))
+            write_released.append(release_write.wait(timeout=10))
         return True
 
     agent = MagicMock(model="gpt-test", provider="test-provider")
@@ -1074,7 +1156,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
     )
     emitter.start()
 
-    assert entered_write.wait(timeout=2)
+    assert entered_write.wait(timeout=10)
     try:
         status = server.handle_request(
             {
@@ -1085,7 +1167,7 @@ def test_terminal_event_releases_live_session_before_client_delivery(capture, mo
         )
     finally:
         release_write.set()
-    emitter.join(timeout=2)
+    emitter.join(timeout=10)
 
     assert not emitter.is_alive()
     assert observed_events

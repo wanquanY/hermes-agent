@@ -268,6 +268,45 @@ async def test_spawn_configures_large_worker_stdio_limit(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_spawn_env_uses_model_child_security_tier(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["env"] = kwargs["env"].copy()
+        stdout = asyncio.StreamReader(limit=kwargs["limit"])
+        stdout.feed_data(
+            (encode_outgoing(WorkerReadyFrame(ready=True, bootstrap_ms=1.0)) + "\n").encode()
+        )
+        stdout.feed_eof()
+        return _FakeProcess(stdout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "gateway-secret")
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "auxiliary-secret")
+
+    sup = _make_supervisor(_Collector())
+    try:
+        await sup.ensure(
+            _scope(tmp_path),
+            env_overrides={
+                "DOVIE_LLM_RUNTIME_TOKEN": "worker-runtime-token",
+                "GH_TOKEN": "overlay-bypass-attempt",
+            },
+        )
+    finally:
+        await sup.shutdown_all()
+
+    env = captured["env"]
+    assert env["OPENAI_API_KEY"] == "provider-secret"
+    assert env["DOVIE_LLM_RUNTIME_TOKEN"] == "worker-runtime-token"
+    assert env["HERMES_HOME"] == str(tmp_path)
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "AUXILIARY_VISION_API_KEY" not in env
+    assert "GH_TOKEN" not in env
+
+
+@pytest.mark.asyncio
 async def test_read_loop_dispatches_large_event_frame(tmp_path) -> None:
     collector = _Collector()
     sup = _make_supervisor(collector)

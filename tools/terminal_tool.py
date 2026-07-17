@@ -254,6 +254,11 @@ def _get_approval_callback():
     return getattr(_callback_tls, "approval", None)
 
 
+def get_approval_callback():
+    """Return the active thread-scoped approval UI callback."""
+    return _get_approval_callback()
+
+
 def set_sudo_password_callback(cb):
     """Register a callback for sudo password prompts (used by CLI).
 
@@ -962,6 +967,20 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         overrides: Dict of config keys to override
     """
     _task_env_overrides[task_id] = overrides
+    override_cwd = str(overrides.get("cwd") or "").strip()
+    if override_cwd:
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+
+        session_key = resolve_terminal_session_key(task_id)
+        terminal_cwd_registry.record(task_id, session_key, override_cwd)
+        with terminal_cwd_registry.execution_guard(task_id):
+            with _env_lock:
+                live_env = _active_environments.get(task_id)
+                if live_env is not None:
+                    live_env.cwd = override_cwd
 
 
 def clear_task_env_overrides(task_id: str):
@@ -1353,6 +1372,9 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     # Phase 2: stop the actual sandboxes OUTSIDE the lock so other tool calls
     # are not blocked while Modal/Docker sandboxes shut down.
     for task_id, env in envs_to_stop:
+        from tools.terminal_cwd_registry import terminal_cwd_registry
+
+        terminal_cwd_registry.discard_environment(task_id)
         # Invalidate stale file_ops cache entry (Bug fix: prevents
         # ShellFileOperations from referencing a dead sandbox)
         try:
@@ -1478,6 +1500,11 @@ def cleanup_vm(task_id: str):
     with _env_lock:
         env = _active_environments.pop(task_id, None)
         _last_activity.pop(task_id, None)
+
+    if env is not None:
+        from tools.terminal_cwd_registry import terminal_cwd_registry
+
+        terminal_cwd_registry.discard_environment(task_id)
 
     # Clean up per-task creation lock
     with _creation_locks_lock:
@@ -1782,6 +1809,12 @@ def terminal_tool(
         # every delegate_task child share one container; only task_ids with
         # a registered env override (RL benchmarks) get isolated sandboxes.
         effective_task_id = _resolve_container_task_id(task_id)
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+
+        terminal_session_key = resolve_terminal_session_key(task_id)
 
         # Check per-task overrides (set by environments like TerminalBench2Env)
         # before falling back to global env var config
@@ -1986,12 +2019,16 @@ def terminal_tool(
             # Spawn a tracked background process via the process registry.
             # For local backends: uses subprocess.Popen with output buffering.
             # For non-local backends: runs inside the sandbox via env.execute().
-            from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
 
-            session_key = get_current_session_key(default="")
+            session_key = terminal_session_key
             notification_session_key = session_key
-            effective_cwd = workdir or cwd
+            effective_cwd = terminal_cwd_registry.resolve(
+                environment_key=effective_task_id,
+                session_key=terminal_session_key,
+                default_cwd=cwd,
+                explicit_workdir=workdir,
+            )
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
@@ -2120,11 +2157,23 @@ def terminal_tool(
             
             while retry_count <= max_retries:
                 try:
-                    execute_kwargs = {
-                        "timeout": effective_timeout,
-                        "cwd": workdir or cwd,
-                    }
-                    result = env.execute(command, **execute_kwargs)
+                    with terminal_cwd_registry.execution_guard(effective_task_id):
+                        effective_cwd = terminal_cwd_registry.resolve(
+                            environment_key=effective_task_id,
+                            session_key=terminal_session_key,
+                            default_cwd=cwd,
+                            explicit_workdir=workdir,
+                        )
+                        execute_kwargs = {
+                            "timeout": effective_timeout,
+                            "cwd": effective_cwd,
+                        }
+                        result = env.execute(command, **execute_kwargs)
+                        terminal_cwd_registry.record(
+                            effective_task_id,
+                            terminal_session_key,
+                            getattr(env, "cwd", effective_cwd),
+                        )
                 except Exception as e:
                     error_str = str(e).lower()
                     if "timeout" in error_str:
@@ -2200,9 +2249,11 @@ def terminal_tool(
             from tools.ansi_strip import strip_ansi
             output = strip_ansi(output)
 
-            # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            # Use the same command-aware policy as background process output.
+            # Environment dumps need KEY=value masking; source/config output
+            # keeps the lower-false-positive code-file mode.
+            from agent.redact import redact_terminal_output
+            output = redact_terminal_output(output.strip(), command) if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")

@@ -57,7 +57,12 @@ def is_transient_stream_event(frame: dict[str, Any]) -> bool:
     return not bool(payload.get("stream_checkpoint") or payload.get("streamCheckpoint"))
 
 
-def observe(frame: dict[str, Any], *, db: Any = None) -> None:
+def observe(
+    frame: dict[str, Any],
+    *,
+    db: Any = None,
+    checkpoint_required: bool = True,
+) -> None:
     if not is_transient_stream_event(frame):
         return
     key = _lane_key(frame, db=db)
@@ -90,6 +95,29 @@ def observe(frame: dict[str, Any], *, db: Any = None) -> None:
         if lane is None:
             lane = _StreamLane(key=key, frame=_copy_frame(frame))
             _lanes[key] = lane
+        # Make the operation explicit before any live fan-out. Consumers must
+        # never infer append-vs-snapshot semantics from the fragment content or
+        # from whether a provider happened to use `text` versus `delta`.
+        payload["mode"] = mode
+        if text_stream:
+            text_stream["mode"] = mode
+        frame["payload"] = payload
+        if isinstance(frame.get("text_stream"), dict):
+            frame["text_stream"]["mode"] = mode
+        # Every append fragment needs an absolute UTF-16 position before it
+        # leaves Hermes.  Provider adapters historically omitted the offset
+        # for ordinary token chunks, which made the live transport and the
+        # later durable checkpoint impossible to reconcile when they crossed
+        # in flight.  The stream registry is the single owner of accumulated
+        # text, so it is also the only correct place to infer this value.
+        if offset is None and mode == "append":
+            offset = _utf16_length(lane.text)
+            payload["offset"] = offset
+            if text_stream:
+                text_stream["offset"] = offset
+            frame["payload"] = payload
+            if isinstance(frame.get("text_stream"), dict):
+                frame["text_stream"]["offset"] = offset
         next_text = _merge_text(lane.text, incoming, mode=mode, offset=offset)
         if next_text != lane.text and lane.checkpointed_offset > 0:
             durable_prefix = _slice_utf16(lane.text, 0, lane.checkpointed_offset)
@@ -104,7 +132,14 @@ def observe(frame: dict[str, Any], *, db: Any = None) -> None:
         lane.latest_source_seq = max(lane.latest_source_seq, source_seq)
         if next_text != lane.text:
             lane.text = next_text
-            lane.dirty = True
+            # Team Mission activity deltas are persisted fragment-by-fragment
+            # in the canonical mission activity journal before fan-out.  A
+            # second snapshot/checkpoint path would create another producer
+            # for the same visible text.  Keep the lane only for absolute
+            # offset calculation; ordinary session streams still use durable
+            # checkpoints for reconnect repair.
+            if checkpoint_required:
+                lane.dirty = True
 
 
 def pending_checkpoints(
@@ -127,28 +162,6 @@ def pending_checkpoints(
             and (not exclude_event_types or lane.key[3] not in exclude_event_types)
             and lane.dirty
             and lane.text
-        ]
-        lanes.sort(key=lambda lane: lane.latest_source_seq)
-        return [_checkpoint(lane) for lane in lanes]
-
-
-def pending_activity_checkpoints(
-    activity_id: str,
-    *,
-    db: Any = None,
-) -> list[PendingCheckpoint]:
-    normalized = str(activity_id or "").strip()
-    db_scope = _db_scope(db)
-    if not normalized:
-        return []
-    with _lock:
-        lanes = [
-            lane
-            for lane in _lanes.values()
-            if lane.key[0] == db_scope
-            and lane.dirty
-            and lane.text
-            and _frame_activity_id(lane.frame) == normalized
         ]
         lanes.sort(key=lambda lane: lane.latest_source_seq)
         return [_checkpoint(lane) for lane in lanes]
@@ -180,24 +193,6 @@ def replay_snapshots(
                 not scope_key
                 or str(lane.frame.get("runtime_scope_key") or "").strip() == scope_key
             )
-        ]
-        lanes.sort(key=lambda lane: lane.latest_source_seq)
-        return [_replay_snapshot_frame(lane) for lane in lanes]
-
-
-def replay_activity_snapshots(activity_id: str, *, db: Any = None) -> list[dict[str, Any]]:
-    normalized = str(activity_id or "").strip()
-    db_scope = _db_scope(db)
-    if not normalized:
-        return []
-    with _lock:
-        lanes = [
-            lane
-            for lane in _lanes.values()
-            if lane.key[0] == db_scope
-            and lane.dirty
-            and lane.text
-            and _frame_activity_id(lane.frame) == normalized
         ]
         lanes.sort(key=lambda lane: lane.latest_source_seq)
         return [_replay_snapshot_frame(lane) for lane in lanes]
@@ -383,16 +378,6 @@ def _copy_frame(frame: dict[str, Any]) -> dict[str, Any]:
 
 def _db_scope(db: Any) -> str:
     return f"db:{id(db)}" if db is not None else "db:none"
-
-
-def _frame_activity_id(frame: dict[str, Any]) -> str:
-    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-    return _first_text(
-        frame.get("activity_id"),
-        frame.get("activityId"),
-        payload.get("activity_id"),
-        payload.get("activityId"),
-    )
 
 
 def _first_text(*values: Any) -> str:

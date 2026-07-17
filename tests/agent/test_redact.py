@@ -5,7 +5,12 @@ import os
 
 import pytest
 
-from agent.redact import redact_sensitive_text, RedactingFormatter
+from agent.redact import (
+    RedactingFormatter,
+    is_env_dump_command,
+    redact_sensitive_text,
+    redact_terminal_output,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +62,43 @@ class TestKnownPrefixes:
     def test_short_token_fully_masked(self):
         result = redact_sensitive_text("key=sk-short1234567")
         assert "***" in result
+
+    def test_fireworks_key_is_redacted_when_bare(self):
+        token = "fw_" + "a" * 40
+        result = redact_sensitive_text(f"request failed for {token}")
+        assert token not in result
+        assert result.startswith("request failed for fw_")
+
+
+class TestUrlBareToken:
+    def test_long_bare_userinfo_token_is_redacted(self):
+        token = "opaque-token-1234567890"
+        result = redact_sensitive_text(f"https://{token}@github.com/org/repo.git")
+        assert token not in result
+        assert "@github.com" in result
+
+    def test_short_username_is_not_treated_as_token(self):
+        value = "ssh://git@example.com/org/repo.git"
+        assert redact_sensitive_text(value) == value
+
+    def test_path_email_is_not_treated_as_userinfo(self):
+        value = "https://example.com/search/user@example.com"
+        assert redact_sensitive_text(value) == value
+
+
+class TestTerminalOutputPolicy:
+    def test_detects_env_dump_in_shell_sequence(self):
+        assert is_env_dump_command("echo ready && printenv | sort")
+        assert not is_env_dump_command("python dump_env.py")
+
+    def test_env_dump_masks_opaque_assignment(self):
+        secret = "opaque-value-without-vendor-prefix"
+        result = redact_terminal_output(f"CUSTOM_AUTH_TOKEN={secret}", "printenv")
+        assert secret not in result
+
+    def test_source_dump_keeps_fixture_assignment(self):
+        source = "MAX_TOKENS=100\nCUSTOM_AUTH_TOKEN=test-fixture"
+        assert redact_terminal_output(source, "sed -n 1,20p config.py") == source
 
 
 class TestEnvAssignments:

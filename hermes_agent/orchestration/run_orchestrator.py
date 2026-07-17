@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 
 from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.run_identity import RunIdentity
 from hermes_agent.domain.run_state_machine import ACTIVE_RUN_STATUSES
 from hermes_agent.domain.run_terminator import (
     TerminateCause,
@@ -28,6 +30,7 @@ from hermes_agent.domain.run_terminator import (
     terminate_run as _terminate_run_atomic,
 )
 from hermes_agent.orchestration.worker_pool import InflightRun, WorkerPool
+from hermes_agent.repositories.run_repo import RunRepoImpl
 
 
 _logger = logging.getLogger(__name__)
@@ -40,6 +43,7 @@ class RunLaunchSpec:
     worker_id: str
     turn_id: str = ""
     runtime_scope_key: str = ""
+    agent_profile_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ class RunOrchestrator:
 
     def __init__(self, pool: WorkerPool) -> None:
         self._pool = pool
+        self._launch_lock = threading.RLock()
 
     # ------------------------------------------------------------------
 
@@ -81,35 +86,100 @@ class RunOrchestrator:
         *,
         now: float | None = None,
     ) -> RunLaunchResult:
-        stable_run = str(spec.run_id or "").strip()
-        stable_session = str(spec.session_id or "").strip()
-        stable_worker = str(spec.worker_id or "").strip()
-        if not stable_run or not stable_session or not stable_worker:
-            raise ValueError("run_id, session_id, worker_id are required")
+        incoming = RunIdentity.create(
+            run_id=spec.run_id,
+            session_id=spec.session_id,
+            worker_id=spec.worker_id,
+            runtime_scope_key=spec.runtime_scope_key,
+            agent_profile_id=spec.agent_profile_id,
+            require_worker=True,
+        )
 
-        ledger = EventLedger(conn)
-        outcome = ledger.append(
-            session_id=stable_session,
-            run_id=stable_run,
-            event_type=self.RUN_STARTED_EVENT_TYPE,
-            payload={
-                "run_id": stable_run,
-                "worker_id": stable_worker,
-                "turn_id": str(spec.turn_id or ""),
-                "runtime_scope_key": str(spec.runtime_scope_key or ""),
-            },
-            turn_id=str(spec.turn_id or ""),
-            now=now,
-        )
-        inflight = self._pool.record_run_start(
-            worker_id=stable_worker,
-            run_id=stable_run,
-            session_id=stable_session,
-            turn_id=str(spec.turn_id or ""),
-            runtime_scope_key=str(spec.runtime_scope_key or ""),
-            now=now,
-        )
-        return RunLaunchResult(inflight=inflight, start_seq=outcome.seq)
+        # Launch is a single identity decision across both durable and in-memory
+        # owners. The lock also makes one sqlite connection safe from concurrent
+        # launch attempts in callers that have not installed a sharded RPC lock.
+        with self._launch_lock:
+            self._pool.validate_run_start(
+                worker_id=incoming.worker_id,
+                run_id=incoming.run_id,
+                session_id=incoming.session_id,
+                runtime_scope_key=incoming.runtime_scope_key,
+                agent_profile_id=incoming.agent_profile_id,
+            )
+            start_seq = self._claim_and_append_start(conn, incoming, spec, now=now)
+            inflight = self._pool.record_run_start(
+                worker_id=incoming.worker_id,
+                run_id=incoming.run_id,
+                session_id=incoming.session_id,
+                turn_id=str(spec.turn_id or ""),
+                runtime_scope_key=incoming.runtime_scope_key,
+                agent_profile_id=incoming.agent_profile_id,
+                now=now,
+            )
+            return RunLaunchResult(inflight=inflight, start_seq=start_seq)
+
+    def _claim_and_append_start(
+        self,
+        conn: sqlite3.Connection,
+        incoming: RunIdentity,
+        spec: RunLaunchSpec,
+        *,
+        now: float | None,
+    ) -> int:
+        owns_tx = not conn.in_transaction
+        savepoint = "hermes_run_identity_launch"
+        if owns_tx:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            claimed = RunRepoImpl(conn).claim_identity(incoming)
+
+            prior = conn.execute(
+                """
+                SELECT seq
+                  FROM run_events
+                 WHERE session_id = ? AND run_id = ? AND event_type = ?
+                 ORDER BY seq ASC
+                 LIMIT 1
+                """,
+                (
+                    incoming.session_id,
+                    incoming.run_id,
+                    self.RUN_STARTED_EVENT_TYPE,
+                ),
+            ).fetchone()
+            if prior is None:
+                outcome = EventLedger(conn).append(
+                    session_id=incoming.session_id,
+                    run_id=incoming.run_id,
+                    event_type=self.RUN_STARTED_EVENT_TYPE,
+                    payload={
+                        "run_id": incoming.run_id,
+                        "worker_id": claimed.worker_id,
+                        "turn_id": str(spec.turn_id or ""),
+                        "runtime_scope_key": claimed.runtime_scope_key,
+                        "agent_profile_id": claimed.agent_profile_id,
+                    },
+                    turn_id=str(spec.turn_id or ""),
+                    now=now,
+                )
+                start_seq = outcome.seq
+            else:
+                start_seq = int(self._row_value(prior, "seq", 0) or 0)
+
+            if owns_tx:
+                conn.execute("COMMIT")
+            else:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return start_seq
+        except Exception:
+            if owns_tx:
+                conn.execute("ROLLBACK")
+            else:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
 
     def terminate(
         self,
@@ -147,7 +217,7 @@ class RunOrchestrator:
         rows = conn.execute(
             """
             SELECT run_id, session_id, runtime_scope_key, turn_id,
-                   execution_session_id, status
+                   worker_id, agent_profile_id, status
               FROM runs
              WHERE status IN ({placeholders})
             """.format(
@@ -162,13 +232,14 @@ class RunOrchestrator:
             session_id = self._row_value(row, "session_id", 1)
             if not run_id or not session_id:
                 continue
-            worker_id = self._row_value(row, "runtime_scope_key", 2) or "unknown"
+            worker_id = self._row_value(row, "worker_id", 4) or "unknown"
             self._pool.record_run_start(
                 worker_id=worker_id,
                 run_id=run_id,
                 session_id=session_id,
                 turn_id=self._row_value(row, "turn_id", 3) or "",
                 runtime_scope_key=self._row_value(row, "runtime_scope_key", 2) or "",
+                agent_profile_id=self._row_value(row, "agent_profile_id", 5) or "",
                 now=now,
             )
             recovered.append(run_id)

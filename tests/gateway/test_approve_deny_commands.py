@@ -319,6 +319,35 @@ class TestDenyCommand:
         assert all(e.result == "deny" for e in [e1, e2])
 
     @pytest.mark.asyncio
+    async def test_deny_reason_is_relayed_without_treating_reason_all_as_batch(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entry = _ApprovalEntry({"command": "test"})
+        _gateway_queues[session_key] = [entry]
+
+        await runner._handle_deny_command(_make_event("/deny not at all safe"))
+
+        assert entry.result == "deny"
+        assert entry.reason == "not at all safe"
+
+    @pytest.mark.asyncio
+    async def test_deny_all_relays_same_reason_to_every_entry(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entries = (_ApprovalEntry({"command": "one"}), _ApprovalEntry({"command": "two"}))
+        _gateway_queues[session_key] = list(entries)
+
+        await runner._handle_deny_command(_make_event("/deny all use staging"))
+
+        assert [entry.reason for entry in entries] == ["use staging", "use staging"]
+
+    @pytest.mark.asyncio
     async def test_deny_no_pending(self):
         """/deny with no pending approval returns helpful message."""
         runner = _make_runner()

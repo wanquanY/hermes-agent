@@ -746,12 +746,80 @@ _cleanup_done = False
 # Weak reference to the active AIAgent for memory provider shutdown at exit
 _active_agent_ref = None
 
+
+def _persist_active_agent_snapshot(agent, conversation_history=None) -> bool:
+    """Durably hand an accepted CLI input to the session owner before close."""
+    agent_state = vars(agent) if hasattr(agent, "__dict__") else {}
+    if agent_state.get("_session_db") is None:
+        return False
+    persist_lock = agent_state.get("_session_persist_lock")
+
+    def persist() -> None:
+        # Read the snapshot and the CLI-to-worker handoff marker only after the
+        # same lock used by turn persistence is held.  Otherwise close can copy
+        # a half-transitioned message while the worker is applying an API-only
+        # prompt projection or advancing the database cursor.
+        current_state = vars(agent) if hasattr(agent, "__dict__") else {}
+        source_messages = current_state.get("_session_messages")
+        using_session_snapshot = isinstance(source_messages, list)
+        if not using_session_snapshot:
+            source_messages = (
+                conversation_history
+                if isinstance(conversation_history, list)
+                else []
+            )
+        pending = current_state.get("_pending_cli_user_message")
+        base_messages = list(source_messages)
+
+        from agent.turn_message_buffer import TurnMessageBuffer
+
+        persist_from_index = len(base_messages)
+        if not using_session_snapshot and isinstance(pending, dict):
+            for index, message in enumerate(base_messages):
+                if message is pending:
+                    persist_from_index = index
+                    break
+        snapshot = TurnMessageBuffer(
+            base_messages,
+            persist_from_index=persist_from_index,
+        )
+        if isinstance(pending, dict) and not any(
+            message is pending for message in snapshot
+        ):
+            snapshot.append_existing_current_input(
+                pending,
+                api_content=pending.get("content"),
+            )
+        if getattr(agent, "_cached_system_prompt", None) is None:
+            from agent.conversation_loop import _restore_or_build_system_prompt
+
+            _restore_or_build_system_prompt(agent, None, base_messages)
+        agent._ensure_db_session()
+        agent._persist_session(snapshot, base_messages)
+
+    try:
+        if persist_lock is None:
+            persist()
+        else:
+            with persist_lock:
+                persist()
+        return True
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Could not persist active CLI session before close",
+            exc_info=True,
+        )
+        return False
+
 def _run_cleanup():
     """Run resource cleanup exactly once."""
     global _cleanup_done
     if _cleanup_done:
         return
     _cleanup_done = True
+
+    if _active_agent_ref is not None:
+        _persist_active_agent_snapshot(_active_agent_ref)
 
     try:
         _cleanup_all_terminals()
@@ -6684,6 +6752,11 @@ class HermesCLI:
         if last_user_idx is None:
             print("(._.) No user message found to retry.")
             return None
+
+        if self.agent is not None:
+            from agent.runtime_stability import reset_stream_stale_circuit
+
+            reset_stream_stale_circuit(self.agent, reason="cli_retry")
         
         # Extract the message text and remove everything from that point forward
         last_message = self.conversation_history[last_user_idx].get("content", "")
@@ -9609,7 +9682,9 @@ class HermesCLI:
         from hermes_cli.debug import run_debug_share
         from types import SimpleNamespace
 
-        args = SimpleNamespace(lines=200, expire=7, local=False)
+        # Typing /debug is itself the consent action; input() would hang in
+        # prompt_toolkit's event loop.
+        args = SimpleNamespace(lines=200, expire=7, local=False, yes=True)
         run_debug_share(args)
 
     def _handle_update_command(self) -> bool:
@@ -11309,7 +11384,10 @@ class HermesCLI:
                 from agent.model_metadata import get_model_context_length
                 _ctx_len = get_model_context_length(
                     self.model, base_url=self.base_url or "", api_key=self.api_key or "",
-                    config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None)
+                    config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None,
+                    provider=getattr(self.agent, "provider", "") if self.agent else "",
+                    allow_network_discovery=False,
+                )
                 _ctx_result = preprocess_context_references(
                     message, cwd=os.getcwd(), context_length=_ctx_len)
                 if _ctx_result.expanded or _ctx_result.blocked:
@@ -11332,8 +11410,11 @@ class HermesCLI:
             from run_agent import _sanitize_surrogates
             message = _sanitize_surrogates(message)
 
-        # Add user message to history
-        self.conversation_history.append({"role": "user", "content": message})
+        # Stage the exact accepted dict so close persistence and the worker can
+        # hand off one identity instead of independently creating user rows.
+        staged_user_message = {"role": "user", "content": message}
+        self.agent._pending_cli_user_message = staged_user_message
+        self.conversation_history.append(staged_user_message)
 
         ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
         print(flush=True)
@@ -11451,7 +11532,9 @@ class HermesCLI:
                         conversation_history=self.conversation_history[:-1],  # Exclude the message we just added
                         stream_callback=stream_callback,
                         task_id=self.session_id,
-                        persist_user_message=message if _voice_prefix else None,
+                        persist_user_message=(
+                            message if agent_message != message else None
+                        ),
                     )
                 except Exception as exc:
                     logging.error("run_conversation raised: %s", exc, exc_info=True)
@@ -14354,6 +14437,7 @@ class HermesCLI:
             set_secret_capture_callback(None)
             # Close session in SQLite
             if hasattr(self, '_session_db') and self._session_db and self.agent:
+                _persist_active_agent_snapshot(self.agent, self.conversation_history)
                 try:
                     self._session_db.sessions.end(self.agent.session_id, "cli_close")
                 except (Exception, KeyboardInterrupt) as e:

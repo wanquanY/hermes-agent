@@ -79,7 +79,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, *, warn):
     )
 
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
-    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda **_kwargs: {})
     monkeypatch.setattr(
         "hermes_cli.model_switch.switch_model",
         lambda **kw: _fake_switch_result(),

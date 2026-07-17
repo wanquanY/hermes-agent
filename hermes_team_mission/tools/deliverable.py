@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_team_mission.context.worker_context import TOOL_ARGS_BUDGET_CHARS
-from hermes_team_mission.runtime.node_finish import finish_team_mission_node_run
+from hermes_team_mission.runtime.node_handoff import record_team_mission_node_handoff
 from tools.registry import registry, tool_error, tool_result
 from hermes_team_mission.tools.planning import TOOL_RESULT_BUDGET_CHARS
 from hermes_team_mission.tools.planning import _active_run_id
@@ -212,7 +212,7 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
     )
     next_context = _metadata(args.get("next_context") or args.get("nextContext") or payload.get("next_context") or payload.get("nextContext"))
     output_contract = _metadata(node.get("output_contract"))
-    finish = finish_team_mission_node_run(
+    handoff = record_team_mission_node_handoff(
         db=db,
         mission=mission,
         node=node,
@@ -228,12 +228,12 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
         confidence=_confidence(args.get("confidence")),
         visibility="handoff",
     )
-    deliverable = finish.get("deliverable") if isinstance(finish, Mapping) else {}
+    deliverable = handoff.get("deliverable") if isinstance(handoff, Mapping) else {}
     if not deliverable:
         return tool_error("Failed to persist Team Mission handoff deliverable.")
     mission_id = _text(binding.get("mission_id"))
-    task_id = _text(finish.get("task_id") if isinstance(finish, Mapping) else "") or _task_id_for_node(mission, node, binding)
-    event_errors = finish.get("event_errors") if isinstance(finish, Mapping) else []
+    task_id = _text(handoff.get("task_id") if isinstance(handoff, Mapping) else "") or _task_id_for_node(mission, node, binding)
+    event_errors = handoff.get("event_errors") if isinstance(handoff, Mapping) else []
     if event_errors:
         exc = event_errors[0]
         logger.error(

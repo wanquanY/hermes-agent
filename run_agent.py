@@ -132,7 +132,6 @@ from agent.prompt_builder import (
     build_nous_subscription_prompt,
 )
 from agent.model_metadata import (
-    fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
     parse_available_output_tokens_from_error,
@@ -212,7 +211,6 @@ _MAX_TOOL_WORKERS = 8
 # process, not once per AIAgent instantiation.  Without this, long-running
 # gateway processes leak one OS thread per incoming message and eventually
 # exhaust the system thread limit (RuntimeError: can't start new thread).
-_openrouter_prewarm_done = threading.Event()
 
 # =========================================================================
 # Large tool result handler — save oversized output to temp file
@@ -585,6 +583,22 @@ class AIAgent:
         # Context engine reset (works for both built-in compressor and plugins)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
+            current_session_id = str(getattr(self, "session_id", "") or "").strip()
+            if current_session_id:
+                self.context_compressor.on_session_start(
+                    current_session_id,
+                    session_db=getattr(self, "_session_db", None),
+                    platform=getattr(self, "platform", None) or "cli",
+                    model=getattr(self, "model", ""),
+                    context_length=getattr(
+                        self.context_compressor,
+                        "context_length",
+                        0,
+                    ),
+                )
+        self._stream_stale_failures = 0
+        self._stream_stale_retry_after = 0.0
+        self._stream_stale_route_hash = ""
 
     def _ensure_lmstudio_runtime_loaded(self, config_context_length: Optional[int] = None) -> None:
         """
@@ -1292,6 +1306,17 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        persist_lock = getattr(self, "_session_persist_lock", None)
+        if persist_lock is None:
+            return self._persist_session_unlocked(messages, conversation_history)
+        with persist_lock:
+            return self._persist_session_unlocked(messages, conversation_history)
+
+    def _persist_session_unlocked(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+    ):
         if getattr(self, "_session_persistence_disabled", False):
             self._session_messages = self._messages_for_persistence(messages)
             return
@@ -1736,6 +1761,27 @@ class AIAgent:
             pass
 
     def _flush_messages_to_session_db(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        source_buffer_id: int | None = None,
+    ):
+        persist_lock = getattr(self, "_session_persist_lock", None)
+        if persist_lock is None:
+            return self._flush_messages_to_session_db_unlocked(
+                messages,
+                conversation_history,
+                source_buffer_id=source_buffer_id,
+            )
+        with persist_lock:
+            return self._flush_messages_to_session_db_unlocked(
+                messages,
+                conversation_history,
+                source_buffer_id=source_buffer_id,
+            )
+
+    def _flush_messages_to_session_db_unlocked(
         self,
         messages: List[Dict],
         conversation_history: List[Dict] = None,
@@ -2403,7 +2449,10 @@ class AIAgent:
         # session-id changes land in the right file without any re-point
         # bookkeeping at the call sites.
         try:
-            log_file = self.logs_dir / f"session_{self.session_id}.json"
+            from hermes_agent.domain.safe_identifiers import safe_filename_component
+
+            safe_session_id = safe_filename_component(self.session_id)
+            log_file = self.logs_dir / f"session_{safe_session_id}.json"
         except Exception:
             return
 
@@ -3308,28 +3357,9 @@ class AIAgent:
 
     @staticmethod
     def _build_keepalive_http_client(base_url: str = "") -> Any:
-        try:
-            import httpx as _httpx
-            import socket as _socket
+        from agent.process_bootstrap import build_provider_http_client
 
-            _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
-            if hasattr(_socket, "TCP_KEEPIDLE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
-            elif hasattr(_socket, "TCP_KEEPALIVE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
-            # When a custom transport is provided, httpx won't auto-read proxy
-            # from env vars (allow_env_proxies = trust_env and transport is None).
-            # Explicitly read proxy settings while still honoring NO_PROXY for
-            # loopback / local endpoints such as a locally hosted sub2api.
-            _proxy = _get_proxy_for_base_url(base_url)
-            return _httpx.Client(
-                transport=_httpx.HTTPTransport(socket_options=_sock_opts),
-                proxy=_proxy,
-            )
-        except Exception:
-            return None
+        return build_provider_http_client(base_url)
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
@@ -3998,6 +4028,11 @@ class AIAgent:
             ):
                 text = text.lstrip("\n")
         if not text:
+            return
+        if getattr(self, "_verification_stream_hold", False):
+            self._verification_stream_buffer = (
+                str(getattr(self, "_verification_stream_buffer", "") or "") + text
+            )
             return
         callbacks = self._stream_delta_callbacks()
         delivered = False
@@ -4800,13 +4835,38 @@ class AIAgent:
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
-            if not _should_parallelize_tool_batch(tool_calls):
+            if len(tool_calls) <= 1:
                 return self._execute_tool_calls_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
 
-            return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id, api_call_count
+            from agent.tool_dispatch_helpers import _plan_tool_batch_segments
+
+            segments = _plan_tool_batch_segments(tool_calls)
+            if len(segments) == 1:
+                if segments[0][0] == "parallel":
+                    return self._execute_tool_calls_concurrent(
+                        assistant_message,
+                        messages,
+                        effective_task_id,
+                        api_call_count,
+                    )
+                return self._execute_tool_calls_sequential(
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    api_call_count,
+                )
+
+            from agent.tool_executor import execute_tool_calls_segmented
+
+            return execute_tool_calls_segmented(
+                self,
+                assistant_message,
+                messages,
+                effective_task_id,
+                api_call_count,
+                segments=segments,
             )
         finally:
             self._executing_tools = False
@@ -4828,6 +4888,7 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            execution_mode=function_args.get("execution_mode"),
             background=function_args.get("background"),
             parent_agent=self,
             delegate_call_id=delegate_call_id,

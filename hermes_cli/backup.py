@@ -900,25 +900,59 @@ def restore_quick_snapshot(
     """
     home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
-    snap_dir = root / snapshot_id
+    try:
+        from hermes_agent.domain.safe_identifiers import validate_path_component
 
-    if not snap_dir.is_dir():
+        stable_snapshot_id = validate_path_component(snapshot_id, label="snapshot ID")
+        root_resolved = root.resolve(strict=False)
+        snap_dir = root / stable_snapshot_id
+        snap_dir_resolved = snap_dir.resolve(strict=False)
+        snap_dir_resolved.relative_to(root_resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.error("Invalid quick snapshot path %r: %s", snapshot_id, exc)
         return False
 
-    manifest_path = snap_dir / "manifest.json"
+    if not snap_dir_resolved.is_dir():
+        return False
+
+    manifest_path = snap_dir_resolved / "manifest.json"
     if not manifest_path.exists():
         return False
 
     with open(manifest_path, encoding="utf-8") as f:
         meta = json.load(f)
 
+    files = meta.get("files", {})
+    if not isinstance(files, dict):
+        logger.error("Invalid quick snapshot manifest: files must be an object")
+        return False
+
+    # Validate the entire plan before the first write. A partially restored
+    # snapshot is harder to recover from than a clean refusal.
+    restore_plan: list[tuple[str, Path, Path]] = []
+    home_resolved = Path(home).resolve(strict=False)
+    for rel in files:
+        if not isinstance(rel, str):
+            logger.error("Invalid quick snapshot manifest path: %r", rel)
+            return False
+        relative = Path(rel)
+        if relative.is_absolute() or ".." in relative.parts:
+            logger.error("Quick snapshot manifest path traversal blocked: %s", rel)
+            return False
+        try:
+            src = (snap_dir_resolved / relative).resolve(strict=False)
+            dst = (home_resolved / relative).resolve(strict=False)
+            src.relative_to(snap_dir_resolved)
+            dst.relative_to(home_resolved)
+        except (OSError, RuntimeError, ValueError):
+            logger.error("Quick snapshot manifest path traversal blocked: %s", rel)
+            return False
+        restore_plan.append((rel, src, dst))
+
     restored = 0
-    for rel in meta.get("files", {}):
-        src = snap_dir / rel
+    for rel, src, dst in restore_plan:
         if not src.exists():
             continue
-
-        dst = home / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -934,7 +968,7 @@ def restore_quick_snapshot(
         except (OSError, PermissionError) as exc:
             logger.error("Failed to restore %s: %s", rel, exc)
 
-    logger.info("Restored %d files from snapshot %s", restored, snapshot_id)
+    logger.info("Restored %d files from snapshot %s", restored, stable_snapshot_id)
     return restored > 0
 
 

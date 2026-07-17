@@ -105,7 +105,13 @@ def merge_profile_dbs(
 
     conn = sqlite3.connect(str(root_db_path))
     try:
-        conn.execute("PRAGMA foreign_keys=OFF")
+        from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
+
+        configure_sqlite_connection(
+            conn,
+            db_label=f"profile merge root ({root_db_path})",
+            foreign_keys=False,
+        )
         for index, profile_db in enumerate(profile_dbs, start=1):
             if progress:
                 progress(

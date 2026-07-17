@@ -890,7 +890,7 @@ def handle_function_call(
         # avoid double-firing the hook).
         #
         # Single-fire contract: pre_tool_call fires exactly once per tool
-        # execution. get_pre_tool_call_block_message() internally calls
+        # execution. resolve_pre_tool_block() internally calls
         # invoke_hook("pre_tool_call", ...) and returns the first block
         # directive (if any), so observer plugins see the hook on that same
         # pass. When skip=True, the caller already fired it — do nothing
@@ -898,8 +898,8 @@ def handle_function_call(
         if not skip_pre_tool_call_hook:
             block_message: Optional[str] = None
             try:
-                from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
+                from hermes_cli.plugins import resolve_pre_tool_block
+                block_message = resolve_pre_tool_block(
                     function_name,
                     function_args,
                     task_id=task_id or "",

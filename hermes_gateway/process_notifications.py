@@ -27,18 +27,12 @@ def format_gateway_process_notification(evt: dict) -> str | None:
         text += "]"
         return text
 
-    if evt_type == "async_delegation":
-        from tools.process_registry import format_process_notification
-
-        return format_process_notification(evt)
-
     return None
 
 
 def drain_gateway_watch_events(completion_queue) -> list[dict]:
     """Drain gateway-owned watch events without spinning on requeued events."""
     watch_events: list[dict] = []
-    requeue: list[dict] = []
     while not completion_queue.empty():
         try:
             evt = completion_queue.get_nowait()
@@ -47,8 +41,4 @@ def drain_gateway_watch_events(completion_queue) -> list[dict]:
         evt_type = evt.get("type", "completion")
         if evt_type in {"watch_match", "watch_disabled"}:
             watch_events.append(evt)
-        elif evt_type == "async_delegation":
-            requeue.append(evt)
-    for evt in requeue:
-        completion_queue.put(evt)
     return watch_events

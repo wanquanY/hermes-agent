@@ -22,10 +22,12 @@ def _reset_resolved_path():
     _tirith_mod._resolved_path = "tirith"
     _tirith_mod._install_thread = None
     _tirith_mod._install_failure_reason = ""
+    _tirith_mod._reset_tirith_breaker()
     yield
     _tirith_mod._resolved_path = None
     _tirith_mod._install_thread = None
     _tirith_mod._install_failure_reason = ""
+    _tirith_mod._reset_tirith_breaker()
 
 
 # ---------------------------------------------------------------------------
@@ -1130,12 +1132,13 @@ class TestSpawnWarningDedup:
         _tirith_mod._reset_spawn_warning_state()
 
         with caplog.at_level("WARNING", logger="tools.tirith_security"):
-            for _ in range(15):
+            for index in range(15):
                 result = check_command_security("echo hi")
-                # Behavior must remain the same on every call —
-                # fail-open allow, with the exception captured in summary.
                 assert result["action"] == "allow"
-                assert "unavailable" in result["summary"]
+                if index < _tirith_mod._CRASH_LIMIT:
+                    assert "unavailable" in result["summary"]
+                else:
+                    assert "circuit breaker" in result["summary"]
 
         spawn_warnings = [
             rec for rec in caplog.records
@@ -1170,8 +1173,8 @@ class TestSpawnWarningDedup:
             rec for rec in caplog.records
             if "tirith spawn failed" in rec.message
         ]
-        assert len(spawn_warnings) == 2, (
-            f"expected 2 distinct first-occurrence warnings, "
+        assert len(spawn_warnings) == 1, (
+            f"expected 1 warning before the breaker opens, "
             f"got {len(spawn_warnings)}"
         )
 
@@ -1341,3 +1344,45 @@ class TestIsAppTldFinding:
 
     def test_case_insensitive_match(self):
         assert self.fn({"rule_id": "lookalike_tld", "value": ".APP"})
+
+
+class TestTirithCircuitBreaker:
+    @pytest.mark.parametrize("fail_open, expected", ((True, "allow"), (False, "block")))
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_threshold_stops_spawning_and_preserves_policy(
+        self, mock_cfg, mock_run, fail_open, expected
+    ):
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": fail_open,
+        }
+        mock_run.side_effect = OSError("broken")
+        for _ in range(_tirith_mod._CRASH_LIMIT):
+            assert check_command_security("echo hi")["action"] == expected
+        after_open = check_command_security("echo hi")
+        assert after_open["action"] == expected
+        assert "circuit breaker" in after_open["summary"]
+        assert mock_run.call_count == _tirith_mod._CRASH_LIMIT
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_success_resets_consecutive_failure_counter(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {
+            "tirith_enabled": True,
+            "tirith_path": "tirith",
+            "tirith_timeout": 5,
+            "tirith_fail_open": True,
+        }
+        mock_run.side_effect = [
+            OSError("one"),
+            OSError("two"),
+            _mock_run(0, "{}"),
+            OSError("three"),
+            OSError("four"),
+        ]
+        for _ in range(5):
+            check_command_security("echo hi")
+        assert _tirith_mod._tirith_circuit_is_open() is False

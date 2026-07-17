@@ -252,6 +252,6 @@ class TestBudgetForContextWindow:
         threshold, so it will be persisted/truncated rather than sent whole."""
         cfg = budget_for_context_window(65_536)
         huge_len = 279_549
-        threshold = cfg.resolve_threshold("mcp_firecrawl_firecrawl_search")
+        threshold = cfg.resolve_threshold("mcp__firecrawl__firecrawl_search")
         assert threshold < huge_len
         assert cfg.default_result_size < huge_len

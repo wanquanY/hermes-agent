@@ -1,5 +1,7 @@
 """Tests for gateway session management."""
 import json
+import sqlite3
+import threading
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -1239,3 +1241,89 @@ class TestRewriteTranscriptPreservesReasoning:
             "before user",
             "before assistant",
         ]
+
+
+def test_session_store_close_releases_owned_connection(tmp_path) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    conn = store._storage_conn
+    assert conn is not None
+
+    store.close()
+    store.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.execute("SELECT 1")
+
+
+def test_session_store_close_preserves_injected_connection(tmp_path) -> None:
+    from hermes_agent.composition.session_repository_db import (
+        connect_session_repository_db,
+    )
+
+    conn = connect_session_repository_db(tmp_path / "injected.db")
+    store = SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        storage_conn=conn,
+    )
+
+    store.close()
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+    conn.close()
+
+
+def test_session_index_write_does_not_hold_metadata_lock(tmp_path, monkeypatch) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="lock-test",
+        chat_type="dm",
+        user_id="user-1",
+    )
+    entry = store.get_or_create_session(source)
+    started = threading.Event()
+    release = threading.Event()
+    original_write = store._write_index_snapshot
+
+    def slow_write(revision, data) -> None:
+        started.set()
+        release.wait(timeout=2)
+        original_write(revision, data)
+
+    monkeypatch.setattr(store, "_write_index_snapshot", slow_write)
+    worker = threading.Thread(
+        target=store.update_session,
+        args=(entry.session_key,),
+    )
+    worker.start()
+    assert started.wait(timeout=1)
+    assert store._lock.acquire(timeout=0.2)
+    store._lock.release()
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    store.close()
+
+
+def test_older_session_index_snapshot_cannot_overwrite_newer_state(tmp_path) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="revision-test",
+        chat_type="dm",
+        user_id="user-1",
+    )
+    entry = store.get_or_create_session(source)
+
+    with store._lock:
+        entry.display_name = "older"
+        older = store._snapshot_index_locked()
+        entry.display_name = "newer"
+        newer = store._snapshot_index_locked()
+
+    store._write_index_snapshot(*newer)
+    store._write_index_snapshot(*older)
+
+    persisted = json.loads((tmp_path / "sessions.json").read_text(encoding="utf-8"))
+    assert persisted[entry.session_key]["display_name"] == "newer"
+    store.close()

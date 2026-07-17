@@ -90,7 +90,7 @@ _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                       "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
                       "HERMES_")
 _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH")
+                      "PASSWD", "AUTH", "CREDS", "BEARER", "APIKEY")
 
 # Windows-only: a handful of variables are required by the OS/CRT itself.
 # Without them, even stdlib calls like ``socket.socket()`` fail with
@@ -1606,10 +1606,19 @@ def _resolve_child_python(mode: str) -> str:
         exe_names = ("python", "python3")
         subdirs = ("bin",)
 
-    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
-        root = os.environ.get(var, "").strip()
+    # VIRTUAL_ENV is the active Python environment contract and takes strict
+    # precedence over an ambient CONDA_PREFIX inherited from the parent shell.
+    # If that explicit venv is broken, fall back to Hermes' interpreter rather
+    # than silently executing in a different Conda environment.
+    virtual_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    candidates = (
+        (("VIRTUAL_ENV", virtual_env),)
+        if virtual_env
+        else (("CONDA_PREFIX", os.environ.get("CONDA_PREFIX", "").strip()),)
+    )
+    for var, root in candidates:
         if not root:
-            continue
+            break
         for subdir in subdirs:
             for exe in exe_names:
                 candidate = os.path.join(root, subdir, exe)

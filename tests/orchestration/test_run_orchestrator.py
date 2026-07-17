@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from hermes_agent.domain.event_ledger import EventLedger
+from hermes_agent.domain.run_identity import CrossWiredRunError
 from hermes_agent.domain.run_terminator import TerminateCause, TerminateOutcome
 from hermes_agent.orchestration import (
     RunLaunchResult,
@@ -26,6 +27,8 @@ def _make_conn() -> sqlite3.Connection:
             run_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             runtime_scope_key TEXT,
+            worker_id TEXT NOT NULL DEFAULT '',
+            agent_profile_id TEXT NOT NULL DEFAULT '',
             turn_id TEXT,
             execution_session_id TEXT,
             status TEXT NOT NULL,
@@ -166,8 +169,8 @@ def test_reap_orphans_rebuilds_pool_from_active_runs_table():
     # Seed a second orphan active run directly in the runs table.
     conn.execute(
         "INSERT INTO runs (run_id, session_id, status, started_at, updated_at, "
-        "runtime_scope_key, turn_id) "
-        "VALUES ('r2', 's1', 'running', 0, 0, 'w2', 't2')"
+        "runtime_scope_key, worker_id, turn_id) "
+        "VALUES ('r2', 's1', 'running', 0, 0, 'scope-2', 'w2', 't2')"
     )
     conn.commit()
 
@@ -177,6 +180,67 @@ def test_reap_orphans_rebuilds_pool_from_active_runs_table():
     assert set(recovered) == {"r1", "r2"}
     assert orch.pool.size() == 2
     assert orch.pool.get("r2").worker_id == "w2"
+
+
+def test_launch_same_identity_is_idempotent_without_second_event():
+    conn = _make_conn()
+    conn.execute(
+        "UPDATE runs SET runtime_scope_key='scope-1' WHERE run_id='r1'"
+    )
+    conn.commit()
+    orch = RunOrchestrator(WorkerPool())
+    spec = RunLaunchSpec(
+        run_id="r1",
+        session_id="s1",
+        worker_id="w1",
+        runtime_scope_key="scope-1",
+        agent_profile_id="profile-1",
+    )
+
+    first = orch.launch(conn, spec, now=10)
+    second = orch.launch(conn, spec, now=99)
+
+    assert second.start_seq == first.start_seq == 1
+    assert second.inflight is first.inflight
+    assert conn.execute(
+        "SELECT COUNT(*) FROM run_events WHERE event_type='run.started'"
+    ).fetchone()[0] == 1
+
+
+def test_launch_conflict_preserves_row_pool_event_and_sequence():
+    conn = _make_conn()
+    orch = RunOrchestrator(WorkerPool())
+    first = orch.launch(
+        conn,
+        RunLaunchSpec(
+            run_id="r1",
+            session_id="s1",
+            worker_id="w1",
+            agent_profile_id="profile-1",
+        ),
+    )
+
+    with pytest.raises(CrossWiredRunError) as raised:
+        orch.launch(
+            conn,
+            RunLaunchSpec(
+                run_id="r1",
+                session_id="s1",
+                worker_id="w2",
+                agent_profile_id="profile-2",
+            ),
+        )
+
+    assert set(raised.value.mismatch_fields) == {"worker_id", "agent_profile_id"}
+    assert orch.pool.get("r1") is first.inflight
+    row = conn.execute(
+        "SELECT worker_id, agent_profile_id FROM runs WHERE run_id='r1'"
+    ).fetchone()
+    assert tuple(row) == ("w1", "profile-1")
+    assert conn.execute("SELECT COUNT(*) FROM run_events").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT next_seq FROM seq_counter WHERE session_id='s1'"
+    ).fetchone()[0] == 2
 
 
 def test_reap_orphans_ignores_terminal_runs():

@@ -253,10 +253,6 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
         limit = 2000
     replay_mode = _replay_mode(params)
     max_replay_events = _max_replay_events(params, limit)
-    debug_replay_audit = _truthy_param(
-        params.get("debug_replay_audit") or params.get("debugReplayAudit")
-    )
-
     db, err = _db_or_error(rid)
     if err:
         return err
@@ -268,17 +264,11 @@ def runtime_activity_subscribe(rid, params: dict) -> dict:
         limit=limit,
         replay_mode=replay_mode,
         max_replay_events=max_replay_events,
-        debug_replay_audit=debug_replay_audit,
         db=db,
     )
     cursor_only_response = (
         replay_mode in {"live", "cursor_only"}
         or max_replay_events <= 0
-        or (
-            _team_activity_events.uses_event_log(activity_id, db=db)
-            and _team_activity_events.is_terminal_activity(activity_id, db=db)
-            and not debug_replay_audit
-        )
     )
     response_default_after_seq = max(
         after_seq,

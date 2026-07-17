@@ -32,17 +32,34 @@ The approval system supports three modes, configured via `approvals.mode` in `~/
 approvals:
   mode: manual    # manual | smart | off
   timeout: 60     # seconds to wait for user response (default: 60)
+  deny: []        # unconditional case-insensitive command globs
 ```
 
 | Mode | Behavior |
 |------|----------|
 | **manual** (default) | Always prompt the user for approval on dangerous commands |
 | **smart** | Use an auxiliary LLM to assess risk. Low-risk commands (e.g., `python -c "print('hello')"`) are auto-approved. Genuinely dangerous commands are auto-denied. Uncertain cases escalate to a manual prompt. |
-| **off** | Disable all approval checks — equivalent to running with `--yolo`. All commands execute without prompts. |
+| **off** | Disable approval prompts — equivalent to running with `--yolo`. The hardline blocklist and `approvals.deny` remain enforced. |
 
 :::warning
-Setting `approvals.mode: off` disables all safety prompts. Use only in trusted environments (CI/CD, containers, etc.).
+Setting `approvals.mode: off` disables approval prompts; the hardline blocklist
+and `approvals.deny` remain enforced. Use only in trusted environments (CI/CD,
+containers, etc.).
 :::
+
+### User Deny Rules
+
+`approvals.deny` is evaluated before every approval bypass, including yolo,
+`approvals.mode: off`, smart approval, and permanent allowlists. Rules are
+case-insensitive shell globs. A match is a hard block and never opens an
+approval prompt:
+
+```yaml
+approvals:
+  deny:
+    - "git push *"
+    - "terraform destroy*"
+```
 
 ### YOLO Mode
 
@@ -70,7 +87,10 @@ When YOLO is active, Hermes shows two persistent visual reminders so it's hard t
 - A `⚠ YOLO` fragment in the status bar across all width tiers, updated live as you toggle YOLO on or off (rich-text renderer and plain-text fallback).
 
 :::danger
-YOLO mode disables **all** dangerous command safety checks for the session — **except** the hardline blocklist (see below). Use only when you fully trust the commands being generated (e.g., well-tested automation scripts in disposable environments).
+YOLO mode disables dangerous-command approval prompts for the session — the
+hardline blocklist (see below) and `approvals.deny` remain enforced. Use only
+when you fully trust the commands being generated (e.g., well-tested automation
+scripts in disposable environments).
 :::
 
 For destructive session slash commands (`/clear`, `/new` / `/reset`, `/undo`, `/exit --delete`), the CLI also prompts for confirmation before running them. See [Slash Commands — Confirmation prompts for destructive commands](../reference/slash-commands.md#confirmation-prompts-for-destructive-commands).

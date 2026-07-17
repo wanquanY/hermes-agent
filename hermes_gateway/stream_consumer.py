@@ -32,6 +32,10 @@ from hermes_gateway.config import (
     DEFAULT_STREAMING_BUFFER_THRESHOLD as _DEFAULT_STREAMING_BUFFER_THRESHOLD,
     DEFAULT_STREAMING_CURSOR as _DEFAULT_STREAMING_CURSOR,
 )
+from hermes_gateway.response_filters import (
+    is_intentional_silence_response as _is_intentional_silence_response,
+    is_partial_silence_marker as _is_partial_silence_marker,
+)
 from hermes_gateway.stream_consumer_delivery import StreamConsumerDeliveryMixin
 from hermes_gateway.stream_consumer_final import StreamConsumerFinalMixin
 
@@ -520,6 +524,11 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
                 # tag is not lost.
                 if got_done:
                     self._flush_think_buffer()
+                    if _is_intentional_silence_response(
+                        self._clean_for_display(self._accumulated)
+                    ):
+                        await self._suppress_silence_marker()
+                        return
 
                 # Decide whether to flush an edit
                 now = time.monotonic()
@@ -541,6 +550,16 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
                     )
 
                 current_update_visible = False
+                if (
+                    should_edit
+                    and not got_done
+                    and not got_segment_break
+                    and commentary_text is None
+                    and _is_partial_silence_marker(
+                        self._clean_for_display(self._accumulated)
+                    )
+                ):
+                    should_edit = False
                 if should_edit and self._accumulated:
                     # Split overflow: if accumulated text exceeds the platform
                     # limit, split into properly sized chunks.

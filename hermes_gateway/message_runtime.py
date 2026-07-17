@@ -7,6 +7,9 @@ import time
 from typing import Optional
 
 from channels.platforms.base import MessageEvent
+from agent.i18n import t
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry, WorkRejected
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_constants import get_hermes_home
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.busy_message_runtime import busy_message_for
@@ -45,6 +48,34 @@ class GatewayMessageRuntime:
         if getattr(command_result, "handled", True):
             return getattr(command_result, "response", command_result)
 
+        work_id = f"gateway:{session_key}:{time.time_ns()}"
+
+        async def _persist_timeout() -> None:
+            await run_sqlite_io(
+                runner.session_store.mark_resume_pending,
+                session_key,
+                "runtime_drain_timeout",
+            )
+
+        def _cancel_turn() -> None:
+            agent = runner._running_agents.get(session_key)
+            if agent is not None and agent is not AGENT_PENDING_SENTINEL:
+                interrupt = getattr(agent, "interrupt", None)
+                if callable(interrupt):
+                    interrupt("Gateway runtime drain timeout")
+
+        try:
+            work_lease = runner._active_work_registry.register(
+                kind="conversation_turn",
+                surface="gateway",
+                work_id=work_id,
+                metadata={"session_key": session_key},
+                persist_timeout=_persist_timeout,
+                cancel=_cancel_turn,
+            )
+        except WorkRejected:
+            return t("gateway.draining", count=runner._running_agent_count())
+
         runner._running_agents[session_key] = AGENT_PENDING_SENTINEL
         runner._running_agents_ts[session_key] = time.time()
         runtime_status_for(runner).persist_active_agents()
@@ -61,6 +92,7 @@ class GatewayMessageRuntime:
             return agent_result
         finally:
             session_runtime_state_for(runner).release_running_agent_state(session_key)
+            work_lease.release()
 
     async def _continue_goal_if_needed(self, agent_result, source) -> None:
         runner = self._runner
@@ -73,7 +105,10 @@ class GatewayMessageRuntime:
             if not final_text.strip():
                 return
             try:
-                session_entry = runner.session_store.get_or_create_session(source)
+                session_entry = await run_sqlite_io(
+                    runner.session_store.get_or_create_session,
+                    source,
+                )
             except Exception:
                 session_entry = None
             if session_entry is None:
@@ -88,6 +123,12 @@ class GatewayMessageRuntime:
 
 
 def message_runtime_for(runner) -> GatewayMessageRuntime:
+    # GatewayRunner initialization installs the process registry in
+    # production. Lightweight embedders and test doubles can bypass that
+    # initializer, so give each such runner an isolated lifecycle owner
+    # instead of silently sharing process-global state.
+    if getattr(runner, "_active_work_registry", None) is None:
+        runner._active_work_registry = ActiveWorkRegistry()
     service = getattr(runner, "message_runtime", None)
     if isinstance(service, GatewayMessageRuntime):
         return service

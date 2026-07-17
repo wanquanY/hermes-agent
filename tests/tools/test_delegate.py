@@ -2953,6 +2953,11 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
             "api_key": None, "api_mode": None, "model": None,
         }
         parent = _make_mock_parent(depth=0)
+        # Role plumbing is exercised with a parent that truly owns the
+        # delegation capability.  An orchestrator role may retain an existing
+        # capability, but it must never manufacture one for the child.
+        parent.enabled_toolsets = ["terminal", "file", "delegation"]
+        parent.valid_tool_names = {"delegate_task"}
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = MagicMock()
             mock_child.run_conversation.return_value = {
@@ -3068,7 +3073,8 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
             "api_key": None, "api_mode": None, "model": None,
         }
         parent = _make_mock_parent(depth=0)
-        parent.enabled_toolsets = ["terminal", "file"]
+        parent.enabled_toolsets = ["terminal", "file", "delegation"]
+        parent.valid_tool_names = {"delegate_task"}
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
@@ -3223,18 +3229,14 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_config",
            return_value={"max_spawn_depth": 2})
-    def test_intersection_preserves_delegation_bound(
+    def test_orchestrator_role_cannot_widen_parent_tool_surface(
         self, mock_cfg, mock_creds
     ):
-        """Design decision: orchestrator capability is granted by role,
-        NOT inherited from the parent's toolset. A parent without
-        'delegation' in its enabled_toolsets can still spawn an
-        orchestrator child — the re-add in _build_child_agent runs
-        unconditionally for orchestrators (when max_spawn_depth allows).
+        """A requested role can retain capability, never grant it.
 
-        If you want to change to "parent must have delegation too",
-        update _build_child_agent to check parent_toolsets before the
-        re-add and update this test to match.
+        A parent without ``delegate_task`` cannot create an orchestrator
+        child.  The child is downgraded to a leaf so its prompt, display
+        toolsets, and exact executable tool names stay in agreement.
         """
         mock_creds.return_value = {
             "provider": None, "base_url": None,
@@ -3242,12 +3244,16 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         }
         parent = _make_mock_parent(depth=0)
         parent.enabled_toolsets = ["terminal", "file"]  # no delegation
+        parent.valid_tool_names = {"terminal", "read_file"}
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = _make_role_mock_child()
             MockAgent.return_value = mock_child
             delegate_task(goal="test", role="orchestrator",
                           parent_agent=parent)
-            self.assertIn("delegation", MockAgent.call_args[1]["enabled_toolsets"])
+            child_kwargs = MockAgent.call_args[1]
+            self.assertNotIn("delegation", child_kwargs["enabled_toolsets"])
+            self.assertNotIn("delegate_task", child_kwargs["enabled_tools"])
+            self.assertEqual(mock_child._delegate_role, "leaf")
 
 
 class TestOrchestratorEndToEnd(unittest.TestCase):

@@ -1339,7 +1339,10 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
 
 
 def test_init_session_fires_reset_hook(monkeypatch):
+    from tui_gateway.core import agent_session
+
     hooks = []
+    core_emit = agent_session._emit
 
     class _FakeWorker:
         def __init__(self, key, model):
@@ -1372,6 +1375,7 @@ def test_init_session_fires_reset_hook(monkeypatch):
             cols=80,
         )
         assert ("on_session_reset", "session-key") in hooks
+        assert agent_session._emit is core_emit
     finally:
         server._sessions.pop(sid, None)
 
@@ -4131,6 +4135,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert resp.get("result"), f"got error: {resp.get('error')}"
     sid = resp["result"]["session_id"]
+    orphan_session = server._sessions[sid]
     assert build_entered.wait(timeout=1.0), "deferred build did not start"
 
     # Wait until the (deferred) build thread has actually entered
@@ -4156,14 +4161,9 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     # and let it finish — it should detect the orphan and clean up the
     # worker it just allocated + unregister the notify.
     release_build.set()
-
-    # Give the build thread a moment to run through its finally.
-    for _ in range(100):
-        if closed_workers:
-            break
-        import time
-
-        time.sleep(0.02)
+    assert orphan_session["agent_ready"].wait(timeout=2.0), (
+        "orphan build thread did not complete cleanup"
+    )
 
     assert (
         len(closed_workers) == 1
@@ -4820,6 +4820,54 @@ def test_prompt_submit_emits_append_only_message_delta(monkeypatch):
     complete_events = [args[2] for args in emitted if args[0] == "message.complete"]
     assert complete_events[-1]["text"] == "文件已创建完成。\n\n- **文件名**：`team_stream_refactor_check.txt`"
     assert complete_events[-1]["message_seq_in_run"] == 1
+
+
+def test_prompt_submit_scopes_client_message_identity_during_agent_run(monkeypatch):
+    class _Agent:
+        session_id = "session-key"
+
+        def __init__(self):
+            self.observed_client_message_id = ""
+
+        def run_conversation(self, prompt, **_kwargs):
+            self.observed_client_message_id = self._hermes_active_client_message_id
+            return {
+                "final_response": "done",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "client-origin",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "continue history",
+                    "run_id": "run-client-origin",
+                    "turn_id": "turn-client-origin",
+                    "client_message_id": "client-origin",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert "error" not in response
+    assert agent.observed_client_message_id == "client-origin"
+    assert not hasattr(agent, "_hermes_active_client_message_id")
 
 
 def test_prompt_submit_applies_turn_system_context_without_rewriting_user_input(monkeypatch):

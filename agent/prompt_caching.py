@@ -9,7 +9,42 @@ Pure functions -- no class state, no AIAgent dependency.
 """
 
 import copy
+import logging
 from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_prompt_caching_enabled(config: dict | None = None) -> bool:
+    """Return the global prompt-cache kill switch, defaulting to enabled."""
+
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            return True
+    section = config.get("prompt_caching", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        logger.warning(
+            "Invalid prompt_caching section=%r; keeping caching enabled",
+            section,
+        )
+        return True
+    raw = section.get("enabled", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    logger.warning("Invalid prompt_caching.enabled=%r; keeping caching enabled", raw)
+    return True
 
 
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:

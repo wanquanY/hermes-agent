@@ -31,6 +31,7 @@ from hermes_agent.domain.run_terminator import (
 from hermes_agent.read_models.run_events import RunEventReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionRunProjection
+from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
 
 
@@ -55,12 +56,15 @@ class RunService:
         self._unit_of_work = unit_of_work
         self._sessions = sessions
         self._repository = RunRepoImpl(conn)
+        self._activities = TeamMissionRepoImpl(conn)
         self._events = RunEventReadModel(conn)
         self._event_normalizer = event_normalizer
         self._message_complete_projector = message_complete_projector
         self.retention = RunEventRetentionService(conn, unit_of_work)
         self._event_listener_lock = threading.RLock()
         self._event_listeners: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self._session_append_locks_guard = threading.Lock()
+        self._session_append_locks: dict[str, threading.RLock] = {}
 
     def append_event(
         self,
@@ -73,6 +77,36 @@ class RunService:
         stable = str(session_id or "").strip()
         if not stable:
             raise ValueError("session_id is required")
+        # The journal owns both persistence order and live delivery order.
+        # SQLite assigns a monotonic seq inside the transaction, but notifying
+        # listeners after the transaction without this per-session lock lets a
+        # later concurrent append publish first. Keep append -> retention ->
+        # notify serialized for one journal while allowing unrelated sessions
+        # to proceed independently.
+        with self._session_append_lock(stable):
+            return self._append_event_serialized(
+                stable,
+                event,
+                participant_id=participant_id,
+                activity_id=activity_id,
+            )
+
+    def _session_append_lock(self, session_id: str) -> threading.RLock:
+        with self._session_append_locks_guard:
+            lock = self._session_append_locks.get(session_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._session_append_locks[session_id] = lock
+            return lock
+
+    def _append_event_serialized(
+        self,
+        stable: str,
+        event: dict[str, Any],
+        *,
+        participant_id: str,
+        activity_id: str,
+    ) -> dict[str, Any]:
 
         def operation(_conn: sqlite3.Connection) -> dict[str, Any]:
             self._sessions.ensure_runtime_session(
@@ -103,7 +137,13 @@ class RunService:
         if str(saved.get("_persistence_disposition") or "") == "duplicate_session_info":
             return saved
         normalized_run_id = str((saved or {}).get("run_id") or "").strip()
-        persisted_run = self._repository.get_run(normalized_run_id) if normalized_run_id else None
+        persisted_run = (
+            self._unit_of_work.read(
+                lambda _conn: self._repository.get_run(normalized_run_id)
+            )
+            if normalized_run_id
+            else None
+        )
         self.retention.maintain_after_append(
             session_id=stable,
             run_id=normalized_run_id,
@@ -331,7 +371,9 @@ class RunService:
         return self._unit_of_work.execute(operation)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
-        run = self._repository.get_run(run_id)
+        run = self._unit_of_work.read(
+            lambda _conn: self._repository.get_run(run_id)
+        )
         return asdict(run) if run is not None else None
 
     def runtime_state(self, session_id: str) -> dict[str, Any]:
@@ -466,11 +508,13 @@ class RunService:
         limit: int = 2000,
         include_internal: bool = False,
     ) -> list[dict[str, Any]]:
-        return self._events.list_activity_events(
-            activity_id,
-            after_seq=after_seq,
-            limit=limit,
-            include_internal=include_internal,
+        return self._unit_of_work.read(
+            lambda _conn: self._events.list_activity_events(
+                activity_id,
+                after_seq=after_seq,
+                limit=limit,
+                include_internal=include_internal,
+            )
         )
 
     def list_tool_events(
@@ -661,6 +705,60 @@ class RunService:
                     message=reason,
                 )
                 self._repository.update_metadata(run_id, metadata)
+                activity_id = str(metadata.get("activity_id") or "").strip()
+                if activity_id:
+                    result = {
+                        "status": "failed",
+                        "error": reason,
+                        "recovery_decision": decision,
+                    }
+                    self._activities.update_legacy_activity_status(
+                        activity_id,
+                        "failed",
+                        result_summary=reason,
+                        result_json=result,
+                        completed_at=now,
+                    )
+                    self._repository.append_runtime_event(
+                        str(row["session_id"] or ""),
+                        {
+                            "type": "activity.state",
+                            "session_id": str(row["session_id"] or ""),
+                            "execution_session_id": str(
+                                row["execution_session_id"] or ""
+                            ),
+                            "runtime_scope_key": str(
+                                row["runtime_scope_key"] or ""
+                            ),
+                            "run_id": run_id,
+                            "turn_id": str(row["turn_id"] or ""),
+                            "activity_id": activity_id,
+                            "internal": True,
+                            "timestamp": now,
+                            "payload": {
+                                "activity_id": activity_id,
+                                "status": "failed",
+                                "execution_mode": metadata.get("execution_mode"),
+                                "result": result,
+                            },
+                        },
+                        activity_id=activity_id,
+                    )
+                    delegation_activity_id = str(
+                        metadata.get("delegation_activity_id") or ""
+                    ).strip()
+                    if (
+                        metadata.get("is_fanout") is True
+                        and delegation_activity_id
+                        and delegation_activity_id != activity_id
+                    ):
+                        self._activities.update_legacy_activity_status(
+                            delegation_activity_id,
+                            "failed",
+                            result_summary=reason,
+                            result_json=result,
+                            completed_at=now,
+                        )
                 recovered = self._repository.get_run(run_id)
                 if recovered is not None:
                     self._project(recovered)

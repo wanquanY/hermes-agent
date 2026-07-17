@@ -28,11 +28,17 @@ import logging
 import os
 import socket
 import asyncio
-from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+from typing import Any, Optional
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
+
+
+def _without_ipv6_scope_id(value: str) -> str:
+    """Strip raw or URL-encoded IPv6 zone identifiers before classification."""
+    return str(value).split("%", 1)[0]
 
 
 def normalize_url_for_request(url: str) -> str:
@@ -255,7 +261,7 @@ def is_always_blocked_url(url: str) -> bool:
 
         # Literal IP → check directly against the always-blocked set
         try:
-            ip = ipaddress.ip_address(hostname)
+            ip = ipaddress.ip_address(_without_ipv6_scope_id(hostname))
         except ValueError:
             ip = None
 
@@ -281,10 +287,15 @@ def is_always_blocked_url(url: str) -> bool:
             return False
 
         for _family, _, _, _, sockaddr in addr_info:
-            ip_str = sockaddr[0]
+            ip_str = _without_ipv6_scope_id(sockaddr[0])
             try:
                 resolved = ipaddress.ip_address(ip_str)
             except ValueError:
+                logger.warning(
+                    "Unparseable IP address %r for hostname %s; skipping address",
+                    sockaddr[0],
+                    hostname,
+                )
                 continue
             if resolved in _ALWAYS_BLOCKED_IPS or any(
                 resolved in net for net in _ALWAYS_BLOCKED_NETWORKS
@@ -352,11 +363,16 @@ def is_safe_url(url: str) -> bool:
             return False
 
         for family, _, _, _, sockaddr in addr_info:
-            ip_str = sockaddr[0]
+            ip_str = _without_ipv6_scope_id(sockaddr[0])
             try:
                 ip = ipaddress.ip_address(ip_str)
             except ValueError:
-                continue
+                logger.warning(
+                    "Blocked request; unparseable IP address %r for hostname %s",
+                    sockaddr[0],
+                    hostname,
+                )
+                return False
 
             # Always block cloud metadata IPs and link-local, even with toggle on
             if ip in _ALWAYS_BLOCKED_IPS or any(ip in net for net in _ALWAYS_BLOCKED_NETWORKS):
@@ -400,3 +416,17 @@ async def async_is_safe_url(url: str) -> bool:
     ``web_extract_tool``, vision download hooks) instead of ``is_safe_url``.
     """
     return await asyncio.to_thread(is_safe_url, url)
+
+
+def redirect_target_from_response(response: Any) -> Optional[str]:
+    """Resolve the redirect target available inside an httpx response hook."""
+    if not getattr(response, "is_redirect", False):
+        return None
+    headers = getattr(response, "headers", {}) or {}
+    location = headers.get("location")
+    if location:
+        return urljoin(str(getattr(response, "url", "")), str(location))
+    next_request = getattr(response, "next_request", None)
+    if next_request:
+        return str(next_request.url)
+    return None

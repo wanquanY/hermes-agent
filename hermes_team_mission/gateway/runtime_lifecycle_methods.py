@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .runtime_methods import *
 
+
 @method("team_mission.plan.reject")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -417,6 +418,12 @@ def _(rid, params: dict) -> dict:
             "conversation_session_id": conversation_session_id,
             "turn_id": turn_id,
             "recalled": {
+                # Preserve the authoritative conversation rewrite returned by
+                # session.recall_turn. Recall is a deliberately non-monotonic
+                # transcript mutation, so callers must be able to replace
+                # their local projection immediately instead of depending on
+                # eventual delivery of the session.recalled notification.
+                **recall_result,
                 "removed_messages": int(recall_result.get("removed_messages") or 0),
                 "source_message_ids": affected_source_ids,
                 "invalidated_context_ids": invalidated_context_ids,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.config import Platform
 
 
@@ -24,7 +25,7 @@ class GatewayAgentTurnContextService:
     ) -> str:
         runner = self._runner
         # First-message onboarding -- only on the very first interaction ever
-        if not history and not runner.session_store.has_any_sessions():
+        if not history and not await run_sqlite_io(runner.session_store.has_any_sessions):
             context_prompt += (
                 "\n\n[System note: This is the user's very first message ever. "
                 "Briefly introduce yourself and mention that /help shows available commands. "

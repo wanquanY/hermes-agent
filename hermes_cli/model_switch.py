@@ -1239,7 +1239,10 @@ def list_authenticated_providers(
         except Exception:
             return False
 
-    data = fetch_models_dev()
+    # Provider/model pickers are latency-sensitive runtime surfaces. They may
+    # consume the shared disk snapshot, but catalog refresh is an explicit
+    # config operation and must not become an implicit 15s network request.
+    data = fetch_models_dev(allow_network=False)
 
     # Build curated model lists keyed by hermes provider ID
     curated: dict[str, list[str]] = dict(_PROVIDER_MODELS)
@@ -1251,9 +1254,14 @@ def list_authenticated_providers(
     # _PROVIDER_MODELS["nous"] snapshot when the manifest is unreachable.
     curated["nous"] = get_curated_nous_model_ids()
     # Ollama Cloud uses dynamic discovery (no static curated list)
-    if "ollama-cloud" not in curated:
+    if "ollama-cloud" not in curated and (
+        os.environ.get("OLLAMA_API_KEY")
+        or current_provider.strip().lower() == "ollama-cloud"
+    ):
         from hermes_cli.models import fetch_ollama_cloud_models
         curated["ollama-cloud"] = fetch_ollama_cloud_models()
+    else:
+        curated.setdefault("ollama-cloud", [])
     # LM Studio has no static catalog — probe its native /api/v1/models
     # endpoint live so the picker reflects whatever the user has loaded.
     # Base URL precedence: LM_BASE_URL env var > active config's base_url

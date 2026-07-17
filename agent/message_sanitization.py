@@ -279,6 +279,30 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     return "{}"
 
 
+def close_interrupted_tool_sequence(messages: list, final_response: Any = None) -> bool:
+    """Close an interrupted ``assistant(tool_calls) -> tool`` transcript tail.
+
+    The synthetic assistant row is a protocol boundary, not a claim that the
+    task completed. It is appended only when a turn is interrupted and its
+    durable tail is a tool result, so the next user message cannot create the
+    invalid ``tool -> user`` sequence rejected by strict providers.
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "tool":
+        return False
+    text = final_response if isinstance(final_response, str) else ""
+    messages.append(
+        {
+            "role": "assistant",
+            "content": text.strip() or "Operation interrupted.",
+            "metadata": {"synthetic_kind": "interrupted_tool_sequence_close"},
+        }
+    )
+    return True
+
+
 def _strip_non_ascii(text: str) -> str:
     """Remove non-ASCII characters, replacing with closest ASCII equivalent or removing.
 
@@ -431,6 +455,7 @@ def _sanitize_structure_non_ascii(payload: Any) -> bool:
 
 __all__ = [
     "_SURROGATE_RE",
+    "close_interrupted_tool_sequence",
     "_sanitize_surrogates",
     "_sanitize_structure_surrogates",
     "_sanitize_messages_surrogates",

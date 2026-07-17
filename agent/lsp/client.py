@@ -61,6 +61,7 @@ from agent.lsp.protocol import (
     make_response,
     read_message,
 )
+from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger("agent.lsp.client")
 
@@ -71,6 +72,16 @@ DIAGNOSTICS_FULL_WAIT = 10.0
 DIAGNOSTICS_REQUEST_TIMEOUT = 3.0
 PUSH_DEBOUNCE = 0.15
 SHUTDOWN_GRACE = 1.0  # seconds for graceful exit and each forced-stop step
+
+
+def _lsp_subprocess_env(
+    configured_env: Optional[Dict[str, str]] = None,
+) -> dict[str, str]:
+    """Build a least-authority environment for a third-party LSP server."""
+    return hermes_subprocess_env(
+        inherit_credentials=False,
+        extra_env=configured_env,
+    )
 
 # Retry policy for transient ContentModified errors.
 MAX_CONTENT_MODIFIED_RETRIES = 3
@@ -245,9 +256,9 @@ class LSPClient:
             raise
 
     async def _spawn(self) -> None:
-        env = dict(os.environ)
-        if self._env:
-            env.update(self._env)
+        # Language servers are third-party executables. Preserve explicitly
+        # configured server env while denying the operator credential keyring.
+        env = _lsp_subprocess_env(self._env)
 
         try:
             self._proc = await asyncio.create_subprocess_exec(

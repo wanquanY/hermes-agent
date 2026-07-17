@@ -18,8 +18,10 @@ import ast
 import importlib
 import json
 import logging
+import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
@@ -176,6 +178,11 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, ToolEntry] = {}
+        self._legacy_mcp_name_warnings: set[str] = set()
+        # Durable plugin package policy. Authorization is bound to the module
+        # that defines a handler, so delayed threads and direct registry imports
+        # cannot escape the decision made at plugin discovery.
+        self._plugin_override_policy: Dict[str, dict] = {}
         self._toolset_checks: Dict[str, Callable] = {}
         self._toolset_aliases: Dict[str, str] = {}
         # MCP dynamic refresh can mutate the registry while other threads are
@@ -202,6 +209,18 @@ class ToolRegistry:
         """Return a stable snapshot of toolset availability checks."""
         return self._snapshot_state()[1]
 
+    @contextmanager
+    def atomic_mutation(self):
+        """Hold the registry write lock across a multi-entry replacement.
+
+        Individual register/deregister calls remain re-entrant. Readers see
+        either the old or the complete new snapshot, never a half-published
+        dynamic MCP tool list.
+        """
+
+        with self._lock:
+            yield
+
     def _evaluate_toolset_check(self, toolset: str, check: Callable | None) -> bool:
         """Run a toolset check, treating missing or failing checks as unavailable/available."""
         if not check:
@@ -212,10 +231,34 @@ class ToolRegistry:
             logger.debug("Toolset %s check raised; marking unavailable", toolset)
             return False
 
-    def get_entry(self, name: str) -> Optional[ToolEntry]:
-        """Return a registered tool entry by name, or None."""
+    def _resolve_name_locked(self, name: str) -> str | None:
+        if name in self._tools:
+            return name
+        from tools.mcp_identity import resolve_legacy_mcp_tool_name
+
+        resolved = resolve_legacy_mcp_tool_name(name, self._tools)
+        if resolved is not None and name not in self._legacy_mcp_name_warnings:
+            self._legacy_mcp_name_warnings.add(name)
+            logger.warning(
+                "Migrating legacy MCP tool name '%s' to canonical '%s'; "
+                "legacy names are read-only and will not be written again",
+                name,
+                resolved,
+            )
+        return resolved
+
+    def resolve_name(self, name: str) -> str | None:
+        """Resolve a registered name through the one legacy MCP read seam."""
+
         with self._lock:
-            return self._tools.get(name)
+            return self._resolve_name_locked(name)
+
+    def get_entry(self, name: str) -> Optional[ToolEntry]:
+        """Return a registered tool entry by canonical or legacy-read name."""
+
+        with self._lock:
+            resolved = self._resolve_name_locked(name)
+            return self._tools.get(resolved) if resolved is not None else None
 
     def get_registered_toolset_names(self) -> List[str]:
         """Return sorted unique toolset names present in the registry."""
@@ -253,6 +296,45 @@ class ToolRegistry:
     # ------------------------------------------------------------------
     # Registration
     # ------------------------------------------------------------------
+
+    def register_plugin_override_policy(
+        self,
+        module_namespace: str,
+        *,
+        plugin_id: str,
+        capability_declared: bool,
+        operator_opt_in: bool,
+    ) -> None:
+        with self._lock:
+            self._plugin_override_policy[module_namespace] = {
+                "plugin_id": plugin_id,
+                "capability_declared": bool(capability_declared),
+                "operator_opt_in": bool(operator_opt_in),
+            }
+
+    def _plugin_owner_of(self, handler: Callable) -> Optional[str]:
+        module_name = getattr(handler, "__module__", "") or ""
+        try:
+            module_name = handler.__globals__.get("__name__", module_name)  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+        for namespace in sorted(self._plugin_override_policy, key=len, reverse=True):
+            if module_name == namespace or module_name.startswith(namespace + "."):
+                return namespace
+        if module_name.startswith("hermes_plugins."):
+            return ".".join(module_name.split(".")[:2])
+        return None
+
+    @staticmethod
+    def _caller_module() -> str:
+        try:
+            return sys._getframe(2).f_globals.get("__name__", "") or ""
+        except Exception:
+            return ""
+
+    def _plugin_policy_allows_override(self, namespace: str) -> bool:
+        policy = self._plugin_override_policy.get(namespace) or {}
+        return bool(policy.get("capability_declared") and policy.get("operator_opt_in"))
 
     def register(
         self,
@@ -292,6 +374,20 @@ class ToolRegistry:
                         name, toolset, existing.toolset,
                     )
                 elif override:
+                    owner = self._plugin_owner_of(handler)
+                    if owner is not None and not self._plugin_policy_allows_override(owner):
+                        policy = self._plugin_override_policy.get(owner) or {}
+                        plugin_id = policy.get("plugin_id") or owner
+                        logger.error(
+                            "Tool registration REJECTED: plugin %r attempted to override %r "
+                            "without both manifest capability 'tool_override' and operator opt-in",
+                            plugin_id, name,
+                        )
+                        raise PermissionError(
+                            f"Plugin {plugin_id!r} cannot override tool {name!r}; declare "
+                            "capability 'tool_override' and set "
+                            f"plugins.entries.{plugin_id}.allow_tool_override: true."
+                        )
                     # Explicit plugin opt-in: replace the existing tool.
                     # Logged at INFO so the override is auditable in agent.log.
                     logger.info(
@@ -309,7 +405,7 @@ class ToolRegistry:
                         "intentional, or deregister the existing tool first.",
                         name, toolset, existing.toolset,
                     )
-                    return
+                    return False
             self._tools[name] = ToolEntry(
                 name=name,
                 toolset=toolset,
@@ -326,6 +422,7 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
+            return True
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -335,9 +432,29 @@ class ToolRegistry:
         when a server sends ``notifications/tools/list_changed``.
         """
         with self._lock:
-            entry = self._tools.pop(name, None)
+            entry = self._tools.get(name)
             if entry is None:
                 return
+            if not entry.toolset.startswith("mcp-"):
+                caller_module = self._caller_module()
+                caller_owner = None
+                for namespace in sorted(self._plugin_override_policy, key=len, reverse=True):
+                    if caller_module == namespace or caller_module.startswith(namespace + "."):
+                        caller_owner = namespace
+                        break
+                if caller_owner is None and caller_module.startswith("hermes_plugins."):
+                    caller_owner = ".".join(caller_module.split(".")[:2])
+                entry_owner = self._plugin_owner_of(entry.handler)
+                if (
+                    caller_owner is not None
+                    and caller_owner != entry_owner
+                    and not self._plugin_policy_allows_override(caller_owner)
+                ):
+                    raise PermissionError(
+                        f"Plugin module {caller_module!r} cannot deregister tool {name!r} "
+                        "owned by core or another plugin without tool_override capability and opt-in."
+                    )
+            del self._tools[name]
             # Drop the toolset check and aliases if this was the last tool in
             # that toolset.
             toolset_still_exists = any(
@@ -373,8 +490,15 @@ class ToolRegistry:
         # same check_fn within one definitions pass without re-reading the
         # TTL clock.
         check_results: Dict[Callable, bool] = {}
-        entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
-        for name in sorted(tool_names):
+        with self._lock:
+            entries_by_name = dict(self._tools)
+            resolved_names = {
+                resolved
+                for requested_name in tool_names
+                if (resolved := self._resolve_name_locked(requested_name))
+                is not None
+            }
+        for name in sorted(resolved_names):
             entry = entries_by_name.get(name)
             if not entry:
                 continue
@@ -410,7 +534,35 @@ class ToolRegistry:
     # Dispatch
     # ------------------------------------------------------------------
 
-    def dispatch(self, name: str, args: dict, **kwargs) -> str:
+    @staticmethod
+    def _normalize_handler_result(name: str, result):
+        """Return only result shapes supported by the agent tool pipeline."""
+        if isinstance(result, str):
+            return result
+        if (
+            isinstance(result, dict)
+            and result.get("_multimodal") is True
+            and isinstance(result.get("content"), list)
+        ):
+            return result
+
+        result_type = type(result).__name__
+        logger.error(
+            "Tool %s handler returned unsupported result type: %s",
+            name,
+            result_type,
+        )
+        return json.dumps(
+            {
+                "error": f"Tool handler returned unsupported result type: {result_type}",
+                "error_type": "tool_result_contract",
+                "tool": name,
+                "result_type": result_type,
+            },
+            ensure_ascii=False,
+        )
+
+    def dispatch(self, name: str, args: dict, **kwargs) -> str | dict:
         """Execute a tool handler by name.
 
         * Async handlers are bridged automatically via ``_run_async()``.
@@ -423,8 +575,10 @@ class ToolRegistry:
         try:
             if entry.is_async:
                 from model_tools import _run_async
-                return _run_async(entry.handler(args, **kwargs))
-            return entry.handler(args, **kwargs)
+                result = _run_async(entry.handler(args, **kwargs))
+            else:
+                result = entry.handler(args, **kwargs)
+            return self._normalize_handler_result(name, result)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences

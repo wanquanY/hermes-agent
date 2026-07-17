@@ -425,6 +425,24 @@ class GatewayToolEventBridge:
         if event_type == "tool.started" and name:
             self._emit("tool.progress", sid, {"name": name, "preview": preview or ""})
             return
+        if event_type == "tool.output_risk" and name:
+            metadata = kwargs.get("risk_metadata")
+            if not isinstance(metadata, dict):
+                return
+            self._emit(
+                "tool.output_risk",
+                sid,
+                {
+                    "tool_id": str(kwargs.get("tool_call_id") or ""),
+                    "name": str(name),
+                    "risk": str(metadata.get("risk") or "low"),
+                    "findings": [
+                        str(item) for item in metadata.get("findings", [])
+                    ],
+                    "redacted": bool(metadata.get("redacted", False)),
+                },
+            )
+            return
         if event_type == "reasoning.available" and preview:
             payload: dict[str, object] = {"text": str(preview)}
             if self._session_verbose(sid):
@@ -441,9 +459,26 @@ class GatewayToolEventBridge:
                 "goal": str(kwargs.get("goal") or ""),
                 "task_count": int(kwargs.get("task_count") or 1),
                 "task_index": int(kwargs.get("task_index") or 0),
-                "run_id": str((session or {}).get("active_run_id") or ""),
-                "turn_id": str((session or {}).get("active_turn_id") or ""),
-                "client_message_id": str(pending_turn.get("client_message_id") or ""),
+                # Delegated children can outlive their parent turn.  Prefer the
+                # immutable dispatch origin over mutable session state so a late
+                # terminal event is neither dropped nor attached to a newer run.
+                "run_id": str(
+                    kwargs.get("run_id")
+                    or (session or {}).get("active_run_id")
+                    or ""
+                ),
+                "turn_id": str(
+                    kwargs.get("turn_id")
+                    or (session or {}).get("active_turn_id")
+                    or ""
+                ),
+                "client_message_id": str(
+                    kwargs.get("client_message_id")
+                    or pending_turn.get("client_message_id")
+                    or ""
+                ),
+                "runtime_scope_key": str(kwargs.get("runtime_scope_key") or ""),
+                "activity_id": str(kwargs.get("activity_id") or ""),
             }.items()
             if value != ""
         }

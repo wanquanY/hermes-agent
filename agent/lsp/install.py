@@ -35,7 +35,19 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from tools.environments.local import hermes_subprocess_env
+
 logger = logging.getLogger("agent.lsp.install")
+
+
+def _lsp_installer_env(
+    extra_env: Optional[Dict[str, str]] = None,
+) -> dict[str, str]:
+    """Build a least-authority environment for package-manager children."""
+    return hermes_subprocess_env(
+        inherit_credentials=False,
+        extra_env=extra_env,
+    )
 
 # Package-name → install-strategy hint registry.  Each entry is a
 # tuple of strategy name + package name + executable name.  When the
@@ -238,6 +250,7 @@ def _install_npm(
             capture_output=True,
             text=True,
             timeout=300,
+            env=_lsp_installer_env(),
         )
         if proc.returncode != 0:
             logger.warning(
@@ -280,8 +293,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
         logger.info("[install] cannot install %s: go not on PATH", pkg)
         return None
     staging = hermes_lsp_bin_dir()
-    env = dict(os.environ)
-    env["GOBIN"] = str(staging)
+    env = _lsp_installer_env({"GOBIN": str(staging)})
     try:
         logger.info("[install] go install %s (GOBIN=%s)", pkg, staging)
         proc = subprocess.run(
@@ -328,6 +340,7 @@ def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=300,
+            env=_lsp_installer_env(),
         )
         if proc.returncode != 0:
             logger.warning(

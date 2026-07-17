@@ -149,6 +149,8 @@ async def test_dispatch_returns_activity_id_and_conversation_id(tmp_path: Path) 
     assert result == {
         "activity_id": "act-1",
         "conversation_id": "conv-child",
+        "execution_mode": "async",
+        "persistent": True,
         "status": "running",
     }
     assert db.activities.get("act-1")["status"] == "running"
@@ -260,6 +262,8 @@ async def test_dispatch_worker_pool_spawn_failure_marks_activity_failed(tmp_path
     assert result == {
         "activity_id": "act-1",
         "conversation_id": "conv-child",
+        "execution_mode": "async",
+        "persistent": True,
         "status": "failed",
         "error": "spawn exploded",
     }

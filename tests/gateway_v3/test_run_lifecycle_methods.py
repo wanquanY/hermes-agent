@@ -69,6 +69,48 @@ def test_run_launch_returns_start_seq_and_inflight():
     assert orch.pool.size() == 1
 
 
+def test_run_launch_cross_wire_returns_5003_without_second_event():
+    conn, orch, registry = _wired()
+    first = dispatch(
+        registry,
+        {
+            "id": "first",
+            "method": "run.launch",
+            "params": {
+                "runId": "r1",
+                "sessionId": "s1",
+                "workerId": "w1",
+                "agentProfileId": "profile-1",
+            },
+        },
+        resolver=AllowAllResolver(),
+    )
+    assert "error" not in first
+
+    conflict = dispatch(
+        registry,
+        {
+            "id": "second",
+            "method": "run.launch",
+            "params": {
+                "runId": "r1",
+                "sessionId": "s1",
+                "workerId": "w2",
+                "agentProfileId": "profile-2",
+            },
+        },
+        resolver=AllowAllResolver(),
+    )
+
+    assert conflict["error"]["code"] == ErrorCode.RUN_STATE_CONFLICT.value
+    assert set(conflict["error"]["details"]["mismatch_fields"]) == {
+        "worker_id",
+        "agent_profile_id",
+    }
+    assert conn.execute("SELECT COUNT(*) FROM run_events").fetchone()[0] == 1
+    assert orch.pool.get("r1").worker_id == "w1"
+
+
 def test_run_launch_rejects_missing_ids():
     conn, orch, registry = _wired()
     resp = dispatch(

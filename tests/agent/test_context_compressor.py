@@ -25,6 +25,22 @@ def compressor():
         return c
 
 
+def test_constructor_uses_cache_only_context_resolution():
+    with patch(
+        "agent.context_compressor.get_model_context_length",
+        return_value=128_000,
+    ) as resolve:
+        ContextCompressor(
+            model="gpt-4.1",
+            provider="copilot",
+            base_url="https://api.githubcopilot.com",
+            api_key="secret",
+            quiet_mode=True,
+        )
+
+    assert resolve.call_args.kwargs["allow_network_discovery"] is False
+
+
 class TestShouldCompress:
     def test_below_threshold(self, compressor):
         compressor.last_prompt_tokens = 50000

@@ -183,15 +183,16 @@ def _best_effort_sweep_expired_pastes() -> None:
 # ---------------------------------------------------------------------------
 
 _PRIVACY_NOTICE = """\
-⚠️  This will upload the following to a public paste service:
-  • System info (OS, Python version, Hermes version, provider, which API keys
-    are configured — NOT the actual keys)
-  • Recent log lines (agent.log, errors.log, gateway.log — may contain
-    conversation fragments and file paths)
-  • Full agent.log and gateway.log (up to 512 KB each — likely contains
-    conversation content, tool outputs, and file paths)
+⚠️  This will upload system info + logs to a PUBLIC paste service.
 
-Pastes auto-delete after 6 hours.
+Cryptographic secrets are redacted by default, but the following personal
+data is NOT guaranteed to be removed and will be public to anyone with the URL:
+  • Display names and persistent platform user IDs
+  • Recent prompts, responses and tool output present in logs
+  • Local filesystem paths and other PII present in logs
+
+Pastes auto-delete after 6 hours but may be archived by third parties.
+Use --local to inspect the report without uploading.
 """
 
 _GATEWAY_PRIVACY_NOTICE = (
@@ -581,10 +582,29 @@ def collect_debug_report(
 # CLI entry points
 # ---------------------------------------------------------------------------
 
+def _confirm_upload(args) -> bool:
+    """Require affirmative consent before collection or network activity."""
+    if bool(getattr(args, "yes", False)):
+        return True
+    if not sys.stdin.isatty():
+        print(
+            "ERROR: Non-interactive mode requires --yes to confirm debug upload.\n"
+            "Use --local to inspect the report without uploading.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        answer = input("Upload debug report? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer not in {"y", "yes"}:
+        print("Aborted.")
+        return False
+    return True
+
+
 def run_debug_share(args):
     """Collect debug report + full logs, upload each, print URLs."""
-    _best_effort_sweep_expired_pastes()
-
     log_lines = getattr(args, "lines", 200)
     expiry = getattr(args, "expire", 7)
     local_only = getattr(args, "local", False)
@@ -592,6 +612,10 @@ def run_debug_share(args):
 
     if not local_only:
         print(_PRIVACY_NOTICE)
+        if not _confirm_upload(args):
+            return
+
+    _best_effort_sweep_expired_pastes()
 
     print("Collecting debug report...")
 

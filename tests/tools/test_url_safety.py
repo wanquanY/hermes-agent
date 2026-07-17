@@ -10,6 +10,7 @@ from tools.url_safety import (
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
+    redirect_target_from_response,
 )
 
 import ipaddress
@@ -101,6 +102,25 @@ class TestIsSafeUrl:
             (10, 1, 6, "", ("::1", 0, 0, 0)),
         ]):
             assert is_safe_url("http://[::1]:8080/") is False
+
+    def test_ipv6_scope_id_is_stripped_before_link_local_classification(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("fe80::1%en0", 0, 0, 4)),
+        ]):
+            assert is_safe_url("http://scope.example/") is False
+
+    def test_unparseable_resolved_address_fails_closed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("not-an-ip%en0", 0, 0, 4)),
+        ]):
+            assert is_safe_url("http://scope.example/") is False
+
+    def test_mixed_public_and_private_dns_answers_fail_closed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]):
+            assert is_safe_url("https://mixed-answer.example/") is False
 
     def test_dns_failure_blocked(self):
         """DNS failures now fail closed — block the request."""
@@ -576,3 +596,31 @@ class TestIPv4MappedIPv6SSRF:
             (10, 1, 6, "", ("::ffff:100.100.100.200", 0, 0, 0)),
         ]):
             assert is_safe_url("http://aliyun-metadata.internal/") is False
+
+
+class TestRedirectTargetFromResponse:
+    def test_location_header_works_when_next_request_is_missing(self):
+        response = type("Response", (), {
+            "is_redirect": True,
+            "url": "https://public.example/images/start",
+            "headers": {"location": "/private/next"},
+            "next_request": None,
+        })()
+        assert redirect_target_from_response(response) == "https://public.example/private/next"
+
+    def test_falls_back_to_next_request_without_location(self):
+        request = type("Request", (), {"url": "https://next.example/file"})()
+        response = type("Response", (), {
+            "is_redirect": True,
+            "url": "https://public.example/start",
+            "headers": {},
+            "next_request": request,
+        })()
+        assert redirect_target_from_response(response) == "https://next.example/file"
+
+    def test_non_redirect_has_no_target(self):
+        response = type("Response", (), {
+            "is_redirect": False,
+            "headers": {"location": "http://169.254.169.254/"},
+        })()
+        assert redirect_target_from_response(response) is None

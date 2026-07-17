@@ -46,8 +46,13 @@ class SessionStore:
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
         self._lock = threading.Lock()
+        self._load_lock = threading.Lock()
+        self._index_write_lock = threading.Lock()
+        self._index_revision = 0
+        self._persisted_index_revision = 0
         self._has_active_processes_fn = has_active_processes_fn
         self._storage_conn: sqlite3.Connection | None = storage_conn
+        self._owns_storage_conn = storage_conn is None and session_repo is None
         if self._storage_conn is None and session_repo is None:
             self._storage_conn = connect_session_repository_db()
         if session_repo is not None:
@@ -67,57 +72,107 @@ class SessionStore:
             if self._storage_conn is not None
             else None
         )
+
+    def close(self) -> None:
+        """Release the owned SQLite connection outside the metadata lock."""
+
+        with self._lock:
+            conn = self._storage_conn if self._owns_storage_conn else None
+            self._storage_conn = None
+            self._owns_storage_conn = False
+            self._message_repo = None
+            self._message_history = None
+        if conn is not None:
+            conn.close()
     
     def _ensure_loaded(self) -> None:
-        """Load sessions index from disk if not already loaded."""
+        """Load the session index without holding the metadata lock during I/O."""
+
         with self._lock:
-            self._ensure_loaded_locked()
+            if self._loaded:
+                return
+        with self._load_lock:
+            with self._lock:
+                if self._loaded:
+                    return
+            loaded_entries = self._read_index()
+            with self._lock:
+                if not self._loaded:
+                    self._entries.update(loaded_entries)
+                    self._loaded = True
 
     def _ensure_loaded_locked(self) -> None:
-        """Load sessions index from disk. Must be called with self._lock held."""
+        """Compatibility assertion for callers already holding ``_lock``.
+
+        New code must call :meth:`_ensure_loaded` before acquiring the metadata
+        lock so filesystem reads never occur inside the critical section.
+        """
+
         if self._loaded:
             return
+        raise RuntimeError("call _ensure_loaded() before acquiring SessionStore._lock")
 
+    def _read_index(self) -> Dict[str, SessionEntry]:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         sessions_file = self.sessions_dir / "sessions.json"
-
+        entries: Dict[str, SessionEntry] = {}
         if sessions_file.exists():
             try:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for key, entry_data in data.items():
                         try:
-                            self._entries[key] = SessionEntry.from_dict(entry_data)
+                            entries[key] = SessionEntry.from_dict(entry_data)
                         except (ValueError, KeyError):
                             # Skip entries with unknown/removed platform values
                             continue
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
+        return entries
 
-        self._loaded = True
-    
     def _save(self) -> None:
         """Save sessions index to disk (kept for session key -> ID mapping)."""
-        import tempfile
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        sessions_file = self.sessions_dir / "sessions.json"
+        with self._lock:
+            revision, data = self._snapshot_index_locked()
+        self._write_index_snapshot(revision, data)
 
+    def _snapshot_index_locked(self) -> tuple[int, dict[str, dict[str, Any]]]:
+        """Capture a versioned, immutable index snapshot under ``_lock``."""
+
+        self._index_revision += 1
         data = {key: entry.to_dict() for key, entry in self._entries.items()}
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            atomic_replace(tmp_path, sessions_file)
-        except BaseException:
+        return self._index_revision, data
+
+    def _write_index_snapshot(
+        self,
+        revision: int,
+        data: dict[str, dict[str, Any]],
+    ) -> None:
+        """Persist the newest snapshot atomically without holding ``_lock``."""
+
+        import tempfile
+
+        with self._index_write_lock:
+            if revision <= self._persisted_index_revision:
+                return
+            self.sessions_dir.mkdir(parents=True, exist_ok=True)
+            sessions_file = self.sessions_dir / "sessions.json"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
+            )
             try:
-                os.unlink(tmp_path)
-            except OSError as e:
-                logger.debug("Could not remove temp file %s: %s", tmp_path, e)
-            raise
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                atomic_replace(tmp_path, sessions_file)
+                self._persisted_index_revision = revision
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as e:
+                    logger.debug("Could not remove temp file %s: %s", tmp_path, e)
+                raise
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
@@ -226,8 +281,8 @@ class SessionStore:
             logger.debug("Session repository count check failed", exc_info=True)
         # Fallback: check if sessions.json was loaded with existing data.
         # This covers the rare case where the DB is unavailable.
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             return len(self._entries) > 1
 
     def get_or_create_session(
@@ -248,10 +303,11 @@ class SessionStore:
         # All _entries / _loaded mutations are protected by self._lock.
         repo_end_session_id = None
         repo_create_spec = None
+        return_existing = None
+        snapshot = None
 
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
-
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
 
@@ -271,51 +327,57 @@ class SessionStore:
                     # means a re-interrupted retry keeps trying — the
                     # stuck-loop counter handles terminal escalation.
                     entry.updated_at = now
-                    self._save()
-                    return entry
+                    snapshot = self._snapshot_index_locked()
+                    return_existing = entry
                 else:
                     reset_reason = self._should_reset(entry, source)
-                if not reset_reason:
+                if return_existing is None and not reset_reason:
                     entry.updated_at = now
-                    self._save()
-                    return entry
-                else:
+                    snapshot = self._snapshot_index_locked()
+                    return_existing = entry
+                elif return_existing is None:
                     # Session is being auto-reset.
                     was_auto_reset = True
                     auto_reset_reason = reset_reason
                     # Track whether the expired session had any real conversation
                     reset_had_activity = entry.total_tokens > 0
                     repo_end_session_id = entry.session_id
-            else:
+            elif return_existing is None:
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
 
-            # Create new session
-            session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            if return_existing is None:
+                # Create new session
+                session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-            entry = SessionEntry(
-                session_key=session_key,
-                session_id=session_id,
-                created_at=now,
-                updated_at=now,
-                origin=source,
-                display_name=source.chat_name,
-                platform=source.platform,
-                chat_type=source.chat_type,
-                was_auto_reset=was_auto_reset,
-                auto_reset_reason=auto_reset_reason,
-                reset_had_activity=reset_had_activity,
-            )
+                entry = SessionEntry(
+                    session_key=session_key,
+                    session_id=session_id,
+                    created_at=now,
+                    updated_at=now,
+                    origin=source,
+                    display_name=source.chat_name,
+                    platform=source.platform,
+                    chat_type=source.chat_type,
+                    was_auto_reset=was_auto_reset,
+                    auto_reset_reason=auto_reset_reason,
+                    reset_had_activity=reset_had_activity,
+                )
 
-            self._entries[session_key] = entry
-            self._save()
-            repo_create_spec = SessionSpec(
-                session_id=session_id,
-                source=source.platform.value,
-                title=source.chat_name or "",
-                display_title=source.chat_name or "",
-            )
+                self._entries[session_key] = entry
+                snapshot = self._snapshot_index_locked()
+                repo_create_spec = SessionSpec(
+                    session_id=session_id,
+                    source=source.platform.value,
+                    title=source.chat_name or "",
+                    display_title=source.chat_name or "",
+                )
+
+        if snapshot is not None:
+            self._write_index_snapshot(*snapshot)
+        if return_existing is not None:
+            return return_existing
 
         if repo_end_session_id:
             self._session_repo.close(repo_end_session_id, "session_reset")
@@ -331,15 +393,17 @@ class SessionStore:
         last_prompt_tokens: int = None,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
-
             if session_key in self._entries:
                 entry = self._entries[session_key]
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
-                self._save()
+                snapshot = self._snapshot_index_locked()
+        if snapshot is not None:
+            self._write_index_snapshot(*snapshot)
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
@@ -348,13 +412,16 @@ class SessionStore:
         after a gateway restart (#7536).  Returns True if the session
         existed and was marked.
         """
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             if session_key in self._entries:
                 self._entries[session_key].suspended = True
-                self._save()
-                return True
-        return False
+                snapshot = self._snapshot_index_locked()
+        if snapshot is None:
+            return False
+        self._write_index_snapshot(*snapshot)
+        return True
 
     def mark_resume_pending(
         self,
@@ -370,8 +437,9 @@ class SessionStore:
 
         Returns True if the session existed and was marked.
         """
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             if session_key in self._entries:
                 entry = self._entries[session_key]
                 # Never override an explicit ``suspended`` — that is a hard
@@ -381,32 +449,36 @@ class SessionStore:
                 entry.resume_pending = True
                 entry.resume_reason = reason
                 entry.last_resume_marked_at = _now()
-                self._save()
-                return True
-        return False
+                snapshot = self._snapshot_index_locked()
+        if snapshot is None:
+            return False
+        self._write_index_snapshot(*snapshot)
+        return True
 
     def get_entry(self, session_key: str) -> Optional[SessionEntry]:
         """Return the current SessionEntry for a session key without mutating it."""
         if not session_key:
             return None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             return self._entries.get(session_key)
 
     def update_entry_session_id(self, session_key: str, session_id: str) -> bool:
         """Update the transcript session id for a known gateway session key."""
         if not session_key or not session_id:
             return False
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             entry = self._entries.get(session_key)
             if entry is None:
                 return False
             if entry.session_id == session_id:
                 return True
             entry.session_id = session_id
-            self._save()
-            return True
+            snapshot = self._snapshot_index_locked()
+        self._write_index_snapshot(*snapshot)
+        return True
 
     def clear_resume_pending(self, session_key: str) -> bool:
         """Clear the resume-pending flag after a successful resumed turn.
@@ -417,16 +489,18 @@ class SessionStore:
 
         Returns True if a flag was cleared.
         """
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             entry = self._entries.get(session_key)
             if entry is None or not entry.resume_pending:
                 return False
             entry.resume_pending = False
             entry.resume_reason = None
             entry.last_resume_marked_at = None
-            self._save()
-            return True
+            snapshot = self._snapshot_index_locked()
+        self._write_index_snapshot(*snapshot)
+        return True
 
     def prune_old_entries(self, max_age_days: int) -> int:
         """Drop SessionEntry records older than max_age_days.
@@ -451,9 +525,10 @@ class SessionStore:
 
         cutoff = _now() - timedelta(days=max_age_days)
         removed_keys: list[str] = []
+        snapshot = None
 
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             for key, entry in list(self._entries.items()):
                 if entry.suspended:
                     continue
@@ -476,7 +551,10 @@ class SessionStore:
             for key in removed_keys:
                 self._entries.pop(key, None)
             if removed_keys:
-                self._save()
+                snapshot = self._snapshot_index_locked()
+
+        if snapshot is not None:
+            self._write_index_snapshot(*snapshot)
 
         if removed_keys:
             logger.info(
@@ -507,8 +585,9 @@ class SessionStore:
 
         cutoff = _now() - timedelta(seconds=max_age_seconds)
         count = 0
+        snapshot = None
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             for entry in self._entries.values():
                 if entry.resume_pending:
                     continue
@@ -518,7 +597,9 @@ class SessionStore:
                     entry.last_resume_marked_at = _now()
                     count += 1
             if count:
-                self._save()
+                snapshot = self._snapshot_index_locked()
+        if snapshot is not None:
+            self._write_index_snapshot(*snapshot)
         return count
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
@@ -526,10 +607,10 @@ class SessionStore:
         repo_end_session_id = None
         repo_create_spec = None
         new_entry = None
+        snapshot = None
 
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
-
             if session_key not in self._entries:
                 return None
 
@@ -552,7 +633,7 @@ class SessionStore:
             )
 
             self._entries[session_key] = new_entry
-            self._save()
+            snapshot = self._snapshot_index_locked()
             repo_create_spec = SessionSpec(
                 session_id=session_id,
                 source=old_entry.platform.value if old_entry.platform else "unknown",
@@ -560,6 +641,7 @@ class SessionStore:
                 display_title=new_entry.display_name or "",
             )
 
+        self._write_index_snapshot(*snapshot)
         if repo_end_session_id:
             self._session_repo.close(repo_end_session_id, "session_reset")
 
@@ -579,10 +661,10 @@ class SessionStore:
         """
         repo_end_session_id = None
         new_entry = None
+        snapshot = None
 
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
-
             if session_key not in self._entries:
                 return None
 
@@ -607,8 +689,9 @@ class SessionStore:
             )
 
             self._entries[session_key] = new_entry
-            self._save()
+            snapshot = self._snapshot_index_locked()
 
+        self._write_index_snapshot(*snapshot)
         if repo_end_session_id:
             self._session_repo.close(repo_end_session_id, "session_switch")
         self._session_repo.reopen(target_session_id)
@@ -617,8 +700,8 @@ class SessionStore:
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
         """List all sessions, optionally filtered by activity."""
+        self._ensure_loaded()
         with self._lock:
-            self._ensure_loaded_locked()
             entries = list(self._entries.values())
 
         if active_minutes is not None:

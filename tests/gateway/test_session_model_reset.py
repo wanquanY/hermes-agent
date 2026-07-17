@@ -1,4 +1,6 @@
-"""Tests that /new (and its /reset alias) clears session-scoped overrides."""
+"""Tests that /new (and its /reset alias) clears session-scoped state safely."""
+import asyncio
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -139,3 +141,60 @@ async def test_new_command_only_clears_own_session():
     assert other_key in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
     assert other_key in runner._pending_model_notes
+
+
+@pytest.mark.asyncio
+async def test_new_cleanup_does_not_block_event_loop_or_hold_cache_lock():
+    runner = _make_runner()
+    session_key = build_session_key(_make_source())
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    old_agent = MagicMock()
+    runner._agent_cache_lock = threading.RLock()
+    runner._agent_cache = {session_key: (old_agent, "signature")}
+
+    def slow_cleanup(agent):
+        assert agent is old_agent
+        cleanup_started.set()
+        release_cleanup.wait(timeout=2)
+
+    runner._cleanup_agent_resources = slow_cleanup
+    reset_task = asyncio.create_task(runner._handle_reset_command(_make_event("/new")))
+    while not cleanup_started.is_set():
+        await asyncio.sleep(0.001)
+
+    ticks = 0
+    for _ in range(20):
+        ticks += 1
+        await asyncio.sleep(0.002)
+    assert ticks == 20
+    assert not reset_task.done()
+    assert runner._agent_cache_lock.acquire(timeout=0.1)
+    runner._agent_cache_lock.release()
+    assert session_key not in runner._agent_cache
+
+    release_cleanup.set()
+    await reset_task
+
+
+@pytest.mark.asyncio
+async def test_new_cleanup_timeout_still_rotates_session(monkeypatch, caplog):
+    import hermes_gateway.reset_command as reset_command
+
+    runner = _make_runner()
+    session_key = build_session_key(_make_source())
+    release_cleanup = threading.Event()
+    runner._agent_cache_lock = threading.RLock()
+    runner._agent_cache = {session_key: (MagicMock(), "signature")}
+    runner._cleanup_agent_resources = lambda _agent: release_cleanup.wait(timeout=2)
+    monkeypatch.setattr(reset_command, "_RESET_CLEANUP_TIMEOUT_S", 0.01)
+
+    with caplog.at_level("WARNING", logger="hermes_gateway.reset_command"):
+        await asyncio.wait_for(
+            runner._handle_reset_command(_make_event("/new")),
+            timeout=1,
+        )
+    release_cleanup.set()
+
+    runner.session_store.reset_session.assert_called_once_with(session_key)
+    assert any("proceeding while cleanup finishes off-loop" in message for message in caplog.messages)

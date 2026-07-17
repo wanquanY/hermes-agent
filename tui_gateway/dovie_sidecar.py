@@ -232,6 +232,11 @@ async def main_async(args: argparse.Namespace) -> None:
             await asyncio.Future()
     finally:
         stop_cron_ticker()
+        from hermes_agent.orchestration.worker_runtime import shutdown_run_worker_runtime
+        from hermes_agent.composition.async_sqlite import shutdown_async_sqlite_boundary
+
+        await shutdown_run_worker_runtime()
+        await shutdown_async_sqlite_boundary()
 
 
 def main() -> None:

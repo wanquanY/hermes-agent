@@ -2485,7 +2485,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             try:
                 from agent.models_dev import list_agentic_models
 
-                mdev_models = list_agentic_models(provider_id)
+                mdev_models = list_agentic_models(provider_id, allow_network=True)
             except Exception:
                 pass
             if mdev_models:
@@ -2510,7 +2510,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         try:
             from agent.models_dev import list_agentic_models
 
-            mdev_models = list_agentic_models(provider_id)
+            mdev_models = list_agentic_models(provider_id, allow_network=True)
         except Exception:
             pass
 

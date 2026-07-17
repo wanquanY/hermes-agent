@@ -347,6 +347,7 @@ _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/images", "image_cache"),
     ("cache/audio", "audio_cache"),
     ("cache/screenshots", "browser_screenshots"),
+    ("cache/delegation", "delegation_cache"),
 ]
 
 
@@ -432,5 +433,4 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-
 

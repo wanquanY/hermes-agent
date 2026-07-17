@@ -8,6 +8,7 @@ from typing import Union
 
 from agent.i18n import t
 from channels.platforms.base import EphemeralReply, MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 
@@ -24,7 +25,10 @@ class GatewayRuntimeStatusCommandService:
 
         runner = self._runner
         source = event.source
-        session_entry = runner.session_store.get_or_create_session(source)
+        session_entry = await run_sqlite_io(
+            runner.session_store.get_or_create_session,
+            source,
+        )
         connected_platforms = [p.value for p in runner.adapters.keys()]
         session_key = session_entry.session_key
         is_running = session_key in runner._running_agents
@@ -35,11 +39,17 @@ class GatewayRuntimeStatusCommandService:
         db_total_tokens = 0
         if runner._session_db:
             try:
-                title = runner._session_db.sessions.get_title(session_entry.session_id)
+                title = await run_sqlite_io(
+                    runner._session_db.sessions.get_title,
+                    session_entry.session_id,
+                )
             except Exception:
                 title = None
             try:
-                row = runner._session_db.sessions.get(session_entry.session_id)
+                row = await run_sqlite_io(
+                    runner._session_db.sessions.get,
+                    session_entry.session_id,
+                )
                 if row:
                     db_total_tokens = (
                         (row.get("input_tokens") or 0)
@@ -73,7 +83,10 @@ class GatewayRuntimeStatusCommandService:
 
         try:
             from hermes_cli.session_recap import build_recap
-            history = runner.session_store.load_transcript(session_entry.session_id)
+            history = await run_sqlite_io(
+                runner.session_store.load_transcript,
+                session_entry.session_id,
+            )
             recap = build_recap(
                 history,
                 session_title=title,
@@ -172,7 +185,10 @@ class GatewayRuntimeStatusCommandService:
 
         runner = self._runner
         source = event.source
-        session_entry = runner.session_store.get_or_create_session(source)
+        session_entry = await run_sqlite_io(
+            runner.session_store.get_or_create_session,
+            source,
+        )
         session_key = session_entry.session_key
 
         agent = runner._running_agents.get(session_key)

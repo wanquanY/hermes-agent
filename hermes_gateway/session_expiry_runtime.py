@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL, agent_cache_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
@@ -24,14 +25,17 @@ class GatewaySessionExpiryRuntimeService:
         runner = self._runner
         while runner._running:
             try:
-                runner.session_store._ensure_loaded()
-                expired_entries = []
-                for key, entry in list(runner.session_store._entries.items()):
-                    if entry.expiry_finalized:
-                        continue
-                    if not runner.session_store._is_session_expired(entry):
-                        continue
-                    expired_entries.append((key, entry))
+                def _collect_expired_entries() -> list:
+                    runner.session_store._ensure_loaded()
+                    with runner.session_store._lock:
+                        return [
+                            (key, entry)
+                            for key, entry in runner.session_store._entries.items()
+                            if not entry.expiry_finalized
+                            and runner.session_store._is_session_expired(entry)
+                        ]
+
+                expired_entries = await run_sqlite_io(_collect_expired_entries)
 
                 if expired_entries:
                     platforms: dict[str, int] = {}
@@ -49,7 +53,7 @@ class GatewaySessionExpiryRuntimeService:
 
                 for key, entry in expired_entries:
                     try:
-                        self.finalize_expired_session(key, entry)
+                        await self.finalize_expired_session(key, entry)
                         finalize_failures.pop(entry.session_id, None)
                     except Exception as exc:
                         failures = finalize_failures.get(entry.session_id, 0) + 1
@@ -60,9 +64,13 @@ class GatewaySessionExpiryRuntimeService:
                                 "Marking as finalized to prevent infinite retry loop.",
                                 failures, entry.session_id, exc,
                             )
-                            with runner.session_store._lock:
-                                entry.expiry_finalized = True
-                                runner.session_store._save()
+                            def _mark_finalized() -> None:
+                                with runner.session_store._lock:
+                                    entry.expiry_finalized = True
+                                    snapshot = runner.session_store._snapshot_index_locked()
+                                runner.session_store._write_index_snapshot(*snapshot)
+
+                            await run_sqlite_io(_mark_finalized)
                             finalize_failures.pop(entry.session_id, None)
                         else:
                             logger.debug(
@@ -81,7 +89,7 @@ class GatewaySessionExpiryRuntimeService:
                     else:
                         logger.info("Session expiry done: %d finalized", done)
 
-                self.sweep_idle_and_prune_sessions()
+                await self.sweep_idle_and_prune_sessions()
             except Exception as exc:
                 logger.debug("Session expiry watcher error: %s", exc)
 
@@ -90,9 +98,9 @@ class GatewaySessionExpiryRuntimeService:
                     break
                 await asyncio.sleep(1)
 
-    def finalize_expired_session(self, key: str, entry) -> None:
+    async def finalize_expired_session(self, key: str, entry) -> None:
         runner = self._runner
-        try:
+        def _invoke_finalize_hook() -> None:
             from hermes_cli.plugins import invoke_hook
 
             parts = key.split(":")
@@ -102,21 +110,36 @@ class GatewaySessionExpiryRuntimeService:
                 session_id=entry.session_id,
                 platform=platform,
             )
+
+        try:
+            await runner._run_in_executor_with_context(_invoke_finalize_hook)
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
-        cached_agent = None
-        cache_lock = getattr(runner, "_agent_cache_lock", None)
-        if cache_lock is not None:
-            with cache_lock:
-                cached = runner._agent_cache.get(key)
-                cached_agent = cached[0] if isinstance(cached, tuple) else cached if cached else None
+        cached_agent = agent_cache_for(runner).pop_cached_agent(key)
         if cached_agent is None:
             cached_agent = runner._running_agents.get(key)
         if cached_agent and cached_agent is not AGENT_PENDING_SENTINEL:
-            runner._cleanup_agent_resources(cached_agent)
+            try:
+                await asyncio.wait_for(
+                    runner._run_in_executor_with_context(
+                        runner._cleanup_agent_resources,
+                        cached_agent,
+                    ),
+                    timeout=30.0,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Expired-session resource cleanup exceeded 30s for %s; continuing finalization",
+                    key,
+                )
+            except Exception:
+                logger.warning(
+                    "Expired-session resource cleanup failed for %s",
+                    key,
+                    exc_info=True,
+                )
 
-        agent_cache_for(runner).evict_cached_agent(key)
         runner._session_model_overrides.pop(key, None)
         runtime_config_for(runner).set_session_reasoning_override(key, None)
         if hasattr(runner, "_pending_model_notes"):
@@ -127,12 +150,16 @@ class GatewaySessionExpiryRuntimeService:
         update_prompt_pending = getattr(runner, "_update_prompt_pending", None)
         if isinstance(update_prompt_pending, dict):
             update_prompt_pending.pop(key, None)
-        with runner.session_store._lock:
-            entry.expiry_finalized = True
-            runner.session_store._save()
+        def _persist_finalized() -> None:
+            with runner.session_store._lock:
+                entry.expiry_finalized = True
+                snapshot = runner.session_store._snapshot_index_locked()
+            runner.session_store._write_index_snapshot(*snapshot)
+
+        await run_sqlite_io(_persist_finalized)
         logger.debug("Session expiry finalized for %s", entry.session_id)
 
-    def sweep_idle_and_prune_sessions(self) -> None:
+    async def sweep_idle_and_prune_sessions(self) -> None:
         runner = self._runner
         try:
             idle_evicted = agent_cache_for(runner).sweep_idle_cached_agents()
@@ -148,7 +175,10 @@ class GatewaySessionExpiryRuntimeService:
         try:
             max_age = int(getattr(runner.config, "session_store_max_age_days", 0) or 0)
             if max_age > 0:
-                pruned = runner.session_store.prune_old_entries(max_age)
+                pruned = await run_sqlite_io(
+                    runner.session_store.prune_old_entries,
+                    max_age,
+                )
                 if pruned:
                     logger.info("SessionStore prune: dropped %d stale entries", pruned)
         except Exception as exc:

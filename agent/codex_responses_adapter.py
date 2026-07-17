@@ -19,6 +19,10 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.responses_route_policy import (
+    ResponsesRoutePolicy,
+    coerce_responses_route_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,8 +284,10 @@ def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     *,
     is_xai_responses: bool = False,
+    is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True,
     current_issuer_kind: Optional[str] = None,
+    route_policy: ResponsesRoutePolicy | None = None,
 ) -> List[Dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
 
@@ -317,6 +323,15 @@ def _chat_messages_to_responses_input(
     (drops ALL replay); ``current_issuer_kind`` is the per-item filter
     that runs only when replay is still enabled.
     """
+    policy = coerce_responses_route_policy(
+        route_policy,
+        is_xai_responses=is_xai_responses,
+        is_github_responses=is_github_responses,
+        replay_encrypted_reasoning=replay_encrypted_reasoning,
+    )
+    replay_encrypted_reasoning = policy.replay_encrypted_reasoning
+    current_issuer_kind = current_issuer_kind or policy.issuer_kind
+
     items: List[Dict[str, Any]] = []
     seen_item_ids: set = set()
 
@@ -435,9 +450,9 @@ def _chat_messages_to_responses_input(
                             "status": _normalize_responses_message_status(raw_item.get("status")),
                             "content": normalized_content_parts,
                         }
-                        item_id = raw_item.get("id")
-                        if isinstance(item_id, str) and item_id.strip():
-                            replay_item["id"] = item_id.strip()
+                        item_id = policy.replayable_message_item_id(raw_item.get("id"))
+                        if item_id is not None:
+                            replay_item["id"] = item_id
                         phase = raw_item.get("phase")
                         if isinstance(phase, str) and phase.strip():
                             replay_item["phase"] = phase.strip()
@@ -549,7 +564,16 @@ def _chat_messages_to_responses_input(
 # Input preflight / validation
 # ---------------------------------------------------------------------------
 
-def _preflight_codex_input_items(raw_items: Any) -> List[Dict[str, Any]]:
+def _preflight_codex_input_items(
+    raw_items: Any,
+    *,
+    route_policy: ResponsesRoutePolicy | None = None,
+    is_github_responses: bool = False,
+) -> List[Dict[str, Any]]:
+    policy = coerce_responses_route_policy(
+        route_policy,
+        is_github_responses=is_github_responses,
+    )
     if not isinstance(raw_items, list):
         raise ValueError("Codex Responses input must be a list of input items.")
 
@@ -689,9 +713,9 @@ def _preflight_codex_input_items(raw_items: Any) -> List[Dict[str, Any]]:
                 "status": _normalize_responses_message_status(item.get("status")),
                 "content": normalized_content,
             }
-            item_id = item.get("id")
-            if isinstance(item_id, str) and item_id.strip():
-                normalized_item["id"] = item_id.strip()
+            item_id = policy.replayable_message_item_id(item.get("id"))
+            if item_id is not None:
+                normalized_item["id"] = item_id
             phase = item.get("phase")
             if isinstance(phase, str) and phase.strip():
                 normalized_item["phase"] = phase.strip()
@@ -763,6 +787,8 @@ def _preflight_codex_api_kwargs(
     api_kwargs: Any,
     *,
     allow_stream: bool = False,
+    route_policy: ResponsesRoutePolicy | None = None,
+    is_github_responses: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
@@ -784,7 +810,11 @@ def _preflight_codex_api_kwargs(
         instructions = str(instructions)
     instructions = instructions.strip() or DEFAULT_AGENT_IDENTITY
 
-    normalized_input = _preflight_codex_input_items(api_kwargs.get("input"))
+    normalized_input = _preflight_codex_input_items(
+        api_kwargs.get("input"),
+        route_policy=route_policy,
+        is_github_responses=is_github_responses,
+    )
 
     tools = api_kwargs.get("tools")
     normalized_tools = None
@@ -1041,7 +1071,10 @@ def _normalize_codex_response(
                     saw_final_answer_phase = True
             message_text = _extract_responses_message_text(item)
             if message_text:
-                content_parts.append(message_text)
+                if normalized_phase in {"commentary", "analysis"}:
+                    reasoning_parts.append(message_text)
+                else:
+                    content_parts.append(message_text)
                 raw_message_item: Dict[str, Any] = {
                     "type": "message",
                     "role": "assistant",

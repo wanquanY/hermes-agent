@@ -23,6 +23,7 @@ from hermes_agent.repositories.session_repo import (
     SessionRepo,
     SessionRepoImpl,
 )
+from hermes_agent.domain.tool_effect import persist_tool_effect, tool_effect_from_metadata
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
@@ -40,6 +41,7 @@ class MessageSpec:
     tool_call_id: str = ""
     tool_calls: str = ""
     tool_name: str = ""
+    effect_disposition: str = ""
     reasoning: str = ""
     conversation_message_id: str = ""
     platform_message_id: str = ""
@@ -58,6 +60,7 @@ class Message:
     tool_call_id: str = ""
     tool_calls: str = ""
     tool_name: str = ""
+    effect_disposition: str = ""
     reasoning: str = ""
     conversation_message_id: str = ""
     platform_message_id: str = ""
@@ -125,7 +128,10 @@ class MessageRepoImpl:
         if not stable_sid or not role:
             raise ValueError("session_id and role are required")
         ts = float(message.timestamp or time.time())
-        metadata_json = json.dumps(message.metadata or {}, ensure_ascii=False)
+        metadata_json = json.dumps(
+            persist_tool_effect(message.metadata, message.effect_disposition),
+            ensure_ascii=False,
+        )
         cursor = self._conn.execute(
             """
             INSERT INTO messages (
@@ -882,7 +888,14 @@ class MessageRepository:
                 _json_or_none(message.get("codex_message_items")) if role == "assistant" else None,
                 _platform_message_id(message),
                 str(message.get("conversation_message_id") or ""),
-                _json_or_none(message.get("metadata")),
+                _json_or_none(
+                    persist_tool_effect(
+                        message.get("metadata")
+                        if isinstance(message.get("metadata"), dict)
+                        else {},
+                        message.get("effect_disposition"),
+                    )
+                ),
             ),
         )
         return int(cursor.lastrowid or 0)
@@ -1056,7 +1069,11 @@ def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[st
             if row[source_key]:
                 message[source_key] = _json_or(row[source_key], None)
     if row["metadata_json"]:
-        message["metadata"] = _json_or(row["metadata_json"], None)
+        metadata = _json_or(row["metadata_json"], None)
+        message["metadata"] = metadata
+        effect_disposition = tool_effect_from_metadata(metadata)
+        if effect_disposition:
+            message["effect_disposition"] = effect_disposition
     return message
 
 
@@ -1080,6 +1097,7 @@ def _row_to_message(row: Any) -> Message:
         tool_call_id=str(_get("tool_call_id", 5) or ""),
         tool_calls=str(_get("tool_calls", 6) or ""),
         tool_name=str(_get("tool_name", 7) or ""),
+        effect_disposition=tool_effect_from_metadata(metadata),
         timestamp=float(_get("timestamp", 8) or 0),
         reasoning=str(_get("reasoning", 9) or ""),
         conversation_message_id=str(_get("conversation_message_id", 10) or ""),

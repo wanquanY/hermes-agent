@@ -64,6 +64,25 @@ class TestExistingBehaviorStillWorks:
     def test_unknown_returns_none(self, repair):
         assert repair("xyz_no_such_tool") is None
 
+    def test_legacy_mcp_replay_resolves_to_canonical_registry_name(self):
+        from run_agent import AIAgent
+        from tools.mcp_identity import canonical_mcp_tool_name
+        from tools.registry import registry
+
+        canonical = canonical_mcp_tool_name("filesystem", "read_file")
+        registry.register(
+            name=canonical,
+            toolset="mcp-filesystem",
+            schema={"name": canonical, "description": "read", "parameters": {}},
+            handler=lambda args: "ok",
+        )
+        try:
+            stub = SimpleNamespace(valid_tool_names={canonical})
+            bound = AIAgent._repair_tool_call.__get__(stub, AIAgent)
+            assert bound("mcp_filesystem_read_file") == canonical
+        finally:
+            registry.deregister(canonical)
+
 
 class TestClassLikeEmissions:
     """Regression coverage for #14784 — CamelCase + _tool suffix variants."""

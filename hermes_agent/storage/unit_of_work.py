@@ -42,5 +42,15 @@ class SqliteUnitOfWork:
                     self._conn.execute("ROLLBACK")
                 raise
 
+    def read(self, operation: Callable[[sqlite3.Connection], T]) -> T:
+        """Run a pure read under the connection lock without a write lease.
+
+        ``execute`` deliberately starts ``BEGIN IMMEDIATE`` because its callers
+        mutate aggregates atomically. Hot-path policy reads must not acquire a
+        SQLite RESERVED lock merely to inspect one row.
+        """
+        with self._lock:
+            return operation(self._conn)
+
 
 __all__ = ["SqliteUnitOfWork"]

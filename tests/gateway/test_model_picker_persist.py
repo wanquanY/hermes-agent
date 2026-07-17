@@ -94,7 +94,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     )
 
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
-    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda **_kwargs: {})
     # The picker-setup path calls list_picker_providers, which otherwise hits
     # the network (OpenRouter model catalog). Stub it to a minimal list — these
     # tests capture and fire the on_model_selected callback and don't assert on

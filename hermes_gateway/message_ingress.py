@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class GatewayMessageIngressService:
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
 
-                hook_results = _invoke_hook(
+                hook_results = await run_sqlite_io(
+                    _invoke_hook,
                     "pre_gateway_dispatch",
                     event=event,
                     gateway=runner,

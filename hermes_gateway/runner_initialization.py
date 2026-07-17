@@ -10,6 +10,9 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from channels.platforms.base import BasePlatformAdapter, MessageEvent
+from hermes_agent.application.active_work_registry import (
+    get_process_active_work_registry,
+)
 from hermes_gateway.config import GatewayConfig, Platform, load_gateway_config
 from hermes_gateway.delivery import DeliveryRouter
 from hermes_gateway.fast_command import fast_command_for
@@ -62,6 +65,8 @@ def initialize_gateway_runner_state(
     runner._exit_reason: Optional[str] = None
     runner._exit_code: Optional[int] = None
     runner._draining = False
+    runner._active_work_registry = get_process_active_work_registry()
+    runner._active_work_registry.start_accepting()
     runner._restart_requested = False
     runner._restart_task_started = False
     runner._restart_detached = False

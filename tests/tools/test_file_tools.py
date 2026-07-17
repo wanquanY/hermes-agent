@@ -238,6 +238,40 @@ class TestPatchHandler:
         assert "error" in result
         assert "Unknown mode" in result["error"]
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_move_header_checks_both_sensitive_endpoints(self, mock_get):
+        from tools.file_tools import patch_tool
+
+        for move in ("/tmp/work -> /etc/crontab", "/etc/hosts -> /tmp/leak"):
+            result = json.loads(patch_tool(
+                mode="patch",
+                patch=f"*** Begin Patch\n*** Move File: {move}\n*** End Patch",
+            ))
+            assert "sensitive" in result["error"].lower()
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_no_space_patch_header_still_checks_sensitive_path(self, mock_get):
+        from tools.file_tools import patch_tool
+
+        result = json.loads(patch_tool(
+            mode="patch",
+            patch="*** Begin Patch\n***Update File: /etc/hosts\n@@\n-old\n+new\n*** End Patch",
+        ))
+        assert "sensitive" in result["error"].lower()
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_move_header_traversal_is_rejected_before_dispatch(self, mock_get):
+        from tools.file_tools import patch_tool
+
+        result = json.loads(patch_tool(
+            mode="patch",
+            patch="*** Begin Patch\n*** Move File: safe.txt -> ../../escape\n*** End Patch",
+        ))
+        assert "traversal" in result["error"].lower()
+        mock_get.assert_not_called()
+
 
 class TestSearchHandler:
     @patch("tools.file_tools._get_file_ops")

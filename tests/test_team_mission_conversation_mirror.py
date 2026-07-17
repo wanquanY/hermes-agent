@@ -448,12 +448,43 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             "交付",
             "完成",
         ]
-        assert all(event.get("transient") is True for event in live_projected_deltas)
-        assert not any(
-            event.get("type") == "team_mission.runtime.event"
-            and (event.get("payload") or {}).get("source_event_type") == "message.delta"
-            for event in db.list_team_mission_run_events("mission-1", after_seq=0)
+        assert [
+            frame
+            for frame in transport.frames
+            if frame.get("method") == "event"
+        ] == []
+        assert all(event.get("transient") is not True for event in live_projected_deltas)
+        assert all(int(event.get("activity_event_seq") or 0) > 0 for event in live_projected_deltas)
+
+        run_control.publish_recorded_event(
+            {
+                "type": "tool.generating",
+                "session_id": "runtime-synthesis",
+                "conversation_session_id": "synthesis-session-1",
+                "run_id": "run-synthesis",
+                "turn_id": "turn-synthesis",
+                "runtime_scope_key": "team:mission-1:synthesis",
+                "activity_id": "mission:mission-1",
+                "payload": {
+                    "activity_id": "mission:mission-1",
+                    "name": "team_mission_team_profile",
+                },
+            },
+            db=db,
+            persist=False,
         )
+        live_tool_events = [
+            frame.get("params") or {}
+            for frame in mission_transport.frames
+            if (
+                frame.get("method") == "event"
+                and ((frame.get("params") or {}).get("payload") or {}).get("source_event_type")
+                == "tool.generating"
+            )
+        ]
+        assert len(live_tool_events) == 1
+        assert live_tool_events[0].get("transient") is not True
+        assert int(live_tool_events[0].get("activity_event_seq") or 0) > 0
 
         _, replay_events = run_control.subscribe_activity(
             activity_id="mission:mission-1",
@@ -465,14 +496,116 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             if event["type"] == "team_mission.runtime.event"
             and event["payload"]["source_event_type"] == "message.delta"
         ]
-        assert len(replay_deltas) == 1
-        assert replay_deltas[0]["transient"] is True
-        assert replay_deltas[0]["payload"]["text_stream"]["mode"] == "snapshot"
-        assert replay_deltas[0]["payload"]["text_stream"]["delta"] == "最终交付完成"
+        assert [event["payload"]["text_stream"]["delta"] for event in replay_deltas] == [
+            "最终",
+            "交付",
+            "完成",
+        ]
+        assert [event["seq"] for event in replay_deltas] == sorted(
+            event["seq"] for event in replay_deltas
+        )
+        assert all(event.get("transient") is not True for event in replay_deltas)
+        assert len([
+            event for event in replay_events
+            if event["payload"]["source_event_type"] == "tool.generating"
+        ]) == 1
 
     finally:
         run_control.unsubscribe_session(subscription_id=node_subscription_id)
         run_control.unsubscribe_activity(subscription_id=mission_subscription_id)
+
+
+def test_gateway_emit_routes_bound_team_run_only_through_activity_journal(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
+    from tui_gateway import server
+    from tui_gateway.services import run_control
+
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-single-route",
+        conversation_id="conversation-single-route",
+        title="Single route",
+        objective="Publish each visible event once",
+        mode="supervised_mission",
+        leader_session_id="team-session-single-route",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-single-route",
+        node_id="node-single-route",
+        kind="worker",
+        title="Worker",
+        status="running",
+    )
+    db.runs.upsert(
+        run_id="run-single-route",
+        session_id="team:mission-single-route:node:node-single-route",
+        runtime_scope_key="team:mission-single-route:node:node-single-route",
+        execution_session_id="runtime-single-route",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-single-route",
+        node_id="node-single-route",
+        run_id="run-single-route",
+        session_id="team:mission-single-route:node:node-single-route",
+        execution_session_id="runtime-single-route",
+        runtime_scope_key="team:mission-single-route:node:node-single-route",
+        role="worker",
+    )
+    monkeypatch.setattr(server, "_db_for_stable_session", lambda _stable: db)
+
+    transport = _MemoryTransport()
+    subscription_id, _ = run_control.subscribe_activity(
+        activity_id="mission:mission-single-route",
+        transport=transport,
+        db=db,
+    )
+    with server._sessions_lock:
+        previous_session = server._sessions.get("runtime-single-route")
+        server._sessions["runtime-single-route"] = {
+            "session_key": "team:mission-single-route:node:node-single-route",
+            "active_run_id": "run-single-route",
+            "active_turn_id": "turn-single-route",
+            "active_runtime_scope_key": "team:mission-single-route:node:node-single-route",
+            "transport": transport,
+        }
+    token = server.bind_transport(transport)
+    try:
+        server._emit(
+            "message.delta",
+            "runtime-single-route",
+            {
+                "run_id": "run-single-route",
+                "turn_id": "turn-single-route",
+                "mode": "append",
+                "offset": 0,
+                "delta": "唯一",
+                "text": "唯一",
+            },
+        )
+    finally:
+        server.reset_transport(token)
+        run_control.unsubscribe_activity(subscription_id=subscription_id)
+        with server._sessions_lock:
+            if previous_session is None:
+                server._sessions.pop("runtime-single-route", None)
+            else:
+                server._sessions["runtime-single-route"] = previous_session
+
+    delivered = [
+        frame.get("params") or {}
+        for frame in transport.frames
+        if frame.get("method") == "event"
+    ]
+    assert [event["type"] for event in delivered] == ["team_mission.runtime.event"]
+    assert delivered[0]["payload"]["source_event_type"] == "message.delta"
+    assert delivered[0]["payload"]["text_stream"]["delta"] == "唯一"
+    assert delivered[0].get("transient") is not True
+    assert int(delivered[0].get("activity_event_seq") or 0) > 0
+    db.close()
 
 
 def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal(tmp_path: Path):
@@ -549,12 +682,11 @@ def test_team_mission_poll_delivers_domain_projection_for_directly_delivered_nod
             activity_id="mission:mission-1",
             transport=None,
             db=db,
-            debug_replay_audit=True,
         )
         assert mission_terminals
         assert persisted_event["seq"] == direct_event["seq"]
-        # The runtime ledger owns a dense canonical sequence, while debug
-        # audit replay preserves the producer's original source cursor.
+        # The runtime ledger owns a dense canonical sequence while source
+        # attribution preserves the producer's original cursor.
         assert persisted_event["seq"] == 1
         assert mission_terminals[0]["source_seq"] == 1168
         assert mission_terminals[0]["payload"]["source_event_type"] == "message.complete"

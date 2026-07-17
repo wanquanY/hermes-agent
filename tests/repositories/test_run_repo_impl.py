@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from hermes_agent.domain.run_identity import CrossWiredRunError, RunIdentity
 from hermes_agent.domain.run_terminator import TerminateCause, TerminateOutcome
 from hermes_agent.repositories import (
     CanonicalEventSpec,
@@ -30,6 +31,8 @@ def _make_conn() -> sqlite3.Connection:
             run_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             runtime_scope_key TEXT,
+            worker_id TEXT NOT NULL DEFAULT '',
+            agent_profile_id TEXT NOT NULL DEFAULT '',
             turn_id TEXT,
             execution_session_id TEXT,
             status TEXT NOT NULL,
@@ -82,6 +85,80 @@ def test_create_and_get_run_roundtrip():
     assert created.status == "running"
     got = repo.get_run("r1")
     assert got == created
+
+
+def test_create_run_is_identity_idempotent_and_never_replaces_row():
+    conn = _make_conn()
+    repo = RunRepoImpl(conn)
+    spec = RunSpec(
+        run_id="r1",
+        session_id="s1",
+        runtime_scope_key="scope-1",
+        worker_id="worker-1",
+        agent_profile_id="profile-1",
+    )
+    created = repo.create_run("s1", spec)
+    retried = repo.create_run("s1", spec)
+
+    assert retried == created
+    assert retried.worker_id == "worker-1"
+    assert retried.agent_profile_id == "profile-1"
+
+    conn.execute("INSERT INTO sessions (id, source) VALUES ('s2', 'test')")
+    with pytest.raises(CrossWiredRunError):
+        repo.create_run("s2", RunSpec(run_id="r1", session_id="s2"))
+    assert repo.get_run("r1") == created
+
+
+def test_materialized_upsert_rejects_session_or_scope_rewire():
+    conn = _make_conn()
+    repo = RunRepoImpl(conn)
+    repo.upsert_materialized_state(
+        run_id="r1",
+        session_id="s1",
+        runtime_scope_key="scope-1",
+    )
+    repo.claim_identity(
+        RunIdentity.create(
+            run_id="r1",
+            session_id="s1",
+            runtime_scope_key="scope-1",
+            worker_id="worker-1",
+            require_worker=True,
+        )
+    )
+    conn.execute("INSERT INTO sessions (id, source) VALUES ('s2', 'test')")
+
+    with pytest.raises(CrossWiredRunError):
+        repo.upsert_materialized_state(
+            run_id="r1",
+            session_id="s2",
+            runtime_scope_key="scope-2",
+        )
+
+    assert repo.get_run("r1").session_id == "s1"
+    assert repo.get_run("r1").runtime_scope_key == "scope-1"
+
+
+def test_unclaimed_placeholder_can_canonicalize_from_run_context():
+    conn = _make_conn()
+    conn.execute("INSERT INTO sessions (id, source) VALUES ('s2', 'test')")
+    repo = RunRepoImpl(conn)
+    repo.upsert_materialized_state(
+        run_id="r1",
+        session_id="s1",
+        runtime_scope_key="legacy-member-session",
+    )
+
+    canonical = repo.upsert_materialized_state(
+        run_id="r1",
+        session_id="s2",
+        runtime_scope_key="member-chat:conversation:member",
+    )
+
+    assert canonical.session_id == "s2"
+    assert canonical.runtime_scope_key == "member-chat:conversation:member"
+    assert canonical.worker_id == ""
 
 
 def test_get_run_returns_none_missing():

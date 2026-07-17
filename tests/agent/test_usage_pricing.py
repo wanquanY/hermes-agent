@@ -161,6 +161,30 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
     assert float(result.amount_usd) == 0.0
 
 
+def test_subscription_provider_usage_never_probes_models_endpoint(monkeypatch):
+    def _unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("subscription pricing must not query /models")
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _unexpected_probe,
+    )
+
+    for provider, base_url in (
+        ("copilot", "https://api.githubcopilot.com"),
+        ("copilot-acp", "acp://copilot"),
+        ("xai-oauth", "https://api.x.ai/v1"),
+    ):
+        result = estimate_usage_cost(
+            "gpt-5.4",
+            CanonicalUsage(input_tokens=1_000, output_tokens=500),
+            provider=provider,
+            base_url=base_url,
+        )
+        assert result.status == "included"
+        assert float(result.amount_usd) == 0.0
+
+
 def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",
@@ -206,6 +230,30 @@ def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
 
     assert float(entry.input_cost_per_million) == 0.5
     assert float(entry.output_cost_per_million) == 2.0
+
+
+def test_runtime_pricing_is_cache_only(monkeypatch):
+    calls = []
+
+    def _fake_fetch(base_url, api_key=None, *, allow_network=True):
+        calls.append((base_url, allow_network))
+        return {}
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _fake_fetch,
+    )
+
+    entry = get_pricing_entry(
+        "vendor/private-model",
+        provider="custom",
+        base_url="https://models.example.com/v1",
+        api_key="secret",
+        allow_network_discovery=False,
+    )
+
+    assert entry is None
+    assert calls == [("https://models.example.com/v1", False)]
 
 
 def test_nous_portal_pricing_preserves_vendor_prefixed_model_ids(monkeypatch):

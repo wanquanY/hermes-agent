@@ -1210,7 +1210,7 @@ class TestShareIncludesAutoDelete:
             run_debug_share(args)
 
         out = capsys.readouterr().out
-        assert "public paste service" in out
+        assert "PUBLIC paste service" in out
 
     def test_local_no_privacy_notice(self, hermes_home, capsys):
         from hermes_cli.debug import run_debug_share
@@ -1224,4 +1224,57 @@ class TestShareIncludesAutoDelete:
             run_debug_share(args)
 
         out = capsys.readouterr().out
-        assert "public paste service" not in out
+        assert "PUBLIC paste service" not in out
+
+
+class TestDebugShareConsent:
+    def _args(self, **overrides):
+        from types import SimpleNamespace
+
+        values = {"lines": 50, "expire": 7, "local": False, "no_redact": False, "yes": False}
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_interactive_decline_has_zero_collection_and_network(self, hermes_home, monkeypatch, capsys):
+        from hermes_cli.debug import run_debug_share
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        with patch("hermes_cli.debug._best_effort_sweep_expired_pastes") as sweep, \
+             patch("hermes_cli.debug._capture_dump") as collect, \
+             patch("hermes_cli.debug.upload_to_pastebin") as upload:
+            run_debug_share(self._args())
+        sweep.assert_not_called()
+        collect.assert_not_called()
+        upload.assert_not_called()
+        assert "Aborted" in capsys.readouterr().out
+
+    def test_noninteractive_requires_yes_before_collection(self, hermes_home, monkeypatch):
+        from hermes_cli.debug import run_debug_share
+
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+        with patch("hermes_cli.debug._capture_dump") as collect, \
+             patch("hermes_cli.debug.upload_to_pastebin") as upload, \
+             pytest.raises(SystemExit) as exc:
+            run_debug_share(self._args())
+        assert exc.value.code == 1
+        collect.assert_not_called()
+        upload.assert_not_called()
+
+    def test_yes_skips_prompt_and_uploads(self, hermes_home, monkeypatch):
+        from hermes_cli.debug import run_debug_share
+
+        monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("input must not run"))
+        with patch("hermes_cli.dump.run_dump"), \
+             patch("hermes_cli.debug.upload_to_pastebin", return_value="https://paste.rs/ok"), \
+             patch("hermes_cli.debug._schedule_auto_delete"):
+            run_debug_share(self._args(yes=True))
+
+    def test_local_never_prompts(self, hermes_home, monkeypatch):
+        from hermes_cli.debug import run_debug_share
+
+        monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("input must not run"))
+        with patch("hermes_cli.dump.run_dump"), \
+             patch("hermes_cli.debug.upload_to_pastebin") as upload:
+            run_debug_share(self._args(local=True))
+        upload.assert_not_called()

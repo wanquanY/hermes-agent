@@ -72,6 +72,54 @@ CREATE TABLE IF NOT EXISTS session_compression_leases (
 CREATE INDEX IF NOT EXISTS idx_session_compression_leases_expiry
     ON session_compression_leases(expires_at);
 
+CREATE TABLE IF NOT EXISTS session_runtime_stability (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    compression_ineffective_count INTEGER NOT NULL DEFAULT 0
+        CHECK (compression_ineffective_count >= 0),
+    compression_fallback_streak INTEGER NOT NULL DEFAULT 0
+        CHECK (compression_fallback_streak >= 0),
+    compression_verdict_pending INTEGER NOT NULL DEFAULT 0
+        CHECK (compression_verdict_pending IN (0, 1)),
+    compression_failure_cooldown_until REAL NOT NULL DEFAULT 0,
+    compression_failure_error TEXT NOT NULL DEFAULT '',
+    stream_stale_failures INTEGER NOT NULL DEFAULT 0
+        CHECK (stream_stale_failures >= 0),
+    stream_stale_retry_after REAL NOT NULL DEFAULT 0,
+    stream_stale_route_hash TEXT NOT NULL DEFAULT '',
+    stream_stale_last_error TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS verification_workspace_state (
+    scope_id TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    edit_generation INTEGER NOT NULL DEFAULT 0 CHECK (edit_generation >= 0),
+    last_verified_generation INTEGER NOT NULL DEFAULT -1,
+    last_event_id INTEGER,
+    changed_paths_json TEXT NOT NULL DEFAULT '[]',
+    updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope_id, workspace_root)
+);
+
+CREATE TABLE IF NOT EXISTS verification_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_id TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    edit_generation INTEGER NOT NULL CHECK (edit_generation >= 0),
+    command TEXT NOT NULL,
+    canonical_command TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    evidence_scope TEXT NOT NULL CHECK (evidence_scope IN ('targeted', 'full')),
+    status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+    exit_code INTEGER NOT NULL,
+    cwd TEXT NOT NULL,
+    output_summary TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verification_evidence_scope_root
+    ON verification_evidence(scope_id, workspace_root, id DESC);
+
 -- Control-plane denormalized session index. One row per user-visible session.
 -- Status fields are a WRITE-TIME projection so the sidebar read path is a single
 -- indexed query (no recursive CTE / live merge / per-session approval / per-profile
@@ -253,6 +301,8 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     runtime_scope_key TEXT,
+    worker_id TEXT NOT NULL DEFAULT '',
+    agent_profile_id TEXT NOT NULL DEFAULT '',
     turn_id TEXT,
     execution_session_id TEXT,
     status TEXT NOT NULL,

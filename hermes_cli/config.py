@@ -651,6 +651,14 @@ DEFAULT_CONFIG = {
         #   "on"             — force the prompt posture everywhere.
         #   "off"            — disable entirely.
         "coding_context": "auto",
+        # Provider-independent edit verification. Successful file mutations
+        # open a new edit generation; the agent gets one bounded internal
+        # continuation when no fresh passing test/lint/type/build evidence
+        # exists. No synthetic transcript message is persisted.
+        "verification": {
+            "completion_guard": "auto",
+            "max_attempts": 1,
+        },
         # Staged inactivity warning: send a warning to the user at this
         # threshold before escalating to a full timeout.  The warning fires
         # once per run and does not interrupt the agent.  0 = disable warning.
@@ -961,6 +969,9 @@ DEFAULT_CONFIG = {
                                       # trigger to 85% when the global threshold is lower.
                                       # Codex caps these families at 272K, while direct API,
                                       # OpenRouter, and Copilot retain their larger windows.
+        "codex_app_server_auto": "native",  # native | hermes | off. Only the app-server
+                                      # owns its real thread context; manual compaction
+                                      # always uses thread/compact/start.
         "in_place": False,            # When True, compaction rewrites the message
                                       # list and rebuilds the system prompt WITHOUT
                                       # rotating the session id — the conversation
@@ -994,6 +1005,7 @@ DEFAULT_CONFIG = {
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
     "prompt_caching": {
+        "enabled": True,
         "cache_ttl": "5m",
     },
 
@@ -1073,6 +1085,8 @@ DEFAULT_CONFIG = {
             "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
+            "max_concurrency": 4,  # process-wide active vision jobs (env: HERMES_VISION_MAX_CONCURRENCY)
+            "max_queue": 256,      # bounded waiting jobs; excess requests fail before payload allocation
         },
         "web_extract": {
             "provider": "auto",
@@ -1410,6 +1424,10 @@ DEFAULT_CONFIG = {
                                  # "low", "minimal", "none" (empty = inherit parent's level)
         "max_concurrent_children": 3,  # max parallel children per batch; floor of 1 enforced, no ceiling
         "max_async_children": 3,  # max concurrent background (background=true) subagents; new dispatches rejected at capacity
+        # Full child summaries are safely spilled when the static ceiling or
+        # the parent's dynamic context-headroom budget is exceeded. 0 disables
+        # only this static ceiling; the dynamic budget remains authoritative.
+        "max_summary_chars": 24000,
         # Orchestrator role controls (see tools/delegate_tool.py:_get_max_spawn_depth
         # and _get_orchestrator_enabled).  Values are clamped to [1, 3] with a
         # warning log if out of range.
@@ -1608,6 +1626,9 @@ DEFAULT_CONFIG = {
         "mode": "manual",
         "timeout": 60,
         "cron_mode": "deny",
+        # Case-insensitive shell globs that are blocked before yolo, smart
+        # approval, mode=off and permanent allowlists. Example: ["git push *"]
+        "deny": [],
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system

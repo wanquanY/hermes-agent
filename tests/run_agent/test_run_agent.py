@@ -620,6 +620,16 @@ class TestSessionJsonSnapshotOptIn:
         # the session JSON opt-in.
         assert hasattr(agent, "logs_dir")
 
+    def test_traversal_session_id_snapshot_stays_inside_logs_dir(self, agent, tmp_path):
+        agent._session_json_enabled = True
+        agent.logs_dir = tmp_path
+        agent.session_id = "../../outside/tenant"
+        agent._save_session_log([{"role": "user", "content": "hello"}])
+
+        snapshots = list(tmp_path.glob("session_*.json"))
+        assert len(snapshots) == 1
+        assert snapshots[0].resolve().parent == tmp_path.resolve()
+
 
 class TestGetMessagesUpToLastAssistant:
     def test_empty_list(self, agent):
@@ -1928,7 +1938,7 @@ class TestExecuteToolCalls:
         assert messages[1]["tool_call_id"] == "c2"
         assert messages[1]["content"] == "search result"
 
-    def test_invalid_json_args_defaults_empty(self, agent):
+    def test_invalid_json_args_are_rejected_without_dispatch(self, agent):
         tc = _mock_tool_call(
             name="web_search", arguments="not valid json", call_id="c1"
         )
@@ -1936,13 +1946,12 @@ class TestExecuteToolCalls:
         messages = []
         with patch("run_agent.handle_function_call", return_value="ok") as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
-            # Invalid JSON args should fall back to empty dict
-            args, kwargs = mock_hfc.call_args
-            assert args[:3] == ("web_search", {}, "task-1")
-            assert set(kwargs.get("enabled_tools", [])) == agent.valid_tool_names
+            mock_hfc.assert_not_called()
         assert len(messages) == 1
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
+        assert "valid json object" in messages[0]["content"].lower()
+        assert "tool was not executed" in messages[0]["content"].lower()
 
     def test_result_truncation_over_100k(self, agent, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -2497,48 +2506,48 @@ class TestParallelScopePathNormalization:
 
 
 class TestMcpParallelToolBatch:
-    """Integration test: _should_parallelize_tool_batch respects MCP parallel flag."""
+    """MCP transport concurrency never implies effect-free business calls."""
 
     def test_mcp_tools_default_sequential(self):
         """MCP tools without supports_parallel_tool_calls are sequential."""
         from run_agent import _should_parallelize_tool_batch
-        tc1 = _mock_tool_call(name="mcp_github_list_repos", arguments='{"org":"openai"}', call_id="c1")
-        tc2 = _mock_tool_call(name="mcp_github_search_code", arguments='{"q":"test"}', call_id="c2")
+        tc1 = _mock_tool_call(name="mcp__github__list_repos", arguments='{"org":"openai"}', call_id="c1")
+        tc2 = _mock_tool_call(name="mcp__github__search_code", arguments='{"q":"test"}', call_id="c2")
         assert not _should_parallelize_tool_batch([tc1, tc2])
 
-    def test_mcp_tools_parallel_when_server_opted_in(self):
-        """MCP tools from a parallel-safe server can run concurrently."""
+    def test_transport_parallel_opt_in_does_not_bypass_effect_gate(self):
+        """Server capacity is not proof that two external effects may reorder."""
         from run_agent import _should_parallelize_tool_batch
         from tools.mcp_tool import _mcp_tool_server_names, _parallel_safe_servers, _lock
         with _lock:
             _parallel_safe_servers.add("github")
-            _mcp_tool_server_names["mcp_github_list_repos"] = "github"
-            _mcp_tool_server_names["mcp_github_search_code"] = "github"
+            _mcp_tool_server_names["mcp__github__list_repos"] = "github"
+            _mcp_tool_server_names["mcp__github__search_code"] = "github"
         try:
-            tc1 = _mock_tool_call(name="mcp_github_list_repos", arguments='{"org":"openai"}', call_id="c1")
-            tc2 = _mock_tool_call(name="mcp_github_search_code", arguments='{"q":"test"}', call_id="c2")
-            assert _should_parallelize_tool_batch([tc1, tc2])
+            tc1 = _mock_tool_call(name="mcp__github__list_repos", arguments='{"org":"openai"}', call_id="c1")
+            tc2 = _mock_tool_call(name="mcp__github__search_code", arguments='{"q":"test"}', call_id="c2")
+            assert not _should_parallelize_tool_batch([tc1, tc2])
         finally:
             with _lock:
                 _parallel_safe_servers.discard("github")
-                _mcp_tool_server_names.pop("mcp_github_list_repos", None)
-                _mcp_tool_server_names.pop("mcp_github_search_code", None)
+                _mcp_tool_server_names.pop("mcp__github__list_repos", None)
+                _mcp_tool_server_names.pop("mcp__github__search_code", None)
 
-    def test_mixed_mcp_and_builtin_parallel(self):
-        """MCP parallel tools mixed with built-in parallel-safe tools."""
+    def test_unknown_mcp_effect_is_barrier_for_safe_builtin(self):
+        """A safe builtin cannot cross an unknown MCP effect barrier."""
         from run_agent import _should_parallelize_tool_batch
         from tools.mcp_tool import _mcp_tool_server_names, _parallel_safe_servers, _lock
         with _lock:
             _parallel_safe_servers.add("docs")
-            _mcp_tool_server_names["mcp_docs_search"] = "docs"
+            _mcp_tool_server_names["mcp__docs__search"] = "docs"
         try:
-            tc1 = _mock_tool_call(name="mcp_docs_search", arguments='{"query":"api"}', call_id="c1")
+            tc1 = _mock_tool_call(name="mcp__docs__search", arguments='{"query":"api"}', call_id="c1")
             tc2 = _mock_tool_call(name="web_search", arguments='{"query":"test"}', call_id="c2")
-            assert _should_parallelize_tool_batch([tc1, tc2])
+            assert not _should_parallelize_tool_batch([tc1, tc2])
         finally:
             with _lock:
                 _parallel_safe_servers.discard("docs")
-                _mcp_tool_server_names.pop("mcp_docs_search", None)
+                _mcp_tool_server_names.pop("mcp__docs__search", None)
 
     def test_mixed_parallel_and_serial_mcp_servers(self):
         """One parallel MCP server + one non-parallel MCP server = sequential."""
@@ -2547,17 +2556,17 @@ class TestMcpParallelToolBatch:
         with _lock:
             _parallel_safe_servers.add("docs")
             # "github" is NOT in _parallel_safe_servers
-            _mcp_tool_server_names["mcp_docs_search"] = "docs"
-            _mcp_tool_server_names["mcp_github_list_repos"] = "github"
+            _mcp_tool_server_names["mcp__docs__search"] = "docs"
+            _mcp_tool_server_names["mcp__github__list_repos"] = "github"
         try:
-            tc1 = _mock_tool_call(name="mcp_docs_search", arguments='{"query":"api"}', call_id="c1")
-            tc2 = _mock_tool_call(name="mcp_github_list_repos", arguments='{"org":"openai"}', call_id="c2")
+            tc1 = _mock_tool_call(name="mcp__docs__search", arguments='{"query":"api"}', call_id="c1")
+            tc2 = _mock_tool_call(name="mcp__github__list_repos", arguments='{"org":"openai"}', call_id="c2")
             assert not _should_parallelize_tool_batch([tc1, tc2])
         finally:
             with _lock:
                 _parallel_safe_servers.discard("docs")
-                _mcp_tool_server_names.pop("mcp_docs_search", None)
-                _mcp_tool_server_names.pop("mcp_github_list_repos", None)
+                _mcp_tool_server_names.pop("mcp__docs__search", None)
+                _mcp_tool_server_names.pop("mcp__github__list_repos", None)
 
 
 class TestHandleMaxIterations:
@@ -5432,6 +5441,25 @@ class TestPersistUserMessageOverride:
         first_db_write = agent._session_db.messages.append.call_args_list[0].kwargs
         assert first_db_write["content"] == "Hello there"
 
+    def test_persistence_projection_preserves_multimodal_live_content(self, agent):
+        clean_content = [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "local://image"}},
+        ]
+        provider_content = [
+            {"type": "text", "text": "API-only prefix: describe this"},
+            {"type": "image_url", "image_url": {"url": "local://image"}},
+        ]
+        messages = [{"role": "user", "content": provider_content}]
+        agent._persist_user_message_idx = 0
+        agent._persist_user_message_override = clean_content
+
+        persisted = agent._messages_for_persistence(messages)
+
+        assert messages[0]["content"] is provider_content
+        assert messages[0]["content"][0]["text"].startswith("API-only")
+        assert persisted[0]["content"] == clean_content
+
     def test_api_only_user_instruction_reaches_provider_but_not_returned_history(self, agent):
         TestRunConversation()._setup_agent(agent)
         agent._session_persistence_disabled = True
@@ -5458,6 +5486,45 @@ class TestPersistUserMessageOverride:
         returned_users = [message for message in result["messages"] if message.get("role") == "user"]
         assert returned_users[-1]["content"] == ""
         assert result["final_response"] == "The terminal report is ready."
+
+
+def test_persist_session_serializes_snapshot_decisions():
+    """Concurrent close/worker writers never enter persistence together."""
+    import threading
+    import time
+
+    agent = AIAgent.__new__(AIAgent)
+    agent._session_persist_lock = threading.RLock()
+    active = 0
+    maximum_active = 0
+    calls = []
+    state_lock = threading.Lock()
+
+    def persist_unlocked(messages, conversation_history=None):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        calls.append(messages[0]["content"])
+        with state_lock:
+            active -= 1
+
+    agent._persist_session_unlocked = persist_unlocked
+    threads = [
+        threading.Thread(
+            target=agent._persist_session,
+            args=([{"role": "user", "content": value}], []),
+        )
+        for value in ("close", "worker")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_active == 1
+    assert sorted(calls) == ["close", "worker"]
 
 
 class TestReasoningReplayForStrictProviders:

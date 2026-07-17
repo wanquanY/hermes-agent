@@ -253,6 +253,9 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
     specs: List[ShellHookSpec] = []
 
     for event_name, entries in hooks_cfg.items():
+        # Configuration namespaces nested under hooks are not hook events.
+        if event_name == "output_spill":
+            continue
         if event_name not in VALID_HOOKS:
             suggestion = difflib.get_close_matches(
                 str(event_name), VALID_HOOKS, n=1, cutoff=0.6,
@@ -499,7 +502,7 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
     For ``pre_tool_call`` the Claude-Code-style ``{"decision": "block",
     "reason": "..."}`` payload is translated into the canonical Hermes
     ``{"action": "block", "message": "..."}`` shape expected by
-    :func:`hermes_cli.plugins.get_pre_tool_call_block_message`.  This is
+    :func:`hermes_cli.plugins.resolve_pre_tool_block`.  This is
     the single most important correctness invariant in this module —
     skipping the translation silently breaks every ``pre_tool_call``
     block directive.

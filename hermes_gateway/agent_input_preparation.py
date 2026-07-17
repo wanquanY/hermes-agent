@@ -112,10 +112,18 @@ class AgentInputPreparation:
             get_entry = getattr(session_store, "get_entry", None)
             if callable(get_entry):
                 resume_entry = get_entry(self._session_key)
+        resume_mark_is_fresh = bool(
+            resume_entry is not None
+            and getattr(resume_entry, "resume_pending", False)
+            and self._is_fresh_gateway_interruption(
+                getattr(resume_entry, "last_resume_marked_at", None),
+                window_secs=freshness_window,
+            )
+        )
         is_resume_pending = bool(
             resume_entry is not None
             and getattr(resume_entry, "resume_pending", False)
-            and interruption_is_fresh
+            and (interruption_is_fresh or resume_mark_is_fresh)
         )
         has_fresh_tool_tail = bool(
             agent_history
@@ -148,6 +156,17 @@ class AgentInputPreparation:
                 "those results and summarize what was accomplished, then address the "
                 "user's new message below.]\n\n"
                 + message
+            )
+        if (
+            not str(message or "").strip()
+            and resume_entry is not None
+            and getattr(resume_entry, "resume_pending", False)
+        ):
+            return (
+                "[System note: The previous turn in this session was interrupted "
+                "by a gateway restart. Review the intact conversation history, "
+                "finish any unfinished work, summarize what was accomplished, "
+                "then wait for the user's next message.]"
             )
         return message
 

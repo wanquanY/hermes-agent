@@ -10,6 +10,10 @@ from typing import Any, Protocol, runtime_checkable
 
 from hermes_agent.domain.canonical_event import CanonicalEvent as DomainCanonicalEvent
 from hermes_agent.domain.event_ledger import EventLedger, LedgerEvent
+from hermes_agent.domain.run_identity import (
+    RunIdentity,
+    ensure_run_identity_compatible,
+)
 from hermes_agent.domain.run_event_codec import decode_run_event_row, encode_run_event_frame
 from hermes_agent.domain.run_event_index import (
     project_run_event_search_index_from_row,
@@ -45,6 +49,8 @@ class RunSpec:
     session_id: str
     turn_id: str = ""
     runtime_scope_key: str = ""
+    worker_id: str = ""
+    agent_profile_id: str = ""
     execution_session_id: str = ""
     status: str = "running"
 
@@ -59,6 +65,8 @@ class Run:
     completed_at: float | None = None
     turn_id: str = ""
     runtime_scope_key: str = ""
+    worker_id: str = ""
+    agent_profile_id: str = ""
     execution_session_id: str = ""
     last_seq: int = 0
     terminal_seq: int = 0
@@ -109,6 +117,8 @@ class CanonicalEventSpec:
 @runtime_checkable
 class RunRepo(Protocol):
     def create_run(self, session_id: str, spec: RunSpec) -> Run: ...
+
+    def claim_identity(self, incoming: RunIdentity) -> RunIdentity: ...
 
     def upsert_materialized_state(
         self,
@@ -213,23 +223,75 @@ class RunRepoImpl:
 
     # ------------------------------------------------------------------
 
+    def claim_identity(self, incoming: RunIdentity) -> RunIdentity:
+        """Atomically validate and fill unclaimed durable identity fields."""
+        row = self._conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?",
+            (incoming.run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"run {incoming.run_id!r} must exist before launch")
+        existing = _identity_from_run_row(row)
+        claimed = existing.claimed_with(incoming)
+        self._conn.execute(
+            """
+            UPDATE runs
+               SET runtime_scope_key = ?,
+                   worker_id = ?,
+                   agent_profile_id = ?
+             WHERE run_id = ?
+            """,
+            (
+                claimed.runtime_scope_key,
+                claimed.worker_id,
+                claimed.agent_profile_id,
+                claimed.run_id,
+            ),
+        )
+        return claimed
+
     def create_run(self, session_id: str, spec: RunSpec) -> Run:
         stable_sid = str(session_id or "").strip()
         stable_run = str(spec.run_id or "").strip()
         if not stable_sid or not stable_run:
             raise ValueError("session_id and RunSpec.run_id are required")
+        spec_session = str(spec.session_id or stable_sid).strip()
+        if spec_session != stable_sid:
+            raise ValueError("session_id and RunSpec.session_id must match")
+        incoming_identity = RunIdentity.create(
+            run_id=stable_run,
+            session_id=stable_sid,
+            runtime_scope_key=spec.runtime_scope_key,
+            worker_id=spec.worker_id,
+            agent_profile_id=spec.agent_profile_id,
+        )
+        existing = self._conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?",
+            (stable_run,),
+        ).fetchone()
+        if existing is not None:
+            ensure_run_identity_compatible(
+                _identity_from_run_row(existing),
+                incoming_identity,
+            )
+            got = self.get_run(stable_run)
+            assert got is not None
+            return got
         now = time.time()
         self._conn.execute(
             """
-            INSERT OR REPLACE INTO runs (
-                run_id, session_id, runtime_scope_key, turn_id,
+            INSERT INTO runs (
+                run_id, session_id, runtime_scope_key, worker_id,
+                agent_profile_id, turn_id,
                 execution_session_id, status, started_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stable_run,
                 stable_sid,
-                str(spec.runtime_scope_key or ""),
+                incoming_identity.runtime_scope_key,
+                incoming_identity.worker_id,
+                incoming_identity.agent_profile_id,
                 str(spec.turn_id or ""),
                 str(spec.execution_session_id or ""),
                 str(spec.status or "running"),
@@ -275,16 +337,19 @@ class RunRepoImpl:
             self._conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id, session_id, runtime_scope_key, turn_id, execution_session_id, status,
+                    run_id, session_id, runtime_scope_key, worker_id,
+                    agent_profile_id, turn_id, execution_session_id, status,
                     started_at, updated_at, completed_at, last_seq, error,
                     metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stable_run,
                     stable_sid,
                     normalized_scope,
+                    "",
+                    "",
                     str(turn_id or ""),
                     str(execution_session_id or ""),
                     incoming_status,
@@ -297,6 +362,22 @@ class RunRepoImpl:
                 ),
             )
         else:
+            persisted_identity = _identity_from_run_row(existing)
+            # Event ingestion may create a placeholder from legacy execution
+            # hints before RunContext resolves the canonical conversation and
+            # participant scope.  The worker claim is the seal: before it,
+            # materialization may canonicalize session/scope; after it, every
+            # identity dimension is immutable.
+            identity_is_claimed = bool(persisted_identity.worker_id)
+            if identity_is_claimed:
+                ensure_run_identity_compatible(
+                    persisted_identity,
+                    RunIdentity.create(
+                        run_id=stable_run,
+                        session_id=stable_sid,
+                        runtime_scope_key=normalized_scope,
+                    ),
+                )
             existing_status = str(existing["status"] or "")
             next_status = resolve_explicit_run_status(
                 existing_status=existing_status,
@@ -335,7 +416,11 @@ class RunRepoImpl:
                 WHERE run_id = ?
                 """,
                 (
-                    stable_sid,
+                    (
+                        persisted_identity.session_id
+                        if identity_is_claimed
+                        else stable_sid
+                    ),
                     normalized_scope,
                     str(turn_id or ""),
                     str(execution_session_id or ""),
@@ -360,7 +445,8 @@ class RunRepoImpl:
         row = self._conn.execute(
             """
             SELECT run_id, session_id, status, started_at, updated_at,
-                   completed_at, turn_id, runtime_scope_key, execution_session_id,
+                   completed_at, turn_id, runtime_scope_key, worker_id,
+                   agent_profile_id, execution_session_id,
                    last_seq, terminal_seq, terminal_degraded, terminal_cause,
                    error, metadata_json
               FROM runs
@@ -883,13 +969,25 @@ def _row_to_run(row: Any) -> Run:
         completed_at=float(completed_at_raw) if completed_at_raw is not None else None,
         turn_id=str(_g("turn_id", 6) or ""),
         runtime_scope_key=str(_g("runtime_scope_key", 7) or ""),
-        execution_session_id=str(_g("execution_session_id", 8) or ""),
-        last_seq=int(_g("last_seq", 9) or 0),
-        terminal_seq=int(_g("terminal_seq", 10) or 0),
-        terminal_degraded=bool(int(_g("terminal_degraded", 11) or 0)),
-        terminal_cause=str(_g("terminal_cause", 12) or ""),
-        error=str(_g("error", 13) or ""),
-        metadata=_json_loads(_g("metadata_json", 14), {}),
+        worker_id=str(_g("worker_id", 8) or ""),
+        agent_profile_id=str(_g("agent_profile_id", 9) or ""),
+        execution_session_id=str(_g("execution_session_id", 10) or ""),
+        last_seq=int(_g("last_seq", 11) or 0),
+        terminal_seq=int(_g("terminal_seq", 12) or 0),
+        terminal_degraded=bool(int(_g("terminal_degraded", 13) or 0)),
+        terminal_cause=str(_g("terminal_cause", 14) or ""),
+        error=str(_g("error", 15) or ""),
+        metadata=_json_loads(_g("metadata_json", 16), {}),
+    )
+
+
+def _identity_from_run_row(row: Any) -> RunIdentity:
+    return RunIdentity.create(
+        run_id=row["run_id"],
+        session_id=row["session_id"],
+        runtime_scope_key=row["runtime_scope_key"],
+        worker_id=row["worker_id"],
+        agent_profile_id=row["agent_profile_id"],
     )
 
 

@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict
 
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource, build_session_key
@@ -29,22 +30,22 @@ class GatewaySessionHandoffRuntimeService:
                     await asyncio.sleep(interval)
                     continue
                 sessions = runner._session_db.sessions
-                pending = sessions.list_pending_handoffs()
+                pending = await run_sqlite_io(sessions.list_pending_handoffs)
                 for row in pending:
                     session_id = row.get("id")
                     if not session_id:
                         continue
-                    if not sessions.claim_handoff(session_id):
+                    if not await run_sqlite_io(sessions.claim_handoff, session_id):
                         continue
                     try:
                         await self.process_handoff(row)
-                        sessions.complete_handoff(session_id)
+                        await run_sqlite_io(sessions.complete_handoff, session_id)
                     except Exception as exc:
                         logger.warning(
                             "Handoff for session %s failed: %s",
                             session_id, exc, exc_info=True,
                         )
-                        sessions.fail_handoff(session_id, str(exc))
+                        await run_sqlite_io(sessions.fail_handoff, session_id, str(exc))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -106,8 +107,12 @@ class GatewaySessionHandoffRuntimeService:
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
         )
 
-        runner.session_store.get_or_create_session(dest_source)
-        switched = runner.session_store.switch_session(session_key, cli_session_id)
+        await run_sqlite_io(runner.session_store.get_or_create_session, dest_source)
+        switched = await run_sqlite_io(
+            runner.session_store.switch_session,
+            session_key,
+            cli_session_id,
+        )
         if switched is None:
             raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
 

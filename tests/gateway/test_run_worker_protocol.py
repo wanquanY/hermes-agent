@@ -20,6 +20,7 @@ from typing import AsyncIterator
 
 import pytest
 
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
 from tui_gateway.run_worker import (
     EventFrame,
     FrameDecodeError,
@@ -451,6 +452,47 @@ async def test_handler_dispatches_run_start_to_backend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_rejects_run_start_after_runtime_begins_draining() -> None:
+    backend = _RecordingBackend()
+    registry = ActiveWorkRegistry()
+    registry.begin_drain()
+    handler = _build_default_handler(
+        backend,
+        _RecordingResponder(),
+        set(),
+        active_work_registry=registry,
+    )
+    sink = _Sink()
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps(
+                    {
+                        "op": "run.start",
+                        "run_id": "r-draining",
+                        "turn_id": "t1",
+                        "conversation_session_id": "s1",
+                        "prompt": "hi",
+                    }
+                ),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=sink.write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    assert backend.starts == []
+    terms = [frame for frame in sink.decoded() if frame.get("op") == "run.terminal"]
+    assert len(terms) == 1
+    assert terms[0]["run_id"] == "r-draining"
+    assert terms[0]["status"] == "failed"
+    assert "runtime is draining" in terms[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_handler_emits_synthesized_terminal_on_backend_exception() -> None:
     class _BoomBackend(WorkerRunBackend):
         async def start(self, frame, emit) -> None:
@@ -693,6 +735,30 @@ async def test_real_responder_approval_blank_answer_defaults_to_once(monkeypatch
         InteractiveResponseFrame(kind="approval", request_id="sess-1", answer=None)
     )
     assert captured == [("sess-1", "once")]
+
+
+@pytest.mark.asyncio
+async def test_real_responder_approval_dict_relays_deny_reason(monkeypatch) -> None:
+    captured = {}
+
+    def fake_resolve(session_key, choice, resolve_all: bool = False, reason=None) -> int:
+        captured.update(session_key=session_key, choice=choice, reason=reason)
+        return 1
+
+    import tools.approval as approval_mod
+    monkeypatch.setattr(approval_mod, "resolve_gateway_approval", fake_resolve)
+    responder = RealInteractiveResponder()
+    ok = await responder.resolve(InteractiveResponseFrame(
+        kind="approval",
+        request_id="req-deny",
+        answer={"choice": "deny", "reason": "wrong environment"},
+    ))
+    assert ok is True
+    assert captured == {
+        "session_key": "req-deny",
+        "choice": "deny",
+        "reason": "wrong environment",
+    }
 
 
 @pytest.mark.asyncio

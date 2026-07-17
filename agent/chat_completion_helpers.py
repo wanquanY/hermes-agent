@@ -57,6 +57,12 @@ from agent.tool_dispatch_helpers import (
     _multimodal_text_summary,
 )
 from agent.retry_utils import jittered_backoff
+from agent.runtime_stability import (
+    check_stream_stale_circuit,
+    record_stream_stale_failure,
+    record_stream_success,
+    reset_stream_stale_circuit,
+)
 from agent.tool_guardrails import (
     ToolGuardrailDecision,
     append_toolguard_guidance,
@@ -67,6 +73,12 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
+
+# A short cross-turn gate after a non-rate-limit fallback chain is exhausted.
+# This prevents an immediate new turn from replaying every provider and
+# re-marshalling a large context again. Rate-limit/billing failures retain the
+# existing 60-second window.
+_FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
 def _log_dovie_stream_stage(agent, stage: str, **fields: Any) -> None:
@@ -175,6 +187,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    check_stream_stale_circuit(agent)
     result = {"response": None, "error": None}
     request_client_holder = {"client": None}
     request_client_lock = threading.Lock()
@@ -342,6 +355,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"codex time-to-first-byte exceeded {_ttfb_timeout:.0f}s",
+            )
             agent._touch_activity(
                 f"codex stream killed after {int(_elapsed)}s with no first byte"
             )
@@ -383,6 +400,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     _close_request_client_once("stale_call_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"non-streaming response stale after {_elapsed:.0f}s",
+            )
             agent._touch_activity(
                 f"stale non-streaming call killed after {int(_elapsed)}s"
             )
@@ -410,6 +431,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
             raise InterruptedError("Agent interrupted during API call")
     if result["error"] is not None:
         raise result["error"]
+    if result["response"] is not None:
+        record_stream_success(agent)
     return result["response"]
 
 
@@ -919,6 +942,15 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if (not fallback_already_active) or (primary_provider and current_provider == primary_provider):
             agent._rate_limited_until = time.monotonic() + 60
     if agent._fallback_index >= len(agent._fallback_chain):
+        if (
+            agent._fallback_chain
+            and reason not in {FailoverReason.rate_limit, FailoverReason.billing}
+        ):
+            existing = getattr(agent, "_rate_limited_until", 0) or 0
+            agent._rate_limited_until = max(
+                existing,
+                time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S,
+            )
         return False
 
     fb = agent._fallback_chain[agent._fallback_index]
@@ -926,7 +958,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     fb_provider = (fb.get("provider") or "").strip().lower()
     fb_model = (fb.get("model") or "").strip()
     if not fb_provider or not fb_model:
-        return agent._try_activate_fallback()  # skip invalid, try next
+        return agent._try_activate_fallback(reason=reason)  # skip invalid, try next
 
     # Skip entries that resolve to the current (provider, model) — falling
     # back to the same backend that just failed loops the failure. Compare
@@ -941,7 +973,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback skip: chain entry %s/%s matches current provider/model",
             fb_provider, fb_model,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
     if (
         fb_base_url_for_dedup
         and current_base_url
@@ -952,7 +984,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback skip: chain entry base_url %s matches current backend",
             fb_base_url_for_dedup,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
 
     # Use centralized router for client construction.
     # raw_codex=True because the main agent needs direct responses.stream()
@@ -983,7 +1015,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             logging.warning(
                 "Fallback to %s failed: provider not configured",
                 fb_provider)
-            return agent._try_activate_fallback()  # try next in chain
+            return agent._try_activate_fallback(reason=reason)  # try next in chain
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
 
@@ -1110,6 +1142,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_key=_fb_ctx_api_key, provider=agent.provider,
                 config_context_length=getattr(agent, "_config_context_length", None),
                 custom_providers=getattr(agent, "_custom_providers", None),
+                allow_network_discovery=False,
             )
             agent.context_compressor.update_model(
                 model=agent.model,
@@ -1134,10 +1167,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        reset_stream_stale_circuit(agent, reason="fallback_activated")
         return True
     except Exception as e:
         logging.error("Failed to activate fallback %s: %s", fb_model, e)
-        return agent._try_activate_fallback()  # try next in chain
+        return agent._try_activate_fallback(reason=reason)  # try next in chain
 
 
 
@@ -1409,6 +1443,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     """
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
+    check_stream_stale_circuit(agent)
     _log_dovie_stream_stage(
         agent,
         "interruptible-stream-entry",
@@ -1495,6 +1530,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 raise InterruptedError("Agent interrupted during Bedrock API call")
         if result["error"] is not None:
             raise result["error"]
+        if result["response"] is not None:
+            record_stream_success(agent)
         return result["response"]
 
     result = {"response": None, "error": None, "partial_tool_names": []}
@@ -2457,6 +2494,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 _close_request_client_once("stale_stream_kill")
             except Exception:
                 pass
+            record_stream_stale_failure(
+                agent,
+                f"stream response stale after {_stale_elapsed:.0f}s",
+            )
             # Rebuild the primary client too — its connection pool
             # may hold dead sockets from the same provider outage.
             try:
@@ -2546,7 +2587,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 role="assistant", content=_partial_text, tool_calls=None,
                 reasoning_content=None,
             )
-            return SimpleNamespace(
+            partial_response = SimpleNamespace(
                 id=PARTIAL_STREAM_STUB_ID,
                 model=getattr(agent, "model", "unknown"),
                 choices=[SimpleNamespace(
@@ -2555,7 +2596,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 usage=None,
                 _dropped_tool_names=_partial_names or None,
             )
+            record_stream_success(agent)
+            return partial_response
         raise result["error"]
+    if result["response"] is not None:
+        record_stream_success(agent)
     return result["response"]
 
 # ── Provider fallback ──────────────────────────────────────────────────

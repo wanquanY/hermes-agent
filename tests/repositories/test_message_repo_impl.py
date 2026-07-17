@@ -121,6 +121,30 @@ def test_append_persists_message_and_returns_projection():
     assert row["n"] == 1
 
 
+def test_tool_effect_disposition_round_trips_through_sqlite_metadata():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    message = repo.append(
+        "s1",
+        MessageSpec(
+            session_id="s1",
+            role="tool",
+            content="timed out",
+            tool_call_id="call-1",
+            tool_name="terminal",
+            effect_disposition="unknown",
+        ),
+    )
+
+    assert message.effect_disposition == "unknown"
+    assert (
+        message.metadata["_hermes_tool_effect_disposition"]
+        == "unknown"
+    )
+    loaded = repo.get_page("s1", direction=PageDirection.HEAD, limit=10)
+    assert loaded.messages[0].effect_disposition == "unknown"
+
+
 def test_append_requires_session_and_role():
     repo = MessageRepoImpl(_make_conn())
     with pytest.raises(ValueError):

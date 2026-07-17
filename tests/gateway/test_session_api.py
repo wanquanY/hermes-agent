@@ -170,6 +170,18 @@ async def test_session_crud_and_message_history(adapter, session_db):
 
 
 @pytest.mark.asyncio
+async def test_session_create_and_fork_reject_path_shaped_ids(adapter, session_db):
+    source_id = session_db.sessions.create("source-session", "api_server")
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        for unsafe in ("../escape", "/absolute", "..\\windows", "tenant/id"):
+            create = await cli.post("/api/sessions", json={"id": unsafe})
+            assert create.status == 400
+            fork = await cli.post(f"/api/sessions/{source_id}/fork", json={"id": unsafe})
+            assert fork.status == 400
+
+
+@pytest.mark.asyncio
 async def test_session_messages_follow_compression_tip(adapter, session_db):
     source_id = session_db.sessions.create("source-session", "api_server")
     session_db.messages.append(source_id, "user", "before compression")

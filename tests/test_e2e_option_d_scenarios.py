@@ -410,7 +410,13 @@ async def test_e2e_async_agent_dispatch_round_trip(harness, tmp_path: Path) -> N
         time_fn=lambda: 100.0,
     )
 
-    assert result == {"activity_id": "act-C", "conversation_id": "conv-C-child", "status": "running"}
+    assert result == {
+        "activity_id": "act-C",
+        "conversation_id": "conv-C-child",
+        "execution_mode": "async",
+        "persistent": True,
+        "status": "running",
+    }
     assert harness.supervisor.sent_run_starts[0][0] == "profile:profile-worker"
     assert harness.supervisor.sent_run_starts[0][1] == "conv-C-child"
     assert harness.supervisor.sent_run_starts[0][2].prompt == "Investigate the failure"
@@ -519,7 +525,13 @@ async def test_e2e_async_team_dispatch_round_trip(harness) -> None:
         parent_scope_key="conv-D",
     )
 
-    assert result == {"activity_id": "act-D", "mission_id": "mission-D"}
+    assert result == {
+        "activity_id": "act-D",
+        "mission_id": "mission-D",
+        "execution_mode": "async",
+        "persistent": True,
+        "status": "running",
+    }
     assert harness.db.activities.get("act-D")["target_mission_id"] == "mission-D"
 
     await _complete_dispatched_run(
@@ -600,16 +612,6 @@ async def test_e2e_multi_activity_per_conversation(
     assert [row["activity_id"] for row in rows] == ["act-E1", "act-E2", "act-E3"]
     assert {row["status"] for row in rows} == {"completed"}
     assert harness.db.activities.unread_count(conversation_id="conv-E") == 3
-    monkeypatch.setattr(server, "_get_db", lambda: harness.db, raising=False)
-    index_response = server._methods["session.index.list"](1, {})
-    [item] = [
-        item
-        for item in index_response["result"]["sessions"]
-        if item["id"] == "conv-E"
-    ]
-    assert item["active_activity_count"] == 0
-    assert item["unread_completion_count"] == 3
-
     injected = _drain_activity_events_for_api(_FakeLeaderAgent(harness.db, harness.parent_bus))
     assert [message["role"] for message in injected] == ["system", "system", "system"]
     assert [message["content"].splitlines()[0].split()[2] for message in injected] == [

@@ -402,6 +402,80 @@ class TestValidationPhase:
         assert set(written.keys()) == {"a.py", "b.py"}
 
 
+    def test_context_only_hunk_does_not_reject_later_real_hunk(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+@@ anchor @@
+ anchor
+@@ value @@
+-value = 1
++value = 2
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            written = None
+
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="anchor\nvalue = 1\n", error=None)
+
+            def write_file(self, path, content):
+                self.written = content
+                return SimpleNamespace(error=None)
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(ops, file_ops)
+        assert result.success is True
+        assert file_ops.written == "anchor\nvalue = 2\n"
+
+    def test_patch_with_only_context_hunks_fails_without_write(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+@@ anchor @@
+ anchor
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="anchor\n", error=None)
+
+            def write_file(self, path, content):
+                raise AssertionError("an inert patch must not write")
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False
+        assert "no changes" in result.error.lower()
+
+    def test_validation_error_identifies_original_hunk_number(self):
+        patch = """\
+*** Begin Patch
+*** Update File: a.py
+@@ anchor @@
+ anchor
+@@ first @@
+-first = 1
++first = 2
+@@ missing @@
+-missing = 1
++missing = 2
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def read_file_raw(self, path):
+                return SimpleNamespace(content="anchor\nfirst = 1\n", error=None)
+
+        result = apply_v4a_operations(ops, FakeFileOps())
+        assert result.success is False
+        assert "hunk 3" in result.error.lower()
+
+
 class TestApplyDelete:
     """Tests for _apply_delete producing a real unified diff."""
 

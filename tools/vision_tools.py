@@ -29,9 +29,12 @@ Usage:
 """
 
 import base64
+import asyncio
+import contextlib
 import json
 import logging
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -73,6 +76,97 @@ _VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
 # Hard cap on downloaded image file size (50 MB). Prevents OOM from
 # attacker-hosted multi-gigabyte files or decompression bombs.
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _detect_host_cpus() -> int:
+    try:
+        return max(1, len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_vision_capacity() -> tuple[int, int]:
+    """Resolve process-wide active and queued vision budgets."""
+
+    config: dict = {}
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        config = cfg_get(load_config(), "auxiliary", "vision", default={}) or {}
+    except Exception:
+        pass
+    if not isinstance(config, dict):
+        config = {}
+    active = _positive_int(os.getenv("HERMES_VISION_MAX_CONCURRENCY"))
+    active = active or _positive_int(config.get("max_concurrency"))
+    active = active or min(_detect_host_cpus(), 4)
+    queued = _positive_int(os.getenv("HERMES_VISION_MAX_QUEUE"))
+    queued = queued or _positive_int(config.get("max_queue")) or 256
+    return max(1, active), max(1, queued)
+
+
+_VISION_MAX_CONCURRENCY, _VISION_MAX_QUEUE = _resolve_vision_capacity()
+_vision_concurrency_semaphore = threading.BoundedSemaphore(_VISION_MAX_CONCURRENCY)
+_vision_capacity_lock = threading.Lock()
+_vision_waiting = 0
+_vision_active = 0
+_vision_peak_active = 0
+
+
+class VisionCapacityExceeded(RuntimeError):
+    """Raised before payload allocation when the bounded queue is full."""
+
+
+def vision_concurrency_snapshot() -> dict[str, int]:
+    with _vision_capacity_lock:
+        return {
+            "active": _vision_active,
+            "waiting": _vision_waiting,
+            "peak_active": _vision_peak_active,
+            "max_active": _VISION_MAX_CONCURRENCY,
+            "max_queue": _VISION_MAX_QUEUE,
+        }
+
+
+@contextlib.asynccontextmanager
+async def _vision_concurrency_slot():
+    """Acquire a cancellable process-global vision slot without blocking a loop."""
+
+    global _vision_waiting, _vision_active, _vision_peak_active
+    with _vision_capacity_lock:
+        if _vision_waiting >= _VISION_MAX_QUEUE:
+            raise VisionCapacityExceeded(
+                f"vision queue is full ({_VISION_MAX_QUEUE} waiting)"
+            )
+        _vision_waiting += 1
+
+    acquired = False
+    try:
+        while not acquired:
+            acquired = _vision_concurrency_semaphore.acquire(blocking=False)
+            if not acquired:
+                await asyncio.sleep(0.02)
+    finally:
+        with _vision_capacity_lock:
+            _vision_waiting -= 1
+
+    with _vision_capacity_lock:
+        _vision_active += 1
+        _vision_peak_active = max(_vision_peak_active, _vision_active)
+    try:
+        yield
+    finally:
+        with _vision_capacity_lock:
+            _vision_active -= 1
+        _vision_concurrency_semaphore.release()
 
 
 def _validate_image_url(url: str) -> bool:
@@ -156,13 +250,11 @@ async def _download_image(image_url: str, destination: Path, max_retries: int = 
 
         Must be async because httpx.AsyncClient awaits event hooks.
         """
-        if response.is_redirect and response.next_request:
-            redirect_url = str(response.next_request.url)
-            from tools.url_safety import is_safe_url
-            if not is_safe_url(redirect_url):
-                raise ValueError(
-                    f"Blocked redirect to private/internal address: {redirect_url}"
-                )
+        from tools.url_safety import async_is_safe_url, redirect_target_from_response
+
+        redirect_url = redirect_target_from_response(response)
+        if redirect_url and not await async_is_safe_url(redirect_url):
+            raise ValueError("Blocked redirect to private/internal address")
 
     last_error = None
     for attempt in range(max_retries):
@@ -1078,7 +1170,7 @@ VISION_ANALYZE_SCHEMA = {
 }
 
 
-def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
+def _handle_vision_analyze_unbounded(args: Dict[str, Any], **kw: Any) -> Awaitable[Any]:
     image_url = args.get("image_url", "")
     question = args.get("question", "")
 
@@ -1124,6 +1216,14 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
     )
     model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
     return vision_analyze_tool(image_url, full_prompt, model)
+
+
+async def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Any:
+    try:
+        async with _vision_concurrency_slot():
+            return await _handle_vision_analyze_unbounded(args, **kw)
+    except VisionCapacityExceeded as exc:
+        return tool_error(str(exc), success=False)
 
 
 registry.register(
@@ -1177,13 +1277,11 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     async def _ssrf_redirect_guard(response):
-        if response.is_redirect and response.next_request:
-            redirect_url = str(response.next_request.url)
-            from tools.url_safety import is_safe_url
-            if not is_safe_url(redirect_url):
-                raise ValueError(
-                    f"Blocked redirect to private/internal address: {redirect_url}"
-                )
+        from tools.url_safety import async_is_safe_url, redirect_target_from_response
+
+        redirect_url = redirect_target_from_response(response)
+        if redirect_url and not await async_is_safe_url(redirect_url):
+            raise ValueError("Blocked redirect to private/internal address")
 
     last_error = None
     for attempt in range(max_retries):

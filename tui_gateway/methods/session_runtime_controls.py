@@ -72,9 +72,9 @@ def _spawn_trees_root():
 
 
 def _spawn_tree_session_dir(session_id: str):
-    safe = (
-        "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown"
-    )
+    from hermes_agent.domain.safe_identifiers import safe_filename_component
+
+    safe = safe_filename_component(session_id)
     d = _spawn_trees_root() / safe
     d.mkdir(parents=True, exist_ok=True)
     return d

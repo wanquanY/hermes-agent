@@ -155,11 +155,18 @@ class TestC2Patterns:
         )
 
     def test_known_c2_framework_names(self):
-        for name in ("Praxis", "Cobalt Strike", "Sliver", "Havoc", "Mythic"):
+        for name in ("Cobalt Strike", "Sliver", "Havoc", "Mythic"):
             findings = scan_for_threats(
                 f"Connect to the {name} server.", scope="context"
             )
             assert "known_c2_framework" in findings, name
+
+    def test_praxis_is_not_a_c2_framework(self):
+        for text in (
+            "You are Praxis, my coding assistant.",
+            "Praxis connects theory and practice.",
+        ):
+            assert "known_c2_framework" not in scan_for_threats(text, scope="strict")
 
     def test_c2_explicit(self):
         assert "c2_explicit" in scan_for_threats(

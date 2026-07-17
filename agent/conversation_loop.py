@@ -38,6 +38,7 @@ from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.turn_message_buffer import TurnMessageBuffer
 from agent.message_sanitization import (
+    close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
     _sanitize_messages_non_ascii,
     _sanitize_messages_surrogates,
@@ -67,7 +68,10 @@ from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.system_prompt_cache import system_prompt_cache_scope_key
 from agent.trajectory import has_incomplete_scratchpad
-from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.model_usage_recorder import (
+    ModelUsageAttribution,
+    record_model_response_usage,
+)
 from hermes_constants import (
     FINISH_REASON_STREAM_ERROR,
     display_hermes_home as _dhh_fn,
@@ -729,11 +733,27 @@ def run_conversation(
             "canonical current input is absent from hydrated conversation history: "
             f"{current_input_conversation_message_id}"
         )
+    pending_cli_message = getattr(agent, "_pending_cli_user_message", None)
+    expected_persisted_content = (
+        persist_user_message if persist_user_message is not None else user_message
+    )
     if current_turn_user_message is None:
-        current_turn_user_message = messages.append_current_input(
-            user_message,
-            metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
-        )
+        if (
+            isinstance(pending_cli_message, dict)
+            and pending_cli_message.get("role") == "user"
+            and pending_cli_message.get("content") == expected_persisted_content
+        ):
+            current_turn_user_message = messages.append_existing_current_input(
+                pending_cli_message,
+                api_content=user_message,
+                metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+            )
+        else:
+            agent._pending_cli_user_message = None
+            current_turn_user_message = messages.append_current_input(
+                user_message,
+                metadata=turn_metadata if isinstance(turn_metadata, dict) else None,
+            )
     current_turn_user_idx = messages.current_input_index
     if current_turn_user_idx is None:
         raise RuntimeError("current input binding did not produce a message index")
@@ -769,7 +789,14 @@ def run_conversation(
     # exists. The final turn flush below will append assistant/tool rows by using
     # the same TurnMessageBuffer boundary and persist_message_key idempotency.
     try:
-        agent._persist_session(messages, conversation_history)
+        persist_lock = getattr(agent, "_session_persist_lock", None)
+        if persist_lock is None:
+            agent._persist_session(messages, conversation_history)
+            agent._pending_cli_user_message = None
+        else:
+            with persist_lock:
+                agent._persist_session(messages, conversation_history)
+                agent._pending_cli_user_message = None
     except Exception:
         logger.warning(
             "Early turn-start session persistence failed for session=%s",
@@ -898,6 +925,11 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    verification_attempts = 0
+    verification_requirement_prompt = ""
+    verification_grace_remaining = 0
+    pending_verification_response = None
+    preserved_verification_fallback = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Per-turn file-mutation verifier state.  Keyed by resolved path;
@@ -1124,10 +1156,20 @@ def run_conversation(
                         _injections.append(_fenced)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
+                if verification_requirement_prompt:
+                    _injections.append(
+                        "<hermes_runtime_context type=\"verification_requirement\">\n"
+                        f"{verification_requirement_prompt}\n"
+                        "</hermes_runtime_context>"
+                    )
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                    elif isinstance(_base, list):
+                        api_msg["content"] = list(_base) + [
+                            {"type": "text", "text": "\n\n".join(_injections)}
+                        ]
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
@@ -1493,6 +1535,15 @@ def run_conversation(
                     if isinstance(getattr(agent, "client", None), Mock):
                         _use_streaming = False
 
+                # Final provider boundary. Request overrides, hooks and future
+                # middleware must not be able to reintroduce route-unsafe replay
+                # fields after the initial build-time normalization.
+                if agent.api_mode == "codex_responses":
+                    api_kwargs = agent._get_transport().preflight_kwargs(
+                        api_kwargs,
+                        allow_stream=False,
+                    )
+
                 if _use_streaming:
                     _log_dovie_turn_stage(agent, "streaming-api-call-start")
                     response = agent._interruptible_streaming_api_call(
@@ -1720,10 +1771,15 @@ def run_conversation(
                     while time.time() < sleep_end:
                         if agent._interrupt_requested:
                             agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            interrupt_text = (
+                                "Operation interrupted during retry "
+                                f"({_failure_hint}, attempt {retry_count}/{max_retries})."
+                            )
+                            close_interrupted_tool_sequence(messages, interrupt_text)
                             agent._persist_session(messages, conversation_history)
                             agent.clear_interrupt()
                             return {
-                                "final_response": f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",
+                                "final_response": interrupt_text,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
@@ -2124,20 +2180,24 @@ def run_conversation(
                 
                 # Track actual token usage from response for context management
                 if hasattr(response, 'usage') and response.usage:
-                    canonical_usage = normalize_usage(
+                    usage_record = record_model_response_usage(
+                        agent,
                         response.usage,
-                        provider=agent.provider,
-                        api_mode=agent.api_mode,
+                        attribution=ModelUsageAttribution(
+                            purpose="conversation.primary",
+                            model=agent.model,
+                            provider=agent.provider,
+                            base_url=agent.base_url,
+                            api_mode=agent.api_mode,
+                            primary=True,
+                        ),
+                        update_context=True,
                     )
+                    canonical_usage = usage_record.usage
                     prompt_tokens = canonical_usage.prompt_tokens
                     completion_tokens = canonical_usage.output_tokens
-                    total_tokens = canonical_usage.total_tokens
-                    usage_dict = {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens,
-                    }
-                    agent.context_compressor.update_from_response(usage_dict)
+                    total_tokens = usage_record.reported_total_tokens
+                    usage_dict = usage_record.usage_dict
 
                     # Cache discovered context length after successful call.
                     # Only persist limits confirmed by the provider (parsed
@@ -2150,16 +2210,6 @@ def run_conversation(
                         agent.context_compressor._context_probed = False
                         agent.context_compressor._context_probe_persistable = False
 
-                    agent.session_prompt_tokens += prompt_tokens
-                    agent.session_completion_tokens += completion_tokens
-                    agent.session_total_tokens += total_tokens
-                    agent.session_api_calls += 1
-                    agent.session_input_tokens += canonical_usage.input_tokens
-                    agent.session_output_tokens += canonical_usage.output_tokens
-                    agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
-                    agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
-                    agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
-
                     # Log API call details for debugging/observability
                     _cache_pct = ""
                     if canonical_usage.cache_read_tokens and prompt_tokens:
@@ -2171,62 +2221,6 @@ def run_conversation(
                         api_duration, _cache_pct,
                     )
 
-                    cost_result = estimate_usage_cost(
-                        agent.model,
-                        canonical_usage,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_key=getattr(agent, "api_key", ""),
-                    )
-                    if cost_result.amount_usd is not None:
-                        agent.session_estimated_cost_usd += float(cost_result.amount_usd)
-                    agent.session_cost_status = cost_result.status
-                    agent.session_cost_source = cost_result.source
-
-                    # Persist token counts to session DB for /insights.
-                    # Do this for every platform with a session_id so non-CLI
-                    # sessions (gateway, cron, delegated runs) cannot lose
-                    # token/accounting data if a higher-level persistence path
-                    # is skipped or fails. Gateway/session-store writes use
-                    # absolute totals, so they safely overwrite these per-call
-                    # deltas instead of double-counting them.
-                    if agent._session_db and agent.session_id:
-                        try:
-                            # Ensure the session row exists before attempting UPDATE.
-                            # Under concurrent load (cron/kanban), the initial
-                            # _ensure_db_session() may have failed due to SQLite
-                            # locking.  Retry here so per-call token deltas are
-                            # not silently lost (UPDATE on a non-existent row
-                            # affects 0 rows without error).
-                            if not agent._session_db_created:
-                                agent._ensure_db_session()
-                            agent._session_db.sessions.update_token_counts(
-                                agent.session_id,
-                                input_tokens=canonical_usage.input_tokens,
-                                output_tokens=canonical_usage.output_tokens,
-                                cache_read_tokens=canonical_usage.cache_read_tokens,
-                                cache_write_tokens=canonical_usage.cache_write_tokens,
-                                reasoning_tokens=canonical_usage.reasoning_tokens,
-                                estimated_cost_usd=float(cost_result.amount_usd)
-                                if cost_result.amount_usd is not None else None,
-                                cost_status=cost_result.status,
-                                cost_source=cost_result.source,
-                                billing_provider=agent.provider,
-                                billing_base_url=agent.base_url,
-                                billing_mode="subscription_included"
-                                if cost_result.status == "included" else None,
-                                model=agent.model,
-                                api_call_count=1,
-                            )
-                        except Exception as e:
-                            # Log token persistence failures so they're
-                            # visible in agent.log — silent loss here is
-                            # the root cause of undercounted analytics.
-                            logger.debug(
-                                "Token persistence failed (session=%s, tokens=%d): %s",
-                                agent.session_id, total_tokens, e,
-                            )
-                    
                     if agent.verbose_logging:
                         logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
                     
@@ -2908,10 +2902,15 @@ def run_conversation(
                 # Check for interrupt before deciding to retry
                 if agent._interrupt_requested:
                     agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
+                    interrupt_text = (
+                        "Operation interrupted: handling API error "
+                        f"({error_type}: {agent._clean_error_message(str(api_error))})."
+                    )
+                    close_interrupted_tool_sequence(messages, interrupt_text)
                     agent._persist_session(messages, conversation_history)
                     agent.clear_interrupt()
                     return {
-                        "final_response": f"Operation interrupted: handling API error ({error_type}: {agent._clean_error_message(str(api_error))}).",
+                        "final_response": interrupt_text,
                         "messages": messages,
                         "api_calls": api_call_count,
                         "completed": False,
@@ -3579,10 +3578,15 @@ def run_conversation(
                 while time.time() < sleep_end:
                     if agent._interrupt_requested:
                         agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                        interrupt_text = (
+                            "Operation interrupted: retrying API call after error "
+                            f"(retry {retry_count}/{max_retries})."
+                        )
+                        close_interrupted_tool_sequence(messages, interrupt_text)
                         agent._persist_session(messages, conversation_history)
                         agent.clear_interrupt()
                         return {
-                            "final_response": f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+                            "final_response": interrupt_text,
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
@@ -4171,6 +4175,35 @@ def run_conversation(
                 agent._session_messages = messages
                 
                 # Continue loop for next response
+                try:
+                    from agent.verification_runtime import (
+                        completion_requirement_for_agent,
+                        hold_verification_stream,
+                        release_verification_stream,
+                    )
+
+                    next_verification = completion_requirement_for_agent(
+                        agent,
+                        attempt=verification_attempts,
+                    )
+                    if next_verification is not None:
+                        verification_requirement_prompt = next_verification.prompt()
+                        hold_verification_stream(agent)
+                    else:
+                        verification_requirement_prompt = ""
+                        release_verification_stream(agent, deliver=False)
+                except Exception:
+                    logger.warning("verification post-tool decision failed", exc_info=True)
+                if (
+                    verification_requirement_prompt
+                    and verification_grace_remaining > 0
+                    and (
+                        api_call_count >= agent.max_iterations
+                        or agent.iteration_budget.remaining <= 0
+                    )
+                ):
+                    agent._budget_grace_call = True
+                    verification_grace_remaining -= 1
                 continue
             
             else:
@@ -4480,6 +4513,64 @@ def run_conversation(
                     length_continue_retries = 0
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
+
+                # A final answer after workspace edits is accepted only when
+                # the application-owned aggregate has fresh passing evidence.
+                # The requirement is injected into the provider-bound copy of
+                # the original user input on the next iteration; canonical
+                # messages and state.db never receive a synthetic role event.
+                try:
+                    from agent.verification_runtime import (
+                        completion_requirement_for_agent,
+                    )
+
+                    verification_requirement = completion_requirement_for_agent(
+                        agent,
+                        attempt=verification_attempts,
+                    )
+                except Exception as verification_error:
+                    logger.warning(
+                        "verification completion guard failed",
+                        exc_info=verification_error,
+                    )
+                    verification_requirement = None
+                if verification_requirement is not None:
+                    verification_attempts += 1
+                    verification_requirement_prompt = verification_requirement.prompt()
+                    verification_grace_remaining = 1
+                    agent._budget_grace_call = True
+                    pending_verification_response = final_response
+                    final_response = None
+                    try:
+                        from agent.verification_runtime import (
+                            hold_verification_stream,
+                            release_verification_stream,
+                        )
+
+                        release_verification_stream(agent, deliver=False)
+                        hold_verification_stream(agent)
+                    except Exception:
+                        logger.debug("verification stream reset failed", exc_info=True)
+                    logger.info(
+                        "Rejected unverified final response: session=%s root=%s "
+                        "generation=%d status=%s attempt=%d/%d",
+                        getattr(agent, "session_id", None) or "none",
+                        verification_requirement.workspace_root,
+                        verification_requirement.edit_generation,
+                        verification_requirement.status,
+                        verification_requirement.attempt,
+                        verification_requirement.max_attempts,
+                    )
+                    agent._stream_needs_break = True
+                    continue
+
+                try:
+                    from agent.verification_runtime import release_verification_stream
+
+                    release_verification_stream(agent, deliver=True)
+                except Exception:
+                    logger.debug("verification stream release failed", exc_info=True)
+                pending_verification_response = None
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
@@ -4554,10 +4645,32 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
-    if final_response is None and (
+    budget_exhausted = (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
+    )
+    if (
+        final_response is None
+        and pending_verification_response
+        and budget_exhausted
+        and not interrupted
+        and _turn_exit_reason in {"unknown", "budget_exhausted"}
     ):
+        # Preserve the withheld model answer only when the verification
+        # continuation itself consumed the remaining budget. Provider errors,
+        # interrupts and unrelated exits retain their real terminal outcome.
+        final_response = pending_verification_response
+        _turn_exit_reason = (
+            f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        )
+        preserved_verification_fallback = True
+        try:
+            from agent.verification_runtime import release_verification_stream
+
+            release_verification_stream(agent, deliver=False)
+        except Exception:
+            pass
+    elif final_response is None and budget_exhausted:
         # Budget exhausted — ask the model for a summary via one extra
         # API call with tools stripped.  _handle_max_iterations injects a
         # user message and makes a single toolless request.
@@ -4607,6 +4720,17 @@ def run_conversation(
                     exc_info=True,
                 )
 
+    # A failed/interrupted/exhausted turn must never carry a withheld answer
+    # into the next user turn. Accepted and genuine budget-fallback paths have
+    # already released the hold above; this is the terminal safety net.
+    if getattr(agent, "_verification_stream_hold", False):
+        try:
+            from agent.verification_runtime import release_verification_stream
+
+            release_verification_stream(agent, deliver=False)
+        except Exception:
+            logger.debug("verification stream terminal cleanup failed", exc_info=True)
+
     # Determine if conversation completed successfully
     completed = final_response is not None and api_call_count < agent.max_iterations
 
@@ -4622,6 +4746,18 @@ def run_conversation(
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
     agent._drop_trailing_empty_response_scaffolding(messages)
+    if interrupted:
+        close_interrupted_tool_sequence(messages, final_response)
+    elif preserved_verification_fallback and (
+        not messages or messages[-1].get("role") != "assistant"
+    ):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": final_response,
+                "finish_reason": "verification_budget_fallback",
+            }
+        )
     agent._persist_session(messages, conversation_history)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────

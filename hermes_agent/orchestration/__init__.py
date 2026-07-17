@@ -25,16 +25,19 @@ from hermes_agent.orchestration.team_mission_orchestrator import (
     TeamMissionOrchestrator,
 )
 from hermes_agent.orchestration.worker_pool import InflightRun, WorkerPool
+from hermes_agent.domain.run_identity import CrossWiredRunError, RunIdentity
 
 __all__ = [
     "DEFAULT_LEASE_TTL",
     "DEFAULT_TIMEOUT",
+    "CrossWiredRunError",
     "InflightRun",
     "LONG_OP_TIMEOUT",
     "LockLease",
     "MissionAdvanceOutcome",
     "RpcBusy",
     "RunLaunchResult",
+    "RunIdentity",
     "RunLaunchSpec",
     "RunOrchestrator",
     "ShardedRpcLock",

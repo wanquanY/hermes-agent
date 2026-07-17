@@ -8,6 +8,7 @@ from typing import Optional
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +127,14 @@ class GatewayReloadMcpCommandService:
                 "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
             }
             try:
-                session_entry = self._runner.session_store.get_or_create_session(event.source)
-                self._runner.session_store.append_to_transcript(
-                    session_entry.session_id, reload_msg
+                session_entry = await run_sqlite_io(
+                    self._runner.session_store.get_or_create_session,
+                    event.source,
+                )
+                await run_sqlite_io(
+                    self._runner.session_store.append_to_transcript,
+                    session_entry.session_id,
+                    reload_msg,
                 )
             except Exception as exc:
                 logger.debug("Could not append MCP reload notice to transcript: %s", exc)

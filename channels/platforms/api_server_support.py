@@ -339,12 +339,11 @@ class ResponseStore:
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
-        # Use shared WAL-fallback helper so response_store.db degrades
-        # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
-        # issue addressed for state.db/kanban.db).
-        from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+        # Use the canonical connection policy so response history has the same
+        # macOS durability and WAL fallback guarantees as state.db.
+        from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 
-        apply_wal_with_fallback(self._conn, db_label="response_store.db")
+        configure_sqlite_connection(self._conn, db_label="response_store.db")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS responses (
                 response_id TEXT PRIMARY KEY,
@@ -649,4 +648,3 @@ except ImportError:
     _cron_pause = None
     _cron_resume = None
     _cron_trigger = None
-

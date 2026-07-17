@@ -19,6 +19,9 @@ from hermes_agent.application.message_service import MessageService
 from hermes_agent.application.participant_service import ParticipantService
 from hermes_agent.application.run_event_maintenance_service import RunEventMaintenanceService
 from hermes_agent.application.run_service import RunService
+from hermes_agent.application.runtime_stability_service import (
+    SessionRuntimeStabilityService,
+)
 from hermes_agent.application.session_analytics_service import SessionAnalyticsService
 from hermes_agent.application.session_branch_service import SessionBranchService
 from hermes_agent.application.session_deletion import SessionDeletionService
@@ -32,6 +35,7 @@ from hermes_agent.application.team_mission_audit_service import TeamMissionAudit
 from hermes_agent.application.team_mission_maintenance_service import (
     TeamMissionMaintenanceService,
 )
+from hermes_agent.application.verification_service import VerificationService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.read_models.team_missions import TeamMissionReadModel
 from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
@@ -39,10 +43,12 @@ from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
 from hermes_agent.repositories.conversation_memory_repo import ConversationMemoryRepo
 from hermes_agent.repositories.conversation_participant_repo import ConversationParticipantRepo
+from hermes_agent.repositories.runtime_stability_repo import RuntimeStabilityRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import TeamRegistryRepo
+from hermes_agent.repositories.verification_repo import VerificationRepository
 from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 from hermes_agent.storage.unit_of_work import SqliteUnitOfWork
@@ -98,6 +104,14 @@ class CliSessionStore(TeamMissionStateMixin):
         )
         self.compression_leases = CompressionLeaseService(
             CompressionLeaseRepository(conn),
+            self._unit_of_work,
+        )
+        self.runtime_stability = SessionRuntimeStabilityService(
+            RuntimeStabilityRepository(conn),
+            self._unit_of_work,
+        )
+        self.verification = VerificationService(
+            VerificationRepository(conn),
             self._unit_of_work,
         )
         self.profiles = AgentProfileRepoImpl(conn)

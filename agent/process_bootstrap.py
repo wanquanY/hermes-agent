@@ -24,11 +24,14 @@ unchanged.
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import urllib.request
 from typing import Optional
 
 from utils import base_url_hostname, normalize_proxy_url
+
+logger = logging.getLogger(__name__)
 
 
 # Cached at module level so we only pay the OpenAI SDK import cost once
@@ -51,6 +54,10 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        if "http_client" not in kwargs:
+            http_client = build_provider_http_client(kwargs.get("base_url", ""))
+            if http_client is not None:
+                kwargs["http_client"] = http_client
         return _load_openai_cls()(*args, **kwargs)
 
     def __instancecheck__(self, obj):
@@ -142,6 +149,76 @@ def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
     return proxy
 
 
+def _positive_env_number(name: str, default: float, *, integer: bool = False):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return int(default) if integer else default
+    try:
+        value = int(raw) if integer else float(raw)
+    except ValueError:
+        return int(default) if integer else default
+    if value <= 0:
+        return int(default) if integer else default
+    return value
+
+
+def build_provider_http_client(
+    base_url: str = "",
+    *,
+    async_mode: bool = False,
+    verify=True,
+):
+    """Build the canonical httpx client for OpenAI-compatible providers.
+
+    Idle pooled connections are reaped before common reverse-proxy idle
+    deadlines.  The factory intentionally leaves OS socket options untouched:
+    replacing httpx's defaults previously removed TCP_NODELAY and destabilized
+    TLS/SSE through OpenResty and Cloudflare.  Proxy policy is resolved once
+    from environment + NO_PROXY and ``trust_env`` is then disabled so mounted
+    transports cannot silently choose a different route.
+    """
+
+    try:
+        import httpx
+
+        keepalive_expiry = _positive_env_number(
+            "HERMES_PROVIDER_HTTPX_KEEPALIVE_EXPIRY",
+            20.0,
+        )
+        max_keepalive = _positive_env_number(
+            "HERMES_PROVIDER_HTTPX_MAX_KEEPALIVE",
+            20,
+            integer=True,
+        )
+        max_connections = _positive_env_number(
+            "HERMES_PROVIDER_HTTPX_MAX_CONNECTIONS",
+            100,
+            integer=True,
+        )
+        limits = httpx.Limits(
+            max_keepalive_connections=max_keepalive,
+            max_connections=max_connections,
+            keepalive_expiry=keepalive_expiry,
+        )
+        timeout = httpx.Timeout(
+            connect=15.0,
+            read=None,
+            write=15.0,
+            pool=10.0,
+        )
+        client_cls = httpx.AsyncClient if async_mode else httpx.Client
+        return client_cls(
+            limits=limits,
+            timeout=timeout,
+            proxy=_get_proxy_for_base_url(base_url),
+            trust_env=False,
+            verify=verify,
+        )
+    except Exception as exc:
+        logger.warning("Could not build provider HTTP client: %s", exc)
+        return None
+
+
 def _install_safe_stdio() -> None:
     """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
     for stream_name in ("stdout", "stderr"):
@@ -164,4 +241,5 @@ __all__ = [
     "_install_safe_stdio",
     "_get_proxy_from_env",
     "_get_proxy_for_base_url",
+    "build_provider_http_client",
 ]

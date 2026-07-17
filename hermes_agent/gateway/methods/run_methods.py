@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_agent.domain.run_identity import CrossWiredRunError
 from hermes_agent.domain.run_terminator import TerminateCause
 from hermes_agent.gateway.auth import requires_permission
 from hermes_agent.gateway.error_codes import ErrorCode, MethodError
@@ -26,6 +27,8 @@ def _run_projection(run) -> dict[str, Any]:
         "completed_at": run.completed_at,
         "turn_id": run.turn_id,
         "runtime_scope_key": run.runtime_scope_key,
+        "worker_id": run.worker_id,
+        "agent_profile_id": run.agent_profile_id,
         "execution_session_id": run.execution_session_id,
         "last_seq": run.last_seq,
         "terminal_seq": run.terminal_seq,
@@ -82,7 +85,8 @@ def make_method_run_list(conn_provider):
         rows = conn.execute(
             f"""
             SELECT run_id, session_id, status, started_at, updated_at,
-                   completed_at, turn_id, runtime_scope_key, execution_session_id,
+                   completed_at, turn_id, runtime_scope_key, worker_id,
+                   agent_profile_id, execution_session_id,
                    last_seq, terminal_seq, terminal_degraded, terminal_cause
               FROM runs
              WHERE {" AND ".join(clauses)}
@@ -108,6 +112,11 @@ def make_method_run_list(conn_provider):
                     ),
                     "turn_id": str(row["turn_id"] or ""),
                     "runtime_scope_key": str(row["runtime_scope_key"] or ""),
+                    "worker_id": str(row["worker_id"] or ""),
+                    "agent_profile_id": str(row["agent_profile_id"] or ""),
+                    "execution_session_id": str(
+                        row["execution_session_id"] or ""
+                    ),
                     "last_seq": int(row["last_seq"] or 0),
                     "terminal_seq": int(row["terminal_seq"] or 0),
                     "terminal_degraded": bool(int(row["terminal_degraded"] or 0)),
@@ -207,21 +216,31 @@ def make_method_run_launch(orch: RunOrchestrator, conn_provider):
             )
         turn_id = str(params.get("turn_id") or "").strip()
         runtime_scope_key = str(params.get("runtime_scope_key") or "").strip()
+        agent_profile_id = str(params.get("agent_profile_id") or "").strip()
         conn = conn_provider(session_id)
-        result = orch.launch(
-            conn,
-            RunLaunchSpec(
-                run_id=run_id,
-                session_id=session_id,
-                worker_id=worker_id,
-                turn_id=turn_id,
-                runtime_scope_key=runtime_scope_key,
-            ),
-        )
+        try:
+            result = orch.launch(
+                conn,
+                RunLaunchSpec(
+                    run_id=run_id,
+                    session_id=session_id,
+                    worker_id=worker_id,
+                    turn_id=turn_id,
+                    runtime_scope_key=runtime_scope_key,
+                    agent_profile_id=agent_profile_id,
+                ),
+            )
+        except CrossWiredRunError as exc:
+            raise MethodError(
+                ErrorCode.RUN_STATE_CONFLICT,
+                str(exc),
+                details=exc.details,
+            ) from exc
         return {
             "run_id": result.inflight.run_id,
             "session_id": result.inflight.session_id,
             "worker_id": result.inflight.worker_id,
+            "agent_profile_id": result.inflight.agent_profile_id,
             "start_seq": result.start_seq,
             "allocated_at": result.inflight.allocated_at,
         }

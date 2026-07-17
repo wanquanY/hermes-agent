@@ -720,7 +720,10 @@ class TestPluginContext:
             plugins_dir = tmp_path / "hermes_test" / "plugins"
             plugin_dir = plugins_dir / "override_plugin"
             plugin_dir.mkdir(parents=True)
-            (plugin_dir / "plugin.yaml").write_text(yaml.dump({"name": "override_plugin"}))
+            (plugin_dir / "plugin.yaml").write_text(yaml.dump({
+                "name": "override_plugin",
+                "capabilities": ["tool_override"],
+            }))
             (plugin_dir / "__init__.py").write_text(
                 'def register(ctx):\n'
                 '    ctx.register_tool(\n'
@@ -733,7 +736,10 @@ class TestPluginContext:
             )
             hermes_home = tmp_path / "hermes_test"
             (hermes_home / "config.yaml").write_text(
-                yaml.safe_dump({"plugins": {"enabled": ["override_plugin"]}})
+                yaml.safe_dump({"plugins": {
+                    "enabled": ["override_plugin"],
+                    "entries": {"override_plugin": {"allow_tool_override": True}},
+                }})
             )
             monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 

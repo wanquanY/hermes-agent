@@ -190,6 +190,43 @@ class TestBuildChildProgressCallback:
         assert "status=running" in caplog.text
         assert "payload_bytes=" in caplog.text
 
+    def test_async_terminal_event_keeps_dispatch_origin_after_parent_turn_changes(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent._hermes_active_run_id = "run-original"
+        parent._hermes_active_turn_id = "turn-original"
+        parent._hermes_active_client_message_id = "client-original"
+        parent._hermes_active_runtime_scope_key = "profile:original"
+        parent.tool_progress_callback = MagicMock()
+
+        callback = _build_child_progress_callback(
+            0,
+            "finish later",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+
+        # The parent turn has finished and a newer turn now owns the session.
+        parent._hermes_active_run_id = "run-new"
+        parent._hermes_active_turn_id = "turn-new"
+        parent._hermes_active_client_message_id = "client-new"
+        parent._hermes_active_runtime_scope_key = "profile:new"
+        callback(
+            "subagent.complete",
+            preview="done",
+            status="completed",
+            summary="done",
+        )
+
+        terminal = parent.tool_progress_callback.call_args
+        assert terminal.args[0] == "subagent.complete"
+        assert terminal.kwargs["run_id"] == "run-original"
+        assert terminal.kwargs["turn_id"] == "turn-original"
+        assert terminal.kwargs["client_message_id"] == "client-original"
+        assert terminal.kwargs["runtime_scope_key"] == "profile:original"
+        assert terminal.kwargs["status"] == "completed"
+
     def test_task_descriptor_is_emitted_once_on_lifecycle_start(self):
         parent = MagicMock()
         parent._delegate_spinner = None

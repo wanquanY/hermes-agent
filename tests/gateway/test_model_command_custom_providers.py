@@ -54,7 +54,7 @@ async def test_handle_model_command_lists_saved_custom_provider(tmp_path, monkey
     import hermes_gateway.runner as gateway_run
 
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
-    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda **_kwargs: {})
 
     result = await model_command_for(_make_runner()).handle_model_command(_make_event())
 

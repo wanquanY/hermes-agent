@@ -171,6 +171,25 @@ class TestLifecycle:
         s.close()
         assert client._closed is True
 
+    def test_native_compaction_state_tracks_started_completed_and_close(self):
+        session = make_session(FakeClient())
+        started = {
+            "method": "item/started",
+            "params": {"item": {"id": "compact-1", "type": "contextCompaction"}},
+        }
+        completed = {
+            "method": "item/completed",
+            "params": {"item": {"id": "compact-1", "type": "contextCompaction"}},
+        }
+
+        session._track_compaction_state(started)  # noqa: SLF001
+        assert session.is_compacting is True
+        session._track_compaction_state(completed)  # noqa: SLF001
+        assert session.is_compacting is False
+        session._track_compaction_state(started)  # noqa: SLF001
+        session.close()
+        assert session.is_compacting is False
+
 
 # ---- turn loop ----
 
@@ -197,6 +216,57 @@ class TestRunTurn:
                    for m in r.projected_messages)
         # turn_id propagated for downstream session-DB linkage
         assert r.turn_id == "turn-fake-001"
+
+    def test_manual_compaction_waits_for_typed_boundary_and_usage(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/started", threadId="thread-fake-001", turn={"id": "compact-1"}
+        )
+        client.queue_notification(
+            "item/completed",
+            threadId="thread-fake-001",
+            turnId="compact-1",
+            item={"id": "item-compact", "type": "contextCompaction"},
+        )
+        client.queue_notification(
+            "thread/tokenUsage/updated",
+            threadId="thread-fake-001",
+            tokenUsage={
+                "last": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 20,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 2,
+                    "totalTokens": 127,
+                }
+            },
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-1", "status": "completed"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert ("thread/compact/start", {"threadId": "thread-fake-001"}) in client.requests
+        assert result.compacted is True
+        assert result.interrupted is False
+        assert result.turn_id == "compact-1"
+        assert result.token_usage_last["totalTokens"] == 127
+
+    def test_manual_compaction_rejects_interrupted_terminal(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-2", "status": "interrupted"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert result.interrupted is True
+        assert result.error == "compact turn interrupted"
 
     def test_token_usage_notification_is_captured(self):
         client = FakeClient()
@@ -231,6 +301,43 @@ class TestRunTurn:
         assert r.token_usage_last["totalTokens"] == 130
         assert r.token_usage_total["totalTokens"] == 500
         assert r.model_context_window == 200000
+
+    def test_thread_compacted_notification_is_captured(self):
+        client = FakeClient()
+        client.queue_notification(
+            "thread/compacted",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
+        )
+
+        result = make_session(client).run_turn("hi", turn_timeout=2.0)
+
+        assert result.compacted is True
+        assert result.thread_id == "thread-fake-001"
+        assert result.turn_id == "turn-fake-001"
+
+    def test_context_compaction_item_is_captured(self):
+        client = FakeClient()
+        client.queue_notification(
+            "item/completed",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            item={"id": "compact-1", "type": "contextCompaction"},
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
+        )
+
+        result = make_session(client).run_turn("hi", turn_timeout=2.0)
+
+        assert result.compacted is True
 
     def test_rich_content_turn_is_collapsed_to_text_payload(self):
         client = FakeClient()

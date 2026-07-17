@@ -54,6 +54,11 @@ def notification_poller_loop(
     from tools.process_registry import process_registry, format_process_notification
 
     def handle_event(evt: dict, *, requeue_when_busy: bool) -> bool:
+        # Activity/Run events are rendered from durable lifecycle state. They
+        # must never be converted into a synthetic prompt turn even if a
+        # future producer accidentally places one on the legacy process queue.
+        if str(evt.get("type") or "").startswith("activity."):
+            return True
         event_sid = evt.get("session_id", "")
         if evt.get("type") == "completion" and process_registry.is_completion_consumed(event_sid):
             return True

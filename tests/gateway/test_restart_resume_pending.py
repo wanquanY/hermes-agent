@@ -369,7 +369,8 @@ class TestGetOrCreateResumePending:
             e.resume_pending = True
             e.resume_reason = "restart_timeout"
             e.suspended = True
-            store._save()
+            snapshot = store._snapshot_index_locked()
+        store._write_index_snapshot(*snapshot)
 
         second = store.get_or_create_session(source)
         assert second.session_id != original_sid

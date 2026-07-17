@@ -8,6 +8,32 @@ from typing import Any
 
 FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
 
+# Tools whose interrupted or dangling execution cannot mutate either external
+# state or Hermes session state. Unknown, plugin, and MCP tools stay
+# effect-capable by default.
+NO_EFFECT_TOOL_NAMES = frozenset({
+    "ha_get_state",
+    "ha_list_entities",
+    "ha_list_services",
+    "read_file",
+    "search_files",
+    "session_search",
+    "skill_view",
+    "skills_list",
+    "web_extract",
+    "web_search",
+    "vision_analyze",
+    "browser_snapshot",
+    "browser_get_images",
+    "browser_console",
+    "read_terminal",
+})
+
+
+def tool_may_have_side_effect(tool_name: str) -> bool:
+    """Fail closed for unknown tools when an execution outcome is uncertain."""
+    return tool_name not in NO_EFFECT_TOOL_NAMES
+
 
 def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     """Return True when a file mutation result proves the write landed."""

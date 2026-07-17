@@ -1908,6 +1908,9 @@ class TestSharedBoardPaths:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+        monkeypatch.setenv("GH_TOKEN", "github-secret")
+        monkeypatch.setenv("AUXILIARY_REVIEW_API_KEY", "auxiliary-secret")
 
         task = kb.Task(
             id="t_dispatch_env",
@@ -1937,6 +1940,9 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+        assert env["OPENAI_API_KEY"] == "provider-secret"
+        assert "GH_TOKEN" not in env
+        assert "AUXILIARY_REVIEW_API_KEY" not in env
 
 
 # ---------------------------------------------------------------------------
@@ -2039,7 +2045,13 @@ def test_connect_falls_back_to_delete_on_locking_protocol(kanban_home, caplog):
 
     class _WalBlockingConnection(_sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):  # type: ignore[override]
-            if "journal_mode=wal" in sql.lower().replace(" ", ""):
+            normalized = sql.lower().replace(" ", "")
+            if normalized == "pragmajournal_mode":
+                # The fixture has already initialized this database in WAL.
+                # Make the policy exercise its activation path so this test
+                # continues to cover a filesystem that rejects WAL setup.
+                return super().execute("SELECT 'delete'")
+            if "journal_mode=wal" in normalized:
                 raise _sqlite3.OperationalError("locking protocol")
             return super().execute(sql, *args, **kwargs)
 

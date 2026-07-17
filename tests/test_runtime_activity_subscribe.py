@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -57,19 +58,11 @@ def gateway_state(db: CliSessionStore) -> Iterator[None]:
     server._db_error = None
     server._db_by_home = {}
     server._db_error_by_home = {}
-    with run_control._lock:
-        run_control._subscriptions_by_id.clear()
-        run_control._subscription_ids_by_session.clear()
-        run_control._subscription_ids_by_activity.clear()
-        run_control._subscription_ids_by_transport.clear()
+    run_control._reset_for_tests()
     try:
         yield
     finally:
-        with run_control._lock:
-            run_control._subscriptions_by_id.clear()
-            run_control._subscription_ids_by_session.clear()
-            run_control._subscription_ids_by_activity.clear()
-            run_control._subscription_ids_by_transport.clear()
+        run_control._reset_for_tests()
         server._db = previous_db
         server._db_error = previous_db_error
         server._db_by_home = previous_db_by_home
@@ -292,7 +285,7 @@ def test_subscribe_limit_caps_replay_size(db: CliSessionStore) -> None:
     assert len(result["events"]) == 2
 
 
-def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionStore) -> None:
+def test_terminal_team_mission_subscribe_honors_canonical_replay_mode(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-subscribe",
         conversation_id="conversation-terminal-subscribe",
@@ -315,7 +308,6 @@ def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionS
             },
         },
     )
-    last_seq = max(int(event.get("seq") or 0) for event in db.list_team_mission_events("mission-terminal-subscribe"))
     transport = _CaptureTransport()
 
     result = _assert_ok(
@@ -326,15 +318,14 @@ def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionS
         )
     )
 
-    assert result["events"] == []
-    assert result["after_seq"] == last_seq
-    assert result["afterSeq"] == last_seq
+    assert len(result["events"]) >= 1
+    assert result["events"][0]["activity_id"] == "mission:mission-terminal-subscribe"
     subscription = run_control._subscriptions_by_id[result["subscription_id"]]
-    assert subscription["activity_event_last_seq"] == last_seq
-    assert subscription["cursor_only"] is True
+    assert subscription["activity_event_last_seq"] == result["after_seq"]
+    assert subscription["cursor_only"] is False
 
 
-def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: CliSessionStore) -> None:
+def test_terminal_team_mission_subscribe_allows_explicit_cursor_only(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-debug",
         conversation_id="conversation-terminal-debug",
@@ -363,13 +354,16 @@ def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: CliSessio
             "runtime.activity.subscribe",
             {
                 "activity_id": "mission:mission-terminal-debug",
-                "debug_replay_audit": True,
+                "replay_mode": "cursor_only",
+                "max_replay_events": 0,
             },
         )
     )
 
-    assert len(result["events"]) >= 1
-    assert result["events"][0]["activity_id"] == "mission:mission-terminal-debug"
+    assert result["events"] == []
+    assert result["after_seq"] > 0
+    subscription = run_control._subscriptions_by_id[result["subscription_id"]]
+    assert subscription["cursor_only"] is True
 
 
 def test_subscribe_returns_unique_subscription_id(db: CliSessionStore) -> None:
@@ -383,6 +377,57 @@ def test_subscribe_returns_unique_subscription_id(db: CliSessionStore) -> None:
     )
 
     assert first["subscription_id"] != second["subscription_id"]
+
+
+def test_reset_waits_for_inflight_subscription_poll(
+    db: CliSessionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB owner may close only after an accepted poll releases its lease."""
+
+    monkeypatch.setattr(run_control, "_start_subscription_poller_locked", lambda: None)
+    result = _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {"activity_id": "act-test-poll-lifecycle"},
+            transport=_CaptureTransport(),
+        )
+    )
+    assert result["subscription_id"]
+
+    poll_entered = threading.Event()
+    release_poll = threading.Event()
+    reset_finished = threading.Event()
+    original_after_seq = run_control._subscription_after_seq
+
+    def blocking_after_seq(subscription: dict[str, Any]) -> int:
+        if threading.current_thread().name == "test-subscription-poll":
+            poll_entered.set()
+            assert release_poll.wait(timeout=2.0)
+        return original_after_seq(subscription)
+
+    monkeypatch.setattr(run_control, "_subscription_after_seq", blocking_after_seq)
+    poll_thread = threading.Thread(
+        target=run_control._poll_subscription_events_once,
+        name="test-subscription-poll",
+    )
+    poll_thread.start()
+    assert poll_entered.wait(timeout=1.0)
+
+    def reset() -> None:
+        run_control._reset_for_tests()
+        reset_finished.set()
+
+    reset_thread = threading.Thread(target=reset)
+    reset_thread.start()
+    assert not reset_finished.wait(timeout=0.05)
+
+    release_poll.set()
+    poll_thread.join(timeout=2.0)
+    reset_thread.join(timeout=2.0)
+    assert not poll_thread.is_alive()
+    assert not reset_thread.is_alive()
+    assert reset_finished.is_set()
 
 
 def test_subscribe_then_unsubscribe_removes_registration(db: CliSessionStore) -> None:

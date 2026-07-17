@@ -393,6 +393,13 @@ def _merge_sqlite_state_database(source_path: Path, target_path: Path) -> dict[s
         return {**zero, **{key[0].lower() + key[1:]: value for key, value in zero.items()}}
     conn = sqlite3.connect(str(target_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
+    from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
+
+    configure_sqlite_connection(
+        conn,
+        db_label=f"runtime state merge ({target_path})",
+        foreign_keys=False,
+    )
     missing_temp_table = f"hermes_missing_profile_sessions_{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
     attached = False
     try:

@@ -168,6 +168,31 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
     except Exception:
         container_key = task_id
 
+    try:
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+        from tools.approval import get_current_session_key
+
+        explicit_session_key = str(get_current_session_key(default="") or "").strip()
+        session_key = explicit_session_key or resolve_terminal_session_key(task_id)
+        session_cwd = terminal_cwd_registry.get(
+            container_key,
+            session_key,
+        )
+        if session_cwd:
+            return session_cwd
+        # A gateway conversation has an independent logical cwd.  Until that
+        # conversation records one, fall back to its configured workspace —
+        # never to the cwd left behind by another conversation in the shared
+        # environment object. Standalone callers without session context keep
+        # the legacy live-env fallback below.
+        if explicit_session_key and explicit_session_key != container_key:
+            return None
+    except Exception:
+        pass
+
     with _file_ops_lock:
         cached = _file_ops_cache.get(container_key) or _file_ops_cache.get(task_id)
     if cached is not None:
@@ -211,7 +236,17 @@ def _is_blocked_device_path(path: str) -> bool:
     ):
         return True
     if normalized.startswith("/proc/") and normalized.endswith(
-        ("/environ", "/cmdline", "/maps")
+        (
+            "/environ",
+            "/cmdline",
+            "/maps",
+            "/smaps",
+            "/smaps_rollup",
+            "/numa_maps",
+            "/mem",
+            "/auxv",
+            "/pagemap",
+        )
     ):
         return True
     return False
@@ -263,6 +298,13 @@ _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
     "/private/etc/", "/private/var/",
 )
+# macOS resolves the per-user temporary/cache tree from ``/var/folders`` to
+# ``/private/var/folders``.  It is user-writable application data, not a system
+# configuration tree.  Keep the broad ``/private/var`` denial for system-owned
+# state while allowing this one platform-defined user-data subtree.  Resolved
+# symlink targets are checked independently below, so a link from the allowed
+# tree into ``/private/etc`` or another denied subtree still fails closed.
+_SENSITIVE_PATH_PREFIX_EXCEPTIONS = ("/private/var/folders/",)
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 _hermes_config_resolved: str | None = None
@@ -300,8 +342,10 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+    for candidate in (resolved, normalized):
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIX_EXCEPTIONS):
+            continue
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIXES):
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
@@ -660,7 +704,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Hermes internal path guard ────────────────────────────────
         # Prevent prompt injection via catalog or hub metadata files.
-        block_error = get_read_block_error(path)
+        block_error = get_read_block_error(str(_resolved))
         if block_error:
             return json.dumps({"error": block_error})
 
@@ -1033,6 +1077,27 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         return tool_error(str(e))
 
 
+def _extract_v4a_patch_paths(patch: str) -> tuple[list[str], str | None]:
+    """Extract every filesystem endpoint accepted by the V4A parser."""
+    import re as _re
+
+    paths: list[str] = []
+    for match in _re.finditer(
+        r'^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE
+    ):
+        paths.append(match.group(1).strip())
+    for match in _re.finditer(r'^\*\*\*\s*Move\s+File:\s*(.+)$', patch, _re.MULTILINE):
+        move = match.group(1).strip()
+        if " -> " not in move:
+            return [], "Invalid Move File header: expected 'source -> destination'"
+        source, destination = move.split(" -> ", 1)
+        paths.extend((source.strip(), destination.strip()))
+    for endpoint in paths:
+        if ".." in Path(endpoint).parts:
+            return [], f"Refusing patch path traversal: {endpoint}"
+    return paths, None
+
+
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default") -> str:
@@ -1042,9 +1107,10 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     if path:
         _paths_to_check.append(path)
     if mode == "patch" and patch:
-        import re as _re
-        for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
-            _paths_to_check.append(_m.group(1).strip())
+        extracted, extraction_error = _extract_v4a_patch_paths(patch)
+        if extraction_error:
+            return tool_error(extraction_error)
+        _paths_to_check.extend(extracted)
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:

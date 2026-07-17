@@ -37,7 +37,6 @@ from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
-    fetch_model_metadata,
     get_model_context_length,
     is_local_endpoint,
     query_ollama_num_ctx,
@@ -399,22 +398,6 @@ def init_agent(
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
 
-    # Pre-warm OpenRouter model metadata cache in a background thread.
-    # fetch_model_metadata() is cached for 1 hour; this avoids a blocking
-    # HTTP request on the first API response when pricing is estimated.
-    # Use a process-level Event so this thread is only spawned once — a new
-    # AIAgent is created for every gateway request, so without the guard
-    # each message leaks one OS thread and the process eventually exhausts
-    # the system thread limit (RuntimeError: can't start new thread).
-    if (agent.provider == "openrouter" or agent._is_openrouter_url()) and \
-            not _ra()._openrouter_prewarm_done.is_set():
-        _ra()._openrouter_prewarm_done.set()
-        threading.Thread(
-            target=fetch_model_metadata,
-            daemon=True,
-            name="openrouter-prewarm",
-        ).start()
-
     agent.tool_progress_callback = tool_progress_callback
     agent.tool_start_callback = tool_start_callback
     agent.tool_complete_callback = tool_complete_callback
@@ -437,6 +420,10 @@ def init_agent(
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
     agent._interrupt_message = None  # Optional message that triggered interrupt
+    agent._compression_in_flight = False
+    agent._stream_stale_failures = 0
+    agent._stream_stale_retry_after = 0.0
+    agent._stream_stale_route_hash = ""
     agent._execution_thread_id: int | None = None  # Set at run_conversation() start
     agent._interrupt_thread_signal_pending = False
     agent._client_lock = threading.RLock()
@@ -607,6 +594,10 @@ def init_agent(
     # (e.g. CLI voice mode adds a temporary prefix for the live call only).
     agent._persist_user_message_idx = None
     agent._persist_user_message_override = None
+    # CLI close and worker turn persistence can run on different threads.
+    # Serialize the full snapshot/cursor decision, not only the SQLite write.
+    agent._session_persist_lock = threading.RLock()
+    agent._pending_cli_user_message = None
 
     # Cache anthropic image-to-text fallbacks per image payload/URL so a
     # single tool loop does not repeatedly re-run auxiliary vision on the
@@ -1256,6 +1247,32 @@ def init_agent(
     _agent_section = _agent_cfg.get("agent", {})
     if not isinstance(_agent_section, dict):
         _agent_section = {}
+    _verification_cfg = _agent_section.get("verification", {})
+    if not isinstance(_verification_cfg, dict):
+        _verification_cfg = {}
+    _verification_guard_raw = os.getenv(
+        "HERMES_VERIFICATION_COMPLETION_GUARD",
+        str(_verification_cfg.get("completion_guard", "auto")),
+    )
+    _verification_guard_token = str(_verification_guard_raw).strip().lower()
+    if _verification_guard_token in {"1", "true", "yes", "on"}:
+        agent.verification_completion_guard = True
+    elif _verification_guard_token in {"0", "false", "no", "off"}:
+        agent.verification_completion_guard = False
+    else:
+        agent.verification_completion_guard = "auto"
+    try:
+        agent.verification_max_attempts = max(
+            0,
+            int(
+                os.getenv(
+                    "HERMES_VERIFICATION_MAX_ATTEMPTS",
+                    str(_verification_cfg.get("max_attempts", 1)),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        agent.verification_max_attempts = 1
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
     # Universal task-completion guidance toggle.  Default True.  Surfaced
@@ -1348,6 +1365,11 @@ def init_agent(
     compression_in_place = str(
         _compression_cfg.get("in_place", False)
     ).lower() in {"true", "1", "yes"}
+    codex_app_server_auto_compaction = str(
+        _compression_cfg.get("codex_app_server_auto", "native") or "native"
+    ).strip().lower()
+    if codex_app_server_auto_compaction not in {"native", "hermes", "off"}:
+        codex_app_server_auto_compaction = "native"
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1551,6 +1573,7 @@ def init_agent(
             config_context_length=_config_context_length,
             provider=agent.provider,
             custom_providers=_custom_providers,
+            allow_network_discovery=False,
         )
         agent.context_compressor.update_model(
             model=agent.model,
@@ -1576,9 +1599,11 @@ def init_agent(
             provider=agent.provider,
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
+            max_tokens=agent.max_tokens,
         )
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
+    agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).
@@ -1633,6 +1658,7 @@ def init_agent(
                 platform=agent.platform or "cli",
                 model=agent.model,
                 context_length=getattr(agent.context_compressor, "context_length", 0),
+                session_db=agent._session_db,
             )
         except Exception as _ce_err:
             _ra().logger.debug("Context engine on_session_start: %s", _ce_err)

@@ -100,6 +100,28 @@ class TestCodexBuildKwargs:
         )
         assert "prompt_cache_key" not in kw
 
+    def test_github_replay_policy_survives_request_override_and_preflight(self, transport):
+        injected = {
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "phase": "commentary",
+            "id": "stale-connection-id",
+            "content": [{"type": "output_text", "text": "checking"}],
+        }
+        kwargs = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "continue"}],
+            tools=[],
+            is_github_responses=True,
+            request_overrides={"input": [injected]},
+        )
+
+        normalized = transport.preflight_kwargs(kwargs)
+
+        assert "id" not in normalized["input"][0]
+        assert normalized["input"][0]["phase"] == "commentary"
+
     def test_xai_responses_sends_cache_key_via_extra_body(self, transport):
         """xAI's Responses API documents ``prompt_cache_key`` as the
         body-level cache-routing key (the ``x-grok-conv-id`` header is

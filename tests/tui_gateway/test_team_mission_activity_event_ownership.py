@@ -7,7 +7,7 @@ from tui_gateway.services.team_mission_activity_events import (
     activity_last_seq,
     mission_id_for_activity,
     mission_status_for_activity,
-    uses_event_log,
+    uses_mission_activity_journal,
 )
 
 
@@ -75,7 +75,7 @@ def test_activity_replay_queries_use_store_components(tmp_path: Path) -> None:
         )
 
         assert mission_id_for_activity("act-team_dispatch-1", db=db) == "mission-1"
-        assert uses_event_log("mission:mission-1", db=db) is True
+        assert uses_mission_activity_journal("mission:mission-1", db=db) is True
         assert mission_status_for_activity("mission:mission-1", db=db) == "running"
         assert activity_last_seq("mission:mission-1", db=db) == 2
         assert activity_last_seq("chat:chat-session-1", db=db) == 1
@@ -86,7 +86,7 @@ def test_activity_replay_queries_use_store_components(tmp_path: Path) -> None:
 def test_unknown_mission_does_not_select_mission_replay(tmp_path: Path) -> None:
     db = open_cli_session_store(tmp_path / "state.db")
     try:
-        assert uses_event_log("mission:missing", db=db) is False
+        assert uses_mission_activity_journal("mission:missing", db=db) is False
         assert mission_status_for_activity("mission:missing", db=db) == ""
         assert activity_last_seq("chat:missing", db=db) == 0
     finally:

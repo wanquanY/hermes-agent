@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from hermes_team_mission.state.event_log import projection_event
-from tui_gateway.services import runtime_event_protocol
 from tui_gateway.services.run_events import (
     list_activity_events as _list_activity_run_events,
     list_mission_activity_events as _list_mission_run_events,
@@ -299,8 +298,8 @@ def is_activity_id(activity_id: str) -> bool:
     )
 
 
-def uses_event_log(activity_id: str, db: Any = None) -> bool:
-    """Return true when an activity id is backed by Team Mission activity replay.
+def uses_mission_activity_journal(activity_id: str, db: Any = None) -> bool:
+    """Return true when an activity id is backed by a mission activity journal.
 
     ``mission:<id>`` is also used by the generic Activity command bridge in a
     few legacy paths. Those activities have no Team Mission graph and must keep
@@ -340,7 +339,7 @@ def activity_last_seq(activity_id: str, db: Any = None) -> int:
     normalized_activity_id = text(activity_id)
     if not normalized_activity_id:
         return 0
-    if uses_event_log(normalized_activity_id, db=db):
+    if uses_mission_activity_journal(normalized_activity_id, db=db):
         events = _list_mission_activity_run_events(
             db,
             normalized_activity_id,
@@ -740,10 +739,14 @@ def _project_run_event_for_subscription(
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     try:
         source_seq = int(
-            payload.get("source_seq")
-            or payload.get("sourceSeq")
-            or event.get("source_seq")
+            event.get("source_seq")
             or event.get("sourceSeq")
+            or payload.get("source_seq")
+            or payload.get("sourceSeq")
+            or event.get("runtime_source_seq")
+            or event.get("runtimeSourceSeq")
+            or payload.get("runtime_source_seq")
+            or payload.get("runtimeSourceSeq")
             or 0
         )
     except (TypeError, ValueError):
@@ -767,56 +770,15 @@ def project_run_event_for_subscription(
     *,
     mission_id_value: str,
 ) -> dict[str, Any]:
-    source = dict(event or {})
-    source_payload = dict(source.get("payload") or {}) if isinstance(source.get("payload"), dict) else {}
-    snapshot_mode = str(source_payload.get("mode") or "").strip().lower() == "snapshot"
-    if snapshot_mode:
-        # The durable audit projector intentionally rejects historical snapshot
-        # deltas. A transient reconnect snapshot is a transport repair frame,
-        # so project it as append first and restore explicit snapshot semantics.
-        source_payload["mode"] = "append"
-        source["payload"] = source_payload
-    projected = _project_run_event_for_subscription(
-        source,
+    if event.get("transient") is True:
+        raise ValueError(
+            "Team Mission activity delivery requires a persisted canonical journal event"
+        )
+    return _project_run_event_for_subscription(
+        event,
         activity_id,
         mission_id_value=mission_id_value,
     )
-    if snapshot_mode:
-        payload = projected.get("payload") if isinstance(projected.get("payload"), dict) else {}
-        text_stream = payload.get("text_stream") if isinstance(payload.get("text_stream"), dict) else {}
-        text_stream["mode"] = "snapshot"
-        payload["text_stream"] = text_stream
-        payload["mode"] = "snapshot"
-        payload["replay_snapshot"] = True
-        projected["text_stream"] = dict(text_stream)
-        projected["payload"] = payload
-    if event.get("transient"):
-        runtime_event_protocol.mark_transient(projected)
-        projected["runtime_source_seq"] = int(
-            event.get("runtime_source_seq")
-            or event.get("runtimeSourceSeq")
-            or event.get("source_seq")
-            or event.get("sourceSeq")
-            or 0
-        )
-        for key in (
-            "activity_event_seq",
-            "activityEventSeq",
-            "team_mission_event_seq",
-            "teamMissionEventSeq",
-        ):
-            projected.pop(key, None)
-        payload = projected.get("payload") if isinstance(projected.get("payload"), dict) else {}
-        payload["runtime_source_seq"] = projected["runtime_source_seq"]
-        for key in (
-            "activity_event_seq",
-            "activityEventSeq",
-            "team_mission_event_seq",
-            "teamMissionEventSeq",
-        ):
-            payload.pop(key, None)
-        projected["payload"] = payload
-    return projected
 
 
 def _list_mission_activity_run_events(
@@ -853,7 +815,7 @@ def list_activity_events(
     limit: int = 2000,
     event_activity_id: Callable[[dict[str, Any]], str],
 ) -> list[dict[str, Any]]:
-    if uses_event_log(activity_id, db=db):
+    if uses_mission_activity_journal(activity_id, db=db):
         normalized_mission_id = mission_id_for_activity(activity_id, db=db)
         try:
             bounded_limit = max(

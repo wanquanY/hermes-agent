@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from tools.environments.local import hermes_subprocess_env
+
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
@@ -155,9 +157,10 @@ class CodexAppServerClient:
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        spawn_env = os.environ.copy()
-        if env:
-            spawn_env.update(env)
+        spawn_env = hermes_subprocess_env(
+            inherit_credentials=True,
+            extra_env=env,
+        )
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
 

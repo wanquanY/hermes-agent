@@ -29,10 +29,16 @@ class ActivityService:
         return self._write(lambda: self._repository.bind_legacy_activity_to_mission(**fields))
 
     def get_for_mission(self, mission_id: str) -> dict[str, Any] | None:
-        return self._repository.get_legacy_activity_for_mission(mission_id)
+        return self._read(
+            lambda: self._repository.get_legacy_activity_for_mission(mission_id)
+        )
 
     def list_active_missions(self, conversation_id: str) -> list[dict[str, Any]]:
-        return self._repository.list_legacy_active_mission_activities(conversation_id)
+        return self._read(
+            lambda: self._repository.list_legacy_active_mission_activities(
+                conversation_id
+            )
+        )
 
     def mark_mission_terminal(self, **fields: Any) -> bool:
         return self._write(
@@ -103,10 +109,12 @@ class ActivityService:
         status: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self._repository.list_legacy_activities(
-            conversation_id,
-            status=status,
-            limit=limit,
+        return self._read(
+            lambda: self._repository.list_legacy_activities(
+                conversation_id,
+                status=status,
+                limit=limit,
+            )
         )
 
     def list_unread(
@@ -115,9 +123,11 @@ class ActivityService:
         *,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._repository.list_legacy_unread_completions(
-            parent_activity_id,
-            conversation_id=conversation_id,
+        return self._read(
+            lambda: self._repository.list_legacy_unread_completions(
+                parent_activity_id,
+                conversation_id=conversation_id,
+            )
         )
 
     def unread_count(
@@ -126,22 +136,26 @@ class ActivityService:
         parent_activity_id: str | None = None,
         conversation_id: str | None = None,
     ) -> int:
-        return self._repository.get_legacy_unread_completion_count(
-            parent_activity_id=parent_activity_id,
-            conversation_id=conversation_id,
+        return self._read(
+            lambda: self._repository.get_legacy_unread_completion_count(
+                parent_activity_id=parent_activity_id,
+                conversation_id=conversation_id,
+            )
         )
 
     def get(self, activity_id: str) -> dict[str, Any] | None:
-        return self._repository.get_legacy_activity(activity_id)
+        return self._read(lambda: self._repository.get_legacy_activity(activity_id))
 
     def insert_command(self, **fields: Any) -> dict[str, Any]:
         return self._write(lambda: self._repository.insert_activity_command(**fields))
 
     def get_command(self, command_id: str) -> dict[str, Any]:
-        return self._repository.get_activity_command(command_id)
+        return self._read(lambda: self._repository.get_activity_command(command_id))
 
     def list_pending_commands(self, **query: Any) -> list[dict[str, Any]]:
-        return self._repository.list_pending_activity_commands(**query)
+        return self._read(
+            lambda: self._repository.list_pending_activity_commands(**query)
+        )
 
     def update_command_state(self, command_id: str, **fields: Any) -> dict[str, Any]:
         return self._write(
@@ -149,7 +163,12 @@ class ActivityService:
         )
 
     def list_commands(self, activity_id: str, **query: Any) -> list[dict[str, Any]]:
-        return self._repository.list_activity_commands_for_activity(activity_id, **query)
+        return self._read(
+            lambda: self._repository.list_activity_commands_for_activity(
+                activity_id,
+                **query,
+            )
+        )
 
     def reconcile_missions_once(self) -> dict[str, Any]:
         return self._unit_of_work.execute(
@@ -158,6 +177,9 @@ class ActivityService:
 
     def _write(self, operation):
         return self._unit_of_work.execute(lambda _conn: operation())
+
+    def _read(self, operation):
+        return self._unit_of_work.read(lambda _conn: operation())
 
 
 __all__ = ["ActivityService"]

@@ -242,6 +242,8 @@ _READ_ONLY_DB_METHODS = frozenset(
         "session.most_recent",
         "session.status",
         "session.usage",
+        "project.facts",
+        "verification.status",
         "team_mission.conversation.list",
         "team_mission.conversation.render",
         "team_mission.conversation.resolve",
@@ -890,6 +892,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     turn_id = ""
     runtime_scope_key = ""
     direct_transport = None
+    canonical_activity_delivery = False
     try:
         from tui_gateway.services import run_control
 
@@ -947,6 +950,10 @@ def _emit(event: str, sid: str, payload: dict | None = None):
                     **({"activity_id": activity_id, "activityId": activity_id} if activity_id else {}),
                 },
             }
+            canonical_activity_delivery = run_control.event_uses_canonical_activity_journal(
+                frame,
+                db=event_db,
+            )
             terminal_event = _is_terminal_run_event(event)
             recorded_deliveries = run_control.publish_recorded_event(
                 frame,
@@ -990,8 +997,13 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         )
     if payload is not None:
         params["payload"] = payload
+    # Bound Team Mission events are published by the persisted activity-journal
+    # listener above.  The historical direct write is a second transport for
+    # the same semantic event and must not reach the desktop.
     direct_frame = {"jsonrpc": "2.0", "method": "event", "params": params}
-    if direct_transport is not None:
+    if canonical_activity_delivery:
+        direct_delivered = False
+    elif direct_transport is not None:
         direct_delivered = direct_transport.write(direct_frame)
     else:
         direct_delivered = write_json(direct_frame)
@@ -1596,11 +1608,6 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
             evt.get("message", ""),
             evt.get("suppressed", 0),
         )
-    if evt_type == "async_delegation":
-        # Async-delegation completions have no process session_id; without
-        # this the fallthrough keys every one as ("", "async_delegation")
-        # and the second completion's status update is suppressed forever.
-        return (evt.get("delegation_id", ""), evt_type)
     return (evt_sid, evt_type)
 
 
@@ -1890,36 +1897,5 @@ from tui_gateway.core.agent_session import (
     _init_session,
 )
 from tui_gateway.services.completions import fuzzy_cache as _fuzzy_cache
-from tui_gateway.core import agent_session as _agent_session_module
-
-_core_init_session = _init_session
-
-
-def _init_session(*args, **kwargs):
-    session_info_hook = globals().get("_session_info")
-
-    def _session_info_adapter(agent, session=None):
-        try:
-            return session_info_hook(agent, session)  # type: ignore[misc]
-        except TypeError:
-            return session_info_hook(agent)  # type: ignore[misc]
-
-    for name in (
-        "_SlashWorker",
-        "_wire_callbacks",
-        "_notify_session_boundary",
-        "_load_show_reasoning",
-        "_load_tool_progress_mode",
-        "_emit",
-        "_sessions",
-        "_sessions_lock",
-        "_stdio_transport",
-        "_resolve_model",
-    ):
-        if name in globals():
-            setattr(_agent_session_module, name, globals()[name])
-    if session_info_hook is not None:
-        setattr(_agent_session_module, "_session_info", _session_info_adapter)
-    return _core_init_session(*args, **kwargs)
 
 _register_extracted_method_modules()

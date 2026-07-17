@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -41,6 +42,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
 from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_agent.application.active_work_registry import (
+    WorkRejected,
+    get_process_active_work_registry,
+)
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
@@ -254,7 +259,21 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import (
+    advance_next_run as _advance_next_run,
+    claim_job_for_fire,
+    get_due_jobs,
+    heartbeat_run_claim,
+    mark_job_run,
+    new_fire_claim_owner,
+    record_job_drain_timeout,
+    save_job_output,
+)
+
+# Compatibility export for callers/tests that historically patched this seam.
+# The scheduler no longer calls it: claim_job_for_fire advances recurring
+# next_run_at in the same store transaction as ownership.
+advance_next_run = _advance_next_run
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -271,6 +290,13 @@ _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
 _sequential_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def get_running_job_ids() -> set[str]:
+    """Return a stable copy of this process's active scheduler executions."""
+
+    with _running_lock:
+        return set(_running_job_ids)
 
 
 def _get_parallel_pool(max_workers: Optional[int]) -> concurrent.futures.ThreadPoolExecutor:
@@ -1262,6 +1288,51 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script execution failed: {exc}"
 
 
+_RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
+
+
+def _run_job_script_with_claim_heartbeat(
+    job: dict,
+    script_path: str,
+) -> tuple[bool, str]:
+    """Run a script while refreshing only its owned execution claim."""
+
+    owner = str(job.get("_run_claim_owner") or "")
+    if not owner:
+        claim = job.get("run_claim")
+        owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+    if not owner:
+        return _run_job_script(script_path)
+
+    stop = threading.Event()
+    heartbeat_context = contextvars.copy_context()
+
+    def _heartbeat_loop() -> None:
+        while not stop.wait(_RUN_CLAIM_HEARTBEAT_SECONDS):
+            try:
+                if not heartbeat_run_claim(job["id"], expected_owner=owner):
+                    logger.warning(
+                        "Job '%s': script claim ownership was lost; heartbeat stopped",
+                        job.get("id"),
+                    )
+                    return
+            except Exception:
+                logger.exception("Job '%s': script claim heartbeat failed", job.get("id"))
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_context.run,
+        args=(_heartbeat_loop,),
+        name="cron-script-claim-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        return _run_job_script(script_path)
+    finally:
+        stop.set()
+        heartbeat_thread.join(timeout=1.0)
+
+
 def _parse_wake_gate(script_output: str) -> bool:
     """Parse the last non-empty stdout line of a cron job's pre-check script
     as a wake gate.
@@ -1549,7 +1620,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _prior_cwd = None
 
         try:
-            ok, output = _run_job_script(script_path)
+            ok, output = _run_job_script_with_claim_heartbeat(job, script_path)
         finally:
             if _prior_cwd is not None:
                 try:
@@ -1637,7 +1708,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script(script_path)
+        prerun_script = _run_job_script_with_claim_heartbeat(job, script_path)
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
@@ -1977,6 +2048,22 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
+        _run_claim_owner = str(job.get("_run_claim_owner") or "")
+        _last_claim_heartbeat = time.monotonic()
+
+        def _heartbeat_run_claim_if_due() -> None:
+            nonlocal _last_claim_heartbeat
+            if not _run_claim_owner:
+                return
+            current = time.monotonic()
+            if current - _last_claim_heartbeat < _RUN_CLAIM_HEARTBEAT_SECONDS:
+                return
+            _last_claim_heartbeat = current
+            if not heartbeat_run_claim(job_id, expected_owner=_run_claim_owner):
+                raise RuntimeError(
+                    f"Cron execution claim ownership lost for job {job_id}"
+                )
+
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # Preserve scheduler-scoped ContextVar state (for example skill-declared
         # env passthrough registrations) when the cron run hops into the worker
@@ -1985,18 +2072,16 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
         try:
-            if _cron_inactivity_limit is None:
-                # Unlimited — just wait for the result.
-                result = _cron_future.result()
-            else:
-                result = None
-                while True:
-                    done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
-                    )
-                    if done:
-                        result = _cron_future.result()
-                        break
+            result = None
+            while True:
+                done, _ = concurrent.futures.wait(
+                    {_cron_future}, timeout=_POLL_INTERVAL,
+                )
+                if done:
+                    result = _cron_future.result()
+                    break
+                _heartbeat_run_claim_if_due()
+                if _cron_inactivity_limit is not None:
                     # Agent still running — check inactivity.
                     _idle_secs = 0.0
                     if hasattr(agent, "get_activity_summary"):
@@ -2230,16 +2315,18 @@ def run_one_job(
                 "(model error, timeout, or misconfiguration)"
             )
 
-        mark_kwargs = {"delivery_error": delivery_error}
+        mark_kwargs = {
+            "delivery_error": delivery_error,
+            "expected_owner": job.get("_run_claim_owner"),
+        }
         execution_session_id = job.get("_execution_session_id")
         if execution_session_id:
             mark_kwargs["session_id"] = execution_session_id
-        mark_job_run(job["id"], success, error, **mark_kwargs)
-        return True
+        return bool(mark_job_run(job["id"], success, error, **mark_kwargs))
 
     except Exception as exc:
         logger.error("Error processing job %s: %s", job["id"], exc)
-        mark_kwargs = {}
+        mark_kwargs = {"expected_owner": job.get("_run_claim_owner")}
         execution_session_id = job.get("_execution_session_id")
         if execution_session_id:
             mark_kwargs["session_id"] = execution_session_id
@@ -2290,13 +2377,6 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         if verbose:
             logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
-
-        # Advance next_run_at for all recurring jobs FIRST, under the file lock,
-        # before any execution begins.  This preserves at-most-once semantics.
-        # For jobs already running from a prior async tick, this keeps advancing
-        # next_run_at so the grace window does not expire while the job is busy.
-        for job in due_jobs:
-            advance_next_run(job["id"])
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
@@ -2358,9 +2438,47 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     )
                     return None
                 _running_job_ids.add(job_id)
+            owner = new_fire_claim_owner()
+            registry = get_process_active_work_registry()
+            try:
+                work_lease = registry.register(
+                    kind="automation_run",
+                    surface="cron",
+                    work_id=f"cron:{job_id}:{owner}",
+                    metadata={"job_id": job_id, "owner": owner},
+                    persist_timeout=lambda: record_job_drain_timeout(
+                        job_id,
+                        expected_owner=owner,
+                    ),
+                )
+            except WorkRejected:
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                logger.info("Job '%s' rejected because runtime is draining", job_id)
+                return None
+            try:
+                claimed = claim_job_for_fire(job_id, owner=owner)
+            except Exception:
+                work_lease.release()
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                logger.exception("Job '%s': execution claim failed closed", job_id)
+                return None
+            if not claimed:
+                work_lease.release()
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                logger.info(
+                    "Job '%s' already has an execution owner — skipping",
+                    job.get("name", job_id),
+                )
+                return None
+            claimed_job = dict(job)
+            claimed_job["_run_claim_owner"] = owner
+            claimed_job["run_claim"] = {"by": owner}
             _ctx = contextvars.copy_context()
 
-            def _run_and_release(j=job, ctx=_ctx):
+            def _run_and_release(j=claimed_job, ctx=_ctx):
                 try:
                     return ctx.run(
                         run_one_job,
@@ -2370,10 +2488,23 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                         verbose=verbose,
                     )
                 finally:
+                    work_lease.release()
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
 
-            return pool.submit(_run_and_release)
+            try:
+                return pool.submit(_run_and_release)
+            except Exception as exc:
+                mark_job_run(
+                    job_id,
+                    False,
+                    f"scheduler submission failed: {exc}",
+                    expected_owner=owner,
+                )
+                work_lease.release()
+                with _running_lock:
+                    _running_job_ids.discard(job_id)
+                raise
 
         # Sequential workdir/profile jobs still run one at a time, but on a
         # persistent single-thread pool so a long env-mutating job does not

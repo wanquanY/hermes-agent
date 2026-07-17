@@ -58,3 +58,22 @@ def test_checkpoint_is_incremental_append_and_marks_lane_clean():
     assert second.frame["payload"]["mode"] == "append"
     assert second.frame["payload"]["offset"] == 2
     assert second.frame["payload"]["text"] == "😀"
+
+
+def test_observe_assigns_utf16_offsets_to_offsetless_live_fragments():
+    first = _event("A😀", seq=10, offset=0)
+    first["payload"].pop("offset")
+    first["payload"].pop("mode")
+    second = _event("中", seq=11, offset=0)
+    second["payload"].pop("offset")
+    second["payload"].pop("mode")
+
+    runtime_streams.observe(first)
+    runtime_streams.observe(second)
+
+    assert first["payload"]["offset"] == 0
+    assert first["payload"]["mode"] == "append"
+    assert second["payload"]["offset"] == 3
+    assert second["payload"]["mode"] == "append"
+    snapshot = runtime_streams.replay_snapshots("session-1")[0]
+    assert snapshot["payload"]["text"] == "A😀中"

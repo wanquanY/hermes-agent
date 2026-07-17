@@ -9,11 +9,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from channels.platforms.base_models import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.interrupt_control import is_control_interrupt_message
 from hermes_gateway.media_context import build_media_placeholder
 from hermes_gateway.pending_events import dequeue_pending_event
+from hermes_gateway.response_filters import is_intentional_silence_agent_result
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +89,9 @@ class AgentPendingFollowupRuntime:
             next_source = getattr(pending_event, "source", None) or context.source
             if (
                 goal_command_for(self._runner).is_goal_continuation_event(pending_event)
-                and not goal_command_for(self._runner).goal_still_active_for_session(
-                    context.session_id
+                and not await run_sqlite_io(
+                    goal_command_for(self._runner).goal_still_active_for_session,
+                    context.session_id,
                 )
             ):
                 logger.info(
@@ -244,6 +247,12 @@ class AgentPendingFollowupRuntime:
             )
         )
         first_response = result.get("final_response", "")
+        if is_intentional_silence_agent_result(result, first_response):
+            logger.info(
+                "Queued follow-up for session %s: suppressing intentional-silence marker.",
+                context.session_key or "?",
+            )
+            return
         if first_response and not already_streamed and adapter:
             try:
                 logger.info(

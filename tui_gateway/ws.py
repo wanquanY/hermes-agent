@@ -96,6 +96,8 @@ _WS_CONTROL_METHODS = frozenset(
         "session.message_metadata.merge",
         "session.status",
         "session.title",
+        "project.facts",
+        "verification.status",
         "team_mission.conversation.delete",
         "team_mission.conversation.ensure",
         "team_mission.conversation.list",

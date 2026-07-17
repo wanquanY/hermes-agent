@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -61,6 +63,22 @@ _SKIP_PARTS = {"integration", "e2e"}
 # safety net so a single hung file can't stall the whole suite. Override
 # via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
 _DEFAULT_FILE_TIMEOUT_SECONDS = 600.0  # 10 minutes
+_SERIAL_SENTINEL = "hermes-test-runner: serial"
+
+
+def _requires_serial_execution(path: Path) -> bool:
+    """Return whether a file declares exclusive execution in this runner.
+
+    The runner parallelizes at file granularity. Wall-clock performance tests
+    and other host-resource assertions must not measure unrelated concurrent
+    pytest processes, so they can opt into the serial tail with a source
+    sentinel instead of weakening their thresholds.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return any(_SERIAL_SENTINEL in handle.readline() for _ in range(12))
+    except (OSError, UnicodeError):
+        return False
 
 
 def _count_tests(
@@ -219,6 +237,7 @@ def _run_one_file(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    basetemp_root: Path,
 ) -> Tuple[Path, int, str, dict[str, int]]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
 
@@ -246,19 +265,36 @@ def _run_one_file(
     timeouts inside the subprocess; this outer timeout exists only to
     bound a pathologically slow or hung file as a whole.
     """
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    proc = subprocess.Popen(
-        cmd,
-        cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        # POSIX: place the child at the head of its own process group so
-        # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
-        start_new_session=True,
-    )
+    # Pytest's default numbered basetemp directories share one global parent.
+    # Concurrent pytest processes prune old siblings during startup, which can
+    # delete another still-running file's tmp_path. Give every file an explicit
+    # private basetemp under this runner invocation instead.
+    file_basetemp = Path(tempfile.mkdtemp(prefix="file-", dir=basetemp_root))
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(file),
+        "--basetemp",
+        str(file_basetemp),
+        *pytest_args,
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            # POSIX: place the child at the head of its own process group so
+            # _kill_tree can SIGKILL the group atomically.
+            # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
+            # _kill_tree handles the Windows path via taskkill /F /T.
+            start_new_session=True,
+        )
+    except BaseException:
+        shutil.rmtree(file_basetemp, ignore_errors=True)
+        raise
 
     # Capture the pgid NOW, before the leader can exit and be reaped.
     # Once the leader is reaped, os.getpgid(proc.pid) raises
@@ -308,6 +344,7 @@ def _run_one_file(
         # so the operator can spot it.
         rc = 0
     summary = _parse_pytest_summary(output)
+    shutil.rmtree(file_basetemp, ignore_errors=True)
     return file, rc, output, summary
 
 
@@ -534,11 +571,15 @@ def main() -> int:
     # Count individual tests per file via a single pytest --co pass.
     test_counts = _count_tests(files, repo_root, pytest_passthrough)
     total_tests = sum(test_counts.values())
+    serial_files = [file for file in files if _requires_serial_execution(file)]
+    serial_file_set = set(serial_files)
+    parallel_files = [file for file in files if file not in serial_file_set]
 
     print(
         f"Discovered {len(files)} test files ({total_tests} tests) under "
         f"{[str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]}; "
-        f"running with -j {args.jobs}",
+        f"running with -j {args.jobs}"
+        + (f"; {len(serial_files)} file(s) reserved for the serial tail" if serial_files else ""),
         flush=True,
     )
 
@@ -593,20 +634,49 @@ def main() -> int:
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures: List[Future] = []
-        for file in files:
+    # Keep the path product-neutral. The live-system guard intentionally
+    # rejects process-killer commands whose arguments mention "hermes"; a
+    # product-named tmp root can otherwise make an unrelated command such as
+    # ``rg .../skills`` look like a dangerous ``kill ... hermes`` invocation.
+    basetemp_root = Path(tempfile.mkdtemp(prefix="pytest-files-"))
+    try:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures: List[Future] = []
+            for file in parallel_files:
+                t0 = time.monotonic()
+                fut = pool.submit(
+                    _run_one_file,
+                    file,
+                    pytest_passthrough,
+                    repo_root,
+                    args.file_timeout,
+                    basetemp_root,
+                )
+                fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
+                futures.append(fut)
+            # Block until everything's done. ThreadPoolExecutor.__exit__ waits
+            # for all submitted work, but doing it explicitly here makes the
+            # control flow obvious.
+            for fut in futures:
+                fut.result() if fut.exception() is None else None
+        for file in serial_files:
             t0 = time.monotonic()
-            fut = pool.submit(
-                _run_one_file, file, pytest_passthrough, repo_root, args.file_timeout
-            )
-            fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
-            futures.append(fut)
-        # Block until everything's done. ThreadPoolExecutor.__exit__ waits
-        # for all submitted work, but doing it explicitly here makes the
-        # control flow obvious.
-        for fut in futures:
-            fut.result() if fut.exception() is None else None
+            future: Future = Future()
+            try:
+                future.set_result(
+                    _run_one_file(
+                        file,
+                        pytest_passthrough,
+                        repo_root,
+                        args.file_timeout,
+                        basetemp_root,
+                    )
+                )
+            except BaseException as exc:  # keep accounting/reporting uniform
+                future.set_exception(exc)
+            _on_done(file, t0, future)
+    finally:
+        shutil.rmtree(basetemp_root, ignore_errors=True)
 
     elapsed = time.monotonic() - started
     print()

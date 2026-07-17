@@ -61,6 +61,23 @@ class TestProjectionInvariants:
             assert r.is_tool_iteration is False
             assert r.final_text is None
 
+    def test_reasoning_delta_is_classified_without_materializing_message(self) -> None:
+        result = CodexEventProjector().project(
+            {"method": "item/reasoning/delta", "params": {"delta": "thinking"}}
+        )
+
+        assert result.reasoning_delta == "thinking"
+        assert result.content_delta == ""
+        assert result.messages == []
+
+    def test_agent_message_delta_is_classified_as_content(self) -> None:
+        result = CodexEventProjector().project(
+            {"method": "item/agentMessage/delta", "params": {"delta": "answer"}}
+        )
+
+        assert result.content_delta == "answer"
+        assert result.reasoning_delta == ""
+
     def test_turn_started_and_completed_are_silent(self) -> None:
         p = CodexEventProjector()
         for method in ("turn/started", "turn/completed", "thread/started"):

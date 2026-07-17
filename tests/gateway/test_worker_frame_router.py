@@ -21,6 +21,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -88,6 +89,42 @@ async def test_on_event_forwards_payload() -> None:
             "conversation_id": "sess-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_on_event_slow_persistence_keeps_runtime_loop_responsive() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_publish(_payload: dict) -> list:
+        started.set()
+        release.wait(timeout=2)
+        return []
+
+    router = WorkerFrameRouter(
+        sender=_FakeSupervisor(),
+        publish_event=slow_publish,
+        publish_run_terminal=lambda **_kwargs: {},
+    )
+    publish_task = asyncio.create_task(
+        router.on_event(
+            "profile:x",
+            "sess-1",
+            EventFrame(params={"type": "message.complete", "text": "done"}),
+        )
+    )
+    while not started.is_set():
+        await asyncio.sleep(0.001)
+
+    ticks = 0
+    for _ in range(20):
+        ticks += 1
+        await asyncio.sleep(0.002)
+    assert ticks == 20
+    assert not publish_task.done()
+
+    release.set()
+    await publish_task
 
 
 @pytest.mark.asyncio

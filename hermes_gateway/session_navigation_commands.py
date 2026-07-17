@@ -7,6 +7,7 @@ from typing import Optional
 
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
@@ -352,7 +353,7 @@ class GatewaySessionNavigationCommandService:
 
         # /topic off — clean disable path so users don't have to edit the DB.
         if args.lower() in {"off", "disable", "stop"}:
-            return self.disable_telegram_topic_mode_for_chat(source)
+            return await run_sqlite_io(self.disable_telegram_topic_mode_for_chat, source)
 
         if args:
             if not source.thread_id:
@@ -373,7 +374,8 @@ class GatewaySessionNavigationCommandService:
                 return t("gateway.topic.topics_user_disallowed")
 
         try:
-            self._runner._session_db.telegram_topics.enable_telegram_topic_mode(
+            await run_sqlite_io(
+                self._runner._session_db.telegram_topics.enable_telegram_topic_mode,
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
                 has_topics_enabled=capabilities.get("has_topics_enabled"),
@@ -388,7 +390,8 @@ class GatewaySessionNavigationCommandService:
 
         if source.thread_id:
             try:
-                binding = self._runner._session_db.telegram_topics.get_telegram_topic_binding(
+                binding = await run_sqlite_io(
+                    self._runner._session_db.telegram_topics.get_telegram_topic_binding,
                     chat_id=str(source.chat_id),
                     thread_id=str(source.thread_id),
                 )
@@ -399,7 +402,10 @@ class GatewaySessionNavigationCommandService:
                 session_id = str(binding.get("session_id") or "")
                 title = None
                 try:
-                    title = self._runner._session_db.sessions.get_title(session_id)
+                    title = await run_sqlite_io(
+                        self._runner._session_db.sessions.get_title,
+                        session_id,
+                    )
                 except Exception:
                     title = None
                 session_label = title or t("gateway.topic.untitled_session")
@@ -410,7 +416,7 @@ class GatewaySessionNavigationCommandService:
                 )
             return t("gateway.topic.thread_ready")
 
-        return self.telegram_topic_root_status_message(source)
+        return await run_sqlite_io(self.telegram_topic_root_status_message, source)
 
     def telegram_topic_root_status_message(self, source: SessionSource) -> str:
         lines = [
@@ -461,11 +467,14 @@ class GatewaySessionNavigationCommandService:
     async def restore_telegram_topic_session(self, event: MessageEvent, raw_session_id: str) -> str:
         """Restore an existing Telegram-owned Hermes session into this topic."""
         source = event.source
-        session_id = self._runner._session_db.sessions.resolve_id(raw_session_id.strip())
+        session_id = await run_sqlite_io(
+            self._runner._session_db.sessions.resolve_id,
+            raw_session_id.strip(),
+        )
         if not session_id:
             return f"Session not found: {raw_session_id.strip()}"
 
-        session = self._runner._session_db.sessions.get(session_id)
+        session = await run_sqlite_io(self._runner._session_db.sessions.get, session_id)
         if not session:
             return f"Session not found: {raw_session_id.strip()}"
         if str(session.get("source") or "") != "telegram":
@@ -473,8 +482,12 @@ class GatewaySessionNavigationCommandService:
         if str(session.get("user_id") or "") != str(source.user_id):
             return "That session does not belong to this Telegram user."
 
-        linked = self._runner._session_db.telegram_topics.is_telegram_session_linked_to_topic(session_id=session_id)
-        current_binding = self._runner._session_db.telegram_topics.get_telegram_topic_binding(
+        linked = await run_sqlite_io(
+            self._runner._session_db.telegram_topics.is_telegram_session_linked_to_topic,
+            session_id=session_id,
+        )
+        current_binding = await run_sqlite_io(
+            self._runner._session_db.telegram_topics.get_telegram_topic_binding,
             chat_id=str(source.chat_id),
             thread_id=str(source.thread_id),
         )
@@ -484,7 +497,8 @@ class GatewaySessionNavigationCommandService:
 
         session_key = self._runner._session_key_for_source(source)
         try:
-            self._runner._session_db.telegram_topics.bind_telegram_topic(
+            await run_sqlite_io(
+                self._runner._session_db.telegram_topics.bind_telegram_topic,
                 chat_id=str(source.chat_id),
                 thread_id=str(source.thread_id),
                 user_id=str(source.user_id),
@@ -497,10 +511,17 @@ class GatewaySessionNavigationCommandService:
                 return "That session is already linked to another Telegram topic."
             raise
 
-        title = self._runner._session_db.sessions.get_title(session_id) or session_id
+        title = await run_sqlite_io(
+            self._runner._session_db.sessions.get_title,
+            session_id,
+        ) or session_id
         last_assistant = None
         try:
-            for message in reversed(self._runner._session_db.messages.list(session_id)):
+            messages = await run_sqlite_io(
+                self._runner._session_db.messages.list,
+                session_id,
+            )
+            for message in reversed(messages):
                 if message.get("role") == "assistant" and message.get("content"):
                     last_assistant = str(message.get("content"))
                     break
@@ -525,7 +546,8 @@ class GatewaySessionNavigationCommandService:
             # List recent titled sessions for this user/platform
             try:
                 user_source = source.platform.value if source.platform else None
-                sessions = self._runner._session_db.sessions.list_rich(
+                sessions = await run_sqlite_io(
+                    self._runner._session_db.sessions.list_rich,
                     source=user_source, limit=10
                 )
                 titled = [s for s in sessions if s.get("title")]
@@ -544,18 +566,27 @@ class GatewaySessionNavigationCommandService:
                 return t("gateway.resume.list_failed", error=e)
 
         # Resolve the name to a session ID.
-        target_id = self._runner._session_db.sessions.resolve_by_title(name)
+        target_id = await run_sqlite_io(
+            self._runner._session_db.sessions.resolve_by_title,
+            name,
+        )
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
-            target_id = self._runner._session_db.sessions.resolve_resume_id(target_id)
+            target_id = await run_sqlite_io(
+                self._runner._session_db.sessions.resolve_resume_id,
+                target_id,
+            )
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
         # Check if already on that session
-        current_entry = self._runner.session_store.get_or_create_session(source)
+        current_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
         if current_entry.session_id == target_id:
             return t("gateway.resume.already_on", name=name)
 
@@ -563,7 +594,11 @@ class GatewaySessionNavigationCommandService:
         session_runtime_state_for(self._runner).release_running_agent_state(session_key)
 
         # Switch the session entry to point at the old session
-        new_entry = self._runner.session_store.switch_session(session_key, target_id)
+        new_entry = await run_sqlite_io(
+            self._runner.session_store.switch_session,
+            session_key,
+            target_id,
+        )
         if not new_entry:
             return t("gateway.resume.switch_failed")
         session_runtime_state_for(self._runner).clear_session_boundary_security_state(session_key)
@@ -576,10 +611,16 @@ class GatewaySessionNavigationCommandService:
         agent_cache_for(self._runner).evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._runner._session_db.sessions.get_title(target_id) or name
+        title = await run_sqlite_io(
+            self._runner._session_db.sessions.get_title,
+            target_id,
+        ) or name
 
         # Count messages for context
-        history = self._runner.session_store.load_transcript(target_id)
+        history = await run_sqlite_io(
+            self._runner.session_store.load_transcript,
+            target_id,
+        )
         msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
         if not msg_count:
             return t("gateway.resume.resumed_no_count", title=title)
@@ -603,8 +644,14 @@ class GatewaySessionNavigationCommandService:
         session_key = self._runner._session_key_for_source(source)
 
         # Load the current session and its transcript
-        current_entry = self._runner.session_store.get_or_create_session(source)
-        history = self._runner.session_store.load_transcript(current_entry.session_id)
+        current_entry = await run_sqlite_io(
+            self._runner.session_store.get_or_create_session,
+            source,
+        )
+        history = await run_sqlite_io(
+            self._runner.session_store.load_transcript,
+            current_entry.session_id,
+        )
         if not history:
             return t("gateway.branch.no_conversation")
 
@@ -621,15 +668,22 @@ class GatewaySessionNavigationCommandService:
         if branch_name:
             branch_title = branch_name
         else:
-            current_title = self._runner._session_db.sessions.get_title(current_entry.session_id)
+            current_title = await run_sqlite_io(
+                self._runner._session_db.sessions.get_title,
+                current_entry.session_id,
+            )
             base = current_title or "branch"
-            branch_title = self._runner._session_db.sessions.next_title_in_lineage(base)
+            branch_title = await run_sqlite_io(
+                self._runner._session_db.sessions.next_title_in_lineage,
+                base,
+            )
 
         parent_session_id = current_entry.session_id
 
         # Create the new session with parent link
         try:
-            self._runner._session_db.sessions.create(
+            await run_sqlite_io(
+                self._runner._session_db.sessions.create,
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self._runner.config.get("model", {}) or {}).get("default") if isinstance(self._runner.config, dict) else None,
@@ -642,7 +696,8 @@ class GatewaySessionNavigationCommandService:
         # Copy conversation history to the new session
         for msg in history:
             try:
-                self._runner._session_db.messages.append(
+                await run_sqlite_io(
+                    self._runner._session_db.messages.append,
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -661,12 +716,20 @@ class GatewaySessionNavigationCommandService:
 
         # Set title
         try:
-            self._runner._session_db.sessions.set_title(new_session_id, branch_title)
+            await run_sqlite_io(
+                self._runner._session_db.sessions.set_title,
+                new_session_id,
+                branch_title,
+            )
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
         # Switch the session store entry to the new session
-        new_entry = self._runner.session_store.switch_session(session_key, new_session_id)
+        new_entry = await run_sqlite_io(
+            self._runner.session_store.switch_session,
+            session_key,
+            new_session_id,
+        )
         if not new_entry:
             return t("gateway.branch.switch_failed")
         session_runtime_state_for(self._runner).clear_session_boundary_security_state(session_key)

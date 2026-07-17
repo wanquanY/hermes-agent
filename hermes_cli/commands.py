@@ -93,7 +93,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("approve", "Approve a pending dangerous command", "Session",
                gateway_only=True, args_hint="[session|always]"),
     CommandDef("deny", "Deny a pending dangerous command", "Session",
-               gateway_only=True),
+               gateway_only=True, args_hint="[all] [reason]"),
     CommandDef("background", "Run a prompt in the background", "Session",
                aliases=("bg", "btw"), args_hint="<prompt>"),
     CommandDef("agents", "Show active agents and running tasks", "Session",

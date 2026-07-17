@@ -37,7 +37,9 @@ from tui_gateway.run_worker import (
     encode_incoming,
 )
 from tui_gateway.services.runtime_scope import RuntimeScope
+from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_agent.orchestration.worker_db_proxy import serialize_db_value
+from tools.environments.local import hermes_subprocess_env
 
 _log = logging.getLogger(__name__)
 
@@ -178,6 +180,15 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "run_event_maintenance.maybe_auto_compact",
         "run_event_maintenance.prune_duplicate_session_info",
         "run_event_maintenance.reference_payloads",
+        "runtime_stability.carry_forward",
+        "runtime_stability.clear_stream_stale",
+        "runtime_stability.get",
+        "runtime_stability.record_stream_stale_failure",
+        "runtime_stability.write_compression",
+        "verification.completion_requirement",
+        "verification.mark_edited",
+        "verification.record_terminal",
+        "verification.status",
         "runs.append_event",
         "runs.fail_orphaned",
         "runs.get",
@@ -334,7 +345,6 @@ class WorkerSupervisor:
         self._queue_maxsize = max(1, int(queue_maxsize))
         self._python = python_executable or sys.executable
         self._stdio_limit_bytes = _normalize_worker_stdio_limit_bytes(stdio_limit_bytes)
-        self._db_rpc_locks: dict[str, asyncio.Lock] = {}
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -544,7 +554,14 @@ class WorkerSupervisor:
     async def _spawn_locked(
         self, scope: RuntimeScope, env_overrides: dict[str, str],
     ) -> RunWorker:
-        env = os.environ.copy()
+        # A run worker hosts the model runtime, so provider credentials are
+        # intentional authority. Gateway, infra, dashboard and dynamic Hermes
+        # secrets are not: route both the parent snapshot and profile overlay
+        # through the canonical two-tier subprocess policy.
+        env = hermes_subprocess_env(
+            inherit_credentials=True,
+            extra_env=env_overrides,
+        )
         # The new worker runs the LLM in-process; HERMES_HOME selects
         # the per-profile data root just like the legacy sub-sidecar.
         if scope.hermes_home:
@@ -554,7 +571,6 @@ class WorkerSupervisor:
             env["DOVIE_CONVERSATION_ID"] = scope.conversation_id
         if scope.agent_profile_id:
             env["DOVIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
-        env.update(env_overrides)
         # stderr inherits the main sidecar's stderr so tracebacks land
         # in the same agent.log as the legacy worker. Phase 5 may rewire
         # this to a per-scope file once we have the file-rotation policy.
@@ -783,22 +799,25 @@ class WorkerSupervisor:
             )
         try:
             args, kwargs = _decode_db_rpc_params(frame.params)
-            db = _db_for_worker_rpc(frame, args, kwargs)
-            if db is None:
-                raise RuntimeError("state.db unavailable")
-            target: Any = db
-            for path_part in db_method_name.split("."):
-                if not path_part or path_part.startswith("_"):
-                    target = None
-                    break
-                target = getattr(target, path_part, None)
-                if target is None:
-                    break
-            if not callable(target):
-                raise AttributeError(f"worker database proxy has no method {db_method_name!r}")
-            lock_key = _db_rpc_lock_key(frame, args, kwargs)
-            async with self._db_rpc_lock_for(lock_key):
-                result = await asyncio.to_thread(target, *args, **kwargs)
+            def _invoke_db_method() -> Any:
+                db = _db_for_worker_rpc(frame, args, kwargs)
+                if db is None:
+                    raise RuntimeError("state.db unavailable")
+                target: Any = db
+                for path_part in db_method_name.split("."):
+                    if not path_part or path_part.startswith("_"):
+                        target = None
+                        break
+                    target = getattr(target, path_part, None)
+                    if target is None:
+                        break
+                if not callable(target):
+                    raise AttributeError(
+                        f"worker database proxy has no method {db_method_name!r}"
+                    )
+                return target(*args, **kwargs)
+
+            result = await run_sqlite_io(_invoke_db_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(
@@ -807,14 +826,6 @@ class WorkerSupervisor:
                 str(exc) or repr(exc),
                 code=-32000,
             )
-
-    def _db_rpc_lock_for(self, key: str) -> asyncio.Lock:
-        normalized = str(key or "").strip() or "__control__"
-        lock = self._db_rpc_locks.get(normalized)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._db_rpc_locks[normalized] = lock
-        return lock
 
     async def _execute_worker_jsonrpc(
         self,
@@ -918,7 +929,7 @@ class WorkerSupervisor:
                                 "[worker-supervisor] failed to reset transport after gateway RPC"
                             )
 
-            result = await asyncio.to_thread(_invoke_gateway_method)
+            result = await run_sqlite_io(_invoke_gateway_method)
             return DBRpcReplyFrame(id=req_id, result=serialize_db_value(result))
         except Exception as exc:
             return _db_rpc_error(
@@ -1099,17 +1110,6 @@ def _conversation_session_id_from_rpc(
     } and args:
         return str(args[0] or "").strip()
     return ""
-
-
-def _db_rpc_lock_key(
-    frame: DBRpcRequestFrame,
-    args: list[Any],
-    kwargs: dict[str, Any],
-) -> str:
-    stable = _conversation_session_id_from_rpc(frame, args, kwargs)
-    if stable:
-        return f"session:{stable}"
-    return "__control__"
 
 
 def _db_rpc_error(

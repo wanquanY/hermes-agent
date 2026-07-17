@@ -22,6 +22,7 @@ from unittest.mock import patch, MagicMock
 from agent.model_metadata import (
     CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    MINIMUM_CONTEXT_LENGTH,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
@@ -714,6 +715,111 @@ class TestNousPortalContextResolution:
 # =========================================================================
 
 class TestGetModelContextLength:
+    @pytest.mark.parametrize(
+        ("model", "provider", "base_url", "expected"),
+        [
+            (
+                "gpt-5.4",
+                "openai-codex",
+                "https://chatgpt.com/backend-api/codex",
+                272_000,
+            ),
+            (
+                "gpt-4.1",
+                "copilot",
+                "https://api.githubcopilot.com",
+                128_000,
+            ),
+            (
+                "openai/gpt-5.4",
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                1_050_000,
+            ),
+        ],
+    )
+    def test_runtime_resolution_never_performs_metadata_network_io(
+        self,
+        model,
+        provider,
+        base_url,
+        expected,
+    ):
+        """Agent construction is cache/static only, even with credentials."""
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch(
+                "agent.models_dev.lookup_models_dev_context",
+                return_value=None,
+            ) as models_dev,
+            patch("agent.model_metadata.requests.get") as requests_get,
+            patch("agent.model_metadata.fetch_model_metadata") as openrouter_fetch,
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch(
+                "hermes_cli.models.get_copilot_model_context"
+            ) as copilot_catalog,
+        ):
+            result = get_model_context_length(
+                model,
+                provider=provider,
+                base_url=base_url,
+                api_key="credential-must-not-trigger-discovery",
+                allow_network_discovery=False,
+            )
+
+        assert result == expected
+        requests_get.assert_not_called()
+        openrouter_fetch.assert_not_called()
+        ollama_probe.assert_not_called()
+        copilot_catalog.assert_not_called()
+        if provider == "openai-codex":
+            models_dev.assert_not_called()
+        else:
+            models_dev.assert_called_once_with(
+                provider,
+                model,
+                allow_network=False,
+            )
+
+    def test_runtime_custom_endpoint_uses_safe_floor_without_probing(self):
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch("agent.model_metadata._resolve_endpoint_context_length") as endpoint,
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch("agent.model_metadata._query_local_context_length") as local_probe,
+        ):
+            result = get_model_context_length(
+                "vendor/unknown-large-model",
+                provider="custom",
+                base_url="https://models.example.com/v1",
+                api_key="secret",
+                allow_network_discovery=False,
+            )
+
+        assert result == MINIMUM_CONTEXT_LENGTH
+        endpoint.assert_not_called()
+        ollama_probe.assert_not_called()
+        local_probe.assert_not_called()
+
+    def test_non_ollama_provider_never_receives_native_ollama_probe(self):
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch(
+                "agent.models_dev.lookup_models_dev_context",
+                return_value=128_000,
+            ),
+        ):
+            result = get_model_context_length(
+                "gpt-4.1",
+                provider="openai",
+                base_url="https://api.openai.com/v1",
+                api_key="secret",
+            )
+
+        assert result == 128_000
+        ollama_probe.assert_not_called()
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_known_model_from_api(self, mock_fetch):
         mock_fetch.return_value = {

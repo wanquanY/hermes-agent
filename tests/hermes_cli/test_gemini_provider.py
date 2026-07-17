@@ -189,8 +189,10 @@ class TestGeminiAgentInit:
     def test_gemini_agent_uses_chat_completions(self, monkeypatch):
         """Gemini still reports chat_completions even though the transport is native."""
         monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-        with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client:
+        with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client, \
+             patch("agent.agent_init.ContextCompressor") as mock_compressor:
             mock_client.return_value = MagicMock()
+            mock_compressor.return_value = MagicMock(context_length=1048576, threshold_tokens=524288)
             from run_agent import AIAgent
             agent = AIAgent(
                 model="gemini-2.5-flash",
@@ -205,7 +207,7 @@ class TestGeminiAgentInit:
         monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSy_REAL_KEY")
         with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client, \
              patch("run_agent.OpenAI") as mock_openai, \
-             patch("run_agent.ContextCompressor") as mock_compressor:
+             patch("agent.agent_init.ContextCompressor") as mock_compressor:
             mock_client.return_value = MagicMock()
             mock_compressor.return_value = MagicMock(context_length=1048576, threshold_tokens=524288)
             from run_agent import AIAgent
@@ -222,7 +224,7 @@ class TestGeminiAgentInit:
         monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSy_REAL_KEY")
         with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client, \
              patch("run_agent.OpenAI") as mock_openai, \
-             patch("run_agent.ContextCompressor") as mock_compressor:
+             patch("agent.agent_init.ContextCompressor") as mock_compressor:
             mock_openai.return_value = MagicMock()
             mock_compressor.return_value = MagicMock(context_length=128000, threshold_tokens=64000)
             from run_agent import AIAgent
@@ -238,7 +240,7 @@ class TestGeminiAgentInit:
         monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSy_REAL_KEY")
         with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client, \
              patch("run_agent.OpenAI") as mock_openai, \
-             patch("run_agent.ContextCompressor") as mock_compressor:
+             patch("agent.agent_init.ContextCompressor") as mock_compressor:
             mock_openai.return_value = MagicMock()
             mock_compressor.return_value = MagicMock(context_length=1048576, threshold_tokens=524288)
             from run_agent import AIAgent

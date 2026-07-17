@@ -18,6 +18,7 @@ MODULES = (
     "activity",
     "dispatch",
     "conversation_render_snapshot",
+    "verification",
     "prompt",
     "prompt_respond",
     "run",

@@ -299,6 +299,14 @@ def build_turn_context(
             lambda _tokens: False,
         )
         _preflight_deferred = _defer_preflight(_preflight_tokens)
+        try:
+            from agent.codex_compaction import (
+                should_skip_hermes_preflight_compaction as _skip_codex_preflight,
+            )
+
+            _codex_preflight_owned = _skip_codex_preflight(agent)
+        except Exception:
+            _codex_preflight_owned = False
 
         if not _preflight_deferred:
             _last = _compressor.last_prompt_tokens
@@ -306,7 +314,13 @@ def build_turn_context(
             if _last >= 0 and _preflight_tokens > _last:
                 _compressor.last_prompt_tokens = _preflight_tokens
 
-        if _preflight_deferred:
+        if _codex_preflight_owned:
+            logger.info(
+                "Skipping Hermes preflight compression for codex app-server "
+                "mode=%s; the Codex thread owner controls automatic compaction.",
+                getattr(agent, "codex_app_server_auto_compaction", "native"),
+            )
+        elif _preflight_deferred:
             logger.info(
                 "Skipping preflight compression: rough estimate ~%s >= %s, "
                 "but last real provider prompt was %s after compression",
@@ -366,11 +380,32 @@ def build_turn_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
+        try:
+            from tools.hook_output_spill import (
+                get_spill_config as _get_hook_spill_config,
+                spill_if_oversized as _spill_hook_context,
+            )
+
+            _hook_spill_config = _get_hook_spill_config()
+        except Exception:
+            _spill_hook_context = None
+            _hook_spill_config = None
         for r in _pre_results:
+            piece = ""
             if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
+                piece = str(r["context"])
             elif isinstance(r, str) and r.strip():
-                _ctx_parts.append(r)
+                piece = r
+            if not piece:
+                continue
+            if _spill_hook_context is not None:
+                piece = _spill_hook_context(
+                    piece,
+                    session_id=agent.session_id,
+                    source="pre_llm_call hook context",
+                    config=_hook_spill_config,
+                )
+            _ctx_parts.append(piece)
         if _ctx_parts:
             plugin_user_context = "\n\n".join(_ctx_parts)
     except Exception as exc:

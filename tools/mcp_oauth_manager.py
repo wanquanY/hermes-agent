@@ -42,6 +42,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+_OAUTH_METADATA_PREFETCH_DEADLINE = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Per-server entry
@@ -169,17 +171,21 @@ def _make_hermes_provider_class() -> Optional[type]:
                         meta.token_endpoint,
                     )
 
-            # Pre-flight OAuth AS discovery so ``_refresh_token`` has a
-            # correct ``token_endpoint`` before the first refresh attempt.
-            # Only runs when we have tokens on cold-load but no cached
-            # metadata — i.e. the exact scenario where the SDK's built-in
-            # 401-branch discovery hasn't had a chance to run yet.
+            # Pre-flight OAuth AS discovery is needed only for an immediately
+            # expired token that can be refreshed. A valid cached token should
+            # reach initialize without any speculative network request; if it
+            # receives 401, the SDK's protocol-driven discovery owns recovery.
             if (
                 tokens is not None
                 and self.context.oauth_metadata is None
+                and not self.context.is_token_valid()
+                and self.context.can_refresh_token()
             ):
                 try:
-                    await self._prefetch_oauth_metadata()
+                    await asyncio.wait_for(
+                        self._prefetch_oauth_metadata(),
+                        timeout=_OAUTH_METADATA_PREFETCH_DEADLINE,
+                    )
                 except Exception as exc:  # pragma: no cover — defensive
                     # Non-fatal: if discovery fails, the SDK's normal 401-
                     # branch discovery will run on the next request.
@@ -208,7 +214,7 @@ def _make_hermes_provider_class() -> Optional[type]:
             )
 
             server_url = self.context.server_url
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 # Step 1: PRM discovery to learn the authorization_server URL.
                 for url in build_protected_resource_metadata_discovery_urls(
                     None, server_url

@@ -155,6 +155,7 @@ class GatewayInboundMessagePreparationMixin:
                 base_url=getattr(self, "_base_url", None) or runtime.get("base_url") or "",
                 api_key=runtime.get("api_key") or "",
                 config_context_length=config_context_length,
+                allow_network_discovery=False,
             )
             result = await preprocess_context_references_async(
                 message_text,

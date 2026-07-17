@@ -562,6 +562,8 @@ def _cli_exec_blocked(argv: list[str]) -> str | None:
 @method("cli.exec")
 def _(rid, params: dict) -> dict:
     """Run `python -m hermes_cli.main` with argv; capture stdout/stderr (non-interactive only)."""
+    from tools.environments.local import hermes_subprocess_env
+
     argv = params.get("argv", [])
     if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
         return _err(rid, 4003, "argv must be list[str]")
@@ -575,7 +577,7 @@ def _(rid, params: dict) -> dict:
             text=True,
             timeout=min(int(params.get("timeout", 240)), 600),
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=hermes_subprocess_env(inherit_credentials=True),
         )
         parts = [r.stdout or "", r.stderr or ""]
         out = "\n".join(p for p in parts if p).strip() or "(no output)"

@@ -481,6 +481,36 @@ class TestMediaDeliveryPathValidation:
 
         assert BasePlatformAdapter.validate_media_delivery_path(str(media_file)) == str(media_file.resolve())
 
+    def test_absolute_credential_deny_floor_beats_operator_allow_root(self, tmp_path, monkeypatch):
+        from hermes_constants import get_hermes_home
+
+        token = get_hermes_home() / "mcp-tokens" / "server.json"
+        token.parent.mkdir(parents=True, exist_ok=True)
+        token.write_text('{"access_token": "secret"}')
+        self._patch_roots(monkeypatch, get_hermes_home())
+        monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(get_hermes_home()))
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(token)) is None
+
+    @pytest.mark.parametrize(
+        "relative",
+        (
+            "auth.json",
+            ".anthropic_oauth.json",
+            "google_token.json",
+            "auth/google_oauth.json",
+            "pairing/client.json",
+        ),
+    )
+    def test_root_credential_files_never_deliver(self, relative, monkeypatch):
+        from hermes_constants import get_hermes_home
+
+        secret = get_hermes_home() / relative
+        secret.parent.mkdir(parents=True, exist_ok=True)
+        secret.write_text("secret")
+        self._patch_roots(monkeypatch, get_hermes_home())
+        assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
+
 
 # ---------------------------------------------------------------------------
 # should_send_media_as_audio

@@ -164,11 +164,33 @@ def _build_provider_env_blocklist() -> frozenset:
         "VERCEL_TOKEN",
         "VERCEL_PROJECT_ID",
         "VERCEL_TEAM_ID",
+        "GATEWAY_RELAY_ID",
+        "GATEWAY_RELAY_SECRET",
+        "GATEWAY_RELAY_DELIVERY_KEY",
     })
     return frozenset(blocked)
 
 
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
+_ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX")
+
+
+def _is_hermes_internal_secret(key: str) -> bool:
+    """Return whether a dynamically named variable contains Hermes credentials.
+
+    Static registries cannot enumerate per-task auxiliary credentials or relay
+    credentials created at runtime. These values are internal control-plane
+    material and must never be exposed to a model-driven child, even when the
+    child is explicitly allowed to inherit LLM provider credentials.
+    """
+    upper = str(key).upper()
+    if upper.startswith("AUXILIARY_") and (
+        upper.endswith("_API_KEY") or upper.endswith("_BASE_URL")
+    ):
+        return True
+    return upper.startswith("GATEWAY_RELAY_") and upper.endswith(
+        ("_SECRET", "_KEY", "_TOKEN")
+    )
 
 
 def _inject_context_hermes_home(env: dict) -> None:
@@ -195,13 +217,19 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     for key, value in (base_env or {}).items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             continue
+        if _is_hermes_internal_secret(key):
+            continue
         if key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
     for key, value in (extra_env or {}).items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
+            if _is_hermes_internal_secret(real_key):
+                continue
             sanitized[real_key] = value
+        elif _is_hermes_internal_secret(key):
+            continue
         elif key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
@@ -214,6 +242,78 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
         sanitized["HOME"] = _profile_home
 
     return sanitized
+
+
+_ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
+    # GitHub and source-control authority.
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_APP_INSTALLATION_ID",
+    # Gateway, messaging and dashboard authority.
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_SIGNING_SECRET",
+    "GATEWAY_ALLOWED_USERS",
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_RELAY_ID",
+    "GATEWAY_RELAY_SECRET",
+    "GATEWAY_RELAY_DELIVERY_KEY",
+    "HASS_TOKEN",
+    "EMAIL_PASSWORD",
+    "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Remote-compute and deployment authority.
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "DAYTONA_API_KEY",
+})
+
+
+def hermes_subprocess_env(
+    *,
+    inherit_credentials: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the canonical environment for a non-terminal Hermes child.
+
+    Tier-1 and dynamically named internal credentials are always removed.
+    Provider/tool credentials are removed unless the child is an explicitly
+    audited model-driving process. Callers that need one narrow tool credential
+    must add only that allowlisted value after calling this helper.
+    """
+    env = os.environ.copy()
+    for key in _ALWAYS_STRIP_KEYS:
+        env.pop(key, None)
+    for key in list(env):
+        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX) or _is_hermes_internal_secret(key):
+            env.pop(key, None)
+
+    if not inherit_credentials:
+        for key in _HERMES_PROVIDER_ENV_BLOCKLIST:
+            env.pop(key, None)
+
+    for key, value in (extra_env or {}).items():
+        if key in _ALWAYS_STRIP_KEYS or key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
+            continue
+        if _is_hermes_internal_secret(key):
+            continue
+        if not inherit_credentials and key in _HERMES_PROVIDER_ENV_BLOCKLIST:
+            continue
+        env[key] = value
+
+    env.setdefault("PYTHONUTF8", "1")
+    _inject_context_hermes_home(env)
+    from hermes_constants import get_subprocess_home
+
+    profile_home = get_subprocess_home()
+    if profile_home:
+        env["HOME"] = profile_home
+    for marker in _ACTIVE_VENV_MARKER_VARS:
+        env.pop(marker, None)
+    return env
 
 
 def _find_bash() -> str:
@@ -292,7 +392,11 @@ def _make_run_env(env: dict) -> dict:
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
+            if _is_hermes_internal_secret(real_key):
+                continue
             run_env[real_key] = v
+        elif _is_hermes_internal_secret(k):
+            continue
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
     existing_path = run_env.get("PATH", "")

@@ -341,3 +341,68 @@ class TestSpawnEnvIsolation:
             in cmd
         )
         assert "HERMES_KANBAN_DB" not in captured["env"]
+
+
+class TestSpawnEnvSecretStripping:
+    """Codex receives model authority, never Hermes control-plane secrets."""
+
+    @staticmethod
+    def _capture_spawn_env(monkeypatch):
+        import subprocess
+
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        client = cas.CodexAppServerClient(codex_bin="codex")
+        client._closed = True
+        return captured["env"]
+
+    def test_control_plane_and_dynamic_secrets_are_stripped(self, monkeypatch):
+        secret_names = {
+            "GH_TOKEN": "ghp-secret",
+            "TELEGRAM_BOT_TOKEN": "bot-secret",
+            "MODAL_TOKEN_SECRET": "modal-secret",
+            "HERMES_DASHBOARD_SESSION_TOKEN": "dashboard-secret",
+            "AUXILIARY_VISION_API_KEY": "aux-secret",
+            "GATEWAY_RELAY_SECRET": "relay-secret",
+            "GATEWAY_RELAY_ID": "relay-id",
+            "GATEWAY_RELAY_DELIVERY_KEY": "relay-delivery",
+        }
+        for name, value in secret_names.items():
+            monkeypatch.setenv(name, value)
+
+        env = self._capture_spawn_env(monkeypatch)
+
+        assert not secret_names.keys() & env.keys()
+
+    def test_provider_credentials_and_real_home_are_preserved(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+        monkeypatch.setenv("HOME", "/users/alice")
+
+        env = self._capture_spawn_env(monkeypatch)
+
+        assert env["OPENAI_API_KEY"] == "provider-secret"
+        assert env["HOME"] == "/users/alice"

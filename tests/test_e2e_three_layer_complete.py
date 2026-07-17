@@ -499,6 +499,8 @@ async def test_e2e_async_agent_dispatch_three_layer(
     assert result == {
         "activity_id": "activity-dispatch",
         "conversation_id": "conversation-child",
+        "execution_mode": "async",
+        "persistent": True,
         "status": "running",
     }
     assert activity is not None
@@ -662,8 +664,8 @@ def test_e2e_sidebar_single_source_session_index_only(
     assert row["team"]["name"] == "Three Layer Team"
     assert row["team_name"] == "Three Layer Team"
     assert row["active_mission_id"] == team["mission_id"]
-    assert row["active_activity_count"] == 1
-    assert row["unread_completion_count"] == 0
+    assert "active_activity_count" not in row
+    assert "unread_completion_count" not in row
 
 
 @pytest.mark.asyncio

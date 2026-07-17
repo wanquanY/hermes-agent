@@ -1406,8 +1406,11 @@ def _launch_tui(
     tui_dir = PROJECT_ROOT / "ui-tui"
 
     import tempfile
+    from tools.environments.local import hermes_subprocess_env
 
-    env = os.environ.copy()
+    # The Node TUI is a model-driving child: retain provider credentials while
+    # denying control-plane, infrastructure and dynamic Hermes secrets.
+    env = hermes_subprocess_env(inherit_credentials=True)
     active_session_fd, active_session_file = tempfile.mkstemp(
         prefix="hermes-tui-active-session-", suffix=".json"
     )
@@ -5643,7 +5646,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             try:
                 from agent.models_dev import list_agentic_models
 
-                mdev_models = list_agentic_models(provider_id)
+                mdev_models = list_agentic_models(provider_id, allow_network=True)
             except Exception:
                 pass
             if mdev_models:
@@ -5668,7 +5671,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         try:
             from agent.models_dev import list_agentic_models
 
-            mdev_models = list_agentic_models(provider_id)
+            mdev_models = list_agentic_models(provider_id, allow_network=True)
         except Exception:
             pass
 
@@ -11950,6 +11953,12 @@ Examples:
         "--local",
         action="store_true",
         help="Print the report locally instead of uploading",
+    )
+    share_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Confirm upload without a prompt (required in non-interactive mode)",
     )
     share_parser.add_argument(
         "--no-redact",

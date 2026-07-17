@@ -7,6 +7,10 @@ import logging
 import time
 
 from hermes_constants import get_hermes_home
+from hermes_agent.composition.async_sqlite import (
+    run_sqlite_io,
+    shutdown_async_sqlite_boundary,
+)
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL as _AGENT_PENDING_SENTINEL
 from hermes_gateway.interrupt_control import (
     INTERRUPT_REASON_GATEWAY_RESTART as _INTERRUPT_REASON_GATEWAY_RESTART,
@@ -61,8 +65,13 @@ async def stop_gateway_runner(
             except Exception as _e:
                 logger.debug("process_registry.kill_all (%s) error: %s", phase, _e)
             try:
-                from tools.async_delegation import interrupt_all as _interrupt_async
-                _async_n = _interrupt_async(reason=f"gateway shutdown ({phase})")
+                from hermes_agent.application.subagent_execution_service import (
+                    subagent_execution_runtime,
+                )
+
+                _async_n = subagent_execution_runtime.interrupt_all(
+                    reason=f"gateway shutdown ({phase})"
+                )
                 if _async_n:
                     logger.info(
                         "Shutdown (%s): interrupted %d background delegation(s)",
@@ -112,7 +121,8 @@ async def stop_gateway_runner(
             if _agent is _AGENT_PENDING_SENTINEL:
                 continue
             try:
-                self.session_store.mark_resume_pending(
+                await run_sqlite_io(
+                    self.session_store.mark_resume_pending,
                     _sk,
                     "restart_timeout" if self._restart_requested else "shutdown_timeout",
                 )
@@ -121,15 +131,35 @@ async def stop_gateway_runner(
                 logger.debug("pre-drain mark_resume_pending failed for %s: %s", _sk, _e)
 
         _drain_started_at = time.monotonic()
-        active_agents, timed_out = await self._drain_active_agents(timeout)
+        active_work_registry = getattr(self, "_active_work_registry", None)
+        if active_work_registry is None:
+            active_agents, timed_out = await self._drain_active_agents(timeout)
+            active_work_remaining = self._running_agent_count()
+        else:
+            active_agents = self._snapshot_running_agents()
+            drain_report = await active_work_registry.drain(
+                timeout=timeout,
+                cancel_grace=5.0,
+            )
+            # Crossing the graceful deadline is a non-clean shutdown even if
+            # forced cancellation then releases every lease. Preserve resume
+            # markers and skip the clean-shutdown marker in that case.
+            timed_out = bool(drain_report.deadline_expired)
+            active_work_remaining = len(drain_report.timed_out)
+            if drain_report.callback_errors:
+                logger.warning(
+                    "Gateway active-work drain callback errors: %s",
+                    drain_report.callback_errors,
+                )
         logger.info(
             "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
-            "timed_out=%s, active_at_start=%d, active_now=%d)",
+            "timed_out=%s, active_at_start=%d, active_now=%d, active_work_now=%d)",
             _phase_elapsed(),
             time.monotonic() - _drain_started_at,
             timed_out,
             len(active_agents),
             self._running_agent_count(),
+            active_work_remaining,
         )
 
         if not timed_out:
@@ -139,7 +169,7 @@ async def stop_gateway_runner(
             for _sk in _pre_drain_keys:
                 if _sk not in self._running_agents:
                     try:
-                        self.session_store.clear_resume_pending(_sk)
+                        await run_sqlite_io(self.session_store.clear_resume_pending, _sk)
                     except Exception as _e:
                         logger.debug(
                             "clear_resume_pending after drain failed for %s: %s",
@@ -180,7 +210,11 @@ async def stop_gateway_runner(
                 if _agent is _AGENT_PENDING_SENTINEL:
                     continue
                 try:
-                    self.session_store.mark_resume_pending(_sk, _resume_reason)
+                    await run_sqlite_io(
+                        self.session_store.mark_resume_pending,
+                        _sk,
+                        _resume_reason,
+                    )
                 except Exception as _e:
                     logger.debug(
                         "mark_resume_pending failed for %s: %s",
@@ -216,8 +250,6 @@ async def stop_gateway_runner(
             except Exception as e:
                 logger.error("Failed to launch detached gateway restart: %s", e)
 
-        self._finalize_shutdown_agents(active_agents)
-
         # Also shut down memory providers on idle cached agents.
         # _finalize_shutdown_agents only handles agents that were
         # mid-turn at drain time; the _agent_cache may still hold
@@ -229,11 +261,16 @@ async def stop_gateway_runner(
             with _cache_lock:
                 _idle_agents = list(_cache.values())
                 _cache.clear()
+        else:
+            _idle_agents = []
+
+        def _finalize_all_agents() -> None:
+            self._finalize_shutdown_agents(active_agents)
             for _entry in _idle_agents:
-                _agent = (
-                    _entry[0] if isinstance(_entry, tuple) else _entry
-                )
+                _agent = _entry[0] if isinstance(_entry, tuple) else _entry
                 self._cleanup_agent_resources(_agent)
+
+        await asyncio.to_thread(_finalize_all_agents)
 
         for platform, adapter in list(self.adapters.items()):
             _adapter_started_at = time.monotonic()
@@ -306,18 +343,29 @@ async def stop_gateway_runner(
         # old gateway's connection holding the WAL lock until Python
         # actually exits — causing 'database is locked' errors when
         # the new gateway tries to open the same file.
+        _close_targets = [
+            getattr(self, "_session_db", None),
+            getattr(self, "session_store", None),
+        ]
         for _db_holder in (self, getattr(self, "session_store", None)):
-            _db = getattr(_db_holder, "_db", None) if _db_holder else None
-            if _db is None or not hasattr(_db, "close"):
+            _legacy_db = getattr(_db_holder, "_db", None) if _db_holder else None
+            if _legacy_db is not None:
+                _close_targets.append(_legacy_db)
+        _closed_ids: set[int] = set()
+        for _target in _close_targets:
+            close = getattr(_target, "close", None)
+            if not callable(close) or id(_target) in _closed_ids:
                 continue
+            _closed_ids.add(id(_target))
             try:
-                _db.close()
+                await run_sqlite_io(close)
             except Exception as _e:
                 logger.debug("session store close error: %s", _e)
         logger.info(
             "Shutdown phase: session store close done at +%.2fs",
             _phase_elapsed(),
         )
+        await shutdown_async_sqlite_boundary()
 
         from channels.runtime_status import remove_pid_file, release_gateway_runtime_lock
         remove_pid_file()

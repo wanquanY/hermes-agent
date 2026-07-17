@@ -84,17 +84,7 @@ class GatewayAgentCacheService:
     def evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session and soft-release its clients."""
         runner = self._runner
-        lock = getattr(runner, "_agent_cache_lock", None)
-        evicted = None
-        if lock:
-            with lock:
-                evicted = runner._agent_cache.pop(session_key, None)
-        else:
-            cache = getattr(runner, "_agent_cache", None)
-            if cache is not None:
-                evicted = cache.pop(session_key, None)
-
-        agent = evicted[0] if isinstance(evicted, tuple) and evicted else evicted
+        agent = self.pop_cached_agent(session_key)
         if agent is None or agent is AGENT_PENDING_SENTINEL:
             return
 
@@ -119,6 +109,28 @@ class GatewayAgentCacheService:
                 self._release_evicted_agent_soft(agent)
             except Exception as release_exc:
                 logger.debug("Inline agent cache release failed for %s: %s", session_key, release_exc)
+
+    def pop_cached_agent(self, session_key: str) -> Any:
+        """Atomically remove and return one cached agent without cleanup.
+
+        Callers that require hard teardown (for example ``/new``) own that
+        lifecycle after this method releases the cache lock. Ordinary cache
+        invalidation should continue to use :meth:`evict_cached_agent`.
+        """
+
+        runner = self._runner
+        lock = getattr(runner, "_agent_cache_lock", None)
+        evicted = None
+        if lock:
+            with lock:
+                evicted = runner._agent_cache.pop(session_key, None)
+        else:
+            cache = getattr(runner, "_agent_cache", None)
+            if cache is not None:
+                evicted = cache.pop(session_key, None)
+
+        agent = evicted[0] if isinstance(evicted, tuple) and evicted else evicted
+        return None if agent is AGENT_PENDING_SENTINEL else agent
 
     @staticmethod
     def init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:

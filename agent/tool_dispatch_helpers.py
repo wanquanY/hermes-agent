@@ -32,7 +32,9 @@ from typing import Any, Dict, List, Optional
 
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
+    tool_may_have_side_effect,
 )
+from tools.threat_patterns import scan_for_threats
 
 logger = logging.getLogger(__name__)
 
@@ -101,49 +103,94 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
 
 
 def _should_parallelize_tool_batch(tool_calls) -> bool:
-    """Return True when a tool-call batch is safe to run concurrently."""
+    """Return True when a whole tool-call batch is safe to run concurrently."""
     if len(tool_calls) <= 1:
         return False
 
-    tool_names = [tc.function.name for tc in tool_calls]
-    if any(name in _NEVER_PARALLEL_TOOLS for name in tool_names):
-        return False
+    segments = _plan_tool_batch_segments(tool_calls)
+    return len(segments) == 1 and segments[0][0] == "parallel"
 
+
+def _plan_tool_batch_segments(tool_calls) -> List[tuple[str, list[Any]]]:
+    """Plan ordered parallel runs separated by side-effect barriers.
+
+    Unknown/plugin/MCP tools fail closed to the sequential path even when an
+    MCP server advertises transport-level parallelism: that capability says
+    the server can accept concurrent calls, not that the calls are free of
+    externally visible effects.  Known file mutations may share a parallel run
+    only when all reserved paths are independent.  A later call never crosses
+    an earlier barrier.
+    """
+
+    segments: list[list[Any]] = []
+    current: list[Any] = []
     reserved_paths: list[Path] = []
+
+    def close_parallel() -> None:
+        nonlocal current, reserved_paths
+        if current:
+            segments.append(["parallel", current])
+            current = []
+            reserved_paths = []
+
+    def add_sequential(tool_call: Any) -> None:
+        close_parallel()
+        if segments and segments[-1][0] == "sequential":
+            segments[-1][1].append(tool_call)
+        else:
+            segments.append(["sequential", [tool_call]])
+
     for tool_call in tool_calls:
         tool_name = tool_call.function.name
+        if tool_name in _NEVER_PARALLEL_TOOLS:
+            add_sequential(tool_call)
+            continue
+
         try:
             function_args = json.loads(tool_call.function.arguments)
         except Exception:
-            logging.debug(
-                "Could not parse args for %s — defaulting to sequential; raw=%s",
+            logger.debug(
+                "Could not parse args for %s; using a sequential barrier",
                 tool_name,
-                tool_call.function.arguments[:200],
             )
-            return False
+            add_sequential(tool_call)
+            continue
         if not isinstance(function_args, dict):
-            logging.debug(
-                "Non-dict args for %s (%s) — defaulting to sequential",
-                tool_name,
-                type(function_args).__name__,
-            )
-            return False
+            add_sequential(tool_call)
+            continue
 
         if tool_name in _PATH_SCOPED_TOOLS:
             scoped_path = _extract_parallel_scope_path(tool_name, function_args)
             if scoped_path is None:
-                return False
-            if any(_paths_overlap(scoped_path, existing) for existing in reserved_paths):
-                return False
+                add_sequential(tool_call)
+                continue
+            if any(_paths_overlap(scoped_path, path) for path in reserved_paths):
+                close_parallel()
             reserved_paths.append(scoped_path)
+            current.append(tool_call)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
-            # Check if it's an MCP tool from a server that opted into parallel calls.
-            if not _is_mcp_tool_parallel_safe(tool_name):
-                return False
+        if tool_name in _PARALLEL_SAFE_TOOLS and not tool_may_have_side_effect(
+            tool_name
+        ):
+            current.append(tool_call)
+            continue
 
-    return True
+        # Unknown effects are a barrier. MCP transport concurrency alone is
+        # insufficient evidence that reordering external effects is safe.
+        add_sequential(tool_call)
+
+    close_parallel()
+
+    normalized: list[list[Any]] = []
+    for kind, calls in segments:
+        if kind == "parallel" and len(calls) < 2:
+            kind = "sequential"
+        if normalized and kind == "sequential" and normalized[-1][0] == kind:
+            normalized[-1][1].extend(calls)
+        else:
+            normalized.append([kind, calls])
+    return [(str(kind), list(calls)) for kind, calls in normalized]
 
 
 def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optional[Path]:
@@ -317,16 +364,82 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
-def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:
+def make_tool_result_message(
+    name: str,
+    content: Any,
+    tool_call_id: str,
+    *,
+    effect_disposition: str | None = None,
+) -> dict:
     """Build a tool-result message dict with both the OpenAI-format ``name``
     field (required by the wire format and provider adapters) and the internal
     ``tool_name`` field (written to the session DB messages table)."""
-    return {
+    if effect_disposition not in {None, "none", "unknown"}:
+        raise ValueError(
+            "effect_disposition must be one of: none, unknown, or None"
+        )
+    message = {
         "role": "tool",
         "name": name,
         "tool_name": name,
         "content": content,
         "tool_call_id": tool_call_id,
+    }
+    if effect_disposition is not None:
+        message["effect_disposition"] = effect_disposition
+    try:
+        risk_metadata = _tool_output_risk_metadata(name, content)
+    except Exception as exc:
+        logger.debug("Tool output risk scan failed for %s: %s", name, exc)
+    else:
+        if risk_metadata is not None:
+            message["_tool_output_risk"] = risk_metadata
+    return message
+
+
+_UNTRUSTED_TOOL_NAMES = frozenset({"web_extract", "web_search"})
+_UNTRUSTED_TOOL_PREFIXES = ("browser_", "mcp_")
+
+
+def _is_untrusted_tool(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return name in _UNTRUSTED_TOOL_NAMES or any(
+        name.startswith(prefix) for prefix in _UNTRUSTED_TOOL_PREFIXES
+    )
+
+
+def _tool_output_risk_metadata(
+    name: str,
+    content: Any,
+) -> Optional[Dict[str, Any]]:
+    """Classify external text without retaining it in advisory metadata."""
+    if not _is_untrusted_tool(name):
+        return None
+    if isinstance(content, str):
+        text_parts = [content]
+    elif isinstance(content, list):
+        text_parts = [
+            item["text"]
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        ]
+        if not text_parts:
+            return None
+    else:
+        return None
+
+    findings: List[str] = []
+    for text in text_parts:
+        for finding in scan_for_threats(text, scope="context"):
+            if finding not in findings:
+                findings.append(finding)
+    return {
+        "risk": "high" if findings else "low",
+        "findings": findings,
+        "redacted": False,
     }
 
 
@@ -338,6 +451,7 @@ __all__ = [
     "_REDIRECT_OVERWRITE",
     "_is_destructive_command",
     "_should_parallelize_tool_batch",
+    "_plan_tool_batch_segments",
     "_extract_parallel_scope_path",
     "_paths_overlap",
     "_is_multimodal_tool_result",
@@ -346,5 +460,6 @@ __all__ = [
     "_extract_file_mutation_targets",
     "_extract_error_preview",
     "_trajectory_normalize_msg",
+    "_tool_output_risk_metadata",
     "make_tool_result_message",
 ]
