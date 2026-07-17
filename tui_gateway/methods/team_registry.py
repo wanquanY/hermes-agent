@@ -136,6 +136,8 @@ def _team_payload(params: dict) -> dict:
         "name": _text(raw.get("name")),
         "avatar": raw.get("avatar"),
         "description": _text(raw.get("description")),
+        "source_kind": _text(raw.get("source_kind") or raw.get("sourceKind")),
+        "metadata": _object(raw.get("metadata")),
         "lead_agent_profile_id": _text(raw.get("lead_agent_profile_id") or raw.get("leadAgentProfileId")),
         "default_mode": _text(raw.get("default_mode") or raw.get("defaultMode")) or "supervised_mission",
         "policy": _object(raw.get("policy")),

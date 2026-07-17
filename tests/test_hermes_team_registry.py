@@ -23,6 +23,8 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
         team_id="team-1",
         name="Research Team",
         description="Research and verify.",
+        source_kind="employee-marketplace-team",
+        metadata={"marketplaceExecution": {"schema": "dovie.marketplace.runtime-binding.v2"}},
         lead_agent_profile_id="profile-leader",
         default_mode="supervised_mission",
         policy={"planApproval": "always"},
@@ -41,6 +43,8 @@ def test_agent_team_registry_is_native_hermes_state(tmp_path: Path):
     assert team["id"] == "team-1"
     assert member["team_id"] == "team-1"
     assert resolved["name"] == "Research Team"
+    assert resolved["source_kind"] == "employee-marketplace-team"
+    assert resolved["metadata"]["marketplaceExecution"]["schema"] == "dovie.marketplace.runtime-binding.v2"
     assert "default_workspace_id" not in resolved
     assert resolved["members"][0]["id"] == "member-leader"
     assert resolved["members"][0]["capability_tags"] == ["planning", "quality"]
@@ -115,6 +119,8 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
                 "id": "team-1",
                 "name": "Engineering Team",
                 "description": "Build and verify.",
+                "sourceKind": "employee-marketplace-team",
+                "metadata": {"marketplaceExecution": {"entityType": "team", "entityId": "team-1"}},
                 "defaultWorkspaceId": "workspace-legacy",
                 "defaultMode": "supervised_mission",
                 "policy": {"planApproval": "always"},
@@ -191,6 +197,8 @@ def test_team_registry_gateway_crud(monkeypatch, tmp_path: Path):
     assert "default_workspace_id" not in upsert_response["result"]["team"]
     assert upsert_response["result"]["team"]["members"][0]["id"] == "member-leader"
     assert get_response["result"]["team"]["name"] == "Engineering Team"
+    assert get_response["result"]["team"]["source_kind"] == "employee-marketplace-team"
+    assert get_response["result"]["team"]["metadata"]["marketplaceExecution"]["entityId"] == "team-1"
     assert "default_workspace_id" not in get_response["result"]["team"]
     assert get_response["result"]["team"]["projection"] == "detail"
     assert get_response["result"]["team"]["members"][0]["id"] == "member-leader"
@@ -315,6 +323,13 @@ def test_agent_team_member_display_columns_are_migrated_from_legacy_state(tmp_pa
         }
     assert "profile_name" in columns
     assert "profile_avatar" in columns
+
+    with db._lock:
+        team_columns = {
+            row["name"]
+            for row in db._conn.execute("PRAGMA table_info(agent_teams)").fetchall()
+        }
+    assert {"source_kind", "metadata_json"}.issubset(team_columns)
 
     db.teams.upsert_agent_team(
         team_id="team-legacy",

@@ -377,6 +377,8 @@ CREATE TABLE IF NOT EXISTS agent_teams (
     name TEXT NOT NULL,
     avatar_json TEXT,
     description TEXT,
+    source_kind TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     lead_agent_profile_id TEXT,
     default_mode TEXT NOT NULL,
     policy_json TEXT NOT NULL,

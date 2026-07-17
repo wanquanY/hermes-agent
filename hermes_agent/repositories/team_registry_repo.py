@@ -77,6 +77,8 @@ class TeamRegistryRepo:
             "name": _text(_row_value(row, "name", "")),
             "avatar": _json_loads(_row_value(row, "avatar_json", ""), None),
             "description": _text(_row_value(row, "description", "")),
+            "source_kind": _text(_row_value(row, "source_kind", "")),
+            "metadata": _json_loads(_row_value(row, "metadata_json", ""), {}),
             "lead_agent_profile_id": _text(_row_value(row, "lead_agent_profile_id", "")),
             "default_mode": _text(_row_value(row, "default_mode", "")) or "supervised_mission",
             "policy": _json_loads(_row_value(row, "policy_json", ""), {}),
@@ -189,6 +191,8 @@ class TeamRegistryRepo:
         name: str,
         avatar: Any = None,
         description: str = "",
+        source_kind: str = "",
+        metadata: Dict[str, Any] | None = None,
         lead_agent_profile_id: str = "",
         default_mode: str = "supervised_mission",
         policy: Dict[str, Any] | None = None,
@@ -218,15 +222,17 @@ class TeamRegistryRepo:
             conn.execute(
                 """
                 INSERT INTO agent_teams (
-                    id, name, avatar_json, description, lead_agent_profile_id,
+                    id, name, avatar_json, description, source_kind, metadata_json, lead_agent_profile_id,
                     default_mode, policy_json, status,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     avatar_json = excluded.avatar_json,
                     description = excluded.description,
+                    source_kind = excluded.source_kind,
+                    metadata_json = excluded.metadata_json,
                     lead_agent_profile_id = excluded.lead_agent_profile_id,
                     default_mode = excluded.default_mode,
                     policy_json = excluded.policy_json,
@@ -238,6 +244,8 @@ class TeamRegistryRepo:
                     resolved_name,
                     _json_dumps(avatar) if avatar is not None else "",
                     _text(description),
+                    _text(source_kind),
+                    _json_dumps(metadata or {}),
                     _text(lead_agent_profile_id),
                     _text(default_mode) or "supervised_mission",
                     _json_dumps(policy or {}),
@@ -576,6 +584,8 @@ def ensure_team_registry_repository_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             avatar_json TEXT,
             description TEXT,
+            source_kind TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             lead_agent_profile_id TEXT,
             default_mode TEXT NOT NULL,
             policy_json TEXT NOT NULL,
@@ -614,6 +624,8 @@ def ensure_team_registry_repository_schema(conn: sqlite3.Connection) -> None:
         {
             "avatar_json": "TEXT",
             "description": "TEXT",
+            "source_kind": "TEXT",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             "lead_agent_profile_id": "TEXT",
             "default_mode": "TEXT NOT NULL DEFAULT 'supervised_mission'",
             "policy_json": "TEXT NOT NULL DEFAULT '{}'",
