@@ -1183,6 +1183,17 @@ DEFAULT_CONFIG = {
             "timeout": 600,
             "extra_body": {},
         },
+        # Background review — evaluates completed foreground turns for durable
+        # memory/skill updates. ``auto`` preserves the main model's warm cache;
+        # an explicit different model runs as an isolated routed sidecar.
+        "background_review": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 120,
+            "extra_body": {},
+        },
         # Monitor — urgency/importance classifier used by the important-mail
         # monitor catalog automation (cron/scripts/classify_items.py). Scores
         # candidate items 0-10 against the user's criteria so only above-

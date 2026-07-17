@@ -393,6 +393,33 @@ def get_all_skills_dirs() -> List[Path]:
     return dirs
 
 
+def _resolve_for_skill_ownership(path: Path) -> Path:
+    """Resolve a skill path without turning ownership checks into failures."""
+    path_obj = path if isinstance(path, Path) else Path(str(path))
+    try:
+        return path_obj.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return path_obj.expanduser().absolute()
+
+
+def is_external_skill_path(path: Path) -> bool:
+    """Return whether ``path`` belongs to a configured external skills root.
+
+    External roots remain discoverable and readable, while autonomous
+    lifecycle maintenance treats them as read-only. Foreground user-directed
+    operations keep their existing behavior.
+    """
+    candidate = _resolve_for_skill_ownership(path)
+    for root in get_external_skills_dirs():
+        resolved_root = _resolve_for_skill_ownership(root)
+        try:
+            candidate.relative_to(resolved_root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 # ── Condition extraction ──────────────────────────────────────────────────
 
 

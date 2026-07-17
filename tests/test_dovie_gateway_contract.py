@@ -137,6 +137,10 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "toolsets.list" in response["result"]["methods"]
     assert "profile.prepare_runtime" in response["result"]["methods"]
     assert "profile.growth.summary" in response["result"]["methods"]
+    assert "profile.learning.graph" in response["result"]["methods"]
+    assert "profile.learning.node.detail" in response["result"]["methods"]
+    assert "profile.learning.node.edit" in response["result"]["methods"]
+    assert "profile.learning.node.delete" in response["result"]["methods"]
     assert "runtime.ensure" in response["result"]["methods"]
     assert "runtime.status" in response["result"]["methods"]
     assert "storage.stats" in response["result"]["methods"]
@@ -197,6 +201,10 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "toolsets.list" in server._methods
     assert "profile.prepare_runtime" in server._methods
     assert "profile.growth.summary" in server._methods
+    assert "profile.learning.graph" in server._methods
+    assert "profile.learning.node.detail" in server._methods
+    assert "profile.learning.node.edit" in server._methods
+    assert "profile.learning.node.delete" in server._methods
     assert "runtime.ensure" in server._methods
     assert "runtime.status" in server._methods
     assert "approval.respond" in server._methods
@@ -264,6 +272,13 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["config.show"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["skills.reload"].__module__ == "tui_gateway.methods.integrations"
     assert server._methods["profile.growth.summary"].__module__ == "tui_gateway.methods.profile_registry"
+    for method_name in (
+        "profile.learning.graph",
+        "profile.learning.node.detail",
+        "profile.learning.node.edit",
+        "profile.learning.node.delete",
+    ):
+        assert server._methods[method_name].__module__ == "tui_gateway.methods.profile_registry"
     assert {
         getattr(handler, "__module__", "")
         for name, handler in server._methods.items()

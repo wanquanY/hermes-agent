@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from hermes_agent.composition.cli_session_store import open_cli_session_store
 
@@ -81,6 +82,10 @@ def test_agent_profile_growth_summary_reads_latest_profile_home(tmp_path: Path):
     (profile_home / "memories" / "MEMORY.md").write_text("- Project finding\n", encoding="utf-8")
     (profile_home / "memories" / "USER.md").write_text("- User preference\n", encoding="utf-8")
     (profile_home / "skills" / "research" / "search" / "SKILL.md").write_text("# Search\n", encoding="utf-8")
+    (profile_home / "skills" / ".usage.json").write_text(
+        json.dumps({"search": {"created_by": "agent", "use_count": 1}}),
+        encoding="utf-8",
+    )
 
     control_db.profiles.upsert_agent_profile(
         profile_id="agent-1",
@@ -108,6 +113,70 @@ def test_agent_profile_growth_summary_reads_latest_profile_home(tmp_path: Path):
     assert growth["dailyGrowth"][-1]["skillCount"] == 1
     assert growth["dailyGrowth"][-1]["sessionCount"] == 1
     assert any(event["type"] == "session" and event["source"] == "state.db" for event in growth["recentEvents"])
+
+
+def test_profile_learning_graph_rpc_and_growth_share_one_read_model(monkeypatch, tmp_path: Path):
+    import importlib
+
+    from tui_gateway import server
+
+    profile_registry = importlib.import_module("tui_gateway.methods.profile_registry")
+    db = open_cli_session_store(tmp_path / "state.db")
+    home = tmp_path / "profiles" / "agent-a"
+    (home / "memories").mkdir(parents=True)
+    (home / "memories" / "MEMORY.md").write_text("alpha memory", encoding="utf-8")
+    skill = home / "skills" / "learned-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: learned-skill\ndescription: learned\n---\n# Learned\n",
+        encoding="utf-8",
+    )
+    (home / "skills" / ".usage.json").write_text(
+        json.dumps({"learned-skill": {"created_by": "agent", "use_count": 1}}),
+        encoding="utf-8",
+    )
+    db.profiles.upsert_agent_profile(
+        profile_id="agent-a",
+        slug="agent-a",
+        name="Agent A",
+        hermes_home_path=str(home),
+    )
+    monkeypatch.setattr(profile_registry, "_get_db", lambda: db)
+
+    graph_response = server._methods["profile.learning.graph"](
+        "graph", {"agentProfileId": "agent-a"}
+    )
+    growth_response = server._methods["profile.growth.summary"](
+        "growth", {"agentProfileId": "agent-a", "rangePreset": "all"}
+    )
+    graph = graph_response["result"]["graph"]
+    growth = growth_response["result"]["growth"]
+
+    assert growth["memoryItems"] == graph["stats"]["memory_nodes"]
+    assert growth["skillCount"] == graph["stats"]["learned_skills"]
+    memory_id = next(node["id"] for node in graph["nodes"] if node["kind"] == "memory")
+    detail = server._methods["profile.learning.node.detail"](
+        "detail", {"agentProfileId": "agent-a", "nodeId": memory_id}
+    )
+    assert detail["result"]["node"]["content"] == "alpha memory"
+
+    edited = server._methods["profile.learning.node.edit"](
+        "edit",
+        {
+            "agentProfileId": "agent-a",
+            "nodeId": memory_id,
+            "content": "alpha memory updated",
+        },
+    )
+    assert edited["result"]["mutation"]["ok"]
+    refreshed = server._methods["profile.learning.graph"](
+        "graph-2", {"agentProfileId": "agent-a"}
+    )["result"]["graph"]
+    updated_id = next(node["id"] for node in refreshed["nodes"] if node["kind"] == "memory")
+    deleted = server._methods["profile.learning.node.delete"](
+        "delete", {"agentProfileId": "agent-a", "nodeId": updated_id}
+    )
+    assert deleted["result"]["mutation"]["ok"]
 
 
 def test_profile_registry_gateway_crud_is_latest_only(monkeypatch, tmp_path: Path):

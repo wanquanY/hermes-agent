@@ -4,10 +4,11 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 1-12 实现与自动门禁全部完成，等待统一用户实机验收。
-- 后续阶段：建立本地 Phase 12 checkpoint；验收前不 push、不合并回主开发分支。
+- 当前阶段：阶段 1-12 已合入 `dev`；阶段 13（学习图谱、成长时间线与后台自我改进成本控制）正在主仓库独立分支手工吸收。
+- 阶段 13 分支：`codex/absorb-upstream-learning-journey`，直接基于当前 `dev`，不再使用额外 worktree。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
-- 上游快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。2026-07-15 刷新请求因网络超时未更新引用，阶段 0 明确冻结当前已缓存快照。
+- 阶段 1-12 冻结快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。
+- 阶段 13 参考快照：`upstream/main @ a9cc17fd8`，2026-07-17 已成功刷新。旧阶段证据仍使用各自固定 SHA，不以新快照改写历史结论。
 
 ## 文件职责
 
@@ -39,6 +40,8 @@
 | `phase-11-acceptance.md` | 阶段 11 多进程所有权、进程排空、全量与 Doxie 验收证据 |
 | `phase-12-design.md` | 阶段 12 cwd、mixed batch、provider pool、vision、silence、fallback 与 caching 设计 |
 | `phase-12-acceptance.md` | 阶段 12 专项、全量、静态、Doxie 证据与统一实机验收入口 |
+| `phase-13-design.md` | 阶段 13 Learning Graph、Journey、统一成长投影与后台复盘成本控制设计 |
+| `phase-13-acceptance.md` | 阶段 13 专项、全量、契约与用户验收证据 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -102,9 +105,16 @@ python scripts/upstream_absorption_baseline.py \
   fallback cooldown、vision budget 与 prompt caching toggle 均有行为证据。阶段聚合
   464 passed、10 skipped；Hermes 标准全量 1,592 files、29,188 passed、0 failed；
   observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` 退出码 0。
+- 阶段 13：LG1-LG4、BR1 已按当前架构手工吸收；Learning Graph 成为 memory、learned
+  skill、Journey timeline 与成长摘要的唯一派生 read model，统一 mutation seam 提供精确
+  edit/delete 和可恢复 skill archive；background review 支持 same-model warm cache 与显式
+  aux-model digest 路由，并对 session、memory、stdout、技能所有权和归档边界做隔离。
+  阶段专项 434 passed；Hermes 标准全量 1,596 files、29,228 passed、0 failed；静态、
+  分层与 Hermes Web production build 全绿。Doxie desktop 成长页消费与视觉验收待跨仓联调。
 - 发布级长稳证据：真实反向代理、真实 macOS reopen 与 24 小时 soak 尚待统一实机验收，
   未被自动门禁结果替代。
-- 用户验收：改为全部阶段完成后统一进行；阶段 checkpoint 仅保留在本地，尚未推送或合并回主开发分支。
+- 用户验收：阶段 1-12 已合入 `dev`；阶段 13 当前仅在
+  `codex/absorb-upstream-learning-journey` 本地分支，尚未提交或推送，等待统一实机验收。
 
 各阶段完整命令、结果、收益与实机验收入口见对应 `phase-*-acceptance.md`；逐项签核
 见 `review-checklist.md`。

@@ -98,6 +98,9 @@ def test_background_review_fork_opts_out_of_session_finalization(monkeypatch):
         def run_conversation(self, **kwargs):
             # By the time the fork runs, the opt-out must already be applied.
             seen["at_run_time"] = self._end_session_on_close
+            seen["persist_disabled"] = self._persist_disabled
+            seen["session_db"] = self._session_db
+            seen["session_json_enabled"] = self._session_json_enabled
 
         def shutdown_memory_provider(self):
             pass
@@ -118,6 +121,9 @@ def test_background_review_fork_opts_out_of_session_finalization(monkeypatch):
 
     assert seen.get("end_session_on_close") is False
     assert seen.get("at_run_time") is False
+    assert seen.get("persist_disabled") is True
+    assert seen.get("session_db") is None
+    assert seen.get("session_json_enabled") is False
 
 
 def test_background_review_summarizer_receives_captured_messages_after_close(monkeypatch):

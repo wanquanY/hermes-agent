@@ -446,6 +446,101 @@ class MemoryStore:
 
         return self._success_response(target, "Entry removed.")
 
+    def replace_exact(
+        self,
+        target: str,
+        expected_content: str,
+        new_content: str,
+        *,
+        occurrence: int = 0,
+    ) -> Dict[str, Any]:
+        """Replace one exact entry selected by duplicate occurrence.
+
+        Journey nodes carry a content revision instead of a mutable list index.
+        This method keeps their compare-and-swap mutation inside MemoryStore's
+        existing lock, drift guard, threat scan, size budget and atomic writer.
+        """
+        expected = expected_content.strip()
+        replacement = new_content.strip()
+        if not expected:
+            return {"success": False, "error": "expected_content cannot be empty."}
+        if not replacement:
+            return {
+                "success": False,
+                "error": "new_content cannot be empty. Use remove_exact to delete entries.",
+            }
+        scan_error = _scan_memory_content(replacement)
+        if scan_error:
+            return {"success": False, "error": scan_error}
+
+        with self._file_lock(self._path_for(target)):
+            bak = self._detect_external_drift(target)
+            if bak:
+                return _drift_error(self._path_for(target), bak)
+            # Exact graph mutations must preserve duplicate entries so the
+            # occurrence encoded in a canonical node ID remains meaningful.
+            # The legacy reload path de-duplicates as a compatibility policy.
+            entries = self._read_file(self._path_for(target))
+            self._set_entries(target, entries)
+            matches = [index for index, entry in enumerate(entries) if entry == expected]
+            selected = int(occurrence or 0)
+            if selected < 0 or selected >= len(matches):
+                return {
+                    "success": False,
+                    "error": "Memory entry is stale or no longer exists; refresh the learning graph.",
+                }
+            index = matches[selected]
+            if entries[index] == replacement:
+                return self._success_response(target, "Entry unchanged.")
+            candidate = list(entries)
+            candidate[index] = replacement
+            limit = self._char_limit(target)
+            new_total = len(ENTRY_DELIMITER.join(candidate))
+            if new_total > limit:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
+                        "Shorten the new content or remove another entry first."
+                    ),
+                    "current_entries": entries,
+                    "usage": f"{self._char_count(target):,}/{limit:,}",
+                }
+            self._set_entries(target, candidate)
+            self.save_to_disk(target)
+
+        return self._success_response(target, "Entry replaced.")
+
+    def remove_exact(
+        self,
+        target: str,
+        expected_content: str,
+        *,
+        occurrence: int = 0,
+    ) -> Dict[str, Any]:
+        """Remove one exact entry under the canonical MemoryStore lock."""
+        expected = expected_content.strip()
+        if not expected:
+            return {"success": False, "error": "expected_content cannot be empty."}
+        with self._file_lock(self._path_for(target)):
+            bak = self._detect_external_drift(target)
+            if bak:
+                return _drift_error(self._path_for(target), bak)
+            entries = self._read_file(self._path_for(target))
+            self._set_entries(target, entries)
+            matches = [index for index, entry in enumerate(entries) if entry == expected]
+            selected = int(occurrence or 0)
+            if selected < 0 or selected >= len(matches):
+                return {
+                    "success": False,
+                    "error": "Memory entry is stale or no longer exists; refresh the learning graph.",
+                }
+            entries.pop(matches[selected])
+            self._set_entries(target, entries)
+            self.save_to_disk(target)
+
+        return self._success_response(target, "Entry removed.")
+
     def apply_batch(self, target: str, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Apply a sequence of add/replace/remove ops to one target atomically.
 
@@ -1051,7 +1146,5 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
 
 

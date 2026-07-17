@@ -38,6 +38,11 @@ def test_session_search_no_longer_appears_in_auxiliary_model_config():
     assert "session_search" not in {key for key, _name, _desc in _AUX_TASKS}
 
 
+def test_background_review_appears_in_auxiliary_model_config():
+    assert "background_review" in DEFAULT_CONFIG["auxiliary"]
+    assert "background_review" in {key for key, _name, _desc in _AUX_TASKS}
+
+
 def test_aux_tasks_keys_all_exist_in_default_config():
     """Every task the menu offers must be defined in DEFAULT_CONFIG."""
     aux_keys = {k for k, _name, _desc in _AUX_TASKS}

@@ -135,122 +135,12 @@ def _unique_paths(values: Iterable[Any]) -> list[Path]:
     return paths
 
 
-def _read_text(path: Path, max_bytes: int = 96 * 1024) -> str:
-    try:
-        if not path.is_file():
-            return ""
-        with path.open("rb") as handle:
-            return handle.read(max_bytes).decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-
-
-def _count_markdown_knowledge_items(content: str) -> int:
-    count = 0
-    for line in str(content or "").splitlines():
-        trimmed = line.strip()
-        if not trimmed:
-            continue
-        if re.match(r"^#+\s+", trimmed):
-            count += 1
-        elif re.match(r"^[-*]\s+", trimmed):
-            count += 1
-        elif re.match(r"^\d+[.)]\s+", trimmed):
-            count += 1
-        elif len(trimmed) >= 8:
-            count += 1
-    return count
-
-
-def _markdown_highlights(content: str, limit: int = 3) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for line in str(content or "").splitlines():
-        trimmed = re.sub(r"^\d+[.)]\s*", "", re.sub(r"^[-*]\s*", "", re.sub(r"^#+\s*", "", line.strip()))).strip()
-        if len(trimmed) < 3 or trimmed in seen:
-            continue
-        seen.add(trimmed)
-        result.append(trimmed)
-        if len(result) >= limit:
-            break
-    return result
-
-
-@dataclass(frozen=True)
-class FileStat:
-    path: Path
-    mtime: float
-
-
-@dataclass(frozen=True)
-class MemoryDocument:
-    home: Path
-    path: Path
-    content: str
-    mtime: float
-
-
-@dataclass(frozen=True)
-class SkillStat:
-    name: str
-    path: Path
-    home: Path
-    mtime: float
-
-
 @dataclass(frozen=True)
 class SessionStat:
     id: str
     name: str
     source: str
     mtime: float
-
-
-def _file_stat(path: Path) -> FileStat | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    if not path.is_file():
-        return None
-    return FileStat(path=path, mtime=float(stat.st_mtime or 0))
-
-
-def _select_memory_document(home_paths: list[Path], file_name: str) -> MemoryDocument | None:
-    docs: list[MemoryDocument] = []
-    for home in home_paths:
-        path = home / "memories" / file_name
-        stat = _file_stat(path)
-        if stat is None:
-            continue
-        docs.append(MemoryDocument(home=home, path=path, content=_read_text(path), mtime=stat.mtime))
-    with_content = [doc for doc in docs if doc.content.strip()]
-    candidates = with_content or docs
-    return sorted(candidates, key=lambda item: item.mtime, reverse=True)[0] if candidates else None
-
-
-def _list_installed_skills(home: Path | None) -> list[SkillStat]:
-    if home is None:
-        return []
-    skills_root = home / "skills"
-    if not skills_root.is_dir():
-        return []
-    skills: list[SkillStat] = []
-    try:
-        skill_files = sorted(skills_root.rglob("SKILL.md"))
-    except OSError:
-        return []
-    for skill_file in skill_files:
-        if not skill_file.is_file():
-            continue
-        skill_dir = skill_file.parent
-        try:
-            stat = skill_dir.stat()
-            rel = skill_dir.relative_to(skills_root)
-        except OSError:
-            continue
-        skills.append(SkillStat(name=str(rel), path=skill_dir, home=home, mtime=float(stat.st_mtime or 0)))
-    return skills
 
 
 def _connect_readonly(db_path: Path) -> sqlite3.Connection | None:
@@ -381,11 +271,8 @@ def _day_in_range(value: Any, growth_range: dict[str, float]) -> bool:
 
 def _build_daily_growth_series(
     *,
-    memory_items: int,
-    user_memory_items: int,
-    memory_mtime: float,
-    user_mtime: float,
-    skills: list[SkillStat],
+    memory_nodes: list[dict[str, Any]],
+    skill_nodes: list[dict[str, Any]],
     sessions: list[SessionStat],
     growth_range: dict[str, float],
 ) -> list[dict[str, Any]]:
@@ -406,10 +293,10 @@ def _build_daily_growth_series(
         delta = deltas_by_date.setdefault(date_key, _empty_delta())
         delta[key] += count
 
-    apply_delta("memoryItems", memory_items, memory_mtime)
-    apply_delta("memoryItems", user_memory_items, user_mtime)
-    for skill in skills:
-        apply_delta("skillCount", 1, skill.mtime)
+    for node in memory_nodes:
+        apply_delta("memoryItems", 1, _timestamp(node.get("timestamp")))
+    for node in skill_nodes:
+        apply_delta("skillCount", 1, _timestamp(node.get("timestamp")))
     for session in sessions:
         apply_delta("sessionCount", 1, session.mtime)
 
@@ -455,83 +342,100 @@ def summarize_agent_profile_growth(
         ]
     )
     primary_home = home_paths[0] if home_paths else None
-    project_doc = _select_memory_document(home_paths, "MEMORY.md")
-    user_doc = _select_memory_document(home_paths, "USER.md")
-    skills = _list_installed_skills(primary_home)
+    if primary_home is not None:
+        from agent.learning_graph import LearningGraphService
+
+        learning_graph = LearningGraphService(primary_home).build()
+    else:
+        learning_graph = {
+            "nodes": [],
+            "memory": [],
+            "timeline": [],
+            "stats": {
+                "memory_nodes": 0,
+                "learned_skills": 0,
+                "total_nodes": 0,
+            },
+        }
+    memory_nodes = list(learning_graph.get("memory") or [])
+    skill_nodes = [
+        node
+        for node in learning_graph.get("nodes") or []
+        if node.get("kind") == "skill"
+    ]
     sessions = _list_profile_sessions(home_paths)
 
-    memory_items = _count_markdown_knowledge_items(project_doc.content if project_doc else "")
-    user_memory_items = _count_markdown_knowledge_items(user_doc.content if user_doc else "")
+    project_memory_nodes = [node for node in memory_nodes if node.get("source") == "memory"]
+    user_memory_nodes = [node for node in memory_nodes if node.get("source") == "profile"]
     activity_times = [
         _timestamp(profile.get("createdAt") or profile.get("created_at")),
         _timestamp(profile.get("updatedAt") or profile.get("updated_at")),
-        project_doc.mtime if project_doc else 0.0,
-        user_doc.mtime if user_doc else 0.0,
-        *(skill.mtime for skill in skills),
+        *(_timestamp(node.get("timestamp")) for node in memory_nodes),
+        *(_timestamp(node.get("timestamp")) for node in skill_nodes),
         *(session.mtime for session in sessions),
     ]
     growth_range = _resolve_growth_range(range_options, activity_times)
     daily_growth = _build_daily_growth_series(
-        memory_items=memory_items,
-        user_memory_items=user_memory_items,
-        memory_mtime=project_doc.mtime if project_doc else 0.0,
-        user_mtime=user_doc.mtime if user_doc else 0.0,
-        skills=skills,
+        memory_nodes=memory_nodes,
+        skill_nodes=skill_nodes,
         sessions=sessions,
         growth_range=growth_range,
     )
     final = daily_growth[-1] if daily_growth else _empty_delta()
     end_ts = growth_range["end"]
-    latest_skill_at = _latest_iso_before_end(end_ts, *(skill.mtime for skill in skills))
+    latest_skill_at = _latest_iso_before_end(
+        end_ts, *(node.get("timestamp") for node in skill_nodes)
+    )
     latest_session_at = _latest_iso_before_end(end_ts, *(session.mtime for session in sessions))
     latest_memory_at = _latest_iso_before_end(
         end_ts,
-        project_doc.mtime if project_doc else 0.0,
-        user_doc.mtime if user_doc else 0.0,
+        *(node.get("timestamp") for node in memory_nodes),
     )
-    project_memory_items = memory_items if project_doc and _start_of_local_day(project_doc.mtime) <= end_ts else 0
-    visible_user_memory_items = user_memory_items if user_doc and _start_of_local_day(user_doc.mtime) <= end_ts else 0
-
-    def rel(path: Path) -> str:
-        if primary_home is None:
-            return str(path)
-        try:
-            return str(path.relative_to(primary_home))
-        except ValueError:
-            return str(path)
+    project_memory_items = sum(
+        1
+        for node in project_memory_nodes
+        if _timestamp(node.get("timestamp"))
+        and _start_of_local_day(_timestamp(node.get("timestamp"))) <= end_ts
+    )
+    visible_user_memory_items = sum(
+        1
+        for node in user_memory_nodes
+        if _timestamp(node.get("timestamp"))
+        and _start_of_local_day(_timestamp(node.get("timestamp"))) <= end_ts
+    )
 
     recent_events: list[dict[str, Any]] = []
-    if project_doc is not None:
+    for node in sorted(
+        memory_nodes,
+        key=lambda item: _timestamp(item.get("timestamp")),
+        reverse=True,
+    )[:3]:
         recent_events.append(
             {
-                "id": "memory-project",
+                "id": node["id"],
+                "nodeId": node["id"],
                 "type": "memory",
-                "title": f"沉淀 {memory_items} 条项目记忆" if memory_items else "项目记忆更新",
-                "description": "、".join(_markdown_highlights(project_doc.content)) or "MEMORY.md 中已有可用于后续任务的长期上下文",
-                "at": _iso_timestamp(project_doc.mtime),
-                "source": rel(project_doc.path),
+                "title": node.get("title") or "记忆更新",
+                "description": str(node.get("body") or "")[:240],
+                "at": _iso_timestamp(_timestamp(node.get("timestamp"))),
+                "source": f"memories/{node.get('sourceFile') or ''}",
             }
         )
-    if user_doc is not None:
+    for node in sorted(
+        skill_nodes,
+        key=lambda item: _timestamp(item.get("timestamp")),
+        reverse=True,
+    )[:3]:
+        name = _text(node.get("entityId") or node.get("label"))
         recent_events.append(
             {
-                "id": "memory-user",
-                "type": "memory",
-                "title": f"形成 {user_memory_items} 条用户画像" if user_memory_items else "用户画像更新",
-                "description": "、".join(_markdown_highlights(user_doc.content)) or "USER.md 中已有该分身理解到的用户偏好",
-                "at": _iso_timestamp(user_doc.mtime),
-                "source": rel(user_doc.path),
-            }
-        )
-    for skill in sorted(skills, key=lambda item: item.mtime, reverse=True)[:3]:
-        recent_events.append(
-            {
-                "id": f"skill-{skill.name}",
+                "id": node["id"],
+                "nodeId": node["id"],
                 "type": "skill",
-                "title": f"解锁技能 {skill.name}",
-                "description": f"该分身已可调用 {skill.name} 处理匹配任务",
-                "at": _iso_timestamp(skill.mtime),
-                "source": rel(skill.path),
+                "title": f"解锁技能 {name}",
+                "description": f"该分身已可调用 {name} 处理匹配任务",
+                "at": _iso_timestamp(_timestamp(node.get("timestamp"))),
+                "source": f"skills/{name}",
             }
         )
     for session in sorted(sessions, key=lambda item: item.mtime, reverse=True)[:2]:
@@ -570,6 +474,9 @@ def summarize_agent_profile_growth(
         ),
         "dailyGrowth": daily_growth,
         "recentEvents": recent_events,
+        "learningGraphSchemaVersion": learning_graph.get("schemaVersion", 1),
+        "learningGraphStats": learning_graph.get("stats") or {},
+        "timelineItemCount": len(learning_graph.get("timeline") or []),
     }
     _diagnose_growth(
         "read_model_summary",
@@ -581,10 +488,10 @@ def summarize_agent_profile_growth(
         home_count=len(home_paths),
         home_paths=[str(path) for path in home_paths],
         primary_home=str(primary_home) if primary_home else "",
-        project_memory_found=project_doc is not None,
-        user_memory_found=user_doc is not None,
-        project_memory_path=str(project_doc.path) if project_doc else "",
-        user_memory_path=str(user_doc.path) if user_doc else "",
+        project_memory_found=bool(project_memory_nodes),
+        user_memory_found=bool(user_memory_nodes),
+        project_memory_path=str(primary_home / "memories" / "MEMORY.md") if primary_home else "",
+        user_memory_path=str(primary_home / "memories" / "USER.md") if primary_home else "",
         project_memory_items=project_memory_items,
         user_memory_items=visible_user_memory_items,
         skill_count=summary["skillCount"],

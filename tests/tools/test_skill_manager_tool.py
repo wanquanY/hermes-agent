@@ -1032,3 +1032,158 @@ class TestDeleteSkillRmtreeGuard:
         assert result["success"] is False
         assert "skills root" in result["error"].lower()
         assert outside.exists()
+
+
+# ---------------------------------------------------------------------------
+# Background-review ownership, read-before-write, and recoverability
+# ---------------------------------------------------------------------------
+
+
+def _named_skill_content(name: str) -> str:
+    return (
+        "---\n"
+        f"name: {name}\n"
+        "description: A test skill for background review.\n"
+        "---\n\n"
+        f"# {name}\n\n"
+        "Step 1: Do the thing.\n"
+    )
+
+
+@contextmanager
+def _background_review_context(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    skills_root = hermes_home / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+         patch("tools.skills_tool.SKILLS_DIR", skills_root), \
+         patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]), \
+         patch("tools.skill_provenance.is_background_review", return_value=True):
+        yield skills_root
+
+
+class TestBackgroundReviewSkillSafety:
+    def test_patch_requires_skill_view_first(self, tmp_path, monkeypatch):
+        from tools.skill_manager_tool import _reset_background_review_read_marks
+        from tools.skills_tool import skill_view
+
+        _reset_background_review_read_marks()
+        with _background_review_context(tmp_path, monkeypatch):
+            _create_skill("reviewed", _named_skill_content("reviewed"))
+            blocked = json.loads(
+                skill_manage(
+                    "patch",
+                    "reviewed",
+                    old_string="Step 1: Do the thing.",
+                    new_string="Step 1: Do the thing safely.",
+                )
+            )
+            assert blocked["success"] is False
+            assert blocked["_read_before_write_required"] is True
+
+            assert json.loads(skill_view("reviewed"))["success"] is True
+            allowed = json.loads(
+                skill_manage(
+                    "patch",
+                    "reviewed",
+                    old_string="Step 1: Do the thing.",
+                    new_string="Step 1: Do the thing safely.",
+                )
+            )
+            assert allowed["success"] is True, allowed
+        _reset_background_review_read_marks()
+
+    def test_supporting_overwrite_requires_exact_file_read(
+        self, tmp_path, monkeypatch
+    ):
+        from tools.skill_manager_tool import _reset_background_review_read_marks
+        from tools.skills_tool import skill_view
+
+        _reset_background_review_read_marks()
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("reviewed", _named_skill_content("reviewed"))
+            reference = skills_root / "reviewed" / "references" / "workflow.md"
+            reference.parent.mkdir()
+            reference.write_text("old workflow\n", encoding="utf-8")
+
+            assert json.loads(skill_view("reviewed"))["success"] is True
+            blocked = json.loads(
+                skill_manage(
+                    "write_file",
+                    "reviewed",
+                    file_path="references/workflow.md",
+                    file_content="new workflow\n",
+                )
+            )
+            assert blocked["_read_before_write_required"] is True
+
+            assert json.loads(
+                skill_view("reviewed", "references/workflow.md")
+            )["success"] is True
+            allowed = json.loads(
+                skill_manage(
+                    "write_file",
+                    "reviewed",
+                    file_path="references/workflow.md",
+                    file_content="new workflow\n",
+                )
+            )
+            assert allowed["success"] is True, allowed
+        _reset_background_review_read_marks()
+
+    def test_pinned_skill_is_read_only_to_background_review(
+        self, tmp_path, monkeypatch
+    ):
+        with _background_review_context(tmp_path, monkeypatch):
+            _create_skill("pinned", _named_skill_content("pinned"))
+            with patch(
+                "tools.skill_usage.get_record", return_value={"pinned": True}
+            ):
+                result = _edit_skill("pinned", _named_skill_content("pinned"))
+        assert result["success"] is False
+        assert "pinned" in result["error"].lower()
+
+    def test_external_skill_is_read_only_to_background_review(self, tmp_path):
+        local = tmp_path / "local"
+        external = tmp_path / "external"
+        local.mkdir()
+        external.mkdir()
+        skill_dir = _write_external_skill(external)
+        with _two_roots(local, external), patch(
+            "tools.skill_provenance.is_background_review", return_value=True
+        ), patch(
+            "agent.skill_utils.get_external_skills_dirs",
+            return_value=[external.resolve()],
+        ):
+            result = _patch_skill("ext-skill", "OLD_MARKER", "changed")
+        assert result["success"] is False
+        assert "external" in result["error"].lower()
+        assert "OLD_MARKER" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_bare_delete_fails_closed(self, tmp_path, monkeypatch):
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("active", _named_skill_content("active"))
+            result = _delete_skill("active", absorbed_into="")
+        assert result["success"] is False
+        assert result["_fail_closed"] is True
+        assert (skills_root / "active").exists()
+
+    def test_verified_consolidation_is_recoverably_archived(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import skill_usage
+
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("umbrella", _named_skill_content("umbrella"))
+            _create_skill("narrow", _named_skill_content("narrow"))
+            skill_usage.mark_agent_created("narrow")
+            result = json.loads(
+                skill_manage("delete", "narrow", absorbed_into="umbrella")
+            )
+            record = skill_usage.get_record("narrow")
+        assert result["success"] is True, result
+        assert result["_archived"] is True
+        assert not (skills_root / "narrow").exists()
+        assert (skills_root / ".archive" / "narrow").exists()
+        assert record["state"] == skill_usage.STATE_ARCHIVED

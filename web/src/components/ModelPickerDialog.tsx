@@ -2,14 +2,9 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Checkbox } from "@nous-research/ui/ui/components/checkbox";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-<<<<<<< HEAD
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-=======
-import { Input } from "@nous-research/ui/ui/components/input";
-import { Label } from "@nous-research/ui/ui/components/label";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
->>>>>>> af978ecb1 (fix(model): require confirmation for expensive model selections)
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import type { GatewayClient } from "@/lib/gatewayClient";
 import { Check, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";

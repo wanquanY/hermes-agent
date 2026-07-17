@@ -12,6 +12,7 @@ transcript line.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +24,9 @@ def server():
         "sys.modules",
         {
             "hermes_constants": MagicMock(
-                get_hermes_home=MagicMock(return_value="/tmp/hermes_test_review_summary")
+                get_hermes_home=MagicMock(
+                    return_value=Path("/tmp/hermes_test_review_summary")
+                )
             ),
             "hermes_cli.env_loader": MagicMock(),
             "hermes_cli.banner": MagicMock(),
@@ -46,16 +49,20 @@ def test_init_session_attaches_background_review_callback(server, monkeypatch):
     function that emits 'review.summary' for the session's sid."""
     # Neutralize side-effect calls inside _init_session so we're testing
     # just the callback wiring.
-    monkeypatch.setattr(server, "_SlashWorker", lambda *a, **kw: object())
-    monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
-    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **kw: None)
-    monkeypatch.setattr(server, "_session_info", lambda agent: {"model": "m"})
-    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
-    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    from tui_gateway.core import agent_session
+
+    monkeypatch.setattr(agent_session, "_SlashWorker", lambda *a, **kw: object())
+    monkeypatch.setattr(agent_session, "_wire_callbacks", lambda sid: None)
+    monkeypatch.setattr(
+        agent_session, "_notify_session_boundary", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(agent_session, "_session_info", lambda agent, session=None: {"model": "m"})
+    monkeypatch.setattr(agent_session, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(agent_session, "_load_tool_progress_mode", lambda: "all")
 
     captured_emits: list = []
     monkeypatch.setattr(
-        server,
+        agent_session,
         "_emit",
         lambda event, sid, payload=None: captured_emits.append(
             (event, sid, payload)
@@ -69,7 +76,7 @@ def test_init_session_attaches_background_review_callback(server, monkeypatch):
         background_review_callback = None
 
     agent = FakeAgent()
-    server._init_session("sid-abc", "session-key", agent, [], cols=80)
+    agent_session._init_session("sid-abc", "session-key", agent, [], cols=80)
 
     cb = getattr(agent, "background_review_callback", None)
     assert callable(cb), (
@@ -98,13 +105,17 @@ def test_review_summary_callback_survives_agent_without_attribute(server, monkey
     """If the agent is a bare object that doesn't allow attribute
     assignment (e.g. some stubbed test double), _init_session must not
     raise — session startup stays robust."""
-    monkeypatch.setattr(server, "_SlashWorker", lambda *a, **kw: object())
-    monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
-    monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **kw: None)
-    monkeypatch.setattr(server, "_session_info", lambda agent: {"model": "m"})
-    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
-    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
-    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    from tui_gateway.core import agent_session
+
+    monkeypatch.setattr(agent_session, "_SlashWorker", lambda *a, **kw: object())
+    monkeypatch.setattr(agent_session, "_wire_callbacks", lambda sid: None)
+    monkeypatch.setattr(
+        agent_session, "_notify_session_boundary", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(agent_session, "_session_info", lambda agent, session=None: {"model": "m"})
+    monkeypatch.setattr(agent_session, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(agent_session, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setattr(agent_session, "_emit", lambda *a, **kw: None)
 
     class LockedAgent:
         __slots__ = ("model",)
@@ -113,5 +124,5 @@ def test_review_summary_callback_survives_agent_without_attribute(server, monkey
             self.model = "fake/model"
 
     # LockedAgent's __slots__ blocks background_review_callback assignment.
-    server._init_session("sid-x", "key-x", LockedAgent(), [], cols=80)
+    agent_session._init_session("sid-x", "key-x", LockedAgent(), [], cols=80)
     # If we got here, _init_session swallowed the AttributeError gracefully.
