@@ -972,6 +972,9 @@ def _run_prompt_submit(
         images = [*list(session.get("attached_images", [])), *list(submitted_images or [])]
         turn_run_id = str(session.get("active_run_id") or "")
         turn_id = str((turn_metadata or {}).get("turn_id") or session.get("active_turn_id") or "")
+        turn_client_message_id = str(
+            (turn_metadata or {}).get("client_message_id") or ""
+        ).strip()
         session["attached_images"] = []
     agent = session.get("agent")
     if agent is None:
@@ -1513,6 +1516,11 @@ def _run_prompt_submit(
             active_context_missing = object()
             previous_active_run_id = getattr(agent, "_hermes_active_run_id", active_context_missing)
             previous_active_turn_id = getattr(agent, "_hermes_active_turn_id", active_context_missing)
+            previous_active_client_message_id = getattr(
+                agent,
+                "_hermes_active_client_message_id",
+                active_context_missing,
+            )
             previous_active_runtime_scope_key = getattr(agent, "_hermes_active_runtime_scope_key", active_context_missing)
             previous_activity_event_bus = getattr(agent, "activity_event_bus", active_context_missing)
             previous_run_context = getattr(agent, "run_context", active_context_missing)
@@ -1539,6 +1547,7 @@ def _run_prompt_submit(
                 agent._stream_inject_tool_breaks = False
                 agent._hermes_active_run_id = turn_run_id
                 agent._hermes_active_turn_id = turn_id
+                agent._hermes_active_client_message_id = turn_client_message_id
                 agent._hermes_active_runtime_scope_key = str(session.get("runtime_scope_key") or "")
                 if session.get("activity_event_bus") is not None:
                     agent.activity_event_bus = session.get("activity_event_bus")
@@ -1660,6 +1669,15 @@ def _run_prompt_submit(
                         pass
                 else:
                     agent._hermes_active_turn_id = previous_active_turn_id
+                if previous_active_client_message_id is active_context_missing:
+                    try:
+                        delattr(agent, "_hermes_active_client_message_id")
+                    except AttributeError:
+                        pass
+                else:
+                    agent._hermes_active_client_message_id = (
+                        previous_active_client_message_id
+                    )
                 if previous_active_runtime_scope_key is active_context_missing:
                     try:
                         delattr(agent, "_hermes_active_runtime_scope_key")

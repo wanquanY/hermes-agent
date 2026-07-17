@@ -75,6 +75,48 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
+
+def _capture_parent_event_origin(parent_agent: Any) -> Dict[str, str]:
+    """Freeze the parent turn identity before a delegated child can outlive it.
+
+    Asynchronous children may finish after the parent turn has released its
+    active routing fields, or while a newer turn is active on the same session.
+    Reading those mutable fields when the child emits its terminal event either
+    drops the event or attaches it to the wrong run.  Every child stream callback
+    therefore carries the immutable origin captured at dispatch time.
+    """
+
+    def _string_attr(owner: Any, name: str) -> str:
+        value = getattr(owner, name, "")
+        return value.strip() if isinstance(value, str) else ""
+
+    origin = {
+        key: value
+        for key, value in {
+            "run_id": _string_attr(parent_agent, "_hermes_active_run_id"),
+            "turn_id": _string_attr(parent_agent, "_hermes_active_turn_id"),
+            "client_message_id": _string_attr(
+                parent_agent,
+                "_hermes_active_client_message_id",
+            ),
+            "runtime_scope_key": _string_attr(
+                parent_agent,
+                "_hermes_active_runtime_scope_key",
+            ),
+        }.items()
+        if value
+    }
+    run_context = getattr(parent_agent, "run_context", None) or getattr(
+        parent_agent,
+        "_run_context",
+        None,
+    )
+    activity_id = _string_attr(run_context, "activity_id") if run_context else ""
+    if activity_id:
+        origin["activity_id"] = activity_id
+    return origin
+
+
 def _trace_subagent_stream_producer(
     parent_agent: Any,
     *,
@@ -84,6 +126,7 @@ def _trace_subagent_stream_producer(
     task_index: int,
     offset: int,
     text: str,
+    origin: Dict[str, str] | None = None,
 ) -> None:
     if not is_truthy_value(os.environ.get("DOVIE_STREAM_TRACE")):
         return
@@ -93,8 +136,16 @@ def _trace_subagent_stream_producer(
         "task_index=%s offset=%s text_len=%s utf16_len=%s",
         event_type,
         str(getattr(parent_agent, "session_id", "") or ""),
-        str(getattr(parent_agent, "_hermes_active_run_id", "") or ""),
-        str(getattr(parent_agent, "_hermes_active_turn_id", "") or ""),
+        str(
+            (origin or {}).get("run_id")
+            or getattr(parent_agent, "_hermes_active_run_id", "")
+            or ""
+        ),
+        str(
+            (origin or {}).get("turn_id")
+            or getattr(parent_agent, "_hermes_active_turn_id", "")
+            or ""
+        ),
         str(subagent_id or ""),
         delegate_call_id,
         task_index,
@@ -133,8 +184,16 @@ def _trace_subagent_event_producer(
         "dispatch_message_bytes=%s payload_bytes=%s",
         event_type,
         str(getattr(parent_agent, "session_id", "") or ""),
-        str(getattr(parent_agent, "_hermes_active_run_id", "") or ""),
-        str(getattr(parent_agent, "_hermes_active_turn_id", "") or ""),
+        str(
+            payload.get("run_id")
+            or getattr(parent_agent, "_hermes_active_run_id", "")
+            or ""
+        ),
+        str(
+            payload.get("turn_id")
+            or getattr(parent_agent, "_hermes_active_turn_id", "")
+            or ""
+        ),
         str(subagent_id or ""),
         delegate_call_id,
         task_index,
@@ -804,6 +863,7 @@ def _build_child_progress_callback(
         if isinstance(raw_delegation_tool_name, str)
         else ""
     )
+    parent_event_origin = _capture_parent_event_origin(parent_agent)
 
     # Gateway: batch tool names, flush periodically
     _BATCH_SIZE = 5
@@ -814,6 +874,7 @@ def _build_child_progress_callback(
 
     def _identity_kwargs(*, include_descriptor: bool = False) -> Dict[str, Any]:
         kw: Dict[str, Any] = {
+            **parent_event_origin,
             "task_index": task_index,
             "task_count": task_count,
         }
@@ -1064,9 +1125,11 @@ def _build_child_output_delta_callback(
     normalized_delegate_call_id = str(delegate_call_id or "").strip()
     raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
     tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
+    parent_event_origin = _capture_parent_event_origin(parent_agent)
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
+            **parent_event_origin,
             "task_index": task_index,
             "task_count": task_count,
             "tool_count": 0,
@@ -1106,6 +1169,7 @@ def _build_child_output_delta_callback(
                 task_index=task_index,
                 offset=stream_offset,
                 text=delta,
+                origin=parent_event_origin,
             )
             parent_cb(
                 "subagent.output_delta",
@@ -1153,9 +1217,11 @@ def _build_child_reasoning_delta_callback(
     normalized_delegate_call_id = str(delegate_call_id or "").strip()
     raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
     tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
+    parent_event_origin = _capture_parent_event_origin(parent_agent)
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
+            **parent_event_origin,
             "task_index": task_index,
             "task_count": task_count,
             "tool_count": 0,
@@ -1196,6 +1262,7 @@ def _build_child_reasoning_delta_callback(
                 task_index=task_index,
                 offset=stream_offset,
                 text=delta,
+                origin=parent_event_origin,
             )
             parent_cb(
                 "subagent.reasoning_delta",

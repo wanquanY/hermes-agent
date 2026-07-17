@@ -318,12 +318,12 @@ def test_team_mission_submit_deliverable_persists_hidden_handoff_and_returns_ack
     assert stored["payload"]["verification"]["passed"] is True
     assert stored["confidence"] == 0.9
     assert stored["artifact_refs"][0]["path"] == "/tmp/workspace/output.md"
-    assert node["status"] == "completed"
-    assert node["metadata"]["last_run_terminal_event"] == "mission.node.finished"
+    assert node["status"] == "running"
+    assert node["metadata"].get("last_run_terminal_event") in (None, "")
     assert node["metadata"]["last_deliverable_id"] == stored["deliverable_id"]
     assert "mission.node.deliverable.recorded" in source_event_types
-    assert "mission.node.finished" in source_event_types
-    assert "mission.snapshot.updated" in source_event_types
+    assert "mission.node.finished" not in source_event_types
+    assert "mission.snapshot.updated" not in source_event_types
 
     db.append_team_mission_run_event(
         mission_id="mission-1",
@@ -332,7 +332,13 @@ def test_team_mission_submit_deliverable_persists_hidden_handoff_and_returns_ack
     )
     after_visible_complete = db.get_team_mission_node("mission-1", "node-worker")
     assert after_visible_complete["status"] == "completed"
-    assert after_visible_complete["metadata"]["last_run_terminal_event"] == "mission.node.finished"
+    assert after_visible_complete["metadata"]["last_run_terminal_event"] == "message.complete"
+    terminal_event_types = [
+        event["payload"].get("source_event_type")
+        for event in db.list_team_mission_events("mission-1")
+    ]
+    assert terminal_event_types.index("message.complete") < terminal_event_types.index("mission.node.finished")
+    assert terminal_event_types.index("mission.node.finished") < terminal_event_types.index("mission.snapshot.updated")
 
 
 def test_team_mission_submit_deliverable_marks_event_emit_failure(monkeypatch, tmp_path: Path):
@@ -385,7 +391,7 @@ def test_team_mission_submit_deliverable_marks_event_emit_failure(monkeypatch, t
     node = db.get_team_mission_node("mission-1", "node-worker")
     assert result["success"] is True
     assert stored["deliverable_id"] == result["deliverable_id"]
-    assert node["status"] == "completed"
+    assert node["status"] == "running"
     assert node["metadata"]["deliverable_event_emit_failed"] is True
     assert node["metadata"]["pending_deliverable_event_id"] == stored["deliverable_id"]
     assert "event log unavailable" in node["metadata"]["deliverable_event_emit_error"]

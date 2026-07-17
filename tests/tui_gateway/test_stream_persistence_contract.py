@@ -165,6 +165,67 @@ def test_checkpoint_race_does_not_redeliver_live_stream_prefix():
     assert run_control_events.delta_event_for_subscription(subscription, checkpoint) is None
 
 
+def test_team_activity_projection_rejects_unjournaled_transient_event():
+    with pytest.raises(ValueError, match="persisted canonical journal event"):
+        team_mission_activity_events.project_run_event_for_subscription(
+            {
+                "type": "message.delta",
+                "transient": True,
+                "runtime_source_seq": 1,
+                "payload": {"mode": "append", "offset": 0, "delta": "我"},
+            },
+            "mission:mission-1",
+            mission_id_value="mission-1",
+        )
+
+
+def test_nested_text_stream_identity_keeps_message_segments_independent():
+    subscription = {}
+    common = {
+        "type": "message.delta",
+        "run_id": "run-segments",
+        "turn_id": "turn-segments",
+        "runtime_scope_key": "team:mission-1:node:worker",
+    }
+    run_control_events.remember_stream_delivery(
+        subscription,
+        {
+            **common,
+            "transient": True,
+            "text_stream": {
+                "mode": "append",
+                "offset": 0,
+                "delta": "first",
+                "client_message_id": "segment-1",
+            },
+        },
+    )
+    second_segment_checkpoint = {
+        **common,
+        "seq": 2,
+        "text_stream": {
+            "mode": "append",
+            "offset": 0,
+            "delta": "second",
+            "client_message_id": "segment-2",
+        },
+        "payload": {
+            "stream_checkpoint": True,
+            "text_stream": {
+                "mode": "append",
+                "offset": 0,
+                "delta": "second",
+                "client_message_id": "segment-2",
+            },
+        },
+    }
+
+    assert run_control_events.delta_event_for_subscription(
+        subscription,
+        second_segment_checkpoint,
+    ) == second_segment_checkpoint
+
+
 def test_checkpoint_race_delivers_only_unseen_utf16_suffix():
     subscription = {}
     common = {
@@ -201,35 +262,42 @@ def test_checkpoint_race_delivers_only_unseen_utf16_suffix():
     assert projected["payload"]["delta"] == "中"
 
 
-def test_team_activity_projection_keeps_transient_source_out_of_cursor_fields():
-    projected = team_mission_activity_events.project_run_event_for_subscription(
-        {
-            "type": "subagent.output_delta",
-            "transient": True,
-            "runtime_source_seq": 5_751,
-            "conversation_session_id": "team-session",
-            "run_id": "team-run",
-            "turn_id": "team-turn",
-            "payload": {
-                "subagent_id": "reviewer",
-                "mode": "append",
-                "delta": "reviewing",
-                "offset": 0,
-            },
+def test_durable_first_stream_delivery_suppresses_late_live_fragments():
+    subscription = {}
+    common = {
+        "type": "message.delta",
+        "run_id": "run-durable-first",
+        "turn_id": "turn-durable-first",
+        "runtime_scope_key": "team:mission-1:node:root",
+    }
+    checkpoint = {
+        **common,
+        "seq": 10,
+        "payload": {
+            "mode": "append",
+            "offset": 0,
+            "delta": "A😀中",
+            "text": "A😀中",
+            "client_message_id": "turn-durable-first:assistant-segment:0",
+            "stream_checkpoint": True,
         },
-        "mission:mission-1",
-        mission_id_value="mission-1",
-    )
+    }
+    assert run_control_events.delta_event_for_subscription(subscription, checkpoint) == checkpoint
+    run_control_events.remember_stream_delivery(subscription, checkpoint)
 
-    assert projected["transient"] is True
-    assert projected["runtime_source_seq"] == 5_751
-    assert projected["source_seq"] == 0
-    assert "seq" not in projected
-    assert "activity_event_seq" not in projected
-    assert "team_mission_event_seq" not in projected
-    assert "seq" not in projected["payload"]
-    assert "activity_event_seq" not in projected["payload"]
-    assert "team_mission_event_seq" not in projected["payload"]
+    for offset, fragment in ((0, "A😀"), (3, "中")):
+        late_live = {
+            **common,
+            "transient": True,
+            "runtime_source_seq": 100 + offset,
+            "payload": {
+                "mode": "append",
+                "offset": offset,
+                "delta": fragment,
+                "client_message_id": "turn-durable-first:assistant-segment:0",
+            },
+        }
+        assert run_control_events.delta_event_for_subscription(subscription, late_live) is None
 
 
 def test_subagent_stream_checkpoints_once_before_complete(tmp_path):

@@ -257,6 +257,48 @@ def test_interrupted_session_still_emits_subagent_terminal_fact():
     assert events[0]["payload"]["subagent_id"] == "sa-1"
 
 
+def test_late_subagent_terminal_prefers_immutable_origin_over_new_active_turn():
+    events = []
+    sessions = {
+        "sid": {
+            "session_key": "stored",
+            "active_run_id": "run-new",
+            "active_turn_id": "turn-new",
+            "active_runtime_scope_key": "profile:new",
+            "pending_turn": {"client_message_id": "client-new"},
+        }
+    }
+    bridge = GatewayToolEventBridge(
+        sessions=sessions,
+        emit=lambda event_type, sid, payload=None: events.append(
+            {"type": event_type, "session_id": sid, "payload": payload or {}}
+        ),
+        tool_progress_enabled=lambda _sid: True,
+        session_cwd=lambda _session: "/tmp",
+    )
+
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.complete",
+        preview="done",
+        subagent_id="sa-old",
+        status="completed",
+        summary="done",
+        run_id="run-original",
+        turn_id="turn-original",
+        client_message_id="client-original",
+        runtime_scope_key="profile:original",
+        activity_id="act-agent_dispatch:original",
+    )
+
+    payload = events[0]["payload"]
+    assert payload["run_id"] == "run-original"
+    assert payload["turn_id"] == "turn-original"
+    assert payload["client_message_id"] == "client-original"
+    assert payload["runtime_scope_key"] == "profile:original"
+    assert payload["activity_id"] == "act-agent_dispatch:original"
+
+
 def test_agent_profile_design_context_emits_structured_complete_when_tool_progress_disabled():
     events = []
     bridge = _bridge(events, tool_progress_enabled=False)

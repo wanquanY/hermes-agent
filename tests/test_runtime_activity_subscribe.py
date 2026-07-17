@@ -285,7 +285,7 @@ def test_subscribe_limit_caps_replay_size(db: CliSessionStore) -> None:
     assert len(result["events"]) == 2
 
 
-def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionStore) -> None:
+def test_terminal_team_mission_subscribe_honors_canonical_replay_mode(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-subscribe",
         conversation_id="conversation-terminal-subscribe",
@@ -308,7 +308,6 @@ def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionS
             },
         },
     )
-    last_seq = max(int(event.get("seq") or 0) for event in db.list_team_mission_events("mission-terminal-subscribe"))
     transport = _CaptureTransport()
 
     result = _assert_ok(
@@ -319,15 +318,14 @@ def test_terminal_team_mission_subscribe_defaults_to_cursor_only(db: CliSessionS
         )
     )
 
-    assert result["events"] == []
-    assert result["after_seq"] == last_seq
-    assert result["afterSeq"] == last_seq
+    assert len(result["events"]) >= 1
+    assert result["events"][0]["activity_id"] == "mission:mission-terminal-subscribe"
     subscription = run_control._subscriptions_by_id[result["subscription_id"]]
-    assert subscription["activity_event_last_seq"] == last_seq
-    assert subscription["cursor_only"] is True
+    assert subscription["activity_event_last_seq"] == result["after_seq"]
+    assert subscription["cursor_only"] is False
 
 
-def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: CliSessionStore) -> None:
+def test_terminal_team_mission_subscribe_allows_explicit_cursor_only(db: CliSessionStore) -> None:
     db.upsert_team_mission(
         mission_id="mission-terminal-debug",
         conversation_id="conversation-terminal-debug",
@@ -356,13 +354,16 @@ def test_terminal_team_mission_subscribe_allows_debug_audit_replay(db: CliSessio
             "runtime.activity.subscribe",
             {
                 "activity_id": "mission:mission-terminal-debug",
-                "debug_replay_audit": True,
+                "replay_mode": "cursor_only",
+                "max_replay_events": 0,
             },
         )
     )
 
-    assert len(result["events"]) >= 1
-    assert result["events"][0]["activity_id"] == "mission:mission-terminal-debug"
+    assert result["events"] == []
+    assert result["after_seq"] > 0
+    subscription = run_control._subscriptions_by_id[result["subscription_id"]]
+    assert subscription["cursor_only"] is True
 
 
 def test_subscribe_returns_unique_subscription_id(db: CliSessionStore) -> None:

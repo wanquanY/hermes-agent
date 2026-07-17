@@ -452,13 +452,16 @@ def _event_activity_seq(event: dict[str, Any]) -> int:
         return 0
 
 
-def _activity_subscription_uses_event_log_cursor(subscription: dict[str, Any]) -> bool:
+def _activity_subscription_uses_mission_journal_cursor(subscription: dict[str, Any]) -> bool:
     activity_id = str(subscription.get("activity_id") or "").strip()
     if not activity_id:
         return False
     if _team_activity_events.is_team_dispatch_activity_id(activity_id):
         return True
-    return _team_activity_events.uses_event_log(activity_id, db=subscription.get("db"))
+    return _team_activity_events.uses_mission_activity_journal(
+        activity_id,
+        db=subscription.get("db"),
+    )
 
 
 def _subscription_event_cursor(
@@ -471,7 +474,7 @@ def _subscription_event_cursor(
         activity_seq = _event_activity_seq(event)
         if activity_seq > 0:
             return "activity_event_last_seq", activity_seq
-        if _activity_subscription_uses_event_log_cursor(subscription):
+        if _activity_subscription_uses_mission_journal_cursor(subscription):
             return "", 0
     return "last_seq", _raw_event_seq(event)
 
@@ -479,7 +482,7 @@ def _subscription_event_cursor(
 def _subscription_after_seq(subscription: dict[str, Any]) -> int:
     if (
         str(subscription.get("kind") or "session") == "activity"
-        and _team_activity_events.uses_event_log(
+        and _team_activity_events.uses_mission_activity_journal(
             str(subscription.get("activity_id") or "").strip(),
             db=subscription.get("db"),
         )
@@ -558,16 +561,14 @@ def _on_run_event_appended(db: Any, event: dict[str, Any]) -> None:
         or event.get("session_id")
         or ""
     ).strip()
-    is_transient = event.get("transient") is True
     is_canonical_activity_row = bool(
         activity_id == f"mission:{mission_id}"
         and session_id == f"team:mission:{mission_id}:events"
     )
-    # Persisted source rows are projected immediately into the mission's
-    # canonical activity ledger. Delivering both rows produces duplicates and
-    # exposes node-local seq values to a mission-scoped cursor. Transient deltas
-    # have no ledger row yet, so they remain eligible for direct live delivery.
-    if not is_transient and not is_canonical_activity_row:
+    # The mission activity journal is the sole frontend publisher. Source-run
+    # rows and transient execution frames are never eligible for activity
+    # delivery, even when they contain the same mission binding.
+    if not is_canonical_activity_row:
         return
     _team_activity_terminal_log(
         "run-event-appended",
@@ -585,6 +586,25 @@ def _on_run_event_appended(db: Any, event: dict[str, Any]) -> None:
         live_status_event_for_subscription=_team_mission_live_status_event_for_subscription,
         deliver_subscription_event=_deliver_subscription_event,
     )
+
+
+def event_uses_canonical_activity_journal(
+    event: dict[str, Any],
+    *,
+    db: Any = None,
+) -> bool:
+    """Return whether frontend delivery is owned by a mission journal.
+
+    A Team Mission run event is persisted in its source execution session for
+    execution history and projected into exactly one mission activity journal
+    for UI delivery.  Once the run is bound to a mission, the source-session
+    event bus and the gateway's legacy direct-write path must stay silent;
+    otherwise the desktop receives the same semantic event from two transports.
+    """
+
+    if db is None or not isinstance(event, dict):
+        return False
+    return bool(_team_mission_run_binding(event, db=db))
 
 
 def _ensure_run_event_listener_registered(db: Any) -> bool:
@@ -1287,7 +1307,7 @@ def _poll_one_subscription(subscription: dict[str, Any]) -> None:
                 "activity_event_last_seq"
                 if (
                     subscription_kind == "activity"
-                    and _team_activity_events.uses_event_log(activity_id, db=db)
+                    and _team_activity_events.uses_mission_activity_journal(activity_id, db=db)
                 )
                 else "last_seq"
             )
@@ -1859,13 +1879,22 @@ def record_event(
         params,
         assign_if_missing=not worker_process,
     )
+    team_mission_binding = (
+        _team_mission_run_binding(frame, db=db)
+        if not worker_process and run_id and db is not None
+        else {}
+    )
     transient_stream = bool(
         not worker_process and _runtime_streams.is_transient_stream_event(frame)
     )
     if transient_stream:
         persist = False
         _runtime_event_protocol.mark_transient(frame, params)
-        _runtime_streams.observe(frame, db=db)
+        _runtime_streams.observe(
+            frame,
+            db=db,
+            checkpoint_required=not bool(team_mission_binding),
+        )
     elif _flush_streams and not worker_process and stable and run_id:
         _persist_stream_checkpoints(
             conversation_session_id=stable,
@@ -1884,6 +1913,12 @@ def record_event(
     )
     if not worker_process and not will_persist and frame.get("transient") is not False:
         _runtime_event_protocol.mark_transient(frame, params)
+    canonical_team_activity_append_required = bool(
+        not worker_process
+        and db is not None
+        and team_mission_binding
+        and not will_persist
+    )
     scheduler_mission_id = ""
     persisted_run_checked = False
     persisted_terminal_reopen = False
@@ -1981,7 +2016,11 @@ def record_event(
                 state["updated_at"] = now
 
         subscribers = set()
-        if stable:
+        # Team Mission frontend delivery has one owner: the canonical activity
+        # journal listener.  Do not also publish the source execution row to
+        # session subscribers; the journal projection below is durable and is
+        # used identically for live delivery, reconnect, and replay.
+        if stable and not team_mission_binding:
             for subscription_id in list(_subscription_ids_by_session.get(stable, set())):
                 subscription = _subscriptions_by_id.get(subscription_id)
                 transport = subscription.get("transport") if isinstance(subscription, dict) else None
@@ -2023,13 +2062,42 @@ def record_event(
                 subscriber_delivery_count=len(result),
                 **_stream_trace_summary(frame),
             )
-    with _lock:
-        has_activity_subscribers = any(_subscription_ids_by_activity.values())
-    if transient_stream and db is not None and has_activity_subscribers:
-        # Team mission activity subscribers consume a projected transport ABI.
-        # The run-event listener normally produces it after a durable append;
-        # transient streams deliberately have no append, so project them here.
-        _on_run_event_appended(db, frame)
+    if canonical_team_activity_append_required:
+        # Persist-before-publish is the Team Mission activity invariant.  Raw
+        # execution deltas stay transient in their node session, but the
+        # canvas-visible projection is appended to the dedicated mission
+        # activity journal first.  The run-event append listener is then the
+        # only publisher for both live delivery and replay; no transient frame
+        # may bypass that journal.
+        mission_event_appender = _db_method(db, "append_team_mission_event_for_run")
+        if mission_event_appender is None:
+            logger.error(
+                "[dovie-run-control] canonical-team-activity-append-unavailable %s",
+                _json_for_log({
+                    "event_type": event_type,
+                    "session_id": stable,
+                    "run_id": run_id,
+                    "mission_id": str(team_mission_binding.get("mission_id") or ""),
+                }),
+            )
+        else:
+            try:
+                mission_event_appender(run_id=run_id, event=frame)
+            except Exception as exc:
+                # Fail closed: publishing an unjournaled fragment would
+                # reintroduce the second cursor domain and make replay differ
+                # from what the user saw live.
+                logger.error(
+                    "[dovie-run-control] canonical-team-activity-append-failed %s",
+                    _json_for_log({
+                        "event_type": event_type,
+                        "session_id": stable,
+                        "run_id": run_id,
+                        "mission_id": str(team_mission_binding.get("mission_id") or ""),
+                        "error": str(exc),
+                    }),
+                    exc_info=True,
+                )
     if persist and stable and (method := _run_method(db, "append_event")):
         prev_projecting = getattr(db, "_team_mission_projecting", False)
         try:
@@ -2627,7 +2695,6 @@ def subscribe_activity(
     limit: int = 2000,
     replay_mode: str = "replay_live",
     max_replay_events: int | None = None,
-    debug_replay_audit: bool = False,
     db: Any = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Register an activity-scoped subscription. Returns (subscription_id, replay_events)."""
@@ -2655,16 +2722,18 @@ def subscribe_activity(
 
     normalized_subscription_id = uuid.uuid4().hex
     is_team_mission_activity = _team_activity_events.is_activity_id(normalized_activity_id)
-    uses_team_mission_event_log = _team_activity_events.uses_event_log(normalized_activity_id, db=db)
+    uses_mission_activity_journal = _team_activity_events.uses_mission_activity_journal(
+        normalized_activity_id,
+        db=db,
+    )
     is_team_dispatch_activity = _team_activity_events.is_team_dispatch_activity_id(normalized_activity_id)
     terminal_team_mission_activity = (
-        uses_team_mission_event_log
+        uses_mission_activity_journal
         and _team_activity_events.is_terminal_activity(normalized_activity_id, db=db)
     )
     force_cursor_only = (
         normalized_replay_mode in {"live", "cursor_only"}
         or normalized_max_replay_events <= 0
-        or (terminal_team_mission_activity and not debug_replay_audit)
     )
     cursor_seq = max(
         normalized_after_seq,
@@ -2673,15 +2742,15 @@ def subscribe_activity(
     raw_initial_seq = (
         0
         if is_team_dispatch_activity
-        else cursor_seq if force_cursor_only and not uses_team_mission_event_log else normalized_after_seq
+        else cursor_seq if force_cursor_only and not uses_mission_activity_journal else normalized_after_seq
     )
     activity_event_initial_seq = (
         0
         if is_team_dispatch_activity
-        else cursor_seq if force_cursor_only and uses_team_mission_event_log
-        else normalized_after_seq if uses_team_mission_event_log else 0
+        else cursor_seq if force_cursor_only and uses_mission_activity_journal
+        else normalized_after_seq if uses_mission_activity_journal else 0
     )
-    replay_after_seq = activity_event_initial_seq if uses_team_mission_event_log else normalized_after_seq
+    replay_after_seq = activity_event_initial_seq if uses_mission_activity_journal else normalized_after_seq
     replay_limit = 0 if force_cursor_only else normalized_max_replay_events
     _team_activity_terminal_log(
         "subscribe-start",
@@ -2694,7 +2763,7 @@ def subscribe_activity(
         cursor_seq=cursor_seq,
         terminal_team_mission_activity=terminal_team_mission_activity,
         is_team_mission_activity=is_team_mission_activity,
-        uses_team_mission_event_log=uses_team_mission_event_log,
+        uses_mission_activity_journal=uses_mission_activity_journal,
         mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
         node_selector=_team_activity_events.node_selector(normalized_activity_id),
         has_transport=transport is not None,
@@ -2711,7 +2780,7 @@ def subscribe_activity(
         cursor_seq=cursor_seq,
         terminal_team_mission_activity=terminal_team_mission_activity,
         is_team_mission_activity=is_team_mission_activity,
-        uses_team_mission_event_log=uses_team_mission_event_log,
+        uses_mission_activity_journal=uses_mission_activity_journal,
         mission_id=_team_activity_events.mission_id_for_activity(normalized_activity_id, db=db),
         node_selector=_team_activity_events.node_selector(normalized_activity_id),
         has_transport=transport is not None,
@@ -2780,22 +2849,6 @@ def subscribe_activity(
         if _event_activity_id(event) == normalized_activity_id
         and int(event.get("seq") or 0) > replay_after_seq
     ]
-    mission_id_value = _team_activity_events.mission_id_for_activity(
-        normalized_activity_id,
-        db=db,
-    )
-    transient_snapshots = [
-        _team_activity_events.project_run_event_for_subscription(
-            event,
-            normalized_activity_id,
-            mission_id_value=mission_id_value,
-        )
-        for event in _runtime_streams.replay_activity_snapshots(
-            normalized_activity_id,
-            db=db,
-        )
-    ] if mission_id_value else []
-    events.extend(transient_snapshots)
     _trace_team_runtime_chain(
         "subscribe-activity-replay",
         activity_id=normalized_activity_id,
@@ -2827,7 +2880,7 @@ def subscribe_activity(
             if events:
                 for event in events:
                     _remember_subscription_delivery(subscription, event)
-            elif uses_team_mission_event_log:
+            elif uses_mission_activity_journal:
                 subscription["activity_event_last_seq"] = max(
                     int(subscription.get("activity_event_last_seq") or 0),
                     activity_event_initial_seq,
@@ -3040,10 +3093,10 @@ def detach_transport(transport: Transport | None) -> None:
     for subscription in subscriptions:
         db = subscription.get("db")
         if str(subscription.get("kind") or "session") == "activity":
-            pending = _runtime_streams.pending_activity_checkpoints(
-                str(subscription.get("activity_id") or ""),
-                db=db,
-            )
+            # Activity subscribers are replayed exclusively from their
+            # canonical journal.  Persisting a stream checkpoint here would
+            # manufacture a second visible version of the same text.
+            pending = []
         else:
             pending = _runtime_streams.pending_checkpoints(
                 str(subscription.get("conversation_session_id") or ""),

@@ -125,8 +125,6 @@ def _session_index_sql(where: list[str]) -> str:
         "       tmc.workspace_id AS team_conversation_workspace_id, "
         "       tmc.workspace_path AS team_conversation_workspace_path, "
         "       '' AS team_conversation_active_mission_id, "
-        "       COUNT(CASE WHEN act.status IN ('pending','running') THEN 1 END) AS active_activity_count, "
-        "       COUNT(CASE WHEN act.status IN ('completed','failed') AND act.read_at IS NULL THEN 1 END) AS unread_completion_count, "
         "       COALESCE(am.mission_id, '') AS active_mission_id, "
         "       am.link_status AS mission_status, "
         "       CASE WHEN COALESCE(am.mission_id, '') != '' THEN 1 ELSE 0 END AS conversation_has_active_mission, "
@@ -220,8 +218,6 @@ def _session_index_sql(where: list[str]) -> str:
         "   AND member_participant.runtime_scope_key = si.runtime_scope_key "
         "   AND member_participant.member_id != '' "
         "   AND LOWER(COALESCE(member_participant.role, '')) = 'member' "
-        "  LEFT JOIN activities act "
-        "    ON act.conversation_id = COALESCE(NULLIF(si.conversation_id, ''), si.session_id)"
         + where_sql
         + " GROUP BY si.session_id "
         " ORDER BY si.updated_at DESC, si.started_at DESC, si.session_id DESC LIMIT ?"
@@ -239,8 +235,6 @@ def _session_index_row_to_item(row: sqlite3.Row) -> dict[str, Any]:
     ):
         if flag in item:
             item[flag] = bool(item.get(flag))
-    for count_field in ("active_activity_count", "unread_completion_count"):
-        item[count_field] = int(item.get(count_field) or 0)
     if (
         item.get("conversation_kind") == "team"
         and item.get("conversation_id")

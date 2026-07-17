@@ -459,9 +459,26 @@ class GatewayToolEventBridge:
                 "goal": str(kwargs.get("goal") or ""),
                 "task_count": int(kwargs.get("task_count") or 1),
                 "task_index": int(kwargs.get("task_index") or 0),
-                "run_id": str((session or {}).get("active_run_id") or ""),
-                "turn_id": str((session or {}).get("active_turn_id") or ""),
-                "client_message_id": str(pending_turn.get("client_message_id") or ""),
+                # Delegated children can outlive their parent turn.  Prefer the
+                # immutable dispatch origin over mutable session state so a late
+                # terminal event is neither dropped nor attached to a newer run.
+                "run_id": str(
+                    kwargs.get("run_id")
+                    or (session or {}).get("active_run_id")
+                    or ""
+                ),
+                "turn_id": str(
+                    kwargs.get("turn_id")
+                    or (session or {}).get("active_turn_id")
+                    or ""
+                ),
+                "client_message_id": str(
+                    kwargs.get("client_message_id")
+                    or pending_turn.get("client_message_id")
+                    or ""
+                ),
+                "runtime_scope_key": str(kwargs.get("runtime_scope_key") or ""),
+                "activity_id": str(kwargs.get("activity_id") or ""),
             }.items()
             if value != ""
         }

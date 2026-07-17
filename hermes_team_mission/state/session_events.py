@@ -106,6 +106,7 @@ class TeamMissionEventMixin:
         metadata = dict(node.get("metadata") or {})
         failure = _classify_team_mission_failure(event_type, payload)
         event_seq = _event_seq(event)
+        finished_at = time.time()
         existing_terminal_run_id = str(metadata.get("last_run_id") or "").strip()
         existing_terminal_status = str(
             metadata.get("last_run_terminal_status")
@@ -143,6 +144,8 @@ class TeamMissionEventMixin:
                 "last_run_terminal_event": event_type,
                 "last_run_terminal_status": next_status,
                 "last_run_terminal_seq": event_seq,
+                "last_run_finished_at": finished_at,
+                "last_run_finish_source": event_type,
                 **({
                     "last_run_reason_code": missing_handoff_failure.get("reason_code") or "protocol_violation",
                     "last_run_recoverability": missing_handoff_failure.get("recoverability") or "blocked",
@@ -178,7 +181,74 @@ class TeamMissionEventMixin:
                 )
             except Exception:
                 pass
+        deliverable = self.latest_team_mission_deliverable_for_run(run_id) or {}
+        finish_payload = {
+            "mission_id": str(binding.get("mission_id") or ""),
+            "missionId": str(binding.get("mission_id") or ""),
+            "node_id": str(binding.get("node_id") or ""),
+            "nodeId": str(binding.get("node_id") or ""),
+            "run_id": run_id,
+            "runId": run_id,
+            "status": next_status,
+            "node_status": next_status,
+            "nodeStatus": next_status,
+            "node": updated,
+            "finished_at": finished_at,
+            "finishedAt": finished_at,
+            "source_terminal_event": event_type,
+            "sourceTerminalEvent": event_type,
+            "source_terminal_seq": event_seq,
+            "sourceTerminalSeq": event_seq,
+        }
+        if deliverable:
+            finish_payload.update({
+                "deliverable_id": _text(deliverable.get("deliverable_id")),
+                "deliverableId": _text(deliverable.get("deliverable_id")),
+                "deliverable_status": _text(deliverable.get("status")),
+                "deliverableStatus": _text(deliverable.get("status")),
+                "result": _text(deliverable.get("result")),
+                "summary": _text(deliverable.get("summary")),
+                "artifact_refs": list(deliverable.get("artifact_refs") or []),
+                "artifactRefs": list(deliverable.get("artifact_refs") or []),
+                "source": _text(deliverable.get("source")) or "authoritative",
+                "visibility": _text(deliverable.get("visibility")) or "handoff",
+                "channel": "handoff",
+            })
+        try:
+            _event_log.append_team_mission_structural_event(
+                self,
+                mission_id=str(binding.get("mission_id") or ""),
+                source_event={
+                    "type": "mission.node.finished",
+                    "run_id": run_id,
+                    "payload": finish_payload,
+                },
+                identity=runtime_event_identity(
+                    mission={"mission_id": str(binding.get("mission_id") or "")},
+                    node=updated,
+                    binding=binding,
+                ),
+                dedupe_key=(
+                    f"node-finished:{binding.get('mission_id') or ''}:"
+                    f"{binding.get('node_id') or ''}:{run_id}"
+                ),
+            )
+        except Exception:
+            pass
         self.reduce_team_mission_graph(str(binding.get("mission_id") or ""))
+        try:
+            from hermes_team_mission.runtime.snapshot_events import append_team_mission_snapshot_updated
+
+            append_team_mission_snapshot_updated(
+                self,
+                mission_id=str(binding.get("mission_id") or ""),
+                reason="node_finished",
+                node_id=str(binding.get("node_id") or ""),
+                run_id=run_id,
+                status=next_status,
+            )
+        except Exception:
+            pass
         compile_mode = "final"
         if next_status in {"cancelled", "interrupted"}:
             compile_mode = "canceled"

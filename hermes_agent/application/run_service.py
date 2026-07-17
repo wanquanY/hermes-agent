@@ -63,6 +63,8 @@ class RunService:
         self.retention = RunEventRetentionService(conn, unit_of_work)
         self._event_listener_lock = threading.RLock()
         self._event_listeners: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self._session_append_locks_guard = threading.Lock()
+        self._session_append_locks: dict[str, threading.RLock] = {}
 
     def append_event(
         self,
@@ -75,6 +77,36 @@ class RunService:
         stable = str(session_id or "").strip()
         if not stable:
             raise ValueError("session_id is required")
+        # The journal owns both persistence order and live delivery order.
+        # SQLite assigns a monotonic seq inside the transaction, but notifying
+        # listeners after the transaction without this per-session lock lets a
+        # later concurrent append publish first. Keep append -> retention ->
+        # notify serialized for one journal while allowing unrelated sessions
+        # to proceed independently.
+        with self._session_append_lock(stable):
+            return self._append_event_serialized(
+                stable,
+                event,
+                participant_id=participant_id,
+                activity_id=activity_id,
+            )
+
+    def _session_append_lock(self, session_id: str) -> threading.RLock:
+        with self._session_append_locks_guard:
+            lock = self._session_append_locks.get(session_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._session_append_locks[session_id] = lock
+            return lock
+
+    def _append_event_serialized(
+        self,
+        stable: str,
+        event: dict[str, Any],
+        *,
+        participant_id: str,
+        activity_id: str,
+    ) -> dict[str, Any]:
 
         def operation(_conn: sqlite3.Connection) -> dict[str, Any]:
             self._sessions.ensure_runtime_session(

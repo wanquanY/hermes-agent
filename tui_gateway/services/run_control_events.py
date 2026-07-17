@@ -118,17 +118,59 @@ def remember_terminal_delivery(subscription: dict[str, Any], event: dict[str, An
 
 
 def _stream_delivery_identity(event: dict[str, Any]) -> tuple[Any, ...] | None:
-    event_type = str(event.get("type") or "").strip()
+    payload, text_stream = _stream_payload(event)
+    subject = _stream_subject(event, payload, text_stream)
+    event_type = str(
+        payload.get("source_event_type")
+        or payload.get("sourceEventType")
+        or payload.get("event_type")
+        or payload.get("eventType")
+        or event.get("type")
+        or ""
+    ).strip()
     if not event_type.endswith((".delta", ".thinking")):
         return None
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     return (
         event_type,
-        event_run_id(event),
-        event_turn_id(event),
-        event_runtime_scope_key(event),
         str(
-            payload.get("subagent_id")
+            text_stream.get("run_id")
+            or text_stream.get("runId")
+            or subject.get("run_id")
+            or subject.get("runId")
+            or payload.get("source_run_id")
+            or payload.get("sourceRunId")
+            or event_run_id(event)
+        ).strip(),
+        str(
+            text_stream.get("turn_id")
+            or text_stream.get("turnId")
+            or subject.get("turn_id")
+            or subject.get("turnId")
+            or payload.get("source_turn_id")
+            or payload.get("sourceTurnId")
+            or event_turn_id(event)
+        ).strip(),
+        str(
+            text_stream.get("runtime_scope_key")
+            or text_stream.get("runtimeScopeKey")
+            or subject.get("runtime_scope_key")
+            or subject.get("runtimeScopeKey")
+            or payload.get("source_runtime_scope_key")
+            or payload.get("sourceRuntimeScopeKey")
+            or event_runtime_scope_key(event)
+        ).strip(),
+        str(
+            text_stream.get("subagent_id")
+            or text_stream.get("subagentId")
+            or text_stream.get("test_run_id")
+            or text_stream.get("testRunId")
+            or text_stream.get("stream_id")
+            or text_stream.get("streamId")
+            or text_stream.get("segment_id")
+            or text_stream.get("segmentId")
+            or text_stream.get("client_message_id")
+            or text_stream.get("clientMessageId")
+            or payload.get("subagent_id")
             or payload.get("subagentId")
             or payload.get("test_run_id")
             or payload.get("testRunId")
@@ -163,6 +205,22 @@ def _stream_payload(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
         else {}
     )
     return payload, text_stream
+
+
+def _stream_subject(
+    event: dict[str, Any],
+    payload: dict[str, Any],
+    text_stream: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the source execution subject beneath a projected wrapper."""
+    for candidate in (
+        text_stream.get("subject"),
+        event.get("subject"),
+        payload.get("subject"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
 
 
 def remember_stream_delivery(subscription: dict[str, Any], event: dict[str, Any]) -> None:
@@ -209,30 +267,36 @@ def remember_stream_delivery(subscription: dict[str, Any], event: dict[str, Any]
     offsets[identity] = max(previous, end_offset)
 
 
-def _project_stream_checkpoint(
+def _project_stream_append(
     subscription: dict[str, Any], event: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Suppress/crop a durable append checkpoint already seen live."""
+    """Deliver only the unseen range of any append fragment.
+
+    This is deliberately symmetric: live can arrive before durable, or a
+    durable poll can win the race and be followed by a late live fan-out.
+    Treating only durable checkpoints specially fixed one ordering while
+    leaving the inverse ordering able to duplicate text.
+    """
     identity = _stream_delivery_identity(event)
     if identity is None:
         return event
     payload, text_stream = _stream_payload(event)
-    if not bool(payload.get("stream_checkpoint") or payload.get("streamCheckpoint")):
-        return event
     mode = str(text_stream.get("mode") or payload.get("mode") or "append").strip().lower()
     if mode != "append":
-        # Snapshot checkpoints may intentionally rewrite an earlier prefix and
+        # Snapshot/replace events intentionally rewrite an earlier prefix and
         # must remain authoritative.
+        return event
+    raw_offset = text_stream.get("offset", payload.get("offset"))
+    if raw_offset is None:
+        # The runtime stream registry stamps offsets on new frames. Keeping
+        # this compatibility path avoids guessing for older persisted rows.
         return event
     offsets = subscription.get("direct_stream_offsets")
     delivered_end = int(offsets.get(identity) or 0) if isinstance(offsets, dict) else 0
     try:
-        checkpoint_offset = max(
-            0,
-            int(text_stream.get("offset", payload.get("offset", 0)) or 0),
-        )
+        fragment_offset = max(0, int(raw_offset or 0))
     except (TypeError, ValueError):
-        checkpoint_offset = 0
+        return event
     text = next(
         (
             value
@@ -247,17 +311,17 @@ def _project_stream_checkpoint(
         ),
         "",
     )
-    checkpoint_end = checkpoint_offset + _utf16_length(text)
-    if delivered_end <= checkpoint_offset:
+    fragment_end = fragment_offset + _utf16_length(text)
+    if delivered_end <= fragment_offset:
         return event
-    if delivered_end >= checkpoint_end:
+    if delivered_end >= fragment_end:
         return None
 
-    # The live transport saw only a prefix. Deliver exactly the unseen suffix
-    # while retaining the checkpoint's canonical seq/identity.
+    # The subscriber saw only a prefix. Deliver exactly the unseen suffix while
+    # retaining this event's canonical cursor/causal identity.
     projected = dict(event)
     projected_payload = dict(payload)
-    suffix = _slice_utf16(text, delivered_end - checkpoint_offset)
+    suffix = _slice_utf16(text, delivered_end - fragment_offset)
     projected_payload.update({"offset": delivered_end, "text": suffix, "delta": suffix})
     if "output" in projected_payload:
         projected_payload["output"] = suffix
@@ -283,7 +347,7 @@ def delta_event_for_subscription(
 ) -> dict[str, Any] | None:
     if was_terminal_delivered(subscription, event):
         return None
-    return _project_stream_checkpoint(subscription, event)
+    return _project_stream_append(subscription, event)
 
 
 def payload_status(status: str) -> str:

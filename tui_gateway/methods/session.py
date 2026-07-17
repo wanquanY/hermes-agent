@@ -1288,8 +1288,6 @@ def _session_index_list_item(row: dict) -> dict:
         "running": bool(row.get("running")),
         "waiting_approval": bool(row.get("waiting_approval")),
         "pending_approval_count": row.get("pending_approval_count") or 0,
-        "active_activity_count": row.get("active_activity_count") or 0,
-        "unread_completion_count": row.get("unread_completion_count") or 0,
         "active_run_id": row.get("active_run_id") or "",
         "active_execution_session_id": row.get("active_execution_session_id") or "",
         "conversation_id": row.get("conversation_id") or "",

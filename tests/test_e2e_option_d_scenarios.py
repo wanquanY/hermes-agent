@@ -612,16 +612,6 @@ async def test_e2e_multi_activity_per_conversation(
     assert [row["activity_id"] for row in rows] == ["act-E1", "act-E2", "act-E3"]
     assert {row["status"] for row in rows} == {"completed"}
     assert harness.db.activities.unread_count(conversation_id="conv-E") == 3
-    monkeypatch.setattr(server, "_get_db", lambda: harness.db, raising=False)
-    index_response = server._methods["session.index.list"](1, {})
-    [item] = [
-        item
-        for item in index_response["result"]["sessions"]
-        if item["id"] == "conv-E"
-    ]
-    assert item["active_activity_count"] == 0
-    assert item["unread_completion_count"] == 3
-
     injected = _drain_activity_events_for_api(_FakeLeaderAgent(harness.db, harness.parent_bus))
     assert [message["role"] for message in injected] == ["system", "system", "system"]
     assert [message["content"].splitlines()[0].split()[2] for message in injected] == [

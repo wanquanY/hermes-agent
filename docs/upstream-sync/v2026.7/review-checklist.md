@@ -126,6 +126,10 @@ Gateway contract 与 desktop `test:gates` 退出码 0。阶段 6 等待最终统
 - [x] C2、CB3、D2 的 hook spill、delegation headroom 与执行模式 owner 已记录。
 - [x] sync/async 共用唯一 `SubagentExecutionService`、Activity/Run 和 terminal contract。
 - [x] async 单任务、fan-out、root/child cancel、backpressure、shutdown 与 orphan 恢复有行为证据。
+- [x] parent 先 terminal 或新回合已开始时，迟到 child terminal 仍持久化并归属原 Run/Activity；
+  断线回放可收敛 Doxie subagent 面板。
+- [x] Doxie 以生成合同覆盖 101 个 Hermes 内建工具，并为当前 7 个动态集成工具建立明确展示；
+  `get_activity` 等新增工具不再回退为“工具调用 + 结构化数据”。
 - [x] synthetic completion message、进程内业务 registry 与 completion queue 已移除。
 - [x] hook/summary spill 安全、有界、可清理，预算幂等且 fan-out 顺序稳定。
 - [x] Hermes 全量、静态/分层/zero-debt 与 Doxie `test:gates` 完成。

@@ -3550,11 +3550,14 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(
     assert worker["runtime_scope_key"] == "profile:worker-a"
 
     events = db.list_team_mission_run_events("mission-current")
-    assert not any(
-        event["type"] == "team_mission.runtime.event"
-        and event["payload"]["source_event_type"] == "message.delta"
+    runtime_events = [
+        event
         for event in events
-    )
+        if event["type"] == "team_mission.runtime.event"
+        and event["payload"]["source_event_type"] == "message.delta"
+    ]
+    assert len(runtime_events) == 1
+    assert runtime_events[0]["payload"]["text_stream"]["delta"] == "worker-live"
     status_events = [
         event for event in events if event["type"] == "team_mission.conversation.status"
     ]
@@ -5157,7 +5160,11 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
         },
         db=db,
     )
-    assert db.runs.list_events_by_activity("mission:mission-1") == []
+    persisted = db.runs.list_events_by_activity("mission:mission-1")
+    assert len(persisted) == 1
+    assert persisted[0]["type"] == "team_mission.runtime.event"
+    assert persisted[0]["payload"]["source_event_type"] == "message.delta"
+    assert persisted[0]["payload"]["text_stream"]["delta"] == "先前事件"
 
     transport = _MemoryTransport()
     token = server.bind_transport(transport)
@@ -5184,7 +5191,10 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
     )
     assert "source_event" not in subscribed["result"]["events"][0]["payload"]
     assert "source_payload" not in subscribed["result"]["events"][0]["payload"]
-    assert db.list_team_mission_events("mission-1") == []
+    audit_events = db.list_team_mission_events("mission-1")
+    assert len(audit_events) == 1
+    assert audit_events[0]["type"] == "team_mission.runtime.event"
+    assert audit_events[0]["payload"]["source_event_type"] == "message.delta"
 
     run_control.publish_recorded_event(
         {
@@ -5253,18 +5263,20 @@ def test_runtime_activity_subscribe_replays_and_streams_team_mission_runtime_eve
     assert [event["type"] for event in persisted_activity_events] == [
         "team_mission.runtime.event",
         "team_mission.runtime.event",
+        "team_mission.runtime.event",
     ]
     assert [
         event["payload"]["source_event_type"] for event in persisted_activity_events
     ] == [
         "message.delta",
+        "message.delta",
         "tool.start",
     ]
     assert persisted_activity_events[0]["payload"]["text_stream"]["mode"] == "append"
-    assert (
-        persisted_activity_events[0]["payload"]["text_stream"]["delta"]
-        == "先前事件实时事件"
-    )
+    assert [
+        event["payload"].get("text_stream", {}).get("delta")
+        for event in persisted_activity_events[:2]
+    ] == ["先前事件", "实时事件"]
 
     removed = server._methods["runtime.activity.unsubscribe"](
         2, {"subscription_id": subscription_id}
@@ -7217,6 +7229,16 @@ def _recall_setup_team_conversation(monkeypatch, tmp_path: Path):
                 "removed_messages": 2,
                 "draft": {"text": "你好", "attachments": []},
                 "interrupted": True,
+                "session_id": "team-session-1",
+                "conversation_session_id": "team-session-1",
+                "turn_id": str(params.get("turn_id") or ""),
+                "messages": [
+                    {
+                        "role": "user",
+                        "text": "保留的上一轮",
+                        "metadata": {"turn_id": "turn-before"},
+                    }
+                ],
             },
         }
 
@@ -7326,6 +7348,14 @@ def test_recall_turn_member_chat_cancels_canonical_conversation_run(
         }
     ]
     assert calls["team_mission_cancel"] == []
+    assert result["recalled"]["conversation_session_id"] == "team-session-1"
+    assert result["recalled"]["messages"] == [
+        {
+            "role": "user",
+            "text": "保留的上一轮",
+            "metadata": {"turn_id": "turn-before"},
+        }
+    ]
     # Conv recall was deferred to session.recall_turn.
     assert len(calls["session_recall"]) == 1
     assert calls["session_recall"][0]["session_id"] == "team-session-1"

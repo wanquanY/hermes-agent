@@ -80,7 +80,11 @@ python scripts/upstream_absorption_baseline.py \
 - 阶段 8：C2、CB3、D2 已按当前架构吸收；同步/异步 delegation 共用唯一
   `SubagentExecutionService`、Activity/Run 与 typed event，移除 synthetic completion message；
   hook 与 fan-in summary 具备安全有界 spill；Hermes 阶段聚合 626 passed、0 failed，
-  全量 29,044 passed、0 failed；Doxie contract/gates 退出码 0。
+  全量 29,044 passed、0 failed；Doxie contract/gates 退出码 0。统一实机验收补充关闭了
+  parent terminal 后异步 child 终态丢路由的问题：事件来源在派发时冻结，迟到完成仍可持久化、
+  回放并归属原 Run；Doxie 同步建立 101 个内建工具的生成展示合同，补齐 42 个缺失定义，
+  `get_activity` 等异步工具不再回退原始结构化字段。补充定向合同门禁见
+  `phase-8-acceptance.md`。
 - 阶段 9：U7、CX1、CX2、CX4 已按当前架构吸收；route policy、native compaction、
   reasoning projector 与 verification aggregate 专项聚合 766 passed、0 failed；运行期
   catalog cache-only 修正 112 passed。标准全量发现的 MCP OAuth discovery 阻塞已由阶段 10
