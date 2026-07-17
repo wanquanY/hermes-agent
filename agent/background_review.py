@@ -7,10 +7,11 @@ the conversation snapshot in a forked :class:`AIAgent` and asks itself
 the memory + skill stores.  Main conversation and prompt cache are never
 touched.
 
-The fork inherits the parent's live runtime (provider, model, base_url,
-credentials, cached system prompt) so it hits the same prefix cache and
-uses the same auth.  It runs with a tool whitelist limited to memory and
-skill management tools; everything else is denied at runtime.
+By default the fork inherits the parent's live runtime and warm prompt cache.
+``auxiliary.background_review`` may route it to a different model; routed
+reviews get a bounded history digest and never inherit model-specific prompt
+or reasoning state.  The fork runs with a memory/skill-only whitelist and is
+isolated from foreground transcript/session persistence.
 
 See the ``hermes-agent-dev`` skill (``references/self-improvement-loop.md``)
 for invariants and PR review criteria.
@@ -18,13 +19,161 @@ for invariants and PR review criteria.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from agent.thread_scoped_output import thread_scoped_silence
+
 logger = logging.getLogger(__name__)
+
+
+def _parent_review_runtime(agent: Any) -> Dict[str, Any]:
+    runtime = agent._current_main_runtime()
+    api_mode = runtime.get("api_mode") or None
+    if api_mode == "codex_app_server":
+        api_mode = "codex_responses"
+    return {
+        "provider": agent.provider,
+        "model": agent.model,
+        "api_key": runtime.get("api_key") or None,
+        "base_url": runtime.get("base_url") or None,
+        "api_mode": api_mode,
+        "credential_pool": getattr(agent, "_credential_pool", None),
+        "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
+        "max_tokens": getattr(agent, "max_tokens", None),
+        "command": getattr(agent, "acp_command", None),
+        "args": list(getattr(agent, "acp_args", []) or []),
+        "routed": False,
+    }
+
+
+def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
+    """Select the background-review runtime without changing the default path.
+
+    ``auto`` and same provider/model retain the parent's warm-cache runtime.
+    Only an explicit different provider+model is a routed cold-cache review.
+    Any config or credential failure falls back to the parent so review remains
+    a best-effort sidecar and cannot fail the foreground turn.
+    """
+    parent = _parent_review_runtime(agent)
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        auxiliary = config.get("auxiliary") if isinstance(config, dict) else {}
+        auxiliary = auxiliary if isinstance(auxiliary, dict) else {}
+        task = auxiliary.get("background_review")
+        task = task if isinstance(task, dict) else {}
+        provider = str(task.get("provider") or "").strip()
+        model = str(task.get("model") or "").strip()
+        base_url = str(task.get("base_url") or "").strip() or None
+        api_key = str(task.get("api_key") or "").strip() or None
+        if not provider or provider == "auto" or not model:
+            return parent
+        if provider == str(agent.provider or "") and model == str(agent.model or ""):
+            return parent
+
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        resolved = resolve_runtime_provider(
+            requested=provider,
+            target_model=model,
+            explicit_api_key=api_key,
+            explicit_base_url=base_url,
+        )
+        if not isinstance(resolved, dict) or not resolved:
+            raise RuntimeError(f"unable to resolve auxiliary provider {provider!r}")
+        request_overrides = dict(resolved.get("request_overrides") or {})
+        extra_body = task.get("extra_body")
+        if isinstance(extra_body, dict):
+            merged_extra_body = dict(request_overrides.get("extra_body") or {})
+            merged_extra_body.update(extra_body)
+            if merged_extra_body:
+                request_overrides["extra_body"] = merged_extra_body
+        return {
+            "provider": resolved.get("provider") or provider,
+            "model": resolved.get("model") or model,
+            "api_key": resolved.get("api_key"),
+            "base_url": resolved.get("base_url"),
+            "api_mode": resolved.get("api_mode"),
+            "credential_pool": resolved.get("credential_pool"),
+            "request_overrides": request_overrides,
+            "max_tokens": resolved.get("max_output_tokens"),
+            "command": resolved.get("command"),
+            "args": list(resolved.get("args") or []),
+            "routed": True,
+        }
+    except Exception as exc:
+        logger.debug(
+            "background-review auxiliary routing failed (%s); using main model",
+            exc,
+        )
+        return parent
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return " ".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict)
+        ).strip()
+    return ""
+
+
+def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]:
+    """Bound cold-written context only for a different-model review fork."""
+    messages = list(messages_snapshot or [])
+    tail = max(1, int(tail or 24))
+    keep = messages[-tail:]
+    while keep and isinstance(keep[0], dict) and keep[0].get("role") == "tool":
+        tail += 1
+        if len(messages) <= tail:
+            keep = messages
+            while (
+                keep
+                and isinstance(keep[0], dict)
+                and keep[0].get("role") == "tool"
+            ):
+                keep = keep[1:]
+            return keep
+        keep = messages[-tail:]
+    if len(messages) <= tail:
+        return messages
+
+    lines: List[str] = []
+    for message in messages[: -len(keep)]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        text = _message_text(message).replace("\n", " ")
+        if role == "user" and text:
+            lines.append(f"USER: {text[:300]}")
+        elif role == "assistant":
+            tool_calls = message.get("tool_calls") or []
+            names = [
+                str((call.get("function") or {}).get("name") or "?")
+                for call in tool_calls
+                if isinstance(call, dict)
+            ]
+            if names:
+                lines.append(f"ASSISTANT[tools: {', '.join(names)}]")
+            if text:
+                lines.append(f"ASSISTANT: {text[:200]}")
+    digest = {
+        "role": "user",
+        "content": (
+            "[Earlier conversation digest. Older turns were summarized to bound "
+            "the routed background review's cold-write cost; recent turns follow "
+            "verbatim.]\n" + "\n".join(lines)
+        ),
+    }
+    return [digest, *keep]
 
 
 # Review-prompt strings — used by ``spawn_background_review_thread`` to build
@@ -115,7 +264,9 @@ _SKILL_REVIEW_PROMPT = (
     "Protected skills (DO NOT edit these):\n"
     "  • Bundled skills (shipped with Hermes, e.g. 'hermes-agent').\n"
     "  • Hub-installed skills (installed via 'hermes skills install').\n"
-    "  • Pinned skills (marked via 'hermes curator pin').\n"
+    "  • Pinned skills (marked via 'hermes curator pin'). Pinned means "
+    "the user has opted out of all autonomous maintenance; do not edit, "
+    "delete, archive, or consolidate them.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
     "Do NOT capture (these become persistent self-imposed constraints "
@@ -198,7 +349,9 @@ _COMBINED_REVIEW_PROMPT = (
     "Protected skills (DO NOT edit these):\n"
     "  • Bundled skills (shipped with Hermes, e.g. 'hermes-agent').\n"
     "  • Hub-installed skills (installed via 'hermes skills install').\n"
-    "  • Pinned skills (marked via 'hermes curator pin').\n"
+    "  • Pinned skills (marked via 'hermes curator pin'). Pinned means "
+    "the user has opted out of all autonomous maintenance; do not edit, "
+    "delete, archive, or consolidate them.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
     "Do NOT capture as skills (these become persistent self-imposed "
@@ -456,61 +609,45 @@ def _run_review_in_thread(
     review_agent = None
     review_messages: List[Dict] = []
     try:
-        with open(os.devnull, "w", encoding="utf-8") as _devnull, \
-             contextlib.redirect_stdout(_devnull), \
-             contextlib.redirect_stderr(_devnull):
-            # Inherit the parent agent's live runtime (provider, model,
-            # base_url, api_key, api_mode) so the fork uses the exact
-            # same credentials the main turn is using.  Without this,
-            # AIAgent.__init__ re-runs auto-resolution from env vars,
-            # which fails for OAuth-only providers, session-scoped
-            # creds, or credential-pool setups where the resolver can't
-            # reconstruct auth from scratch -- producing the spurious
-            # "No LLM provider configured" warning at end of turn.
-            _parent_runtime = agent._current_main_runtime()
-            _parent_api_mode = _parent_runtime.get("api_mode") or None
-            # The review fork needs to call agent-loop tools (memory,
-            # skill_manage). Those tools require Hermes' own dispatch,
-            # which the codex_app_server runtime bypasses entirely
-            # (it runs the turn inside codex's subprocess). So when
-            # the parent is on codex_app_server, downgrade the review
-            # fork to codex_responses — same auth/credentials, but
-            # talks to the OpenAI Responses API directly so Hermes
-            # owns the loop and the agent-loop tools dispatch.
-            if _parent_api_mode == "codex_app_server":
-                _parent_api_mode = "codex_responses"
-            # skip_memory=True keeps the review fork from
-            # touching external memory plugins (honcho, mem0,
-            # supermemory, etc.).  Without it, the fork's
-            # __init__ rebuilds its own _memory_manager from
-            # config, scoped to the parent's session_id, and
-            # run_conversation() then leaks the harness prompt
-            # into the user's real memory namespace via three
-            # ingestion sites: on_turn_start (cadence + turn
-            # message), prefetch_all (recall query), and
-            # sync_all (harness prompt + review output recorded
-            # as a (user, assistant) turn pair).  Built-in
-            # MEMORY.md / USER.md state is re-bound from the
-            # parent below so memory(action="add") writes from
-            # the review still land on disk; the review just
-            # has zero side effects on external providers.
-            # Match parent's toolset config so ``tools[]`` is byte-identical
-            # in the request body — Anthropic's cache key includes it.
-            # (The runtime whitelist below still restricts dispatch.)
+        # ``redirect_stdout`` mutates process-wide state and can swallow output
+        # from the foreground TUI.  Route only this worker thread to devnull.
+        with thread_scoped_silence():
+            review_runtime = _resolve_review_runtime(agent)
+            routed = bool(review_runtime.get("routed"))
+            fork_kwargs: Dict[str, Any] = {}
+            max_tokens = review_runtime.get("max_tokens")
+            if isinstance(max_tokens, int) and max_tokens > 0:
+                fork_kwargs["max_tokens"] = max_tokens
+            command = review_runtime.get("command")
+            if command:
+                fork_kwargs["acp_command"] = command
+                fork_kwargs["acp_args"] = list(review_runtime.get("args") or [])
+            if not routed:
+                reasoning_config = getattr(agent, "reasoning_config", None)
+                if isinstance(reasoning_config, dict):
+                    fork_kwargs["reasoning_config"] = dict(reasoning_config)
+
+            # skip_memory=True prevents the fork from ingesting its harness
+            # prompt into external memory providers. Built-in profile memory is
+            # rebound below so explicit memory writes still reach the profile.
             review_agent = AIAgent(
-                model=agent.model,
+                model=review_runtime.get("model") or agent.model,
                 max_iterations=16,
                 quiet_mode=True,
                 platform=agent.platform,
-                provider=agent.provider,
-                api_mode=_parent_api_mode,
-                base_url=_parent_runtime.get("base_url") or None,
-                api_key=_parent_runtime.get("api_key") or None,
-                credential_pool=getattr(agent, "_credential_pool", None),
+                provider=review_runtime.get("provider") or agent.provider,
+                api_mode=review_runtime.get("api_mode") or None,
+                base_url=review_runtime.get("base_url") or None,
+                api_key=review_runtime.get("api_key") or None,
+                credential_pool=review_runtime.get("credential_pool"),
+                request_overrides=dict(
+                    review_runtime.get("request_overrides") or {}
+                ),
                 parent_session_id=agent.session_id,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 skip_memory=True,
+                **fork_kwargs,
             )
             review_agent._memory_write_origin = "background_review"
             review_agent._memory_write_context = "background_review"
@@ -526,6 +663,12 @@ def _run_review_in_thread(
             review_agent._user_profile_enabled = agent._user_profile_enabled
             review_agent._memory_nudge_interval = 0
             review_agent._skill_nudge_interval = 0
+            # The fork is a sidecar, not a second owner of the foreground
+            # session.  It may write learning artifacts, but never transcript,
+            # session DB, JSONL, compression lineage, or lifecycle state.
+            review_agent._persist_disabled = True
+            review_agent._session_db = None
+            review_agent._session_json_enabled = False
             # Suppress all status/warning emits from the fork so the
             # user only sees the final successful-action summary.
             # Without this, mid-review "Iteration budget exhausted",
@@ -534,25 +677,11 @@ def _run_review_in_thread(
             # _vprint and leak past the stdout redirect (they go via
             # _print_fn/status_callback, which bypass sys.stdout).
             review_agent.suppress_status_output = True
-            # Inherit the parent's cached system prompt verbatim so
-            # the review fork's outbound HTTP request hits the same
-            # Anthropic/OpenRouter prefix cache the parent warmed.
-            # Without this, the fork rebuilds the system prompt from
-            # scratch (fresh _hermes_now() timestamp, fresh
-            # session_id, narrower toolset → different skills_prompt)
-            # and the byte-exact prefix-cache key misses. See
-            # issue #25322 and PR #17276 for the full analysis +
-            # measured impact (~26% end-to-end cost reduction on
-            # Sonnet 4.5).
-            review_agent._cached_system_prompt = agent._cached_system_prompt
-            # Defensive: pin session_start + session_id to the
-            # parent's so any code path that re-renders parts of
-            # the system prompt (compression, plugin hooks) still
-            # produces byte-identical output. The cached-prompt
-            # assignment above already short-circuits the normal
-            # rebuild path, but these pins guarantee parity even
-            # if a future code path bypasses the cache.
-            review_agent.session_start = agent.session_start
+            # Prompt and reasoning parity are valid only for the same model.
+            # A routed auxiliary model must build its own compatible prompt.
+            if not routed:
+                review_agent._cached_system_prompt = agent._cached_system_prompt
+                review_agent.session_start = agent.session_start
             review_agent.session_id = agent.session_id
             # The fork shares the parent's live session_id (pinned above for
             # prefix-cache parity). It is single-lifecycle and calls close()
@@ -579,10 +708,13 @@ def _run_review_in_thread(
                 clear_thread_tool_whitelist,
             )
 
+            review_toolsets = ["skills"]
+            if review_agent._memory_enabled or review_agent._user_profile_enabled:
+                review_toolsets.insert(0, "memory")
             review_whitelist = {
                 t["function"]["name"]
                 for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
+                    enabled_toolsets=review_toolsets,
                     quiet_mode=True,
                 )
             }
@@ -594,6 +726,17 @@ def _run_review_in_thread(
                 ),
             )
             try:
+                from tools.skill_manager_tool import (
+                    _reset_background_review_read_marks,
+                )
+
+                _reset_background_review_read_marks()
+            except Exception:
+                logger.debug(
+                    "background-review read-mark reset failed",
+                    exc_info=True,
+                )
+            try:
                 review_agent.run_conversation(
                     user_message=(
                         prompt
@@ -601,20 +744,22 @@ def _run_review_in_thread(
                         "management tools. Other tools will be denied "
                         "at runtime — do not attempt them."
                     ),
-                    conversation_history=messages_snapshot,
+                    conversation_history=(
+                        _digest_history(messages_snapshot)
+                        if routed
+                        else messages_snapshot
+                    ),
                 )
             finally:
                 clear_thread_tool_whitelist()
 
-            # Tear down memory providers while stdout is still
-            # redirected so background thread teardown (Honcho flush,
-            # Hindsight sync, etc.) stays silent.  The finally block
-            # below is a safety net for the exception path.
+            # Snapshot before shutdown: providers and close hooks may clear
+            # transient messages in future implementations.
+            review_messages = list(getattr(review_agent, "_session_messages", []))
             try:
                 review_agent.shutdown_memory_provider()
             except Exception:
                 pass
-            review_messages = list(getattr(review_agent, "_session_messages", []))
             try:
                 review_agent.close()
             except Exception:
@@ -627,11 +772,18 @@ def _run_review_in_thread(
         # the review agent inherits that history and would otherwise
         # re-surface stale "created"/"updated" messages from the prior
         # conversation as if they just happened (issue #14944).
-        actions = summarize_background_review_actions(
-            review_messages,
-            messages_snapshot,
-            notification_mode=getattr(agent, "_memory_notifications", "on"),
-        )
+        try:
+            actions = summarize_background_review_actions(
+                review_messages,
+                messages_snapshot,
+                notification_mode=getattr(agent, "_memory_notifications", "on"),
+            )
+        except Exception:
+            logger.warning(
+                "Background review produced an unreadable action summary",
+                exc_info=True,
+            )
+            actions = []
 
         if actions:
             summary = " · ".join(dict.fromkeys(actions))
@@ -651,16 +803,11 @@ def _run_review_in_thread(
         logger.warning("Background memory/skill review failed: %s", e)
         agent._emit_auxiliary_failure("background review", e)
     finally:
-        # Safety-net cleanup for the exception path.  Normal
-        # completion already shut down inside redirect_stdout above.
-        # Re-open devnull here so any teardown output (Honcho flush,
-        # Hindsight sync, background thread joins) stays silent even
-        # on the exception path where redirect_stdout already exited.
+        # Safety-net cleanup for the exception path, still scoped only to this
+        # worker thread.
         if review_agent is not None:
             try:
-                with open(os.devnull, "w", encoding="utf-8") as _fn, \
-                     contextlib.redirect_stdout(_fn), \
-                     contextlib.redirect_stderr(_fn):
+                with thread_scoped_silence():
                     try:
                         review_agent.shutdown_memory_provider()
                     except Exception:

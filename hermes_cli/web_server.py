@@ -1809,11 +1809,11 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "vision",
     "web_extract",
     "compression",
-    "session_search",
     "skills_hub",
     "approval",
     "mcp",
     "curator",
+    "background_review",
 )
 
 

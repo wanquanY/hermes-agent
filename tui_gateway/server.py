@@ -228,6 +228,8 @@ _READ_ONLY_DB_METHODS = frozenset(
         "profile.draft.list",
         "profile.get",
         "profile.growth.summary",
+        "profile.learning.graph",
+        "profile.learning.node.detail",
         "profile.list",
         "rollback.diff",
         "rollback.list",

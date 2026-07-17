@@ -99,3 +99,8 @@ SEC-SURFACE-03,security,0,skip-with-reason,Feishu webhook 与 WhatsApp guard,9e4
 SEC-SURFACE-04,security,0,skip-with-reason,WeCom callback 预鉴权限流,74541beb9,账本 skip reason 复核通过,Dovie 当前不启用 WeCom surface,
 SEC-SURFACE-05,security,4,absorb,Tirith 崩溃 circuit breaker,07cc567df,阶段4 fail-closed 与 breaker 测试通过,通用执行安全边界仍适用,
 SEC-SURFACE-06,security,0,equivalent,Kanban 脱敏与 markdown 消毒,3b56d3a29;5b45fb269,阶段0既有 kanban redaction 回归通过,本地已有等价实现,
+LG1,capability,13,absorb,profile-scoped Learning Graph,96552c31e,阶段13图谱不变量与 profile 隔离测试通过,当前成长摘要没有统一图谱事实源,
+LG2,capability,13,absorb,Journey 成长时间线与 CLI,e971dc1e9;ce82b0c3c;7e037e1a3,阶段13 CLI 与 timeline 合同通过,当前没有可回放成长时间线,
+LG3,capability,13,absorb,Journey 节点统一查看编辑删除,a0576560e;08be8e5ef;2fc67a3a5,阶段13原子 mutation 与 stale id 测试通过,当前消费端缺少领域 mutation seam,
+LG4,architecture,13,superseded,成长摘要改为 Learning Graph 派生,96552c31e,阶段13 summary/graph 同源测试通过,移除现有独立 memory/skill 计数规则,
+BR1,capability,13,absorb,后台复盘 aux 路由、隔离与安全成长写入,87c4a5ebb;e2fa509bf;b5267671f;437dcacbb;2e828d4b7;17cfa0f0a;8ef006933;20871c1d9;96bc524a7;525e1e775;56abbaeac,阶段13后台复盘成本、隔离、先读后写、所有权与可恢复归档测试通过,当前固定主模型完整历史且隔离和技能写入边界不完整,

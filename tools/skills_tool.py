@@ -1298,6 +1298,17 @@ def skill_view(
                     ensure_ascii=False,
                 )
 
+            try:
+                from tools.skill_manager_tool import mark_background_review_skill_read
+
+                mark_background_review_skill_read(target_file)
+            except Exception:
+                logger.debug(
+                    "Could not record background-review read for %s",
+                    target_file,
+                    exc_info=True,
+                )
+
             return json.dumps(
                 {
                     "success": True,
@@ -1493,6 +1504,17 @@ def skill_view(
             if setup_needed
             else SkillReadinessStatus.AVAILABLE.value,
         }
+
+        try:
+            from tools.skill_manager_tool import mark_background_review_skill_read
+
+            mark_background_review_skill_read(skill_md)
+        except Exception:
+            logger.debug(
+                "Could not record background-review read for %s",
+                skill_md,
+                exc_info=True,
+            )
 
         setup_help = next((e["help"] for e in required_env_vars if e.get("help")), None)
         if setup_help:

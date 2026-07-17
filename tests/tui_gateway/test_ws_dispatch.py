@@ -92,6 +92,23 @@ def test_profile_growth_summary_uses_control_plane_executor():
     assert executor is ws._ws_control_executor  # noqa: SLF001
 
 
+@pytest.mark.parametrize(
+    "method",
+    [
+        "profile.learning.graph",
+        "profile.learning.node.detail",
+        "profile.learning.node.edit",
+        "profile.learning.node.delete",
+    ],
+)
+def test_profile_learning_methods_use_control_plane_executor(method):
+    executor = ws._executor_for_request(  # noqa: SLF001
+        {"id": "1", "method": method, "params": {"agentProfileId": "agent-a"}}
+    )
+
+    assert executor is ws._ws_control_executor  # noqa: SLF001
+
+
 def test_conversation_render_snapshot_uses_control_plane_executor():
     executor = ws._executor_for_request(  # noqa: SLF001
         {"id": "1", "method": "conversation.render_snapshot", "params": {"session_id": "stored-1"}}
@@ -1097,6 +1114,33 @@ def test_profile_growth_summary_stays_on_control_plane_with_profile_scope():
                     "runtimeScopeKey": "profile:agent-a:version:v1",
                     "agentProfileVersionId": "v1",
                     "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "profile.learning.graph",
+        "profile.learning.node.detail",
+        "profile.learning.node.edit",
+        "profile.learning.node.delete",
+    ],
+)
+def test_profile_learning_methods_stay_on_control_plane_with_profile_scope(method):
+    assert not runtime_scope.should_route_to_worker(
+        {
+            "id": "1",
+            "method": method,
+            "params": {
+                "agentProfileId": "agent-a",
+                "runtime_scope_key": "profile:agent-a",
+                "dovie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a",
+                    "hermesHomePath": "/tmp/hermes-agent-a",
                 },
             },
         }

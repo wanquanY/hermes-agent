@@ -55,6 +55,16 @@ STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
+# Load-bearing bundled skills that autonomous curation must never mutate,
+# consolidate, or archive. Keep this list intentionally small: broader bundled
+# and hub ownership checks are handled separately.
+PROTECTED_BUILTIN_SKILLS: Set[str] = {"plan"}
+
+
+def is_protected_builtin(skill_name: str) -> bool:
+    """Return whether a skill backs a load-bearing built-in workflow."""
+    return skill_name in PROTECTED_BUILTIN_SKILLS
+
 
 def _skills_dir() -> Path:
     return get_hermes_home() / "skills"
@@ -293,6 +303,16 @@ def is_agent_created(skill_name: str) -> bool:
     return skill_name not in off_limits
 
 
+def is_hub_installed(skill_name: str) -> bool:
+    """Return whether ``skill_name`` is owned by the Skills Hub."""
+    return skill_name in _read_hub_installed_names()
+
+
+def is_bundled(skill_name: str) -> bool:
+    """Return whether ``skill_name`` was seeded from bundled skills."""
+    return skill_name in _read_bundled_manifest_names()
+
+
 def _is_curator_managed_record(record: Any) -> bool:
     """Return True when a usage record opts a skill into curator management."""
     if not isinstance(record, dict):
@@ -485,6 +505,10 @@ def archive_skill(skill_name: str) -> Tuple[bool, str]:
     Returns (ok, message). Never archives bundled or hub skills — callers are
     responsible for checking provenance, but we double-check here as a safety net.
     """
+    if is_protected_builtin(skill_name):
+        return False, (
+            f"skill '{skill_name}' is a protected built-in and is never archived"
+        )
     if not is_agent_created(skill_name):
         return False, f"skill '{skill_name}' is bundled or hub-installed; never archive"
 

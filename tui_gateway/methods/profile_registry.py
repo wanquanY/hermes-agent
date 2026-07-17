@@ -254,6 +254,30 @@ def _version_id_from_params(params: dict | None) -> str:
     )
 
 
+def _learning_profile_context(params: dict | None) -> tuple[object | None, dict, str]:
+    db = _get_db()
+    if db is None:
+        return None, {}, ""
+    profile_id = _profile_id_from_params(params)
+    profile = db.profiles.get_agent_profile(profile_id) if profile_id else {}
+    home = (
+        _text(
+            profile.get("runtimeHomePath")
+            or profile.get("runtime_home_path")
+            or profile.get("hermesHomePath")
+            or profile.get("hermes_home_path")
+        )
+        if profile
+        else ""
+    )
+    return db, profile, home
+
+
+def _learning_node_id(params: dict | None) -> str:
+    params = params or {}
+    return _text(params.get("node_id") or params.get("nodeId") or params.get("id"))
+
+
 def _growth_diagnostic(stage: str, **fields) -> None:
     emit_dovie_diagnostic("[profile-growth-summary]", {"stage": stage, **fields})
 
@@ -408,6 +432,84 @@ def _(rid, params: dict) -> dict:
         latest_activity_at=summary.get("latestActivityAt", ""),
     )
     return _ok(rid, {"growth": summary, "summary": summary})
+
+
+@method("profile.learning.graph")
+def _(rid, params: dict) -> dict:
+    db, profile, home = _learning_profile_context(params)
+    if db is None:
+        return _err(rid, 5008, "Hermes profile registry db unavailable")
+    if not _profile_id_from_params(params):
+        return _err(rid, 4006, "agent profile id required")
+    if not profile:
+        return _err(rid, 4040, "profile not found")
+    if not home:
+        return _err(rid, 4094, "profile runtime home unavailable")
+    from agent.learning_graph import LearningGraphService
+
+    return _ok(rid, {"graph": LearningGraphService(home).build()})
+
+
+@method("profile.learning.node.detail")
+def _(rid, params: dict) -> dict:
+    db, profile, home = _learning_profile_context(params)
+    if db is None:
+        return _err(rid, 5008, "Hermes profile registry db unavailable")
+    if not profile:
+        return _err(rid, 4040, "profile not found")
+    if not home:
+        return _err(rid, 4094, "profile runtime home unavailable")
+    node_id = _learning_node_id(params)
+    if not node_id:
+        return _err(rid, 4006, "learning node id required")
+    from agent.learning_mutations import LearningMutationService
+
+    result = LearningMutationService(home).detail(node_id)
+    if not result.get("ok"):
+        return _err(rid, 4044, result.get("message", "learning node not found"))
+    return _ok(rid, {"node": result})
+
+
+@method("profile.learning.node.edit")
+def _(rid, params: dict) -> dict:
+    db, profile, home = _learning_profile_context(params)
+    if db is None:
+        return _err(rid, 5008, "Hermes profile registry db unavailable")
+    if not profile:
+        return _err(rid, 4040, "profile not found")
+    if not home:
+        return _err(rid, 4094, "profile runtime home unavailable")
+    node_id = _learning_node_id(params)
+    if not node_id:
+        return _err(rid, 4006, "learning node id required")
+    from agent.learning_mutations import LearningMutationService
+
+    result = LearningMutationService(home).edit(
+        node_id, str((params or {}).get("content") or "")
+    )
+    if not result.get("ok"):
+        return _err(rid, 4095, result.get("message", "learning node edit failed"))
+    return _ok(rid, {"mutation": result})
+
+
+@method("profile.learning.node.delete")
+def _(rid, params: dict) -> dict:
+    db, profile, home = _learning_profile_context(params)
+    if db is None:
+        return _err(rid, 5008, "Hermes profile registry db unavailable")
+    if not profile:
+        return _err(rid, 4040, "profile not found")
+    if not home:
+        return _err(rid, 4094, "profile runtime home unavailable")
+    node_id = _learning_node_id(params)
+    if not node_id:
+        return _err(rid, 4006, "learning node id required")
+    from agent.learning_mutations import LearningMutationService
+
+    result = LearningMutationService(home).delete(node_id)
+    if not result.get("ok"):
+        return _err(rid, 4095, result.get("message", "learning node delete failed"))
+    return _ok(rid, {"mutation": result})
 
 
 @method("profile.draft.upsert")

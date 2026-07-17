@@ -40,6 +40,10 @@ from tools.delegation_credentials import (
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
 )
+from tools.delegation_config import load_delegation_config as _load_config
+from tools.delegation_event_origin import (
+    capture_parent_event_origin as _capture_parent_event_origin,
+)
 from tools.delegation_builder import build_child_agent as _build_child_agent
 from tools.delegation_dovie import (
     _prepare_child_dovie_attribution,
@@ -74,47 +78,6 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "execute_code",  # children should reason step-by-step, not write scripts
     ]
 )
-
-
-def _capture_parent_event_origin(parent_agent: Any) -> Dict[str, str]:
-    """Freeze the parent turn identity before a delegated child can outlive it.
-
-    Asynchronous children may finish after the parent turn has released its
-    active routing fields, or while a newer turn is active on the same session.
-    Reading those mutable fields when the child emits its terminal event either
-    drops the event or attaches it to the wrong run.  Every child stream callback
-    therefore carries the immutable origin captured at dispatch time.
-    """
-
-    def _string_attr(owner: Any, name: str) -> str:
-        value = getattr(owner, name, "")
-        return value.strip() if isinstance(value, str) else ""
-
-    origin = {
-        key: value
-        for key, value in {
-            "run_id": _string_attr(parent_agent, "_hermes_active_run_id"),
-            "turn_id": _string_attr(parent_agent, "_hermes_active_turn_id"),
-            "client_message_id": _string_attr(
-                parent_agent,
-                "_hermes_active_client_message_id",
-            ),
-            "runtime_scope_key": _string_attr(
-                parent_agent,
-                "_hermes_active_runtime_scope_key",
-            ),
-        }.items()
-        if value
-    }
-    run_context = getattr(parent_agent, "run_context", None) or getattr(
-        parent_agent,
-        "_run_context",
-        None,
-    )
-    activity_id = _string_attr(run_context, "activity_id") if run_context else ""
-    if activity_id:
-        origin["activity_id"] = activity_id
-    return origin
 
 
 def _trace_subagent_stream_producer(
@@ -1965,31 +1928,6 @@ def delegate_task(
         "Activity; completion is a typed internal event, not a conversation message."
     )
     return json.dumps(dispatch, ensure_ascii=False)
-
-
-def _load_config() -> dict:
-    """Load delegation config from CLI_CONFIG or persistent config.
-
-    Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
-    to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` are picked up regardless
-    of the entry point (CLI, gateway, cron).
-    """
-    try:
-        from cli import CLI_CONFIG
-
-        cfg = CLI_CONFIG.get("delegation") or {}
-        if cfg:
-            return cfg
-    except Exception:
-        pass
-    try:
-        from hermes_cli.config import load_config
-
-        full = load_config()
-        return full.get("delegation") or {}
-    except Exception:
-        return {}
 
 
 # ---------------------------------------------------------------------------

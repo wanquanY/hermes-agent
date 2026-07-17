@@ -137,7 +137,6 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "append_team_mission_run_event",
         "append_team_mission_structural_event",
         "claim_team_mission_node_start",
-        "compile_team_mission_memory",
         "complete_team_mission_plan",
         "conversation_memory.get_item",
         "conversation_memory.list_edges",

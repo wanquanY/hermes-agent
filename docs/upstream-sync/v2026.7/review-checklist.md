@@ -202,5 +202,17 @@ observability 86 passed、13 skipped、1 xfailed；Doxie desktop `test:gates` �
 
 机器门禁完成时间：2026-07-16。阶段聚合 464 passed、10 skipped；Hermes 1,592 files、
 29,188 passed、0 failed；observability 86 passed、13 skipped、1 xfailed；Doxie desktop
-`test:gates` 退出码 0。阶段 1-12 代码和自动门禁完成，等待最终统一实机验收；尚未
-push 或合并回主开发分支。
+`test:gates` 退出码 0。阶段 1-12 代码和自动门禁完成，已合入 `dev`，等待最终统一实机
+验收。
+
+## 阶段 13
+
+- [x] LG1-LG4、BR1 的当前 owner、上游来源、禁止项和收益已记录。
+- [x] Learning Graph、Journey、mutation 与成长摘要同源实现完成。
+- [x] 后台复盘 aux 路由、digest、技能所有权防护与隔离实现完成。
+- [x] 阶段专项、Hermes 回归、静态/分层与 Hermes Dovie extension contract 完成。
+- [ ] 用户按 `phase-13-acceptance.md` 完成双 profile、成长变更与 aux-review 实机验收。
+
+机器门禁完成时间：2026-07-17。阶段专项 434 passed；Hermes 1,596 files、29,228
+passed、0 failed；Ruff、compileall、import-linter、zero-debt 与 Web production build
+全绿。Doxie desktop 的生成合同、成长页消费和视觉验收留待跨仓联调。

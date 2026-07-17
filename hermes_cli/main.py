@@ -2445,6 +2445,7 @@ _AUX_TASKS: list[tuple[str, str, str]] = [
     ("mcp", "MCP", "MCP tool reasoning"),
     ("skills_hub", "Skills hub", "skills search/install"),
     ("curator", "Curator", "skill-usage review pass"),
+    ("background_review", "Background review", "memory/skill learning review"),
 ]
 
 
@@ -10586,7 +10587,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
-        "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
+        "journey", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "postinstall", "profile", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
@@ -12457,6 +12458,24 @@ Examples:
         _register_curator_cli(curator_parser)
     except Exception as _exc:
         logging.getLogger(__name__).debug("curator CLI wiring failed: %s", _exc)
+
+    # =========================================================================
+    # journey command — canonical learned-skill + memory timeline
+    # =========================================================================
+    journey_parser = subparsers.add_parser(
+        "journey",
+        help="Show what this Hermes profile has learned over time",
+        description=(
+            "Render the canonical profile-scoped learning graph as a timeline. "
+            "The same graph backs Gateway and desktop growth surfaces."
+        ),
+    )
+    try:
+        from hermes_cli.journey import register_cli as _register_journey_cli
+
+        _register_journey_cli(journey_parser)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("journey CLI wiring failed: %s", _exc)
 
     # =========================================================================
     # memory command
