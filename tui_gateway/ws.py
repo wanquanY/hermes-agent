@@ -94,6 +94,7 @@ _WS_CONTROL_METHODS = frozenset(
         "run.fail",
         "run.list",
         "run.reserve",
+        "run.retry.prepare",
         "run.status",
         "session.list",
         "session.messages",

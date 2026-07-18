@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import uuid
 
@@ -21,6 +22,10 @@ from tui_gateway.services.subagent_snapshots import (
 )
 
 _server = bind_server_globals(globals())
+
+_RETRYABLE_RUN_STATUSES = frozenset(
+    {"cancelled", "canceled", "completed", "complete", "failed", "error", "interrupted"}
+)
 
 
 def _conversation_session_id_from_params(params: dict) -> str:
@@ -77,6 +82,199 @@ def _runtime_scope_key_from_params(params: dict, session: dict | None = None) ->
             digest = hashlib.sha1(hermes_home.encode("utf-8")).hexdigest()[:12]
             return f"profile-home:{digest}"
     return "profile:agent-default"
+
+
+def _mapping(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _run_intent_metadata(params: dict) -> dict:
+    """Keep the immutable execution intent required to reproduce a run."""
+
+    metadata = {}
+    for field_name in (
+        "idempotency_key",
+        "retry_of_run_id",
+        "model",
+        "model_descriptor",
+        "dovie_product_context",
+        "run_context_json",
+        "activity_id",
+        "activity_kind",
+        "participant_id",
+    ):
+        value = params.get(field_name)
+        if value not in (None, "", [], {}):
+            metadata[field_name] = value
+    retry_attempt = params.get("retry_attempt")
+    if retry_attempt is not None:
+        try:
+            normalized_retry_attempt = int(retry_attempt)
+        except (TypeError, ValueError):
+            normalized_retry_attempt = 0
+        if normalized_retry_attempt > 0:
+            metadata["retry_attempt"] = normalized_retry_attempt
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    if runtime_scope_key:
+        metadata["runtime_scope_key"] = runtime_scope_key
+    return metadata
+
+
+def _message_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        str(part.get("text") or "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+
+
+def _retry_source_message(db, conversation_session_id: str, source_run_id: str) -> dict | None:
+    messages = db.messages.list(conversation_session_id) if db is not None else []
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        metadata = _mapping(message.get("metadata"))
+        if str(metadata.get("run_id") or "").strip() == source_run_id:
+            return {**message, "metadata": metadata}
+    return None
+
+
+def prepare_run_retry(params: dict) -> tuple[dict | None, tuple[int, str] | None]:
+    """Resolve an immutable retry plan from Hermes-owned run/message truth.
+
+    This method never starts a worker and never mutates transcript state.  The
+    caller passes the returned ``submit`` payload through the existing
+    ``run.reserve`` + ``run.submit`` command path, preserving its idempotency
+    and failure bookkeeping instead of recreating retry semantics client-side.
+    """
+
+    conversation_session_id = _conversation_session_id_from_params(params)
+    source_run_id = str(
+        params.get("source_run_id") or params.get("sourceRunId") or ""
+    ).strip()
+    client_run_id = str(
+        params.get("client_run_id")
+        or params.get("clientRunId")
+        or params.get("run_id")
+        or params.get("command_id")
+        or ""
+    ).strip()
+    idempotency_key = str(
+        params.get("idempotency_key") or params.get("idempotencyKey") or ""
+    ).strip()
+    if not conversation_session_id:
+        return None, (4006, "conversation_session_id required")
+    if not source_run_id:
+        return None, (4006, "source_run_id required")
+    if not client_run_id:
+        return None, (4006, "client_run_id required")
+    if not idempotency_key:
+        return None, (4006, "idempotency_key required")
+    if client_run_id == source_run_id:
+        return None, (4002, "client_run_id must differ from source_run_id")
+
+    db = _run_db_for_stable_session(conversation_session_id)
+    source_run = run_control.get_run(source_run_id, db=db)
+    if not isinstance(source_run, dict):
+        return None, (4404, "source run not found")
+    source_conversation_id = str(
+        source_run.get("conversation_session_id") or source_run.get("session_id") or ""
+    ).strip()
+    if source_conversation_id != conversation_session_id:
+        return None, (4404, "source run does not belong to conversation")
+    source_status = str(source_run.get("status") or "").strip().lower()
+    if source_status not in _RETRYABLE_RUN_STATUSES:
+        return None, (4009, f"source run is not retryable: {source_status or 'unknown'}")
+
+    source_metadata = _mapping(source_run.get("metadata"))
+    try:
+        source_attempt = int(
+            source_metadata.get("retry_attempt")
+            or source_metadata.get("attempt")
+            or 1
+        )
+    except (TypeError, ValueError):
+        source_attempt = 1
+    expected_attempt = params.get("expected_attempt", params.get("expectedAttempt"))
+    if expected_attempt is not None:
+        try:
+            normalized_expected_attempt = int(expected_attempt)
+        except (TypeError, ValueError):
+            return None, (4002, "expected_attempt must be a positive integer")
+        if normalized_expected_attempt < 1:
+            return None, (4002, "expected_attempt must be a positive integer")
+        if normalized_expected_attempt != source_attempt:
+            return None, (4409, "retry attempt conflict")
+
+    source_message = _retry_source_message(db, conversation_session_id, source_run_id)
+    if source_message is None:
+        return None, (4404, "source user message not found")
+    message_metadata = _mapping(source_message.get("metadata"))
+    text = _message_text(source_message.get("content"))
+    attachments = message_metadata.get("attachments")
+    attachments = attachments if isinstance(attachments, list) else []
+    if not text.strip() and not attachments:
+        return None, (4404, "source user message is empty")
+
+    retry_attempt = source_attempt + 1
+    runtime_scope_key = str(
+        source_run.get("runtime_scope_key")
+        or source_metadata.get("runtime_scope_key")
+        or message_metadata.get("runtime_scope_key")
+        or ""
+    ).strip()
+    submit = {
+        "conversation_session_id": conversation_session_id,
+        "session_id": conversation_session_id,
+        "client_run_id": client_run_id,
+        "run_id": client_run_id,
+        "turn_id": str(params.get("turn_id") or uuid.uuid4().hex).strip(),
+        "client_message_id": str(
+            params.get("client_message_id") or f"retry:{client_run_id}"
+        ).strip(),
+        "idempotency_key": idempotency_key,
+        "retry_of_run_id": source_run_id,
+        "retry_attempt": retry_attempt,
+        "text": text,
+        "persist_user_message": text,
+        "draft_text": str(message_metadata.get("draft_text") or text),
+        "attachments": attachments,
+        **({"runtime_scope_key": runtime_scope_key} if runtime_scope_key else {}),
+    }
+    for field_name in (
+        "model",
+        "model_descriptor",
+        "dovie_product_context",
+        "run_context_json",
+        "activity_id",
+        "activity_kind",
+        "participant_id",
+    ):
+        value = source_metadata.get(field_name, message_metadata.get(field_name))
+        if value not in (None, "", [], {}):
+            submit[field_name] = value
+    return {
+        "status": "prepared",
+        "conversation_session_id": conversation_session_id,
+        "source_run_id": source_run_id,
+        "source_attempt": source_attempt,
+        "retry_attempt": retry_attempt,
+        "submit": submit,
+    }, None
 
 
 def _mark_registered_run_failed(
@@ -146,6 +344,7 @@ def _(rid, params: dict) -> dict:
             metadata={
                 "gateway_pid": os.getpid(),
                 "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+                **_run_intent_metadata(params),
             },
             db=run_db,
         )
@@ -244,6 +443,7 @@ def _(rid, params: dict) -> dict:
                 metadata={
                     "gateway_pid": os.getpid(),
                     "gateway_instance_id": _GATEWAY_INSTANCE_ID,
+                    **_run_intent_metadata(submit_params),
                 },
                 db=run_db,
             )
@@ -284,6 +484,7 @@ def _(rid, params: dict) -> dict:
             "gateway_pid": os.getpid(),
             "gateway_instance_id": _GATEWAY_INSTANCE_ID,
             "reserved_by": "control_plane",
+            **_run_intent_metadata(params),
         },
         db=run_db,
     )
@@ -330,6 +531,15 @@ def _(rid, params: dict) -> dict:
             "created": bool(reservation.get("created")) if isinstance(reservation, dict) else False,
         },
     )
+
+
+@method("run.retry.prepare")
+def _(rid, params: dict) -> dict:
+    prepared, failure = prepare_run_retry(params)
+    if failure is not None:
+        code, message = failure
+        return _err(rid, code, message)
+    return _ok(rid, prepared)
 
 
 @method("run.fail")

@@ -45,6 +45,7 @@ _CONTROL_PLANE_METHODS = frozenset(
         "profile.list",
         "profile.upsert",
         "run.events",
+        "run.retry.prepare",
         "runtime.ensure",
         "session.list",
         "session.messages",

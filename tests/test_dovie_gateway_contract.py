@@ -89,6 +89,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert response["result"]["timelineContract"]["capabilities"]["toolEvents"]["canonical"] is True
     assert response["result"]["timelineContract"]["deprecations"] == []
     assert "run.submit" in response["result"]["methods"]
+    assert "run.retry.prepare" in response["result"]["methods"]
     assert "run.events" in response["result"]["methods"]
     assert "session.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
