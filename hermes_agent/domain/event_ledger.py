@@ -93,6 +93,8 @@ class EventLedger:
         event_type: str,
         payload: dict[str, Any],
         turn_id: str = "",
+        execution_session_id: str = "",
+        runtime_scope_key: str = "",
         activity_id: str = "",
         now: float | None = None,
         preassigned_seq: int | None = None,
@@ -115,8 +117,11 @@ class EventLedger:
         envelope = {
             "type": etype,
             "session_id": stable_sid,
+            "conversation_session_id": stable_sid,
             "run_id": stable_run,
             "turn_id": turn_id,
+            "execution_session_id": str(execution_session_id or ""),
+            "runtime_scope_key": str(runtime_scope_key or ""),
             "seq": preassigned_seq or 0,  # patched after allocation
             "timestamp": ts,
             "payload": payload or {},
@@ -147,6 +152,8 @@ class EventLedger:
                 payload_json,
                 event_json,
                 activity_id,
+                execution_session_id,
+                runtime_scope_key,
             )
             return LedgerAppendOutcome(
                 result=AppendResult.APPLIED,
@@ -175,6 +182,8 @@ class EventLedger:
                 payload_json,
                 event_json,
                 activity_id,
+                execution_session_id,
+                runtime_scope_key,
             )
             if owns_tx:
                 self._conn.execute("COMMIT")
@@ -1137,6 +1146,8 @@ class EventLedger:
         payload_json: str,
         event_json: str,
         activity_id: str = "",
+        execution_session_id: str = "",
+        runtime_scope_key: str = "",
     ) -> None:
         self._conn.execute(
             """
@@ -1157,6 +1168,21 @@ class EventLedger:
                 str(activity_id or "") or None,
             ),
         )
+        if str(execution_session_id or "").strip() or str(runtime_scope_key or "").strip():
+            self._conn.execute(
+                """
+                UPDATE run_events
+                SET execution_session_id = ?,
+                    runtime_scope_key = ?
+                WHERE session_id = ? AND seq = ?
+                """,
+                (
+                    str(execution_session_id or ""),
+                    str(runtime_scope_key or ""),
+                    session_id,
+                    seq,
+                ),
+            )
 
 
 def _row_to_event(row: Any) -> LedgerEvent:

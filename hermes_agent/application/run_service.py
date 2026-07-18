@@ -591,6 +591,8 @@ class RunService:
                 target_status=target_status,
                 cause=resolved_cause,
                 turn_id=turn_id,
+                execution_session_id=execution_session_id,
+                runtime_scope_key=runtime_scope_key or stable,
                 activity_id=activity_id,
                 message=message,
                 payload_extra=payload_extra,

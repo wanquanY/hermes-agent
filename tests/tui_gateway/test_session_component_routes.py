@@ -68,11 +68,7 @@ def test_session_create_route_writes_through_session_component(
 ):
     db = open_cli_session_store(tmp_path / "state.db")
     try:
-        monkeypatch.setattr(
-            session_methods,
-            "_db_for_session_request",
-            lambda _params, _session_id="": db,
-        )
+        _install_db(monkeypatch, db)
         monkeypatch.setattr(
             session_methods,
             "_bind_session_workspace",
@@ -97,6 +93,87 @@ def test_session_create_route_writes_through_session_component(
     assert stored is not None
     assert stored["source"] == "tui"
     assert stored["model"] == "test-model"
+
+
+def test_profile_scoped_conversation_lifecycle_uses_control_plane_store(
+    tmp_path,
+    monkeypatch,
+):
+    """Profile metadata selects execution scope, never transcript storage."""
+
+    control_db = open_cli_session_store(tmp_path / "control" / "state.db")
+    profile_home = tmp_path / "profiles" / "agent-a"
+    profile_home.mkdir(parents=True)
+    try:
+        _install_db(monkeypatch, control_db)
+        monkeypatch.setattr(
+            session_methods,
+            "_bind_session_workspace",
+            lambda **_options: {},
+        )
+        monkeypatch.setattr(
+            session_methods,
+            "_new_session_key",
+            lambda: "profile-conversation",
+        )
+        monkeypatch.setattr(session_methods, "_resolve_model", lambda: "test-model")
+
+        profile_context = {
+            "id": "agent-a",
+            "hermesHomePath": str(profile_home),
+            "runtimeScopeKey": "profile:agent-a",
+        }
+        created = server.handle_request(
+            {
+                "id": "create-profile-conversation",
+                "method": "session.create",
+                "params": {
+                    "defer_agent_build": True,
+                    "runtime_scope_key": "profile:agent-a",
+                    "dovie_profile": profile_context,
+                },
+            }
+        )
+        assert "error" not in created, created
+        session_id = created["result"]["conversation_session_id"]
+        assistant_message_id = control_db.messages.append(
+            session_id,
+            role="assistant",
+            content="Control-plane transcript",
+            metadata={"turn_id": "turn-control-plane"},
+        )
+
+        branched = server.handle_request(
+            {
+                "id": "branch-profile-conversation",
+                "method": "session.branch",
+                "params": {
+                    "source_session_id": session_id,
+                    "branch_point": {"message_id": str(assistant_message_id)},
+                    "activate": False,
+                    "hydrate": "tail",
+                    "dovie_profile": profile_context,
+                },
+            }
+        )
+        assert "error" not in branched, branched
+        child_session_id = branched["result"]["conversation_session_id"]
+
+        messages = server.handle_request(
+            {
+                "id": "read-profile-conversation",
+                "method": "session.messages",
+                "params": {
+                    "session_id": child_session_id,
+                    "dovie_profile": profile_context,
+                },
+            }
+        )
+    finally:
+        control_db.close()
+
+    assert messages["result"]["messages"][0]["text"] == "Control-plane transcript"
+    assert not (profile_home / "state.db").exists()
 
 
 def test_session_delete_route_uses_session_lifecycle_component(

@@ -53,6 +53,8 @@ def _make_conn() -> sqlite3.Connection:
             seq INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             turn_id TEXT,
+            execution_session_id TEXT,
+            runtime_scope_key TEXT,
             activity_id TEXT,
             timestamp REAL NOT NULL,
             payload_json TEXT,
@@ -92,6 +94,8 @@ def test_terminate_run_applied_writes_event_and_status():
         target_status="completed",
         cause=TerminateCause.WORKER_EMITTED,
         turn_id="turn-a",
+        execution_session_id="runtime-a",
+        runtime_scope_key="profile:agent-a",
         now=now,
     )
 
@@ -109,10 +113,14 @@ def test_terminate_run_applied_writes_event_and_status():
     assert run_row["terminal_degraded"] == 0
 
     event_row = conn.execute(
-        "SELECT event_type, seq, payload_json FROM run_events WHERE session_id = 'sess-1'"
+        """SELECT event_type, seq, payload_json, execution_session_id,
+                  runtime_scope_key
+             FROM run_events WHERE session_id = 'sess-1'"""
     ).fetchone()
     assert event_row["event_type"] == "message.complete"
     assert event_row["seq"] == 1
+    assert event_row["execution_session_id"] == "runtime-a"
+    assert event_row["runtime_scope_key"] == "profile:agent-a"
     payload = json.loads(event_row["payload_json"])
     assert payload["status"] == "completed"
     assert payload["run_id"] == "run-1"

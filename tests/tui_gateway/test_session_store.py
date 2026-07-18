@@ -43,6 +43,7 @@ def test_get_session_db_for_home_runs_startup_run_event_maintenance(tmp_path):
 
         assert result.db is created[0]
         assert result.default_db is created[0]
+        assert created[0].kwargs == {"db_path": tmp_path / "state.db"}
         assert created[0].maintenance_calls == 1
     finally:
         service = get_storage_maintenance_service()

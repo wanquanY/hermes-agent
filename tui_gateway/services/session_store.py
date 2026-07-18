@@ -45,7 +45,13 @@ def get_session_db_for_home(
         if not create_if_missing and not (default_home / "state.db").exists():
             return SessionStoreResult(None, default_db, default_error)
         try:
-            db = session_db_factory()
+            # Always pin the connection to the home selected by the caller.
+            # Request handling may have an active profile ContextVar, and the
+            # default factory otherwise consults get_hermes_home() again. That
+            # second resolution used to redirect the canonical control-plane
+            # connection into profiles/<id>/state.db even though both homes
+            # passed above were the process root.
+            db = session_db_factory(db_path=default_home / "state.db")
             _run_startup_run_event_maintenance(db, logger, profile_home=default_home)
             return SessionStoreResult(db, db, None)
         except Exception as exc:
