@@ -1193,6 +1193,7 @@ def _team_conversation_snapshot(
         conversation=conversation,
         messages=messages,
     )
+    last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,
@@ -1214,6 +1215,8 @@ def _team_conversation_snapshot(
             "messages": messages,
             "toolEvents": tool_events,
             "runEvents": run_events,
+            "last_event_seq": last_event_seq,
+            "lastEventSeq": last_event_seq,
             "activityWatermarks": activity_watermarks,
             "activity_watermarks": activity_watermarks,
             "pageInfo": page_info if isinstance(page_info, dict) else {},
@@ -1240,6 +1243,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
     if error:
         return error
     page = page or {}
+    last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     return _ok(
         rid,
         _cap_render_result({
@@ -1257,6 +1261,8 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
                 list(page.get("runEvents") or []),
                 list(page.get("messages") or []),
             ),
+            "last_event_seq": last_event_seq,
+            "lastEventSeq": last_event_seq,
             "pageInfo": page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {},
             "branchInfo": page.get("branchInfo") if isinstance(page.get("branchInfo"), dict) else None,
             "projection": {

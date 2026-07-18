@@ -393,6 +393,8 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         assert [event["type"] for event in run_events] == ["tool.complete", "message.delta"]
         assert run_events[0]["payload"]["tool_id"] == "tool-read-1"
         assert run_events[1]["payload"]["text"] == "正在输出但尚未收到终结帧"
+        assert response["result"]["last_event_seq"] == run_events[-1]["seq"]
+        assert response["result"]["lastEventSeq"] == response["result"]["last_event_seq"]
         assert response["result"]["projection"]["source"] == "conversation.render_snapshot"
 
         db.runs.terminate(
@@ -409,6 +411,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
             event["type"] != "message.delta"
             for event in completed_response["result"]["runEvents"]
         )
+        assert completed_response["result"]["last_event_seq"] > response["result"]["last_event_seq"]
     finally:
         db.close()
 
@@ -476,6 +479,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["runEvents"] == []
         assert response["result"]["toolEvents"] == []
+        assert response["result"]["last_event_seq"] > 0
     finally:
         db.close()
 
