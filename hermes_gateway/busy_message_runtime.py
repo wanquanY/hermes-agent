@@ -170,14 +170,21 @@ class GatewayBusyMessageService:
 
         if cmd_def and cmd_def.name == "goal":
             goal_arg = (event.get_command_args() or "").strip().lower()
-            if not goal_arg or goal_arg in {
-                "status",
-                "pause",
-                "resume",
-                "clear",
-                "stop",
-                "done",
-            }:
+            goal_verb = goal_arg.split(None, 1)[0] if goal_arg else ""
+            if (
+                not goal_arg
+                or goal_arg in {
+                    "status",
+                    "show",
+                    "pause",
+                    "resume",
+                    "clear",
+                    "stop",
+                    "done",
+                    "unwait",
+                }
+                or goal_verb == "wait"
+            ):
                 return BusyMessageResult(
                     handled=True,
                     response=await goal_command_for(runner).handle_goal_command(event),
@@ -185,7 +192,8 @@ class GatewayBusyMessageService:
             return BusyMessageResult(
                 handled=True,
                 response=(
-                    "Agent is running — use /goal status / pause / clear mid-run, "
+                    "Agent is running — use /goal status / pause / clear / wait "
+                    "mid-run, "
                     "or /stop before setting a new goal."
                 ),
             )

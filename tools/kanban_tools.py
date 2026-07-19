@@ -34,6 +34,7 @@ import os
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
+from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,20 @@ def _connect(board: Optional[str] = None):
     """
     from hermes_cli import kanban_db as kb
     return kb, kb.connect(board=board)
+
+
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
+
+
+def _goal_judge_available() -> bool:
+    """Return whether the auxiliary goal judge is actually configured."""
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+
+        client, model = get_text_auxiliary_client("goal_judge")
+    except Exception:
+        return False
+    return client is not None and bool(model)
 
 
 def _ok(**fields: Any) -> str:
@@ -481,6 +496,28 @@ def _handle_complete(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            task = kb.get_task(conn, tid)
+            if task and task.goal_mode and _goal_judge_available():
+                verdict = "done"
+                reason = ""
+                try:
+                    verdict, reason, *_ = judge_goal(
+                        goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                        last_response=(summary or result or "").strip(),
+                    )
+                except Exception as judge_exc:
+                    logger.warning(
+                        "goal judge check failed, allowing completion: %s",
+                        judge_exc,
+                        exc_info=True,
+                    )
+                if verdict != "done":
+                    return tool_error(
+                        f"Goal completion rejected by judge: {reason}. "
+                        "Provide explicit acceptance evidence in the summary, "
+                        f"or create continuation tasks with parents=[{tid}] and "
+                        "keep this task alive."
+                    )
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -537,13 +574,31 @@ def _handle_block(args: dict, **kw) -> str:
     if not reason or not str(reason).strip():
         return tool_error("reason is required — explain what input you need")
     reason = redact_sensitive_text(str(reason), force=True)
+    kind = args.get("kind")
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         try:
+            if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
+                return tool_error(
+                    f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)"
+                )
+            task = kb.get_task(conn, tid)
+            if (
+                task
+                and task.goal_mode
+                and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS
+            ):
+                return tool_error(
+                    "goal_mode tasks can only block for a genuine external "
+                    f"dependency with kind in {sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} "
+                    f"(got {kind!r}); otherwise continue working or call "
+                    "kanban_complete so the completion judge can evaluate the result."
+                )
             ok = kb.block_task(
                 conn, tid,
                 reason=reason,
+                kind=kind,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -552,7 +607,13 @@ def _handle_block(args: dict, **kw) -> str:
                     f"running/ready)"
                 )
             run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
+            landed = kb.get_task(conn, tid)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                status=landed.status if landed else "blocked",
+                block_kind=kind,
+            )
         finally:
             conn.close()
     except ValueError as e:
@@ -689,6 +750,17 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"skills must be a list of skill names, got {type(skills).__name__}"
         )
+    goal_mode, goal_bool_error = _parse_bool_arg(args, "goal_mode")
+    if goal_bool_error:
+        return tool_error(goal_bool_error)
+    goal_max_turns = args.get("goal_max_turns")
+    if goal_max_turns is not None:
+        try:
+            goal_max_turns = int(goal_max_turns)
+        except (TypeError, ValueError):
+            return tool_error("goal_max_turns must be an integer")
+        if goal_max_turns < 1:
+            return tool_error("goal_max_turns must be >= 1")
     if isinstance(parents, str):
         parents = [parents]
     if not isinstance(parents, (list, tuple)):
@@ -716,6 +788,8 @@ def _handle_create(args: dict, **kw) -> str:
                     if max_runtime_seconds is not None else None
                 ),
                 skills=skills,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
@@ -975,11 +1049,11 @@ KANBAN_COMPLETE_SCHEMA = {
 KANBAN_BLOCK_SCHEMA = {
     "name": "kanban_block",
     "description": (
-        "Transition the task to blocked because you need human input "
-        "to proceed. ``reason`` will be shown to the human on the "
-        "board and included in context when someone unblocks you. "
-        "Use for genuine blockers only — don't block on things you can "
-        "resolve yourself."
+        "Stop work and state why. Use kind='dependency' while waiting on "
+        "another task, kind='needs_input' for a human decision, "
+        "kind='capability' for a hard access/tooling wall, or "
+        "kind='transient' for a temporary failure. Goal-mode cards may only "
+        "exit through genuine external blockers (dependency/needs_input)."
     ),
     "parameters": {
         "type": "object",
@@ -995,6 +1069,11 @@ KANBAN_BLOCK_SCHEMA = {
                     "Don't paste the whole conversation; the human has "
                     "the board and can ask follow-ups via comments."
                 ),
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["dependency", "needs_input", "capability", "transient"],
+                "description": "Why work cannot continue. Omit only for legacy callers.",
             },
             "board": _board_schema_prop(),
         },
@@ -1179,6 +1258,19 @@ KANBAN_CREATE_SCHEMA = {
                     "The names must match skills installed on the "
                     "assignee's profile."
                 ),
+            },
+            "goal_mode": {
+                "type": "boolean",
+                "description": (
+                    "Keep the dispatched worker in a judge-driven continuation "
+                    "loop until the card is complete, externally blocked, or "
+                    "its turn budget is exhausted."
+                ),
+            },
+            "goal_max_turns": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional turn budget for a goal_mode worker (default 20).",
             },
             "board": _board_schema_prop(),
         },

@@ -723,6 +723,19 @@ def compress_context(
                     parent_session_id=old_session_id,
                 )
                 agent._session_db_created = True
+                # Goal state is keyed by the physical session id. Rotation
+                # must move the one active row to the continuation child or
+                # an autonomous loop silently dies at the compression edge.
+                try:
+                    from hermes_cli.goals import migrate_goal_to_session
+
+                    migrate_goal_to_session(
+                        old_session_id,
+                        agent.session_id,
+                        reason="compression",
+                    )
+                except Exception as goal_error:
+                    logger.debug("Could not migrate goal on compression: %s", goal_error)
                 # Auto-number the title for the continuation session
                 if old_title:
                     try:

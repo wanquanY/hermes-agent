@@ -341,6 +341,23 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "two retries. Omit to use the dispatcher's "
                                "kanban.failure_limit config "
                                f"(default {kb.DEFAULT_FAILURE_LIMIT}).")
+    p_create.add_argument(
+        "--goal",
+        action="store_true",
+        dest="goal_mode",
+        help=(
+            "Keep the worker in a judge-driven goal loop until the card is "
+            "complete, externally blocked, or out of turns."
+        ),
+    )
+    p_create.add_argument(
+        "--goal-max-turns",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="goal_max_turns",
+        help="Turn budget for --goal workers (default 20).",
+    )
     p_create.add_argument("--initial-status",
                           choices=sorted(kb.VALID_INITIAL_STATUSES),
                           default="running",
@@ -1286,6 +1303,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    goal_max_turns = getattr(args, "goal_max_turns", None)
+    if goal_max_turns is not None and goal_max_turns < 1:
+        print("kanban: --goal-max-turns must be >= 1", file=sys.stderr)
+        return 2
     with kb.connect() as conn:
         task_id = kb.create_task(
             conn,
@@ -1304,6 +1325,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
             max_retries=max_retries,
+            goal_mode=bool(getattr(args, "goal_mode", False)),
+            goal_max_turns=goal_max_turns,
             initial_status=getattr(args, "initial_status", "running"),
         )
         task = kb.get_task(conn, task_id)

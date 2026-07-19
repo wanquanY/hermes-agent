@@ -616,6 +616,63 @@ def test_block_rejects_empty_reason(worker_env):
         assert json.loads(out).get("error")
 
 
+def _enable_goal_mode(task_id):
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET goal_mode = 1 WHERE id = ?", (task_id,))
+
+
+def test_goal_mode_completion_is_gated_by_available_judge(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    _enable_goal_mode(worker_env)
+    monkeypatch.setattr(kt, "_goal_judge_available", lambda: True)
+    monkeypatch.setattr(
+        kt,
+        "judge_goal",
+        lambda *_args, **_kwargs: ("continue", "missing evidence", False, None),
+    )
+    result = json.loads(kt._handle_complete({"summary": "not actually done"}))
+    assert "Goal completion rejected" in result["error"]
+
+
+def test_goal_mode_completion_fails_open_without_judge(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    _enable_goal_mode(worker_env)
+    monkeypatch.setattr(kt, "_goal_judge_available", lambda: False)
+    monkeypatch.setattr(
+        kt,
+        "judge_goal",
+        lambda *_args, **_kwargs: pytest.fail("unavailable judge must not be called"),
+    )
+    result = json.loads(kt._handle_complete({"summary": "done"}))
+    assert result["ok"] is True
+
+
+def test_goal_mode_rejects_non_external_block(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    _enable_goal_mode(worker_env)
+    result = json.loads(kt._handle_block({"reason": "giving up"}))
+    assert "goal_mode" in result["error"]
+
+
+def test_goal_mode_dependency_block_routes_to_todo(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    _enable_goal_mode(worker_env)
+    result = json.loads(
+        kt._handle_block({"reason": "waiting on prerequisite", "kind": "dependency"})
+    )
+    assert result["ok"] is True
+    assert result["status"] == "todo"
+    with kb.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "todo"
+
+
 def test_heartbeat_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_heartbeat({"note": "progress"})

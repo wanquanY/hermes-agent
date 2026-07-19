@@ -1964,9 +1964,16 @@ def _run_prompt_submit(
                             default_max_turns=goal_max_turns,
                         )
                         if goal_mgr.is_active():
+                            try:
+                                from hermes_cli.goals import gather_background_processes
+
+                                background_processes = gather_background_processes()
+                            except Exception:
+                                background_processes = None
                             decision = goal_mgr.evaluate_after_turn(
                                 raw,
                                 user_initiated=True,
+                                background_processes=background_processes,
                             )
                             verdict_msg = decision.get("message") or ""
                             if verdict_msg:

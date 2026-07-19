@@ -9027,7 +9027,7 @@ class HermesCLI:
         return mgr
 
     def _handle_goal_command(self, cmd: str) -> None:
-        """Dispatch /goal subcommands: set / status / pause / resume / clear."""
+        """Dispatch the complete persistent-goal command surface."""
         parts = (cmd or "").strip().split(None, 1)
         arg = parts[1].strip() if len(parts) > 1 else ""
 
@@ -9041,6 +9041,19 @@ class HermesCLI:
         # Bare /goal or /goal status → show current state
         if not arg or lower == "status":
             _cprint(f"  {mgr.status_line()}")
+            return
+
+        if lower == "show":
+            _cprint(f"  {mgr.status_line()}")
+            _cprint(f"  {mgr.render_contract()}")
+            return
+
+        if lower == "draft" or lower.startswith("draft "):
+            objective = arg[len("draft"):].strip()
+            if not objective:
+                _cprint("  Usage: /goal draft <objective in plain language>")
+                return
+            self._handle_goal_draft(objective)
             return
 
         if lower == "pause":
@@ -9072,21 +9085,98 @@ class HermesCLI:
                 _cprint(f"  {_DIM}No active goal.{_RST}")
             return
 
-        # Otherwise treat the arg as the goal text.
+        if lower == "wait" or lower.startswith("wait "):
+            wait_arg = arg[len("wait"):].strip()
+            if not wait_arg:
+                _cprint("  Usage: /goal wait <pid> [reason]")
+                return
+            tokens = wait_arg.split(None, 1)
+            try:
+                pid = int(tokens[0])
+            except ValueError:
+                _cprint("  /goal wait: <pid> must be an integer process id.")
+                return
+            reason = tokens[1].strip() if len(tokens) > 1 else ""
+            try:
+                mgr.wait_on(pid, reason=reason)
+            except (RuntimeError, ValueError) as exc:
+                _cprint(f"  /goal wait: {exc}")
+                return
+            suffix = f" ({reason})" if reason else ""
+            _cprint(f"  ⏳ Goal parked on pid {pid}{suffix}. Loop pauses until it exits.")
+            return
+
+        if lower == "unwait":
+            if mgr.stop_waiting():
+                _cprint("  ▶ Wait barrier cleared — goal loop resumes.")
+            else:
+                _cprint(f"  {_DIM}No wait barrier set.{_RST}")
+            return
+
+        # Inline completion-contract fields are authoritative acceptance
+        # criteria; plain free-form goals remain backwards compatible.
+        from hermes_cli.goals import parse_contract
+
+        headline, contract = parse_contract(arg)
+        goal_text = headline or arg
         try:
-            state = mgr.set(arg)
+            state = mgr.set(
+                goal_text,
+                contract=contract if not contract.is_empty() else None,
+            )
         except ValueError as exc:
             _cprint(f"  Invalid goal: {exc}")
             return
 
         _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
+        if state.has_contract():
+            _cprint(f"  {_DIM}Completion contract:{_RST}")
+            for line in state.contract.render_block().splitlines():
+                _cprint(f"    {line}")
         _cprint(
-            f"  {_DIM}After each turn, a judge model will check if the goal is done. "
+            f"  {_DIM}After each turn, a judge model checks if the goal is done"
+            f"{' against the contract above' if state.has_contract() else ''}. "
             f"Hermes keeps working until it is, you pause/clear it, or the budget is "
-            f"exhausted. Use /goal status, /goal pause, /goal resume, /goal clear.{_RST}"
+            f"exhausted. Use /goal status, /goal show, /goal pause, /goal resume, /goal clear.{_RST}"
         )
         # Kick the loop off immediately so the user doesn't have to send a
         # separate message after setting the goal.
+        try:
+            self._pending_input.put(state.goal)
+        except Exception:
+            pass
+
+    def _handle_goal_draft(self, objective: str) -> None:
+        """Draft and activate an evidence-based completion contract."""
+        from hermes_cli.goals import draft_contract
+
+        mgr = self._get_goal_manager()
+        if mgr is None:
+            _cprint(f"  {_DIM}Goals unavailable (no active session).{_RST}")
+            return
+
+        _cprint(f"  {_DIM}Drafting completion contract…{_RST}")
+        try:
+            contract = draft_contract(objective)
+        except Exception as exc:
+            logging.debug("goal draft failed: %s", exc)
+            contract = None
+        try:
+            state = mgr.set(objective, contract=contract)
+        except ValueError as exc:
+            _cprint(f"  Invalid goal: {exc}")
+            return
+
+        _cprint(f"  ⊙ Goal set ({state.max_turns}-turn budget): {state.goal}")
+        if state.has_contract():
+            _cprint(f"  {_DIM}Drafted completion contract:{_RST}")
+            for line in state.contract.render_block().splitlines():
+                _cprint(f"    {line}")
+        else:
+            _cprint(
+                f"  {_DIM}Contract drafting was unavailable; running the objective "
+                f"as a free-form goal.{_RST}"
+            )
         try:
             self._pending_input.put(state.goal)
         except Exception:
@@ -9270,7 +9360,17 @@ class HermesCLI:
         if not last_response.strip():
             return
 
-        decision = mgr.evaluate_after_turn(last_response, user_initiated=True)
+        try:
+            from hermes_cli.goals import gather_background_processes
+
+            background_processes = gather_background_processes()
+        except Exception:
+            background_processes = None
+        decision = mgr.evaluate_after_turn(
+            last_response,
+            user_initiated=True,
+            background_processes=background_processes,
+        )
         msg = decision.get("message") or ""
         if msg:
             _cprint(f"  {msg}")
@@ -14493,6 +14593,65 @@ class HermesCLI:
 # Main Entry Point
 # ============================================================================
 
+def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
+    """Continue a goal-mode Kanban worker inside its existing session."""
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return
+
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli.goals import DEFAULT_MAX_TURNS, run_kanban_goal_loop
+
+    with _kb.connect() as conn:
+        task = _kb.get_task(conn, task_id)
+    if task is None:
+        return
+    goal_text = "\n\n".join(
+        part for part in (task.title or "", task.body or "") if part
+    ).strip()
+    if not goal_text:
+        return
+
+    def _run_turn(prompt: str) -> str:
+        result = cli.agent.run_conversation(
+            user_message=prompt,
+            conversation_history=cli.conversation_history,
+        )
+        if (
+            getattr(cli.agent, "session_id", None)
+            and cli.agent.session_id != cli.session_id
+        ):
+            cli.session_id = cli.agent.session_id
+        response = (
+            result.get("final_response", "")
+            if isinstance(result, dict)
+            else str(result)
+        )
+        if response:
+            print(response)
+        return response or ""
+
+    def _task_status() -> Optional[str]:
+        with _kb.connect() as conn:
+            current = _kb.get_task(conn, task_id)
+        return current.status if current is not None else None
+
+    def _block(reason: str) -> None:
+        with _kb.connect() as conn:
+            _kb.block_task(conn, task_id, reason=reason)
+
+    run_kanban_goal_loop(
+        task_id=task_id,
+        goal_text=goal_text,
+        run_turn=_run_turn,
+        task_status_fn=_task_status,
+        block_fn=_block,
+        max_turns=task.goal_max_turns or DEFAULT_MAX_TURNS,
+        first_response=first_response or "",
+        log=lambda message: logger.info("%s", message),
+    )
+
+
 def main(
     query: str = None,
     q: str = None,
@@ -14825,6 +14984,11 @@ def main(
                         print(f"Error: {result['error']}", file=sys.stderr)
                     elif response:
                         print(response)
+                    if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+                        try:
+                            _run_kanban_goal_loop_q(cli, response)
+                        except Exception as goal_exc:
+                            logger.debug("kanban goal loop failed: %s", goal_exc)
                     # Session ID goes to stderr so piped stdout is clean.
                     print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
                     

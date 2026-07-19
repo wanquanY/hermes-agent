@@ -2600,6 +2600,8 @@
     // input here to save vertical space in the common `scratch` case.
     const [workspaceKind, setWorkspaceKind] = useState("scratch");
     const [workspacePath, setWorkspacePath] = useState("");
+    const [goalMode, setGoalMode] = useState(false);
+    const [goalMaxTurns, setGoalMaxTurns] = useState("");
 
     const submit = function () {
       const trimmed = title.trim();
@@ -2626,9 +2628,17 @@
       }
       const wpTrim = workspacePath.trim();
       if (wpTrim) body.workspace_path = wpTrim;
+      if (goalMode) {
+        body.goal_mode = true;
+        const parsedGoalMaxTurns = parseInt(goalMaxTurns, 10);
+        if (Number.isFinite(parsedGoalMaxTurns) && parsedGoalMaxTurns > 0) {
+          body.goal_max_turns = parsedGoalMaxTurns;
+        }
+      }
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
       setWorkspaceKind("scratch"); setWorkspacePath("");
+      setGoalMode(false); setGoalMaxTurns("");
     };
 
     const showPathInput = workspaceKind !== "scratch";
@@ -2685,6 +2695,28 @@
         title: "Force-load these skills into the worker (in addition to the built-in kanban-worker).",
         className: "h-7 text-xs",
       }),
+      h("div", { className: "flex gap-2 items-center" },
+        h("label", {
+          className: "flex items-center gap-1.5 text-xs cursor-pointer select-none",
+          title: "Keep this worker in a judge-driven goal loop until the card is done or externally blocked.",
+        },
+          h("input", {
+            type: "checkbox",
+            checked: goalMode,
+            onChange: function (event) { setGoalMode(!!event.target.checked); },
+            className: "h-3.5 w-3.5 accent-current",
+          }),
+          tx(t, "goalMode", "goal mode"),
+        ),
+        goalMode ? h(Input, {
+          type: "number",
+          value: goalMaxTurns,
+          onChange: function (event) { setGoalMaxTurns(event.target.value); },
+          placeholder: tx(t, "goalMaxTurns", "max turns (default 20)"),
+          className: "h-7 text-xs w-40",
+          min: 1,
+        }) : null,
+      ),
       h("div", { className: "flex gap-2" },
         h(Select, Object.assign({
           value: workspaceKind,
@@ -3004,6 +3036,10 @@
         (t.skills && t.skills.length > 0) ? h(MetaRow, {
           label: tx(i18n, "skills", "Skills"),
           value: t.skills.join(", "),
+        }) : null,
+        t.goal_mode ? h(MetaRow, {
+          label: tx(i18n, "goalMode", "Goal mode"),
+          value: t.goal_max_turns ? `on (max ${t.goal_max_turns} turns)` : "on",
         }) : null,
         t.created_by ? h(MetaRow, { label: tx(i18n, "createdBy", "Created by"), value: t.created_by }) : null,
       ),

@@ -620,6 +620,141 @@ def _resolve_name(name: str) -> str:
         return name
 
 
+def _goal_manager(session: dict):
+    from hermes_cli.goals import GoalManager
+
+    sid_key = str(session.get("session_key") or "").strip()
+    if not sid_key:
+        raise ValueError("session has no stable key")
+    try:
+        goals_cfg = _load_cfg().get("goals") or {}
+        max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+    except Exception:
+        max_turns = 20
+    return GoalManager(session_id=sid_key, default_max_turns=max_turns)
+
+
+def _goal_state_payload(manager) -> dict:
+    state = manager.state
+    if state is None:
+        return {"active": False, "status": "none"}
+    return {
+        "active": state.status == "active",
+        "status": state.status,
+        "goal": state.goal,
+        "turns_used": state.turns_used,
+        "max_turns": state.max_turns,
+        "subgoals": list(state.subgoals),
+        "contract": state.contract.to_dict(),
+        "waiting_on_pid": state.waiting_on_pid,
+        "waiting_on_session": state.waiting_on_session,
+        "waiting_until": state.waiting_until,
+        "waiting_reason": state.waiting_reason,
+        "last_verdict": state.last_verdict,
+        "last_reason": state.last_reason,
+    }
+
+
+def _goal_rpc_session(rid, params: dict):
+    requested = str(
+        params.get("conversation_session_id")
+        or params.get("stored_session_id")
+        or params.get("session_id")
+        or ""
+    ).strip()
+    runtime_sid, session = _resolve_runtime_session(requested)
+    if session is None:
+        return None, None, _err(rid, 4001, "session not found")
+    return runtime_sid, session, None
+
+
+@method("goal.get")
+def _(rid, params: dict) -> dict:
+    _runtime_sid, session, error = _goal_rpc_session(rid, params)
+    if error:
+        return error
+    try:
+        manager = _goal_manager(session)
+    except Exception as exc:
+        return _err(rid, 5030, f"goals unavailable: {exc}")
+    return _ok(rid, _goal_state_payload(manager))
+
+
+@method("goal.set")
+def _(rid, params: dict) -> dict:
+    _runtime_sid, session, error = _goal_rpc_session(rid, params)
+    if error:
+        return error
+    if session.get("running"):
+        return _err(rid, 4009, "session busy — stop the current run before setting a goal")
+    objective = str(params.get("goal") or params.get("text") or "").strip()
+    if not objective:
+        return _err(rid, 4004, "goal text is empty")
+    try:
+        from hermes_cli.goals import GoalContract, parse_contract
+
+        manager = _goal_manager(session)
+        raw_contract = params.get("contract")
+        if isinstance(raw_contract, dict):
+            contract = GoalContract.from_dict(raw_contract)
+            headline = objective
+        else:
+            headline, contract = parse_contract(objective)
+        state = manager.set(
+            headline or objective,
+            max_turns=params.get("max_turns"),
+            contract=contract if not contract.is_empty() else None,
+        )
+    except (TypeError, ValueError) as exc:
+        return _err(rid, 4004, f"invalid goal: {exc}")
+    except Exception as exc:
+        return _err(rid, 5030, f"goals unavailable: {exc}")
+    return _ok(
+        rid,
+        {
+            **_goal_state_payload(manager),
+            "kickoff_message": state.goal,
+            "notice": f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}",
+        },
+    )
+
+
+@method("goal.pause")
+def _(rid, params: dict) -> dict:
+    _runtime_sid, session, error = _goal_rpc_session(rid, params)
+    if error:
+        return error
+    manager = _goal_manager(session)
+    manager.pause(reason=str(params.get("reason") or "user-paused"))
+    return _ok(rid, _goal_state_payload(manager))
+
+
+@method("goal.resume")
+def _(rid, params: dict) -> dict:
+    _runtime_sid, session, error = _goal_rpc_session(rid, params)
+    if error:
+        return error
+    manager = _goal_manager(session)
+    raw_reset = params.get("reset_budget", params.get("resetBudget", True))
+    reset_budget = (
+        raw_reset
+        if isinstance(raw_reset, bool)
+        else str(raw_reset).strip().lower() not in {"0", "false", "no", "off"}
+    )
+    manager.resume(reset_budget=reset_budget)
+    return _ok(rid, _goal_state_payload(manager))
+
+
+@method("goal.clear")
+def _(rid, params: dict) -> dict:
+    _runtime_sid, session, error = _goal_rpc_session(rid, params)
+    if error:
+        return error
+    manager = _goal_manager(session)
+    manager.clear()
+    return _ok(rid, _goal_state_payload(manager))
+
+
 def _prefill_text_from_content(content) -> str:
     if isinstance(content, list):
         parts = [
@@ -883,24 +1018,37 @@ def _(rid, params: dict) -> dict:
         if not session:
             return _err(rid, 4001, "no active session")
         try:
-            from hermes_cli.goals import GoalManager
+            mgr = _goal_manager(session)
         except Exception as exc:
             return _err(rid, 5030, f"goals unavailable: {exc}")
-
-        sid_key = session.get("session_key") or ""
-        if not sid_key:
-            return _err(rid, 4001, "no session key")
-
-        try:
-            goals_cfg = _load_cfg().get("goals") or {}
-            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
-        except Exception:
-            max_turns = 20
-        mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
 
         lower = arg.strip().lower()
         if not arg.strip() or lower == "status":
             return _ok(rid, {"type": "exec", "output": mgr.status_line()})
+        if lower == "show":
+            return _ok(
+                rid,
+                {"type": "exec", "output": f"{mgr.status_line()}\n{mgr.render_contract()}"},
+            )
+        if lower == "draft" or lower.startswith("draft "):
+            objective = arg[len("draft"):].strip()
+            if not objective:
+                return _err(rid, 4004, "usage: /goal draft <objective in plain language>")
+            try:
+                from hermes_cli.goals import draft_contract
+
+                contract = draft_contract(objective)
+                state = mgr.set(objective, contract=contract)
+            except ValueError as exc:
+                return _err(rid, 4004, f"invalid goal: {exc}")
+            except Exception:
+                state = mgr.set(objective)
+            notice = f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}"
+            if state.has_contract():
+                notice += f"\nCompletion contract:\n{state.contract.render_block()}"
+            else:
+                notice += "\nContract drafting unavailable; running as a free-form goal."
+            return _ok(rid, {"type": "send", "notice": notice, "message": state.goal})
         if lower == "pause":
             state = mgr.pause(reason="user-paused")
             out = "No goal set." if state is None else f"⏸ Goal paused: {state.goal}"
@@ -930,17 +1078,52 @@ def _(rid, params: dict) -> dict:
                 },
             )
 
-        # Otherwise — treat the remaining text as the new goal.
+        if lower == "wait" or lower.startswith("wait "):
+            wait_arg = arg[len("wait"):].strip()
+            if not wait_arg:
+                return _err(rid, 4004, "usage: /goal wait <pid> [reason]")
+            tokens = wait_arg.split(None, 1)
+            try:
+                pid = int(tokens[0])
+            except ValueError:
+                return _err(rid, 4004, "/goal wait: <pid> must be an integer process id")
+            reason = tokens[1].strip() if len(tokens) > 1 else ""
+            try:
+                mgr.wait_on(pid, reason=reason)
+            except (RuntimeError, ValueError) as exc:
+                return _err(rid, 4004, f"/goal wait: {exc}")
+            suffix = f" ({reason})" if reason else ""
+            return _ok(
+                rid,
+                {"type": "exec", "output": f"⏳ Goal parked on pid {pid}{suffix}."},
+            )
+
+        if lower == "unwait":
+            output = (
+                "▶ Wait barrier cleared — goal loop resumes."
+                if mgr.stop_waiting()
+                else "No wait barrier set."
+            )
+            return _ok(rid, {"type": "exec", "output": output})
+
+        from hermes_cli.goals import parse_contract
+
+        headline, contract = parse_contract(arg)
         try:
-            state = mgr.set(arg)
+            state = mgr.set(
+                headline or arg,
+                contract=contract if not contract.is_empty() else None,
+            )
         except ValueError as exc:
             return _err(rid, 4004, f"invalid goal: {exc}")
 
         notice = (
             f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}\n"
             "I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\n"
-            "Controls: /goal status · /goal pause · /goal resume · /goal clear"
+            "Controls: /goal status · /goal show · /goal pause · /goal resume · /goal clear"
         )
+        if state.has_contract():
+            notice += f"\nCompletion contract:\n{state.contract.render_block()}"
         # Send the goal text as the kickoff prompt. The TUI client sees
         # {type: send, notice, message} → renders `notice` as a sys line,
         # then submits `message` as a user turn. The post-turn judge

@@ -117,9 +117,9 @@ class GatewayGoalCommandService:
     async def handle_goal_command(self, event: "MessageEvent") -> str:
         """Handle /goal for gateway platforms.
 
-        Subcommands: ``/goal`` / ``/goal status`` / ``/goal pause`` /
-        ``/goal resume`` / ``/goal clear``. Any other text becomes the
-        new goal.
+        Supports status, completion-contract inspection/drafting, pause/resume,
+        background-process wait barriers, and clear. Any other text becomes the
+        new goal and may include inline completion-contract fields.
 
         Setting a new goal queues the goal text as the next turn so the
         agent starts working on it immediately — the post-turn
@@ -138,6 +138,12 @@ class GatewayGoalCommandService:
 
         if not args or lower == "status":
             return await run_sqlite_io(mgr.status_line)
+
+        if lower == "show":
+            status, contract = await run_sqlite_io(
+                lambda: (mgr.status_line(), mgr.render_contract()),
+            )
+            return f"{status}\n{contract}"
 
         if lower == "pause":
             state = await run_sqlite_io(mgr.pause, reason="user-paused")
@@ -170,9 +176,54 @@ class GatewayGoalCommandService:
                 logger.debug("goal clear: pending continuation cleanup failed: %s", exc)
             return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
 
-        # Otherwise — treat the remaining text as the new goal.
+        if lower == "wait" or lower.startswith("wait "):
+            wait_arg = args[len("wait") :].strip()
+            if not wait_arg:
+                return "Usage: /goal wait <pid> [reason]"
+            wait_tokens = wait_arg.split(None, 1)
+            try:
+                pid = int(wait_tokens[0])
+            except ValueError:
+                return "/goal wait: <pid> must be an integer process id."
+            reason = wait_tokens[1].strip() if len(wait_tokens) > 1 else ""
+            try:
+                await run_sqlite_io(mgr.wait_on, pid, reason=reason)
+            except (RuntimeError, ValueError) as exc:
+                return f"/goal wait: {exc}"
+            reason_text = f" ({reason})" if reason else ""
+            return (
+                f"⏳ Goal parked on pid {pid}{reason_text}. "
+                "Loop pauses until it exits."
+            )
+
+        if lower == "unwait":
+            if await run_sqlite_io(mgr.stop_waiting):
+                return "▶ Wait barrier cleared — goal loop resumes."
+            return "No wait barrier set."
+
+        drafted_contract = None
+        drafting_requested = lower == "draft" or lower.startswith("draft ")
+        if drafting_requested:
+            objective = args[len("draft") :].strip()
+            if not objective:
+                return "Usage: /goal draft <objective in plain language>"
+            try:
+                from hermes_cli.goals import draft_contract
+
+                drafted_contract = await run_sqlite_io(draft_contract, objective)
+            except Exception as exc:
+                logger.debug("goal draft failed: %s", exc)
+            goal_text = objective
+            contract = drafted_contract
+        else:
+            from hermes_cli.goals import parse_contract
+
+            headline, parsed_contract = parse_contract(args)
+            goal_text = headline or args
+            contract = None if parsed_contract.is_empty() else parsed_contract
+
         try:
-            state = await run_sqlite_io(mgr.set, args)
+            state = await run_sqlite_io(mgr.set, goal_text, contract=contract)
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
@@ -193,7 +244,15 @@ class GatewayGoalCommandService:
             except Exception as exc:
                 logger.debug("goal kickoff enqueue failed: %s", exc)
 
-        return t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
+        base = t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
+        if state.has_contract():
+            return f"{base}\nCompletion contract:\n{state.contract.render_block()}"
+        if drafting_requested:
+            return (
+                f"{base}\n"
+                "(Couldn't draft a contract — running as a free-form goal.)"
+            )
+        return base
 
     async def handle_subgoal_command(self, event: "MessageEvent") -> str:
         """Handle /subgoal for gateway platforms (mirror of CLI handler).
@@ -353,9 +412,16 @@ class GatewayGoalCommandService:
             manager = GoalManager(session_id=sid, default_max_turns=max_turns)
             if not manager.is_active():
                 return None
+            try:
+                from hermes_cli.goals import gather_background_processes
+
+                background_processes = gather_background_processes()
+            except Exception:
+                background_processes = None
             return manager.evaluate_after_turn(
                 final_response or "",
                 user_initiated=True,
+                background_processes=background_processes,
             )
 
         decision = await run_sqlite_io(_evaluate_goal)

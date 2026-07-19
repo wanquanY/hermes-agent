@@ -398,6 +398,20 @@ hermes kanban create "audit auth flow" \
 
 These skills are **additive** to the built-in `kanban-worker` — the dispatcher emits one `--skills <name>` flag for each (and for the built-in), so the worker spawns with all of them loaded. The skill names must match skills that are actually installed on the assignee's profile (run `hermes skills list` to see what's available); there's no runtime install.
 
+### Goal-mode cards (`--goal`)
+
+By default each worker gets one turn to do the work and call `kanban_complete` or `kanban_block`. Pass `--goal` in the CLI, or `goal_mode=True` through the `kanban_create` tool or dashboard, to keep the same worker session running in the persistent Goal loop. After every turn the auxiliary judge checks the result against the card title and body. The loop stops when the worker closes the card, the judge confirms the acceptance criteria and the worker finalizes, ownership changes, or the budget runs out. Budget exhaustion blocks the card for human review instead of silently exiting.
+
+```bash
+hermes kanban create "Translate the docs site to French" \
+    --body "Acceptance: every page translated, no English left, links intact." \
+    --assignee linguist \
+    --goal \
+    --goal-max-turns 15      # optional; default 20
+```
+
+Use Goal mode for open-ended, multi-step, or "keep going until X is true" cards. Keep one-shot mode for cheap bounded work. The judge is only as precise as the card, so put explicit acceptance criteria in the body.
+
 ### The orchestrator skill
 
 A **well-behaved orchestrator does not do the work itself.** It decomposes the user's goal into tasks, links them, assigns each to one of the profiles you've set up, and steps back. The `kanban-orchestrator` skill encodes this as tool-call patterns: anti-temptation rules, a Step-0 profile-discovery prompt (the dispatcher silently fails on unknown assignee names, so the orchestrator must ground every card in profiles that actually exist on your machine), and a decomposition playbook keyed on `kanban_create` / `kanban_link` / `kanban_comment`.
@@ -456,7 +470,7 @@ hermes dashboard        # "Kanban" tab appears in the nav, after "Skills"
 - **Per-profile lanes inside Running** — toolbar checkbox toggles sub-grouping of the Running column by assignee.
 - **Live updates via WebSocket** — the plugin tails the append-only `task_events` table on a short poll interval; the board reflects changes the instant any profile (CLI, gateway, or another dashboard tab) acts. Reloads are debounced so a burst of events triggers a single refetch.
 - **Drag-drop** cards between columns to change status. The drop sends `PATCH /api/plugins/kanban/tasks/:id` which routes through the same `kanban_db` code the CLI uses — the three surfaces can never drift. Moves into destructive statuses (`done`, `archived`, `blocked`) prompt for confirmation. Touch devices use a pointer-based fallback so the board is usable from a tablet.
-- **Inline create** — click `+` on any column header to type a title, assignee, priority, and (optionally) a parent task from a dropdown over every existing task. Press Enter to create the task, Shift+Enter to insert a newline in the title field, or Escape to cancel. Creating from the Triage column automatically parks the new task in triage.
+- **Inline create** — click `+` on any column header to set the title, assignee, priority, skills, workspace, Goal mode and its optional turn budget, and (optionally) a parent task. Press Enter to create the task, Shift+Enter to insert a newline in the title field, or Escape to cancel. Creating from the Triage column automatically parks the new task in triage.
 - **Multi-select with bulk actions** — shift/ctrl-click a card or tick its checkbox to add it to the selection. A bulk action bar appears at the top with batch status transitions, archive, and reassign (by profile dropdown, or "(unassign)"). Destructive batches confirm first. Per-id partial failures are reported without aborting the rest.
 - **Click a card** (without shift/ctrl) to open a side drawer (Escape or click-outside closes) with:
   - **Editable title** — click the heading to rename.
@@ -602,6 +616,7 @@ hermes kanban create "<title>" [--body ...] [--assignee <profile>]
                                 [--priority N] [--triage] [--idempotency-key KEY]
                                 [--max-runtime 30m|2h|1d|<seconds>]
                                 [--max-retries N]
+                                [--goal] [--goal-max-turns N]
                                 [--skill <name>]...
                                 [--json]
 hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived] [--json]

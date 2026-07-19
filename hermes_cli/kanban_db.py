@@ -96,6 +96,7 @@ _log = logging.getLogger(__name__)
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -650,6 +651,11 @@ class Task:
     # ``kanban.failure_limit`` config, and then to ``DEFAULT_FAILURE_LIMIT``.
     # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
     max_retries: Optional[int] = None
+    # Run this card's worker through the same judge-driven continuation
+    # engine as /goal. The budget is per worker process and defaults to the
+    # Goal engine's DEFAULT_MAX_TURNS when not set on the card.
+    goal_mode: bool = False
+    goal_max_turns: Optional[int] = None
     # Originating chat/agent session id, when the task was created from
     # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
     # tasks created from the CLI, the dashboard, or any path that doesn't
@@ -721,6 +727,16 @@ class Task:
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
+            ),
+            goal_mode=(
+                bool(row["goal_mode"])
+                if "goal_mode" in keys and row["goal_mode"]
+                else False
+            ),
+            goal_max_turns=(
+                row["goal_max_turns"]
+                if "goal_max_turns" in keys and row["goal_max_turns"]
+                else None
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
@@ -857,6 +873,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
+    -- Judge-driven continuation mode for open-ended cards. The max-turns
+    -- column is NULL when the Goal engine default should be used.
+    goal_mode            INTEGER NOT NULL DEFAULT 0,
+    goal_max_turns       INTEGER,
     -- Originating chat/agent session id when the task was created from
     -- inside an agent loop that propagated ``HERMES_SESSION_ID``. NULL
     -- for tasks created from the CLI, dashboard, or any path that doesn't
@@ -1289,6 +1309,21 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
+    if "goal_mode" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "goal_mode",
+            "goal_mode INTEGER NOT NULL DEFAULT 0",
+        )
+    if "goal_max_turns" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "goal_max_turns",
+            "goal_max_turns INTEGER",
+        )
+
     if "session_id" not in cols:
         # Originating agent/chat session id, populated when the task is
         # created from within an agent loop that propagated
@@ -1493,6 +1528,8 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    goal_mode: bool = False,
+    goal_max_turns: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
@@ -1653,8 +1690,8 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, goal_mode, goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1673,6 +1710,8 @@ def create_task(
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
+                        1 if goal_mode else 0,
+                        int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                     ),
                 )
@@ -1692,6 +1731,7 @@ def create_task(
                         "tenant": tenant,
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
+                        "goal_mode": bool(goal_mode) or None,
                     },
                 )
             return task_id
@@ -3136,28 +3176,34 @@ def block_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    kind: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running -> blocked``."""
+    """Stop a running task and route dependency waits back to ``todo``."""
+    if kind is not None and kind not in VALID_BLOCK_KINDS:
+        raise ValueError(
+            f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
+        )
+    target_status = "todo" if kind == "dependency" else "blocked"
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'blocked',
+                   SET status       = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """,
-                (task_id,),
+                (target_status, task_id),
             )
         else:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'blocked',
+                   SET status       = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
                        worker_pid   = NULL
@@ -3165,7 +3211,7 @@ def block_task(
                    AND status IN ('running', 'ready')
                    AND current_run_id = ?
                 """,
-                (task_id, int(expected_run_id)),
+                (target_status, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
@@ -3182,7 +3228,13 @@ def block_task(
                 outcome="blocked",
                 summary=reason,
             )
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "dependency_wait" if kind == "dependency" else "blocked",
+            {"reason": reason, "kind": kind},
+            run_id=run_id,
+        )
         return True
 
 
@@ -5474,6 +5526,10 @@ def _default_spawn(
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+    if task.goal_mode:
+        env["HERMES_KANBAN_GOAL_MODE"] = "1"
+        if task.goal_max_turns is not None:
+            env["HERMES_KANBAN_GOAL_MAX_TURNS"] = str(int(task.goal_max_turns))
     terminal_timeout = _worker_terminal_timeout_env(
         task.max_runtime_seconds,
         env.get("TERMINAL_TIMEOUT"),
@@ -5551,6 +5607,9 @@ def _default_spawn(
         "chat",
         "-q", prompt,
     ])
+    if task.goal_mode:
+        # The quiet single-query path owns the in-process continuation loop.
+        cmd.append("-Q")
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

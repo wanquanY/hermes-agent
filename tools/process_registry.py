@@ -1031,6 +1031,30 @@ class ProcessRegistry:
         """Check if a completion notification was already consumed via wait/log."""
         return session_id in self._completion_consumed
 
+    def is_session_waiting(self, session_id: str) -> bool:
+        """Return whether a goal parked on this process should remain parked.
+
+        A live watcher with ``watch_patterns`` releases as soon as its own
+        trigger fires, even when the underlying process intentionally keeps
+        running. Unknown, exited, and already-triggered sessions never hold a
+        barrier, so stale persisted goal state cannot wedge the loop.
+        """
+        if not session_id:
+            return False
+        with self._lock:
+            session = self._running.get(session_id) or self._finished.get(session_id)
+        if session is None:
+            return False
+        try:
+            self._refresh_detached_session(session)
+        except Exception:
+            pass
+        if session.exited:
+            return False
+        if session.watch_patterns and not session._watch_disabled and session._watch_hits > 0:
+            return False
+        return True
+
     def _drain_should_skip(self, session_id: str) -> bool:
         """Whether the CLI drain should skip a completion event for this session.
 
@@ -1480,6 +1504,11 @@ class ProcessRegistry:
                 "status": "exited" if s.exited else "running",
                 "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
             }
+            if s.watch_patterns and not s._watch_disabled:
+                entry["watch_patterns"] = list(s.watch_patterns)
+                entry["watch_hit"] = s._watch_hits > 0
+            if s.notify_on_complete:
+                entry["notify_on_complete"] = True
             if s.exited:
                 entry["exit_code"] = s.exit_code
             if s.detached:
