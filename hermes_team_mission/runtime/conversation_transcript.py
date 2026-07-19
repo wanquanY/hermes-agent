@@ -55,13 +55,23 @@ def _append_message_once(
     role: str,
     content: str,
     metadata: dict[str, Any],
-    participant_id: str = "",
+    participant_id: str,
 ) -> bool:
     if not session_id or not content:
         return False
+    stable_participant_id = text(participant_id)
+    if not stable_participant_id:
+        raise ValueError("participant_id is required for transcript messages")
     if not db.sessions.get(session_id):
         db.sessions.create(session_id, source="team_mission", transient=False)
+    metadata = dict(metadata)
+    metadata["participant_id"] = stable_participant_id
+    metadata["participantId"] = stable_participant_id
     mission = mapping(metadata.get("team_mission"))
+    if mission:
+        mission["participant_id"] = stable_participant_id
+        mission["participantId"] = stable_participant_id
+        metadata["team_mission"] = mission
     mission_id = text(mission.get("mission_id"))
     node_id = text(mission.get("node_id"))
     kind = text(mission.get("kind"))
@@ -83,7 +93,7 @@ def _append_message_once(
         session_id,
         role,
         content,
-        participant_id=participant_id,
+        participant_id=stable_participant_id,
         metadata=metadata,
     )
     return True
@@ -104,6 +114,7 @@ def append_user_task_message(
         session_id=session_id,
         role="user",
         content=text(objective),
+        participant_id="user",
         metadata={
             "team_mission": {
                 "kind": "user_task",

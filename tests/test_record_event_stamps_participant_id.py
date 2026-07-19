@@ -205,7 +205,10 @@ def test_render_snapshot_messages_include_message_row_participant_id(tmp_path: P
         db.close()
 
 
-def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monkeypatch):
+def test_legacy_event_without_participant_id_recovers_unique_roster_owner(
+    tmp_path: Path,
+    monkeypatch,
+):
     from tui_gateway import server
 
     conversation_render_snapshot = importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -214,6 +217,10 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
 
     db = _db(tmp_path, "team-session-legacy")
     try:
+        db.participants.ensure_agent_participant(
+            "team-session-legacy",
+            agent_profile_id="profile-legacy",
+        )
         db.messages.append(
             "team-session-legacy",
             role="assistant",
@@ -256,7 +263,7 @@ def test_legacy_event_without_participant_id_still_renders(tmp_path: Path, monke
 
         message = response["result"]["messages"][0]
         assert message["text"] == "legacy reply"
-        assert not message.get("participant_id")
-        assert not message.get("teamMission", {}).get("participantId")
+        assert message["participant_id"] == "agent:profile-legacy"
+        assert message["participantId"] == "agent:profile-legacy"
     finally:
         db.close()

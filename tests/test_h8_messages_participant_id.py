@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION
+from hermes_agent.composition.migrations import load_migrations
 from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from tui_gateway.services import run_control
 
@@ -228,6 +229,95 @@ def test_messages_schema_migration_idempotent(tmp_path: Path):
         assert participant_columns == ["participant_id"]
     finally:
         second.close()
+
+
+def test_message_owner_migration_backfills_direct_conversation_from_roster(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("direct-session-1", source="tui", transient=False)
+        db.participants.ensure_user_participant("direct-session-1")
+        db.participants.ensure_agent_participant(
+            "direct-session-1",
+            agent_profile_id="profile-1",
+        )
+        db.messages.append(
+            "direct-session-1",
+            role="user",
+            content="legacy question",
+        )
+        db.messages.append(
+            "direct-session-1",
+            role="assistant",
+            content="legacy answer",
+        )
+
+        migration = next(
+            record.migration
+            for record in load_migrations()
+            if record.version == 55
+        )
+        migration.apply(db._conn.cursor())  # noqa: SLF001
+        migration.apply(db._conn.cursor())  # noqa: SLF001
+        db._conn.commit()  # noqa: SLF001
+
+        messages = db.messages.list("direct-session-1")
+        assert [message["participant_id"] for message in messages] == [
+            "user",
+            "agent:profile-1",
+        ]
+        assert all(
+            message["metadata"]["message_owner_migration"]["version"] == 55
+            for message in messages
+        )
+    finally:
+        db.close()
+
+
+def test_message_owner_migration_backfills_team_only_when_roster_owner_is_unique(
+    tmp_path: Path,
+):
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("team-session-unique", source="team_mission", transient=False)
+        db.participants.ensure_agent_participant(
+            "team-session-unique",
+            agent_profile_id="profile-unique",
+        )
+        db.messages.append(
+            "team-session-unique",
+            role="assistant",
+            content="uniquely attributable legacy answer",
+        )
+
+        db.sessions.create("team-session-ambiguous", source="team_mission", transient=False)
+        db.participants.ensure_member_participant(
+            "team-session-ambiguous",
+            member_id="member-a",
+        )
+        db.participants.ensure_member_participant(
+            "team-session-ambiguous",
+            member_id="member-b",
+        )
+        db.messages.append(
+            "team-session-ambiguous",
+            role="assistant",
+            content="ambiguous legacy answer",
+        )
+
+        migration = next(
+            record.migration
+            for record in load_migrations()
+            if record.version == 55
+        )
+        migration.apply(db._conn.cursor())  # noqa: SLF001
+        db._conn.commit()  # noqa: SLF001
+
+        [unique_message] = db.messages.list("team-session-unique")
+        [ambiguous_message] = db.messages.list("team-session-ambiguous")
+        assert unique_message["participant_id"] == "agent:profile-unique"
+        assert ambiguous_message["participant_id"] == ""
+    finally:
+        db.close()
 
 
 def test_team_conversation_render_history_messages_have_participant_id(tmp_path: Path, monkeypatch):

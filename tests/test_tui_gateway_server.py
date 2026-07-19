@@ -3956,6 +3956,7 @@ def test_append_model_switch_marker_fires_mid_conversation():
     assert len(appended) == 1
     assert "claude-opus-4-7" in appended[0]["content"]
     assert "anthropic" in appended[0]["content"]
+    assert appended[0]["participant_id"] == "system"
     system_entries = [e for e in session["history"] if e.get("role") == "system"]
     assert len(system_entries) == 1
 

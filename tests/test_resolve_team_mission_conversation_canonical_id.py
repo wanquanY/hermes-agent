@@ -129,7 +129,7 @@ def test_resolve_missing_conversation_returns_explicit_error_not_silent_empty(mo
     assert response["error"]["message"] == "team mission conversation not found"
 
 
-def test_render_snapshot_rejects_resolve_response_with_empty_conversation_id(monkeypatch):
+def test_render_snapshot_rejects_resolve_response_with_empty_conversation_session_id(monkeypatch):
     from tui_gateway import server
 
     importlib.import_module("tui_gateway.methods.conversation_render_snapshot")
@@ -140,8 +140,8 @@ def test_render_snapshot_rejects_resolve_response_with_empty_conversation_id(mon
             "id": rid,
             "result": {
                 "conversation": {
-                    "conversation_id": "",
-                    "conversation_session_id": "team-session-bad",
+                    "conversation_id": "team-conversation-bad",
+                    "conversation_session_id": "",
                     "team_id": "team-bad",
                 },
                 "mission": {},
@@ -157,4 +157,6 @@ def test_render_snapshot_rejects_resolve_response_with_empty_conversation_id(mon
     )
 
     assert response["error"]["code"] == 5008
-    assert response["error"]["message"] == "team_mission resolve returned conversation without canonical id"
+    assert response["error"]["message"] == (
+        "team_mission resolve returned conversation without conversation_session_id"
+    )

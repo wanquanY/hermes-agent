@@ -59,7 +59,12 @@ def _seed_zero_mission_team_conversation(db: CliSessionStore) -> None:
 
 def _seed_active_mission_team_conversation(db: CliSessionStore) -> None:
     db.sessions.create(session_id="team-session-active", source="team_mission")
-    db.messages.append("team-session-active", role="assistant", content="active team render")
+    db.messages.append(
+        "team-session-active",
+        role="assistant",
+        content="active team render",
+        participant_id="leader:conversation-active",
+    )
     db.upsert_team_mission_conversation(
         conversation_id="conversation-active",
         conversation_session_id="team-session-active",
@@ -107,7 +112,9 @@ def test_zero_mission_team_conversation_routes_to_team_render(monkeypatch, tmp_p
 
     assert "error" not in response
     assert response["result"]["kind"] == "team_mission"
-    assert response["result"]["conversation"]["conversation_id"] == "conversation-zero"
+    conversation = response["result"]["conversation"]
+    assert conversation["conversation_session_id"] == "team-session-zero"
+    assert "conversation_id" not in conversation
     assert response["result"]["mission"] == {}
     assert response["result"]["missionPresent"] is False
 
@@ -145,7 +152,9 @@ def test_team_conversation_with_active_mission_routes_to_team_render(
 
     assert "error" not in response
     assert response["result"]["kind"] == "team_mission"
-    assert response["result"]["conversation"]["conversation_id"] == "conversation-active"
+    conversation = response["result"]["conversation"]
+    assert conversation["conversation_session_id"] == "team-session-active"
+    assert "conversation_id" not in conversation
     assert response["result"]["mission"]["mission_id"] == "mission-active"
     assert response["result"]["missionPresent"] is True
 

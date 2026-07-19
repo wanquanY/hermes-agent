@@ -459,8 +459,10 @@ def test_team_conversation_list_reads_requested_dovie_profile_home(tmp_path, mon
                     "dovie_profile": _dovie_profile_without_home(),
                 },
             })
-        assert resp["result"]["conversations"][0]["conversation_id"] == "conversation-1"
-        assert resp["result"]["conversations"][0]["title"] == "Profile scoped team conversation"
+        conversation = resp["result"]["conversations"][0]
+        assert conversation["conversation_session_id"] == "team-session-1"
+        assert "conversation_id" not in conversation
+        assert conversation["title"] == "Profile scoped team conversation"
     finally:
         for db in list(server._db_by_home.values()):
             db.close()
@@ -564,7 +566,8 @@ def test_team_conversation_list_projects_active_mission_runtime_state(tmp_path, 
         })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
-        assert conversation["conversation_id"] == "conversation-running"
+        assert conversation["conversation_session_id"] == "team-session-running"
+        assert "conversation_id" not in conversation
         assert conversation["running"] is True
         assert conversation["run_state"] == "running"
         assert conversation["mission_status"] == "running"
@@ -649,7 +652,8 @@ def test_team_conversation_list_uses_active_member_run_bindings_when_mission_sta
         })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
-        assert conversation["conversation_id"] == "conversation-member-running"
+        assert conversation["conversation_session_id"] == "team-session-member-running"
+        assert "conversation_id" not in conversation
         assert conversation["running"] is True
         assert conversation["run_state"] == "running"
         assert conversation["mission_status"] == "ready"
@@ -731,7 +735,8 @@ def test_team_conversation_list_projects_final_deliverable_and_artifacts(tmp_pat
             })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
-        assert conversation["conversation_id"] == "conversation-completed"
+        assert conversation["conversation_session_id"] == "team-session-completed"
+        assert "conversation_id" not in conversation
         assert conversation["run_state"] == "completed"
         assert conversation["final_deliverables"][0]["messageId"] == str(message_id)
         assert conversation["artifact_refs"] == [{"path": "/tmp/final.txt", "title": "final.txt"}]
@@ -786,7 +791,8 @@ def test_team_conversation_list_prioritizes_approval_gate_state(tmp_path, monkey
             })
         assert "error" not in resp
         [conversation] = resp["result"]["conversations"]
-        assert conversation["conversation_id"] == "conversation-approval"
+        assert conversation["conversation_session_id"] == "team-session-approval"
+        assert "conversation_id" not in conversation
         assert conversation["running"] is True
         assert conversation["run_state"] == "waiting_approval"
         assert conversation["waiting_approval"] is True
@@ -980,19 +986,13 @@ def test_session_status_reads_stored_profile_session_without_runtime(monkeypatch
     db = open_cli_session_store(db_path=profile_home / "state.db")
     try:
         db.sessions.create("stored-1", source="tui")
-        monkeypatch.setattr(server, "_db_by_home", {})
-        monkeypatch.setattr(server, "_db_error_by_home", {})
+        _route_control_plane_to_home(monkeypatch, profile_home)
         resp = server.handle_request({
             "id": "1",
             "method": "session.status",
             "params": {
                 "session_id": "stored-1",
-                "dovie_profile": {
-                    "id": "agent-a",
-                    "agentProfileVersionId": "version-1",
-                    "runtimeScopeKey": "profile:agent-a:version:version-1",
-                    "hermesHomePath": str(profile_home),
-                },
+                "dovie_profile": _dovie_profile_without_home(),
             },
         })
 

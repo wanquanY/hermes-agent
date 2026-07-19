@@ -562,7 +562,12 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         agent = session.get("agent")
         db = getattr(agent, "_session_db", None) if agent is not None else None
         if db is not None:
-            db.messages.append(session_id=session_key, role="system", content=marker)
+            db.messages.append(
+                session_id=session_key,
+                role="system",
+                content=marker,
+                participant_id="system",
+            )
             return
 
         if "_ensure_session_db_row" in globals():
@@ -571,7 +576,10 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
             with _session_db(session) as scoped_db:
                 if scoped_db is not None:
                     scoped_db.messages.append(
-                        session_id=session_key, role="system", content=marker
+                        session_id=session_key,
+                        role="system",
+                        content=marker,
+                        participant_id="system",
                     )
     except Exception:
         logger.debug("failed to persist model switch marker", exc_info=True)

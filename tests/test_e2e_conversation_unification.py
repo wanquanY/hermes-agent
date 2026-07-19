@@ -256,7 +256,8 @@ def test_e2e_team_conversation_creates_routes_renders_correctly_kind_team(
     snapshot = _render(gateway_server, {"session_id": team["session_id"]})
 
     assert snapshot["kind"] == "team_mission"
-    assert snapshot["conversation"]["conversation_id"] == team["conversation_id"]
+    assert snapshot["conversation"]["conversation_session_id"] == team["session_id"]
+    assert "conversation_id" not in snapshot["conversation"]
     assert snapshot["mission"]["mission_id"] == team["mission_id"]
     assert snapshot["messages"][0]["text"] == "leader complete"
     assert snapshot["messages"][0]["metadata"]["source"] == "team_mission.runtime_event"
@@ -284,7 +285,8 @@ def test_e2e_zero_mission_team_conversation_still_renders_after_mission_cancel(
     resolved = db.resolve_team_mission_conversation(team["conversation_id"])
 
     assert snapshot["kind"] == "team_mission"
-    assert snapshot["conversation"]["conversation_id"] == team["conversation_id"]
+    assert snapshot["conversation"]["conversation_session_id"] == team["session_id"]
+    assert "conversation_id" not in snapshot["conversation"]
     assert snapshot["messages"][0]["text"] == "conversation remains visible"
     assert db.session_index.get(team["session_id"])["conversation_kind"] == "team"
     assert resolved["conversation"]["active_mission_id"] == ""

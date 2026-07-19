@@ -62,6 +62,8 @@ def test_prompt_user_persistence_preserves_original_whitespace(
 
     [row] = db.messages.list("conversation-1")
     assert row["content"] == content
+    assert row["participant_id"] == "user"
+    assert row["metadata"]["participant_id"] == "user"
 
 
 def test_prompt_user_persistence_records_attachment_only_turn(

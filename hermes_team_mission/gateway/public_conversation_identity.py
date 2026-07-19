@@ -20,7 +20,6 @@ def public_team_conversation(value: Any) -> dict[str, Any]:
     conversation_session_id = str(
         projected.get("conversation_session_id")
         or projected.get("conversationSessionId")
-        or projected.get("stable_session_id")
         or ""
     ).strip()
     if conversation_session_id:

@@ -9,6 +9,7 @@ import uuid
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.run_events import list_filtered_events, list_runtime_events
+from tui_gateway.services.run_context_resolver import normalize_run_context_params
 from tui_gateway.services.runtime_pool import (
     RuntimeLease,
     RuntimeLeaseError,
@@ -325,6 +326,15 @@ def _runtime_for_run_target(rid, params: dict) -> tuple[str, dict | None, dict |
 @method("run.submit")
 def _(rid, params: dict) -> dict:
     target = _conversation_session_id_from_params(params)
+    run_db = _run_db_for_stable_session(target) if target else _get_db()
+    try:
+        params = normalize_run_context_params(
+            params,
+            conversation_session_id=target,
+            db=run_db,
+        )
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     requested_run_id = str(params.get("client_run_id") or params.get("run_id") or uuid.uuid4().hex).strip()
     requested_turn_id = str(params.get("turn_id") or uuid.uuid4().hex).strip()
     requested_scope_key = _runtime_scope_key_from_params(params)
@@ -334,7 +344,6 @@ def _(rid, params: dict) -> dict:
         or params.get("controlPlaneReserved")
     )
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
-    run_db = _run_db_for_stable_session(target) if target else _get_db()
     if target and requested_run_id and not control_plane_reserved and not transient:
         reservation = run_control.create_run_if_session_idle(
             conversation_session_id=target,
@@ -475,6 +484,15 @@ def _(rid, params: dict) -> dict:
             },
         )
     run_db = _run_db_for_stable_session(target)
+    try:
+        params = normalize_run_context_params(
+            params,
+            conversation_session_id=target,
+            db=run_db,
+        )
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
+    requested_scope_key = _runtime_scope_key_from_params(params)
     reservation = run_control.create_run_if_session_idle(
         conversation_session_id=target,
         run_id=requested_run_id,

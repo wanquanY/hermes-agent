@@ -349,7 +349,8 @@ def test_e2e_render_snapshot_returns_missions_top_level(
     snapshot = _render(gateway)
 
     assert snapshot["kind"] == "team_mission"
-    assert snapshot["conversation"]["conversation_id"] == CONVERSATION_ID
+    assert snapshot["conversation"]["conversation_session_id"] == CONVERSATION_SESSION_ID
+    assert "conversation_id" not in snapshot["conversation"]
     assert snapshot["mission"]["mission_id"] == "mission-B"
     assert [row["target_mission_id"] for row in snapshot["missions"]] == ["mission-A", "mission-B"]
     assert {row["kind"] for row in snapshot["missions"]} == {"mission"}

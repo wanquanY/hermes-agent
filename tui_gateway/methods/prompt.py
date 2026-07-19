@@ -342,6 +342,8 @@ def _persist_prompt_user_turn(
     metadata: dict[str, Any] = {
         "run_id": run_id,
         "turn_id": turn_id,
+        "participant_id": "user",
+        "participantId": "user",
         "turn_message_index": 0,
         "persist_message_key": f"run:{run_id}|turn:{turn_id}|idx:0",
         "runtime_scope_key": runtime_scope_key or canonical_session_id,
@@ -365,6 +367,7 @@ def _persist_prompt_user_turn(
             session_id=canonical_session_id,
             role="user",
             content=content,
+            participant_id="user",
             metadata=metadata,
         )
         _log_prompt_stage(

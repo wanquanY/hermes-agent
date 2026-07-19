@@ -345,6 +345,7 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
             "stored-ordinary-1",
             role="assistant",
             content="我会读取文件。",
+            participant_id="agent:agent-default",
             metadata={"run_id": "run-1", "turn_id": "turn-1"},
         )
         db.runs.append_event(
@@ -432,6 +433,7 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
             "team-session-1",
             role="assistant",
             content="团队任务完成。",
+            participant_id="leader:conversation-1",
             metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
         )
         db.runs.append_event(
@@ -473,7 +475,9 @@ def test_conversation_render_snapshot_returns_completed_team_projection_without_
 
         assert response["result"]["kind"] == "team_mission"
         assert response["result"]["renderReady"] is True
-        assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
+        conversation = response["result"]["conversation"]
+        assert conversation["conversation_session_id"] == "team-session-1"
+        assert "conversation_id" not in conversation
         assert response["result"]["conversation_session_id"] == "team-session-1"
         assert response["result"]["graph"]["recent_messages"][0]["text"] == "团队任务完成。"
         assert response["result"]["messages"][0]["text"] == "团队任务完成。"
@@ -500,6 +504,7 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
             "team-session-1",
             role="assistant",
             content="团队房间首屏消息。",
+            participant_id="leader:conversation-1",
             metadata={"run_id": "team-run-1", "turn_id": "team-turn-1"},
         )
         db.runs.append_event(
@@ -562,7 +567,9 @@ def test_team_mission_conversation_render_returns_room_snapshot(tmp_path, monkey
         assert response["result"]["renderReady"] is True
         assert response["result"]["projection"]["source"] == "team_mission.conversation.render"
         assert response["result"]["conversation_session_id"] == "team-session-1"
-        assert response["result"]["conversation"]["conversation_id"] == "conversation-1"
+        conversation = response["result"]["conversation"]
+        assert conversation["conversation_session_id"] == "team-session-1"
+        assert "conversation_id" not in conversation
         assert response["result"]["mission"]["mission_id"] == "mission-1"
         assert response["result"]["projection"]["leaderReportStatus"] == "pending"
         assert response["result"]["projection"]["leaderReportRunId"] == ""
@@ -600,6 +607,7 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
             "team-session-1",
             role="assistant",
             content="团队任务进行中。",
+            participant_id="leader:conversation-1",
             metadata={"run_id": "completed-run-1", "turn_id": "completed-turn-1"},
         )
         db.runs.upsert(
@@ -723,6 +731,7 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
             "team-session-1",
             role="assistant",
             content="第一轮汇总。",
+            participant_id="leader:conversation-1",
             metadata={
                 "run_id": shared_run_id,
                 "team_mission": {
@@ -736,11 +745,13 @@ def test_conversation_render_snapshot_preserves_team_assistant_run_ids(tmp_path,
             "team-session-1",
             role="user",
             content="继续。",
+            participant_id="user",
         )
         db.messages.append(
             "team-session-1",
             role="assistant",
             content="第二轮汇总。",
+            participant_id="leader:conversation-1",
             metadata={
                 "run_id": shared_run_id,
                 "team_mission": {
@@ -810,18 +821,21 @@ def test_conversation_render_snapshot_filters_node_transcript_but_keeps_mission_
             "team-session-1",
             role="user",
             content="开始团队任务。",
+            participant_id="user",
             metadata={"transcript_activity_kind": "mission_start"},
         )
         db.messages.append(
             "team-session-1",
             role="assistant",
             content="节点内部细节。",
+            participant_id="member:worker",
             metadata={"transcript_activity_kind": "mission_node"},
         )
         db.messages.append(
             "team-session-1",
             role="assistant",
             content="最终汇总。",
+            participant_id="leader:conversation-1",
             metadata={
                 "transcript_activity_kind": "mission_summary",
                 "team_mission": {
@@ -891,24 +905,28 @@ def test_conversation_render_snapshot_normalizes_same_turn_team_assistant_tool_m
             "team-session-1",
             role="user",
             content="创建团队任务。",
+            participant_id="user",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
         db.messages.append(
             "team-session-1",
             role="assistant",
             content="好的，开始创建。",
+            participant_id="leader:conversation-1",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
         db.messages.append(
             "team-session-1",
             role="tool",
             content='{"success": true}',
+            participant_id="leader:conversation-1",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
         db.messages.append(
             "team-session-1",
             role="assistant",
             content="团队任务已接受。",
+            participant_id="leader:conversation-1",
             metadata={"run_id": shared_run_id, "turn_id": shared_turn_id},
         )
         db.upsert_team_mission_conversation(

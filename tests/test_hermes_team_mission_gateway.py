@@ -1731,6 +1731,7 @@ def test_team_mission_create_records_user_task_in_stable_team_session(
     assert [(message["role"], message["content"]) for message in messages] == [
         ("user", "继续做第二个任务"),
     ]
+    assert messages[0]["participant_id"] == "user"
     assert messages[0]["metadata"]["team_mission"]["kind"] == "user_task"
 
 

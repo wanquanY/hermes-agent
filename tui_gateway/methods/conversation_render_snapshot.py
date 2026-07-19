@@ -7,6 +7,10 @@ from typing import Any
 
 from hermes_team_mission.runtime.team_transcript_writer import main_transcript_message_decision
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.message_owner_projection import (
+    MessageOwnerResolutionError,
+    project_render_message_owners,
+)
 from tui_gateway.services.run_events import list_mission_activity_events
 
 _server = bind_server_globals(globals())
@@ -669,17 +673,6 @@ def _message_id(message: dict[str, Any]) -> str:
     )
 
 
-def _message_source_seq(message: dict[str, Any]) -> str:
-    metadata = _message_metadata(message)
-    team_mission = _record(metadata.get("team_mission") or metadata.get("teamMission"))
-    return _text(
-        metadata.get("source_seq")
-        or metadata.get("sourceSeq")
-        or team_mission.get("source_seq")
-        or team_mission.get("sourceSeq")
-    )
-
-
 def _message_source_run_id(message: dict[str, Any]) -> str:
     metadata = _message_metadata(message)
     team_mission = _record(metadata.get("team_mission") or metadata.get("teamMission"))
@@ -689,106 +682,6 @@ def _message_source_run_id(message: dict[str, Any]) -> str:
         or team_mission.get("source_run_id")
         or team_mission.get("sourceRunId")
     )
-
-
-def _message_participant_id(message: dict[str, Any]) -> str:
-    metadata = _message_metadata(message)
-    team_mission = _record(
-        message.get("teamMission")
-        or message.get("team_mission")
-        or metadata.get("team_mission")
-        or metadata.get("teamMission")
-    )
-    return _text(
-        message.get("participant_id")
-        or message.get("participantId")
-        or metadata.get("participant_id")
-        or metadata.get("participantId")
-        or team_mission.get("participant_id")
-        or team_mission.get("participantId")
-    )
-
-
-def _event_participant_id(event: Any) -> str:
-    if not isinstance(event, dict):
-        return ""
-    payload = _record(event.get("payload"))
-    return _text(
-        event.get("participant_id")
-        or event.get("participantId")
-        or payload.get("participant_id")
-        or payload.get("participantId")
-    )
-
-
-def _run_event_participant_index(run_events: list[Any]) -> dict[str, str]:
-    indexed: dict[str, str] = {}
-    for event in run_events:
-        if not isinstance(event, dict):
-            continue
-        participant_id = _event_participant_id(event)
-        if not participant_id:
-            continue
-        payload = _record(event.get("payload"))
-        run_id = _event_run_id(event)
-        seq = _text(event.get("seq") or payload.get("seq"))
-        source_seq = _text(event.get("source_seq") or event.get("sourceSeq") or payload.get("source_seq") or payload.get("sourceSeq"))
-        message_id = _text(payload.get("message_id") or payload.get("messageId"))
-        for key in (
-            f"run:{run_id}" if run_id else "",
-            f"run-seq:{run_id}:{seq}" if run_id and seq else "",
-            f"run-seq:{run_id}:{source_seq}" if run_id and source_seq else "",
-            f"message:{message_id}" if message_id else "",
-        ):
-            if key:
-                indexed.setdefault(key, participant_id)
-    return indexed
-
-
-def _participant_id_for_message_from_events(
-    message: dict[str, Any],
-    event_participants: dict[str, str],
-) -> str:
-    message_id = _message_id(message)
-    run_id = _text(_message_metadata(message).get("run_id") or _message_metadata(message).get("runId"))
-    source_run_id = _message_source_run_id(message)
-    source_seq = _message_source_seq(message)
-    for key in (
-        f"message:{message_id}" if message_id else "",
-        f"run-seq:{source_run_id}:{source_seq}" if source_run_id and source_seq else "",
-        f"run-seq:{run_id}:{source_seq}" if run_id and source_seq else "",
-        f"run:{source_run_id}" if source_run_id else "",
-        f"run:{run_id}" if run_id else "",
-    ):
-        if key and event_participants.get(key):
-            return event_participants[key]
-    return ""
-
-
-def _with_message_participant_id(message: dict[str, Any], participant_id: str) -> dict[str, Any]:
-    participant_id = _text(participant_id) or _message_participant_id(message)
-    if not participant_id:
-        return message
-    next_message = dict(message)
-    next_message["participant_id"] = participant_id
-    next_message["participantId"] = participant_id
-    metadata = dict(_message_metadata(next_message))
-    metadata["participant_id"] = participant_id
-    metadata["participantId"] = participant_id
-    team_mission = dict(_record(
-        next_message.get("teamMission")
-        or next_message.get("team_mission")
-        or metadata.get("team_mission")
-        or metadata.get("teamMission")
-    ))
-    team_mission["participant_id"] = participant_id
-    team_mission["participantId"] = participant_id
-    metadata["team_mission"] = team_mission
-    metadata["teamMission"] = team_mission
-    next_message["team_mission"] = team_mission
-    next_message["teamMission"] = team_mission
-    next_message["metadata"] = metadata
-    return next_message
 
 
 def _covered_render_run_ids(messages: list[dict[str, Any]]) -> set[str]:
@@ -1126,15 +1019,16 @@ def _team_conversation_snapshot(
         if not _record(summary.get("decision")).get("include")
     ]
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
-    event_participants = _run_event_participant_index(raw_run_events)
-    if event_participants:
-        messages = [
-            _with_message_participant_id(
-                message,
-                _participant_id_for_message_from_events(message, event_participants),
-            )
-            for message in messages
-        ]
+    participants = _participants_for_session(session_id)
+    try:
+        messages = project_render_message_owners(
+            messages,
+            run_events=raw_run_events,
+            participants=participants,
+            allow_single_execution_participant=True,
+        )
+    except MessageOwnerResolutionError as exc:
+        return _err(rid, 5008, str(exc))
     # Completed tool calls are transcript rows. The render snapshot exposes
     # only a transcript prefix plus the active chat run tail; a second historic
     # tool-event lane would create another ordering authority in the client.
@@ -1164,7 +1058,6 @@ def _team_conversation_snapshot(
         mission=mission,
         status_projection=status_projection,
     )
-    participants = _participants_for_session(session_id)
     mission_activities = _mission_activities_for_session(session_id)
     activity_watermarks = _team_activity_watermarks(
         session_id=session_id,
@@ -1245,6 +1138,18 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
     if error:
         return error
     page = page or {}
+    participants = _participants_for_session(session_id)
+    raw_messages = list(page.get("messages") or [])
+    raw_run_events = list(page.get("runEvents") or [])
+    try:
+        messages = project_render_message_owners(
+            raw_messages,
+            run_events=raw_run_events,
+            participants=participants,
+            allow_single_execution_participant=True,
+        )
+    except MessageOwnerResolutionError as exc:
+        return _err(rid, 5008, str(exc))
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     return _ok(
         rid,
@@ -1254,13 +1159,13 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "renderReady": True,
             "conversation_session_id": session_id,
             "session_id": session_id,
-            "participants": _participants_for_session(session_id),
-            "messages": list(page.get("messages") or []),
+            "participants": participants,
+            "messages": messages,
             "toolEvents": [],
             "runEvents": _ordinary_render_run_events(
                 session_id,
-                list(page.get("runEvents") or []),
-                list(page.get("messages") or []),
+                raw_run_events,
+                messages,
             ),
             "last_event_seq": last_event_seq,
             "lastEventSeq": last_event_seq,

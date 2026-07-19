@@ -189,6 +189,7 @@ def test_run_events_do_not_duplicate_explicit_transcript_messages_in_render(
             "team-session-1",
             role="assistant",
             content="same final",
+            participant_id="leader:conversation-1",
             metadata={"transcript_activity_kind": "mission_summary"},
         )
         db.runs.append_event(
@@ -219,6 +220,7 @@ def test_event_ordering_by_run_events_seq(
                 "team-session-1",
                 role="assistant",
                 content=text,
+                participant_id="leader:conversation-1",
                 metadata={"transcript_activity_kind": "mission_summary"},
             )
         for run_id, text in (

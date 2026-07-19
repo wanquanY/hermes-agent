@@ -82,7 +82,15 @@ def test_conversation_transcript_uses_composed_session_and_message_services() ->
             "role": "assistant",
             "content": "done",
             "participant_id": "leader:team-1",
-            "metadata": metadata,
+            "metadata": {
+                "participant_id": "leader:team-1",
+                "participantId": "leader:team-1",
+                "team_mission": {
+                    **metadata["team_mission"],
+                    "participant_id": "leader:team-1",
+                    "participantId": "leader:team-1",
+                },
+            },
         }
     ]
 

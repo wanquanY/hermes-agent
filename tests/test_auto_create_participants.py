@@ -245,6 +245,8 @@ def test_render_snapshot_includes_participants_list(monkeypatch, tmp_path: Path)
         "user",
         "agent:profile-1",
     ]
+    assert response["result"]["messages"][0]["participant_id"] == "user"
+    assert response["result"]["messages"][0]["participantId"] == "user"
 
 
 def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> None:
