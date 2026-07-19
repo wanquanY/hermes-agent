@@ -185,6 +185,11 @@ SUPPORTED_STATE_FEATURES = frozenset(REQUIRED_STATE_FEATURES)
 
 REQUIRED_GATEWAY_METHODS = {
     "gateway.capabilities",
+    "goal.clear",
+    "goal.get",
+    "goal.pause",
+    "goal.resume",
+    "goal.set",
     "session.create",
     "session.list",
     "session.messages",

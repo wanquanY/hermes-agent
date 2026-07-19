@@ -225,7 +225,7 @@ def test_goal_set_rpc_resolves_stable_conversation_identity(server, session):
     assert r["result"]["kickoff_message"] == "Refactor auth"
     assert r["result"]["contract"]["verification"] == "pytest tests/auth passes"
 
-    status = _call(server, "goal.get", stored_session_id=session_key)
+    status = _call(server, "goal.get", conversation_session_id=session_key)
     assert status["result"]["active"] is True
     assert status["result"]["goal"] == "Refactor auth"
 

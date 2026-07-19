@@ -7,7 +7,7 @@ continuation prompt back into the same session and keeps working until the
 goal is done, turn budget is exhausted, the user pauses/clears it, or the
 user sends a new message (which takes priority and pauses the goal loop).
 
-State is persisted in SessionDB's ``state_meta`` table keyed by
+State is persisted through the composed state store's ``state_meta`` table keyed by
 ``goal:<session_id>`` so ``/resume`` picks it up.
 
 Design notes / invariants:
@@ -1629,7 +1629,7 @@ def run_kanban_goal_loop(
        terminated the task, ``block_fn`` is invoked so the card lands in a
        sticky ``blocked`` state for human review (NOT a silent exit).
 
-    This function performs NO SessionDB persistence — a worker process is
+    This function performs NO durable session-state persistence — a worker process is
     ephemeral, so the turn budget lives in a local counter. It is fully
     decoupled from the CLI for testability: callers inject ``run_turn``
     (str -> str), ``task_status_fn`` (() -> str|None), and ``block_fn``

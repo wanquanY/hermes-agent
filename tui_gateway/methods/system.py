@@ -658,7 +658,6 @@ def _goal_state_payload(manager) -> dict:
 def _goal_rpc_session(rid, params: dict):
     requested = str(
         params.get("conversation_session_id")
-        or params.get("stored_session_id")
         or params.get("session_id")
         or ""
     ).strip()
