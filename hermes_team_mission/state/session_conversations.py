@@ -1644,21 +1644,28 @@ class TeamMissionConversationMixin:
         except (TypeError, ValueError):
             return 0
 
-    def get_team_mission_conversation_status_projection(self, conversation_id: str) -> Dict[str, Any]:
+    def get_team_mission_conversation_status_projection(self, identifier: str) -> Dict[str, Any]:
         """Return the canonical Team Mission conversation status event payload.
 
         This is the event-stream counterpart to ``team_mission.conversation.list``:
         it projects only sidebar/index facts and keeps raw runtime trace in
         ``run_events``.
         """
-        conversation_id = _text(conversation_id)
+        identifier = _text(identifier)
+        if not identifier:
+            return {}
+        conversation = (
+            self.get_team_mission_conversation_by_session(identifier)
+            or self.get_team_mission_conversation(identifier)
+        )
+        conversation_id = _text(conversation.get("conversation_id"))
         if not conversation_id:
             return {}
         summary = self.get_team_mission_conversation_runtime_summary(conversation_id)
         if not isinstance(summary, dict) or not summary:
             return {}
-        conversation = summary.get("conversation") if isinstance(summary.get("conversation"), dict) else {}
-        conversation = dict(conversation or self.get_team_mission_conversation(conversation_id) or {})
+        summary_conversation = summary.get("conversation") if isinstance(summary.get("conversation"), dict) else {}
+        conversation = dict(summary_conversation or conversation)
         if not conversation:
             return {}
         conversation_session_id = _text(conversation.get("conversation_session_id") or conversation.get("conversationSessionId"))

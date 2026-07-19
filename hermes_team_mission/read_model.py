@@ -7,7 +7,7 @@ from typing import Any
 from hermes_team_mission.domain.node_kinds import normalize_team_mission_node_kind
 
 
-READ_MODEL_SCHEMA_VERSION = 1
+READ_MODEL_SCHEMA_VERSION = 2
 READ_MODEL_SOURCE = "team_mission.snapshot.get"
 
 _MISSION_STATUS_ALIASES = {
@@ -204,17 +204,20 @@ def _conversation_conversation_session_id(conversation: dict[str, Any], mission:
 
 def _normalize_conversation(conversation: Any, mission: dict[str, Any]) -> dict[str, Any]:
     raw = _object(conversation)
-    conversation_id = _first_text(raw.get("conversation_id"), raw.get("conversationId"), mission.get("conversation_id"), mission.get("conversationId"))
     team_id = _first_text(raw.get("team_id"), raw.get("teamId"), mission.get("team_id"), mission.get("teamId"))
-    conversation_session_id = _conversation_conversation_session_id(raw, mission)
+    conversation_session_id = _first_text(
+        _conversation_conversation_session_id(raw, mission),
+        # Compatibility input for snapshots persisted before schema v2. The
+        # legacy aggregate key is never re-emitted by this public read model.
+        raw.get("conversation_id"),
+        raw.get("conversationId"),
+        mission.get("conversation_id"),
+        mission.get("conversationId"),
+    )
     title = _first_text(raw.get("display_title"), raw.get("displayTitle"), raw.get("title"))
     return {
-        "conversation_id": conversation_id,
         "team_id": team_id,
         "conversation_session_id": conversation_session_id,
-        # Compatibility alias for pre-canonical desktop consumers. New code
-        # must use conversation_session_id as the cross-surface identity.
-        "conversation_team_session_id": conversation_session_id,
         "title": title,
         "objective": _first_text(raw.get("objective"), mission.get("objective")),
         "workspace_id": _first_text(raw.get("workspace_id"), raw.get("workspaceId"), mission.get("workspace_id"), mission.get("workspaceId")),
@@ -238,7 +241,6 @@ def _normalize_mission(
     raw = _object(mission)
     normalized_conversation = _normalize_conversation(conversation, raw)
     explicit_mission_id = _first_text(raw.get("mission_id"), raw.get("missionId"), raw.get("id"))
-    conversation_id = normalized_conversation["conversation_id"]
     entity_kind = "mission" if explicit_mission_id else "conversation_shell"
     title = (
         normalized_conversation["title"]
@@ -254,10 +256,8 @@ def _normalize_mission(
         "mission_id": explicit_mission_id,
         "entity_kind": entity_kind,
         "activity_id": activity_id,
-        "conversation_id": conversation_id or explicit_mission_id,
         "team_id": team_id,
         "conversation_session_id": normalized_conversation["conversation_session_id"],
-        "conversation_team_session_id": normalized_conversation["conversation_team_session_id"],
         "title": title,
         "objective": objective,
         "workspace_id": workspace_id,
@@ -578,7 +578,12 @@ def _normalize_task_frame(value: Any) -> dict[str, Any]:
     return {
         "id": frame_id,
         "run_id": _first_text(raw.get("run_id"), raw.get("runId")),
-        "conversation_id": _first_text(raw.get("conversation_id"), raw.get("conversationId")),
+        "conversation_session_id": _first_text(
+            raw.get("conversation_session_id"),
+            raw.get("conversationSessionId"),
+            raw.get("conversation_id"),
+            raw.get("conversationId"),
+        ),
         "mission_id": mission_id,
         "task_id": _first_text(raw.get("task_id"), raw.get("taskId")),
         "title": _text(raw.get("title")),

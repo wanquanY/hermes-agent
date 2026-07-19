@@ -251,7 +251,6 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     conversation_session_id = _conversation_session_id_from_params(params, {})
-    conversation_id = _conversation_id_from_params(params, {})
     turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
     if not conversation_session_id:
         return _err(rid, 4006, "conversation_session_id required")
@@ -269,11 +268,10 @@ def _(rid, params: dict) -> dict:
     # Mission identity (only meaningful for B; ignored for A/C).
     resolved_mission = {}
     try:
-        resolved = (
-            db.resolve_team_mission_conversation(conversation_id)
-            if conversation_id
-            else {}
-        )
+        # ``conversation_session_id`` is the only public conversation identity.
+        # Team Mission still has an internal storage key while its tables are
+        # being migrated, but callers must never be required to know it.
+        resolved = db.resolve_team_mission_conversation(conversation_session_id)
         if isinstance(resolved, dict):
             resolved_mission = (
                 resolved.get("mission")
@@ -414,7 +412,6 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "status": "recalled",
-            "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
             "turn_id": turn_id,
             "recalled": {

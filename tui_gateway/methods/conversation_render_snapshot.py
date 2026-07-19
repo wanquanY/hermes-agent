@@ -194,16 +194,15 @@ def _conversation_identifier(params: dict[str, Any]) -> str:
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     return _text(
         params.get("identifier")
-        or params.get("conversation_id")
-        or params.get("conversationId")
-        or params.get("mission_id")
-        or params.get("missionId")
+        or params.get("conversation_session_id")
+        or params.get("conversationSessionId")
         or params.get("session_id")
         or params.get("sessionId")
-        or params.get("conversation_session_id")
-        or params.get("conversationSessionId")
-        or params.get("conversation_session_id")
-        or params.get("conversationSessionId")
+        or params.get("mission_id")
+        or params.get("missionId")
+        # Pre-migration request compatibility only.
+        or params.get("conversation_id")
+        or params.get("conversationId")
         or metadata.get("conversation_id")
         or metadata.get("conversationId")
     )
@@ -254,7 +253,10 @@ def _route_kind_from_team_conversation(db: Any, identifier: str) -> str:
         return ""
     conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
     if isinstance(conversation, dict) and _text(
-        conversation.get("conversation_id") or conversation.get("conversationId")
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
+        or conversation.get("conversation_id")
+        or conversation.get("conversationId")
     ):
         return "team"
     return ""
@@ -287,14 +289,10 @@ def _route_conversation_kind(params: dict[str, Any]) -> str:
 def _conversation_session_id(params: dict[str, Any]) -> str:
     metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
     return _text(
-        params.get("session_id")
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("session_id")
         or params.get("sessionId")
-        or params.get("conversation_session_id")
-        or params.get("conversationSessionId")
-        or params.get("conversation_session_id")
-        or params.get("conversationSessionId")
-        or params.get("conversation_session_id")
-        or params.get("conversationSessionId")
         or metadata.get("conversation_session_id")
         or metadata.get("conversationSessionId")
     )
@@ -974,21 +972,21 @@ def _filter_team_render_run_events(
     return filtered
 
 
-def _team_conversation_status_projection(conversation_id: str) -> dict[str, Any]:
-    conversation_id = _text(conversation_id)
-    if not conversation_id:
+def _team_conversation_status_projection(conversation_session_id: str) -> dict[str, Any]:
+    conversation_session_id = _text(conversation_session_id)
+    if not conversation_session_id:
         return {}
     try:
         db = _get_db()
         projector = getattr(db, "get_team_mission_conversation_status_projection", None) if db is not None else None
         if not callable(projector):
             return {}
-        projection = projector(conversation_id) or {}
+        projection = projector(conversation_session_id) or {}
         return dict(projection) if isinstance(projection, dict) else {}
     except Exception as exc:
         logger.warning(
-            "conversation.render_snapshot status projection skipped conversation_id=%s: %s",
-            conversation_id,
+            "conversation.render_snapshot status projection skipped conversation_session_id=%s: %s",
+            conversation_session_id,
             exc,
         )
         return {}
@@ -1000,10 +998,13 @@ def _team_conversation_is_running(
     mission: dict[str, Any],
     status_projection: dict[str, Any] | None = None,
 ) -> bool:
-    conversation_id = _text(conversation.get("conversation_id") or conversation.get("conversationId"))
+    conversation_session_id = _text(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
+    )
     projection = status_projection if isinstance(status_projection, dict) else {}
     if not projection:
-        projection = _team_conversation_status_projection(conversation_id)
+        projection = _team_conversation_status_projection(conversation_session_id)
     if projection:
         return bool(projection.get("running")) or _text(
             projection.get("projected_state")
@@ -1091,12 +1092,15 @@ def _team_conversation_snapshot(
         return response
     resolved = response.get("result") if isinstance(response.get("result"), dict) else {}
     conversation = resolved.get("conversation") if isinstance(resolved.get("conversation"), dict) else {}
-    if not _text(conversation.get("conversation_id") or conversation.get("conversationId")):
+    if not _text(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
+    ):
         logger.error(
             "team_mission.conversation.resolve returned conversation without canonical id: identifier=%s",
             identifier,
         )
-        return _err(rid, 5008, "team_mission resolve returned conversation without canonical id")
+        return _err(rid, 5008, "team_mission resolve returned conversation without conversation_session_id")
     graph = resolved.get("graph") if isinstance(resolved.get("graph"), dict) else {}
     team = resolved.get("team") if isinstance(resolved.get("team"), dict) else {}
     graph_conversation = graph.get("conversation") if isinstance(graph.get("conversation"), dict) else {}
@@ -1154,8 +1158,7 @@ def _team_conversation_snapshot(
     mission_present = bool(_text(mission.get("mission_id") or mission.get("missionId")))
     if not mission_present:
         mission = {}
-    conversation_id = _text(conversation.get("conversation_id") or conversation.get("conversationId"))
-    status_projection = _team_conversation_status_projection(conversation_id)
+    status_projection = _team_conversation_status_projection(session_id)
     is_running = _team_conversation_is_running(
         conversation=conversation,
         mission=mission,
@@ -1176,7 +1179,7 @@ def _team_conversation_snapshot(
         "team-conversation-snapshot-filter",
         request_id=str(rid),
         identifier=identifier,
-        conversation_id=_text(conversation.get("conversation_id") or conversation.get("conversationId")),
+        conversation_session_id=session_id,
         session_id=session_id,
         mission_id=_text(mission.get("mission_id") or mission.get("missionId")),
         raw_message_count=len(raw_message_summaries),
@@ -1201,7 +1204,6 @@ def _team_conversation_snapshot(
             "kind": "team_mission",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
-            "conversation_session_id": session_id,
             "conversation_session_id": session_id,
             "session_id": session_id,
             "conversation": conversation,
@@ -1250,7 +1252,6 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "kind": "ordinary",
             "schemaVersion": _SNAPSHOT_SCHEMA_VERSION,
             "renderReady": True,
-            "conversation_session_id": session_id,
             "conversation_session_id": session_id,
             "session_id": session_id,
             "participants": _participants_for_session(session_id),

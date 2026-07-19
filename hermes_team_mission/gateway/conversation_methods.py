@@ -3,6 +3,12 @@ from __future__ import annotations
 
 from .common import *
 from .participant_autocreate import ensure_team_conversation_participants
+from .public_conversation_identity import (
+    public_team_conversation,
+    public_team_conversation_list,
+    public_team_conversation_result,
+    public_team_mission_graph,
+)
 from hermes_team_mission.domain.activity import ACTIVITY_ID_FORMAT_PATTERN
 
 
@@ -361,12 +367,11 @@ def _(rid, params: dict) -> dict:
         )
         return _ok(rid, {
             "mission_id": "",
-            "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
-            "conversation": conversation,
+            "conversation": public_team_conversation(conversation),
             "graph": {
                 "mission": {},
-                "conversation": conversation,
+                "conversation": public_team_conversation(conversation),
                 "nodes": [],
                 "edges": [],
                 "run_bindings": [],
@@ -550,8 +555,8 @@ def _(rid, params: dict) -> dict:
     result = {
         "mission_id": mission_id,
         "activity_id": activity_id,
-        "conversation_id": conversation_id,
-        "graph": graph,
+        "conversation_session_id": conversation_session_id,
+        "graph": public_team_mission_graph(graph),
     }
     if isinstance(start_response, dict):
         result["leader_start"] = start_response.get("result") or {}
@@ -567,18 +572,25 @@ def _(rid, params: dict) -> dict:
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = mission.get("metadata") if isinstance(mission, dict) and isinstance(mission.get("metadata"), dict) else {}
-    conversation_id = (
-        _conversation_id_from_params(params, metadata)
-        or (str(mission.get("conversation_id") or "").strip() if isinstance(mission, dict) else "")
-        or mission_id
-    )
     conversation_session_id = _conversation_session_id_from_params(params, metadata)
     if not conversation_session_id and isinstance(mission, dict) and mission:
         conversation_session_id = _team_conversation_session_id(mission)
-    if not conversation_id and conversation_session_id:
-        conversation_id = conversation_session_id
-    if not conversation_id:
-        return _err(rid, 4006, "conversation_id required")
+    if not conversation_session_id:
+        conversation_session_id = f"team-conversation-{uuid.uuid4().hex}"
+    existing_conversation = (
+        db.get_team_mission_conversation_by_session(conversation_session_id)
+        if conversation_session_id
+        else {}
+    )
+    conversation_id = (
+        str((existing_conversation or {}).get("conversation_id") or "").strip()
+        or (str(mission.get("conversation_id") or "").strip() if isinstance(mission, dict) else "")
+        # Compatibility for callers that have not yet migrated.  New callers
+        # never send this storage key.
+        or _conversation_id_from_params(params, metadata)
+        or conversation_session_id
+        or mission_id
+    )
     params = {
         **params,
         "conversation_id": conversation_id,
@@ -586,7 +598,7 @@ def _(rid, params: dict) -> dict:
         **({"conversation_session_id": conversation_session_id, "conversationSessionId": conversation_session_id} if conversation_session_id else {}),
         **({"mission_id": mission_id, "missionId": mission_id} if mission_id else {}),
     }
-    before = db.get_team_mission_conversation(conversation_id)
+    before = existing_conversation or db.get_team_mission_conversation(conversation_id)
     archived_team_error = _archived_team_write_error(
         db,
         _team_id_for_profile(params, mission=mission if isinstance(mission, dict) else {}, conversation=before),
@@ -660,14 +672,13 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "mission_id": mission_id,
-            "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
             "created": created,
-            "conversation": conversation,
+            "conversation": public_team_conversation(conversation),
             "session": db.sessions.get(conversation_session_id) or {},
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
-            "graph": graph if isinstance(graph, dict) else {},
+            "graph": public_team_mission_graph(graph),
         },
     )
 
@@ -705,7 +716,10 @@ def _(rid, params: dict) -> dict:
             conversation = result.get("conversation") if isinstance(result.get("conversation"), dict) else conversation
     if isinstance(conversation, dict):
         conversation.update(_conversation_runtime_projection(db, conversation))
-    return _ok(rid, _attach_team_detail_projection(db, result))
+    return _ok(
+        rid,
+        public_team_conversation_result(_attach_team_detail_projection(db, result)),
+    )
 
 
 @method("team_mission.conversation.list")
@@ -731,7 +745,7 @@ def _(rid, params: dict) -> dict:
         for conversation in conversations if isinstance(conversations, list) else []:
             _recover_conversation_active_run(db, conversation)
             conversation.update(_conversation_runtime_projection(db, conversation))
-    return _ok(rid, {"conversations": conversations})
+    return _ok(rid, {"conversations": public_team_conversation_list(conversations)})
 
 
 @method("team_mission.conversation.participants")
@@ -818,7 +832,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, f"team mission conversation rename failed: {exc}")
     if not result:
         return _err(rid, 4040, "team mission conversation not found")
-    return _ok(rid, result)
+    return _ok(rid, public_team_conversation_result(result))
 
 
 @method("team_mission.conversation.delete")
@@ -900,7 +914,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, f"team mission conversation delete failed: {exc}")
     if not result:
         return _err(rid, 4040, "team mission conversation not found")
-    return _ok(rid, result)
+    return _ok(rid, public_team_conversation_result(result))
 
 
 # ── Group-chat: direct-to-member (decoupled from team missions) ──────

@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 
 from .common import *
+from .public_conversation_identity import (
+    public_team_conversation,
+    public_team_mission_graph,
+)
 
 _log = logging.getLogger(__name__)
 from .dovie_context import persist_mission_dovie_product_context_from_submit
@@ -794,10 +798,11 @@ def _submit_message_to_member(
     return _ok(
         rid,
         {
-            "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
-            "conversation": ensured_conversation or resolved.get("conversation") or {},
-            "graph": resolved.get("graph") or {},
+            "conversation": public_team_conversation(
+                ensured_conversation or resolved.get("conversation") or {}
+            ),
+            "graph": public_team_mission_graph(resolved.get("graph") or {}),
             "leader_turn": member_turn,
             "member_turn": member_turn,
             "target_member_id": target_member_id,
@@ -817,8 +822,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "text required")
     conversation_id = _conversation_id_from_params(params, {})
     conversation_session_id = _conversation_session_id_from_params(params, {})
-    if not mission_id and not conversation_id:
-        return _err(rid, 4006, "mission_id or conversation_id required")
+    if not mission_id and not conversation_session_id and not conversation_id:
+        return _err(rid, 4006, "mission_id or conversation_session_id required")
     graph = (
         db.team_mission_graphs.get_team_mission_graph(mission_id) if mission_id else {}
     )
@@ -834,7 +839,7 @@ def _(rid, params: dict) -> dict:
     context_graph = graph if isinstance(graph, dict) else {}
     context_mission = mission if isinstance(mission, dict) else {}
     if not mission:
-        resolved_identifier = conversation_id
+        resolved_identifier = conversation_session_id or conversation_id
         resolved = (
             db.resolve_team_mission_conversation(resolved_identifier)
             if resolved_identifier
@@ -883,9 +888,10 @@ def _(rid, params: dict) -> dict:
         else {}
     )
     conversation_id = (
-        conversation_id
-        or str((conversation or {}).get("conversation_id") or "").strip()
+        str((conversation or {}).get("conversation_id") or "").strip()
         or str((mission or {}).get("conversation_id") or "").strip()
+        or conversation_id
+        or conversation_session_id
         or mission_id
     )
     if not conversation_id:
@@ -1275,15 +1281,16 @@ def _(rid, params: dict) -> dict:
         {
             "mission_id": mission_id,
             "activity_id": request_activity_id or leader_activity_id,
-            "conversation_id": conversation_id,
             "conversation_session_id": conversation_session_id,
-            "conversation": conversation,
+            "conversation": public_team_conversation(conversation),
             "leader_turn": leader_turn,
             "leader_runtime_context": leader_runtime_context,
             "leaderRuntimeContext": leader_runtime_context,
-            "graph": db.team_mission_graphs.get_team_mission_graph(mission_id)
-            if mission_id
-            else graph,
+            "graph": public_team_mission_graph(
+                db.team_mission_graphs.get_team_mission_graph(mission_id)
+                if mission_id
+                else graph
+            ),
         },
     )
 
@@ -1329,7 +1336,23 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5008)
     mission_id = _mission_id_from_params(params)
-    conversation_id = _conversation_id_from_params(params)
+    requested_conversation_session_id = _conversation_session_id_from_params(params)
+    legacy_conversation_id = _conversation_id_from_params(params)
+    conversation_identifier = requested_conversation_session_id or legacy_conversation_id
+    conversation_session_id = ""
+    conversation_id = ""
+    if conversation_identifier:
+        resolved = db.resolve_team_mission_conversation(conversation_identifier)
+        conversation = (
+            resolved.get("conversation")
+            if isinstance(resolved, dict)
+            and isinstance(resolved.get("conversation"), dict)
+            else {}
+        )
+        conversation_id = str(conversation.get("conversation_id") or "").strip()
+        conversation_session_id = str(
+            conversation.get("conversation_session_id") or ""
+        ).strip()
     if conversation_id:
         graph = db.team_mission_graphs.get_team_mission_conversation_graph(
             conversation_id
@@ -1347,8 +1370,12 @@ def _(rid, params: dict) -> dict:
         ).strip()
         result = {
             "mission_id": graph_mission_id or mission_id,
-            "conversation_id": conversation_id,
-            "graph": graph,
+            **(
+                {"conversation_session_id": conversation_session_id}
+                if conversation_session_id
+                else {}
+            ),
+            "graph": public_team_mission_graph(graph),
         }
         if mission_id and mission_id != result["mission_id"]:
             result["requested_mission_id"] = mission_id
@@ -1358,7 +1385,7 @@ def _(rid, params: dict) -> dict:
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     if not graph:
         return _err(rid, 4040, "team mission not found")
-    return _ok(rid, {"mission_id": mission_id, "graph": graph})
+    return _ok(rid, {"mission_id": mission_id, "graph": public_team_mission_graph(graph)})
 
 
 @method("team_mission.graph.reduce")

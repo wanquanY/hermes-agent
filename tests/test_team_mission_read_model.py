@@ -42,10 +42,12 @@ def test_read_model_normalizes_mission_and_node_statuses_to_backend_enums():
         }
     )
 
-    assert read_model["schema_version"] == 1
+    assert read_model["schema_version"] == 2
     assert read_model["mission"]["status"] == "cancelled"
     assert read_model["conversation"]["conversation_session_id"] == "team-session-1"
     assert read_model["mission"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in read_model["conversation"]
+    assert "conversation_id" not in read_model["mission"]
     assert read_model["nodes"][0]["status"] == "cancelled"
     assert read_model["nodes"][0]["runtime"]["node_status"] == "cancelled"
     assert read_model["nodes"][0]["kind"] == "synthesis"
@@ -75,7 +77,11 @@ def test_read_model_projects_empty_mission_as_conversation_shell():
 
     assert read_model["mission"]["entity_kind"] == "conversation_shell"
     assert read_model["mission"]["mission_id"] == ""
-    assert read_model["mission"]["conversation_id"] == "conversation-only"
+    assert (
+        read_model["mission"]["conversation_session_id"]
+        == "team-session-conversation-only"
+    )
+    assert "conversation_id" not in read_model["mission"]
     assert read_model["mission"]["status"] == "draft"
     assert read_model["mission"]["conversation"]["status"] == "active"
     assert read_model["conversation"]["conversation_session_id"] == "team-session-conversation-only"
@@ -145,7 +151,7 @@ def test_read_model_derives_node_dependencies_from_edges_and_nodes():
 def test_read_model_schema_version_is_present_for_minimal_snapshot():
     read_model = build_team_mission_read_model({})
 
-    assert read_model["schema_version"] == 1
+    assert read_model["schema_version"] == 2
     assert read_model["mission"]["entity_kind"] == "conversation_shell"
     assert read_model["nodes"] == []
     assert read_model["edges"] == []

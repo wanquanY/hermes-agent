@@ -4,6 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 from .common import *
+from .public_conversation_identity import (
+    public_team_conversation,
+    public_team_mission_graph,
+)
 from hermes_team_mission.read_model import build_team_mission_read_model
 
 
@@ -74,7 +78,7 @@ def _snapshot_version(mission_id: str, event_seq: int, graph: dict[str, Any], re
     return f"mission:{mission_id}:seq:{int(event_seq or 0)}:updated:{updated_at}"
 
 
-def _conversation_snapshot_version(conversation_id: str, conversation: dict[str, Any]) -> str:
+def _conversation_snapshot_version(conversation_session_id: str, conversation: dict[str, Any]) -> str:
     updated_at = (
         conversation.get("updated_at")
         or conversation.get("updatedAt")
@@ -82,42 +86,49 @@ def _conversation_snapshot_version(conversation_id: str, conversation: dict[str,
         or conversation.get("createdAt")
         or ""
     )
-    return f"conversation:{conversation_id}:no-mission:updated:{updated_at}"
+    return f"conversation:{conversation_session_id}:no-mission:updated:{updated_at}"
 
 
 def _canonical_team_conversation_snapshot(
     db: Any,
-    conversation_id: str,
+    identifier: str,
     graph: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    conversation_id = str(conversation_id or "").strip()
-    if not conversation_id:
+    identifier = str(identifier or "").strip()
+    if not identifier:
         return {}
     graph = graph if isinstance(graph, dict) else {}
     conversation = graph.get("conversation") if isinstance(graph.get("conversation"), dict) else {}
     if not conversation:
-        getter = getattr(db, "get_team_mission_conversation", None)
-        if callable(getter):
-            conversation = getter(conversation_id) or {}
+        session_getter = getattr(db, "get_team_mission_conversation_by_session", None)
+        if callable(session_getter):
+            conversation = session_getter(identifier) or {}
+        resolver = getattr(db, "resolve_team_mission_conversation", None)
+        resolved = resolver(identifier) if not conversation and callable(resolver) else {}
+        if not conversation and isinstance(resolved, dict):
+            conversation = resolved.get("conversation") or {}
+        if not graph and isinstance(resolved, dict) and isinstance(resolved.get("graph"), dict):
+            graph = resolved["graph"]
     if not isinstance(conversation, dict) or not conversation:
         return {}
-    conversation_id = str(
-        conversation.get("conversation_id")
-        or conversation.get("conversationId")
-        or conversation_id
+    conversation_session_id = str(
+        conversation.get("conversation_session_id")
+        or conversation.get("conversationSessionId")
+        or identifier
     ).strip()
+    public_conversation = public_team_conversation(conversation)
     team = _team_detail_projection_for_conversation(db, conversation, {})
-    version = _conversation_snapshot_version(conversation_id, conversation)
-    graph_payload = {
+    version = _conversation_snapshot_version(conversation_session_id, conversation)
+    graph_payload = public_team_mission_graph({
         **graph,
         "mission": {},
-        "conversation": conversation,
+        "conversation": public_conversation,
         "nodes": graph.get("nodes") if isinstance(graph.get("nodes"), list) else [],
         "edges": graph.get("edges") if isinstance(graph.get("edges"), list) else [],
         "run_bindings": graph.get("run_bindings") if isinstance(graph.get("run_bindings"), list) else [],
         "deliverables": graph.get("deliverables") if isinstance(graph.get("deliverables"), list) else [],
         "result": {},
-    }
+    })
     if team:
         graph_payload["team"] = team
     snapshot = {
@@ -127,14 +138,14 @@ def _canonical_team_conversation_snapshot(
         "missionId": "",
         "activity_id": "",
         "activityId": "",
-        "conversation_id": conversation_id,
-        "conversationId": conversation_id,
+        "conversation_session_id": conversation_session_id,
+        "conversationSessionId": conversation_session_id,
         "snapshot_version": version,
         "snapshotVersion": version,
         "last_event_seq": 0,
         "lastEventSeq": 0,
         "mission": {},
-        "conversation": conversation,
+        "conversation": public_conversation,
         "team": team,
         "nodes": graph_payload["nodes"],
         "edges": graph_payload["edges"],
@@ -161,6 +172,8 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
     if not mission:
         return {}
     conversation = graph.get("conversation") if isinstance(graph.get("conversation"), dict) else {}
+    public_conversation = public_team_conversation(conversation)
+    public_graph = public_team_mission_graph(graph)
     team = _team_detail_projection_for_conversation(db, conversation, mission)
     nodes = [node for node in graph.get("nodes") or [] if isinstance(node, dict)]
     edges = [edge for edge in graph.get("edges") or [] if isinstance(edge, dict)]
@@ -180,8 +193,8 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
         "snapshotVersion": version,
         "last_event_seq": latest_seq,
         "lastEventSeq": latest_seq,
-        "mission": mission,
-        "conversation": conversation,
+        "mission": public_graph.get("mission") if isinstance(public_graph.get("mission"), dict) else {},
+        "conversation": public_conversation,
         "team": team,
         "nodes": nodes,
         "edges": edges,
@@ -192,7 +205,7 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
         "pending_approvals": _pending_approvals(nodes),
         "pendingApprovals": _pending_approvals(nodes),
         "graph": {
-            **graph,
+            **public_graph,
             **({"team": team} if team else {}),
             "result": result,
         },
@@ -203,11 +216,29 @@ def _canonical_team_mission_snapshot(db: Any, mission_id: str, graph: dict[str, 
 
 def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any]]:
     mission_id = _mission_id_from_params(params) or _mission_id_from_activity_id(_activity_id_from_params(params))
-    conversation_id = _conversation_id_from_params(params)
-    if conversation_id:
+    conversation_session_id = _conversation_session_id_from_params(params)
+    legacy_conversation_id = _conversation_id_from_params(params)
+    identifier = conversation_session_id or legacy_conversation_id
+    if identifier:
+        resolved = db.resolve_team_mission_conversation(identifier)
+        conversation = resolved.get("conversation") if isinstance(resolved, dict) else {}
+        if not conversation and conversation_session_id:
+            conversation = db.get_team_mission_conversation_by_session(
+                conversation_session_id
+            ) or {}
+        conversation_id = str((conversation or {}).get("conversation_id") or "").strip()
+        conversation_session_id = str(
+            (conversation or {}).get("conversation_session_id")
+            or conversation_session_id
+            or ""
+        ).strip()
+        if not conversation_id:
+            return "", {}, {}
         graph = db.team_mission_graphs.get_team_mission_conversation_graph(conversation_id)
         if not graph:
-            return "", {}, {}
+            return "", {}, {
+                "conversation_session_id": conversation_session_id,
+            }
         mission = graph.get("mission") if isinstance(graph.get("mission"), dict) else {}
         resolved_mission_id = str(
             mission.get("mission_id")
@@ -215,7 +246,9 @@ def _graph_for_params(db: Any, params: dict[str, Any]) -> tuple[str, dict[str, A
             or mission_id
             or ""
         ).strip()
-        return resolved_mission_id, graph, {"conversation_id": conversation_id}
+        return resolved_mission_id, graph, {
+            "conversation_session_id": conversation_session_id,
+        }
     if mission_id:
         return mission_id, db.team_mission_graphs.get_team_mission_graph(mission_id), {}
     return "", {}, {}
@@ -229,9 +262,15 @@ def _(rid, params: dict) -> dict:
     params = params if isinstance(params, dict) else {}
     mission_id, graph, meta = _graph_for_params(db, params)
     if not mission_id:
-        conversation_id = str(meta.get("conversation_id") or _conversation_id_from_params(params) or "").strip()
-        if conversation_id:
-            snapshot = _canonical_team_conversation_snapshot(db, conversation_id, graph)
+        conversation_session_id = str(
+            meta.get("conversation_session_id")
+            or _conversation_session_id_from_params(params)
+            or ""
+        ).strip()
+        legacy_identifier = _conversation_id_from_params(params)
+        identifier = conversation_session_id or legacy_identifier
+        if identifier:
+            snapshot = _canonical_team_conversation_snapshot(db, identifier, graph)
             if not snapshot:
                 return _err(rid, 4040, "team mission conversation not found")
             return _ok(
@@ -239,14 +278,14 @@ def _(rid, params: dict) -> dict:
                 {
                     "mission_id": "",
                     "activity_id": "",
-                    "conversation_id": snapshot["conversation_id"],
+                    "conversation_session_id": snapshot["conversation_session_id"],
                     "snapshot": snapshot,
                     "read_model": snapshot["read_model"],
                     "snapshot_version": snapshot["snapshot_version"],
                     "last_event_seq": snapshot["last_event_seq"],
                 },
             )
-        return _err(rid, 4006, "mission_id, activity_id, or conversation_id required")
+        return _err(rid, 4006, "mission_id, activity_id, or conversation_session_id required")
     snapshot = _canonical_team_mission_snapshot(db, mission_id, graph)
     if not snapshot:
         return _err(rid, 4040, "team mission not found")

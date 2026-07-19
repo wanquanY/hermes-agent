@@ -755,7 +755,7 @@ def test_team_mission_snapshot_and_result_rpc_return_canonical_read_models(
     assert snapshot["graph"]["team"]["id"] == "team-1"
     assert snapshot["nodes"]
     assert snapshot_response["result"]["read_model"] == snapshot["read_model"]
-    assert snapshot["read_model"]["schema_version"] == 1
+    assert snapshot["read_model"]["schema_version"] == 2
     assert snapshot["read_model"]["mission"]["mission_id"] == "mission-snapshot"
     assert snapshot["read_model"]["mission"]["status"] == "planning"
     assert (
@@ -807,7 +807,7 @@ def test_team_mission_snapshot_get_returns_conversation_snapshot_without_active_
 
     response = server._methods["team_mission.snapshot.get"](
         1,
-        {"conversation_id": "conversation-only"},
+        {"conversation_session_id": "team-session-conversation-only"},
     )
 
     assert "error" not in response
@@ -815,18 +815,31 @@ def test_team_mission_snapshot_get_returns_conversation_snapshot_without_active_
     snapshot = result["snapshot"]
     assert result["mission_id"] == ""
     assert result["activity_id"] == ""
-    assert result["conversation_id"] == "conversation-only"
+    assert result["conversation_session_id"] == "team-session-conversation-only"
+    assert "conversation_id" not in result
     assert result["last_event_seq"] == 0
     assert snapshot["mission"] == {}
     assert snapshot["nodes"] == []
     assert snapshot["edges"] == []
-    assert snapshot["conversation"]["conversation_id"] == "conversation-only"
+    assert (
+        snapshot["conversation"]["conversation_session_id"]
+        == "team-session-conversation-only"
+    )
+    assert "conversation_id" not in snapshot["conversation"]
     assert snapshot["graph"]["mission"] == {}
-    assert snapshot["graph"]["conversation"]["conversation_id"] == "conversation-only"
+    assert (
+        snapshot["graph"]["conversation"]["conversation_session_id"]
+        == "team-session-conversation-only"
+    )
+    assert "conversation_id" not in snapshot["graph"]["conversation"]
     assert result["read_model"] == snapshot["read_model"]
-    assert snapshot["read_model"]["schema_version"] == 1
+    assert snapshot["read_model"]["schema_version"] == 2
     assert snapshot["read_model"]["mission"]["entity_kind"] == "conversation_shell"
-    assert snapshot["read_model"]["mission"]["conversation_id"] == "conversation-only"
+    assert (
+        snapshot["read_model"]["mission"]["conversation_session_id"]
+        == "team-session-conversation-only"
+    )
+    assert "conversation_id" not in snapshot["read_model"]["mission"]
     assert snapshot["read_model"]["nodes"] == []
     assert snapshot["read_model"]["edges"] == []
 
@@ -914,7 +927,8 @@ def test_team_mission_graph_returns_conversation_graph_when_conversation_id_is_p
     result = response["result"]
     graph = result["graph"]
     assert result["mission_id"] == "mission-2"
-    assert result["conversation_id"] == "conversation-1"
+    assert result["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in result
     assert graph["mission"]["mission_id"] == "mission-2"
     assert [frame["missionId"] for frame in graph["task_frames"]] == [
         "mission-1",
@@ -1006,8 +1020,9 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(
 
     graph = response["result"]["graph"]
     assert graph["mission"] == {}
-    assert response["result"]["conversation_id"] == "mission-1"
-    assert graph["conversation"]["conversation_id"] == "mission-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in response["result"]
+    assert "conversation_id" not in graph["conversation"]
     assert graph["conversation"]["conversation_session_id"] == "team-session-1"
     assert graph["conversation"]["active_mission_id"] == ""
     assert graph["nodes"] == []
@@ -1029,7 +1044,7 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(
     )
 
     assert submit_response["result"]["conversation_session_id"] == "team-session-1"
-    assert submit_response["result"]["conversation_id"] == "mission-1"
+    assert "conversation_id" not in submit_response["result"]
     assert submitted[0]["conversation_session_id"] == "team-session-1"
     assert submitted[0]["agent_profile_id"] == "profile-leader"
     assert "persist_user_message" not in submitted[0]
@@ -1040,7 +1055,11 @@ def test_team_mission_create_conversation_only_does_not_create_or_start_graph(
         {"conversation_id": "mission-1"},
     )
 
-    assert resolve_response["result"]["conversation"]["conversation_id"] == "mission-1"
+    assert (
+        resolve_response["result"]["conversation"]["conversation_session_id"]
+        == "team-session-1"
+    )
+    assert "conversation_id" not in resolve_response["result"]["conversation"]
     assert resolve_response["result"]["mission"] == {}
 
 
@@ -1135,7 +1154,7 @@ def test_team_mission_message_submit_derives_conversation_title_from_first_user_
     assert run_context["execution_home"] != run_context["control_home"]
 
 
-def test_team_mission_message_submit_rejects_session_id_as_conversation_identity(
+def test_team_mission_message_submit_accepts_session_id_as_canonical_conversation_identity(
     monkeypatch, tmp_path: Path
 ):
     import importlib
@@ -1146,6 +1165,22 @@ def test_team_mission_message_submit_rejects_session_id_as_conversation_identity
     team_mission = team_mission_gateway()
     db = open_cli_session_store(tmp_path / "state.db")
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
+    monkeypatch.setitem(
+        server._methods,
+        "run.submit",
+        lambda rid, params: {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "status": "streaming",
+                "run_id": params["run_id"],
+                "turn_id": params["turn_id"],
+                "session_id": params["conversation_session_id"],
+                "conversation_session_id": params["conversation_session_id"],
+                "runtime_scope_key": params["runtime_scope_key"],
+            },
+        },
+    )
 
     response = server._methods["team_mission.message.submit"](
         1,
@@ -1157,9 +1192,11 @@ def test_team_mission_message_submit_rejects_session_id_as_conversation_identity
         },
     )
 
-    assert response["error"]["code"] == 4006
-    assert "mission_id or conversation_id required" in response["error"]["message"]
-    assert db.resolve_team_mission_conversation("team-session-1") == {}
+    assert "error" not in response
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in response["result"]
+    resolved = db.resolve_team_mission_conversation("team-session-1")
+    assert resolved["conversation"]["conversation_session_id"] == "team-session-1"
 
 
 def test_team_mission_member_submit_carries_run_context_json(
@@ -2223,13 +2260,10 @@ def test_team_mission_message_submit_allows_control_plane_outer_call_to_owner_ru
 
     assert "error" not in response
     assert (
-        response["result"]["conversation_id"]
-        == "team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
-    )
-    assert (
         response["result"]["conversation_session_id"]
         == "team-session-team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0"
     )
+    assert "conversation_id" not in response["result"]
     assert (
         submitted["runtime_scope_key"]
         == "team:team-conversation-193ea1df-2fa7-49f6-a4e8-80de90f9e5e0:leader-conversation"
@@ -2270,7 +2304,8 @@ def test_team_mission_conversation_ensure_keeps_team_scope_out_of_profile_owner_
     )
 
     assert "error" not in response
-    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in response["result"]
     assert response["result"]["conversation_session_id"] == "team-session-1"
 
 
@@ -2334,7 +2369,8 @@ def test_team_mission_conversation_ensure_uses_conversation_scope_for_bound_miss
     )
 
     assert "error" not in response
-    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-conversation-1"
+    assert "conversation_id" not in response["result"]
     assert (
         response["result"]["conversation_session_id"] == "team-session-conversation-1"
     )
@@ -2850,9 +2886,10 @@ def test_archived_team_history_is_readable_but_team_writes_are_rejected(
     )
     assert "error" not in resolve_response
     assert (
-        resolve_response["result"]["conversation"]["conversation_id"]
-        == "conversation-archived-team"
+        resolve_response["result"]["conversation"]["conversation_session_id"]
+        == "team-session-archived"
     )
+    assert "conversation_id" not in resolve_response["result"]["conversation"]
     assert resolve_response["result"]["messages"][0]["content"] == "历史消息仍可查看"
 
     ensure_response = server._methods["team_mission.conversation.ensure"](
@@ -2920,7 +2957,8 @@ def test_team_mission_conversation_rename_gateway_updates_canonical_state(
         },
     )
 
-    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in response["result"]
     assert response["result"]["conversation"]["title"] == "新团队任务"
     assert db.sessions.get("team-session-1")["source"] == "team_mission"
     assert db.sessions.get("team-session-1")["title"] is None
@@ -3061,7 +3099,8 @@ def test_team_mission_conversation_delete_gateway_removes_canonical_conversation
 
     assert "result" in response, response
     assert response["result"]["deleted"] is True
-    assert response["result"]["conversation_id"] == "conversation-1"
+    assert response["result"]["conversation_session_id"] == "team-session-1"
+    assert "conversation_id" not in response["result"]
     assert response["result"]["conversation_session_id"] == "team-session-1"
     assert response["result"]["run_session_ids"] == [
         "worker-session-1",
