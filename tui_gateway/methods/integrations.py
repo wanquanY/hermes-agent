@@ -764,26 +764,390 @@ def _browser_disconnect(rid) -> dict:
     return _ok(rid, {"connected": False})
 
 
+def _plugin_market_rows() -> list[dict]:
+    """Return every bundled/user plugin with profile-scoped runtime state.
+
+    Discovery and mutations deliberately stay in Hermes. Desktop clients only
+    receive a serializable control-plane projection and never inspect plugin
+    directories or rewrite profile config themselves.
+    """
+    from pathlib import Path
+
+    from hermes_cli.config import get_hermes_home
+    from hermes_cli.plugins_cmd import (
+        _discover_all_plugins,
+        _get_disabled_set,
+        _get_enabled_set,
+        _missing_requires_env_names,
+        _read_manifest,
+    )
+
+    enabled = _get_enabled_set()
+    disabled = _get_disabled_set()
+    user_root = (get_hermes_home() / "plugins").resolve()
+    rows: list[dict] = []
+    for name, version, description, source, directory, canonical_key in _discover_all_plugins():
+        path = Path(directory)
+        manifest = _read_manifest(path) if path.is_dir() else {}
+        try:
+            path.resolve().relative_to(user_root)
+            user_owned = True
+        except ValueError:
+            user_owned = False
+
+        requirements = manifest.get("requires_env") or []
+        requirement_rows: list[dict] = []
+        for requirement in requirements:
+            if isinstance(requirement, str):
+                requirement_rows.append({"name": requirement})
+            elif isinstance(requirement, dict) and requirement.get("name"):
+                requirement_rows.append(
+                    {
+                        "name": str(requirement["name"]),
+                        "description": str(requirement.get("description") or ""),
+                        "url": str(requirement.get("url") or ""),
+                        "secret": bool(requirement.get("secret", False)),
+                    }
+                )
+
+        runtime_status = (
+            "disabled"
+            if canonical_key in disabled or name in disabled
+            else "enabled"
+            if canonical_key in enabled or name in enabled
+            else "inactive"
+        )
+        rows.append(
+            {
+                # Desktop mutations use the canonical loader key.  The manifest
+                # name remains presentation metadata because nested bundled
+                # plugins can share a leaf name across categories.
+                "name": canonical_key,
+                "manifest_name": name,
+                "display_name": str(
+                    manifest.get("display_name")
+                    or manifest.get("label")
+                    or manifest.get("title")
+                    or name
+                ),
+                "version": str(version or manifest.get("version") or ""),
+                "description": str(description or manifest.get("description") or ""),
+                "author": str(manifest.get("author") or ""),
+                "source": source,
+                "source_url": str(
+                    manifest.get("homepage")
+                    or manifest.get("repository")
+                    or manifest.get("source")
+                    or ""
+                ),
+                "runtime_status": runtime_status,
+                "enabled": runtime_status == "enabled",
+                "hooks": [str(item) for item in manifest.get("hooks") or []],
+                "provides_tools": [str(item) for item in manifest.get("provides_tools") or []],
+                "requires_env": requirement_rows,
+                "missing_env": _missing_requires_env_names(manifest),
+                "can_remove": source in {"user", "git"} and user_owned,
+                "can_update": source in {"user", "git"} and user_owned and (path / ".git").exists(),
+            }
+        )
+    return rows
+
+
 @method("plugins.list")
 def _(rid, params: dict) -> dict:
     try:
-        from hermes_cli.plugins import get_plugin_manager
-
+        rows = _plugin_market_rows()
         return _ok(
             rid,
             {
-                "plugins": [
-                    {
-                        "name": n,
-                        "version": getattr(i, "version", "?"),
-                        "enabled": getattr(i, "enabled", True),
-                    }
-                    for n, i in get_plugin_manager()._plugins.items()
-                ]
+                "plugins": rows,
+                "summary": {
+                    "total": len(rows),
+                    "enabled": sum(row["runtime_status"] == "enabled" for row in rows),
+                    "available": sum(row["runtime_status"] == "inactive" for row in rows),
+                    "needs_configuration": sum(bool(row["missing_env"]) for row in rows),
+                },
             },
         )
     except Exception as e:
         return _err(rid, 5032, str(e))
+
+
+@method("plugins.manage")
+def _(rid, params: dict) -> dict:
+    try:
+        from hermes_cli.plugins_cmd import (
+            dashboard_install_plugin,
+            dashboard_remove_user_plugin,
+            dashboard_set_agent_plugin_enabled,
+            dashboard_update_user_plugin,
+        )
+
+        action = str(params.get("action") or "").strip().lower()
+        name = str(params.get("name") or "").strip()
+        if action == "install":
+            identifier = str(params.get("identifier") or "").strip()
+            if not identifier:
+                return _err(rid, 5033, "plugin identifier required")
+            result = dashboard_install_plugin(
+                identifier,
+                force=bool(params.get("force", False)),
+                # Third-party plugins are inert until the user explicitly enables them.
+                enable=bool(params.get("enable", False)),
+            )
+        elif action == "set_enabled":
+            if not name:
+                return _err(rid, 5033, "plugin name required")
+            result = dashboard_set_agent_plugin_enabled(
+                name,
+                enabled=bool(params.get("enabled", False)),
+            )
+        elif action == "update":
+            if not name:
+                return _err(rid, 5033, "plugin name required")
+            result = dashboard_update_user_plugin(name)
+        elif action == "remove":
+            if not name:
+                return _err(rid, 5033, "plugin name required")
+            result = dashboard_remove_user_plugin(name)
+        elif action == "rescan":
+            return _ok(rid, {"ok": True, "plugins": _plugin_market_rows()})
+        else:
+            return _err(rid, 5033, f"unsupported plugin action: {action or '(empty)'}")
+
+        if not result.get("ok"):
+            return _err(rid, 5033, str(result.get("error") or "plugin operation failed"))
+        result.pop("after_install_path", None)
+        return _ok(rid, result)
+    except Exception as e:
+        return _err(rid, 5033, str(e))
+
+
+def _mcp_server_row(name: str, config: dict) -> dict:
+    transport = "http" if config.get("url") else "stdio" if config.get("command") else "unknown"
+    tools = config.get("tools") if isinstance(config.get("tools"), dict) else {}
+    return {
+        "name": name,
+        "transport": transport,
+        "url": str(config.get("url") or ""),
+        "command": str(config.get("command") or ""),
+        "args": [str(item) for item in config.get("args") or []],
+        "auth_type": str(config.get("auth") or ("header" if config.get("headers") else "none")),
+        "enabled": config.get("enabled", True) is not False,
+        "env_keys": sorted(str(key) for key in (config.get("env") or {}).keys()),
+        "tool_filter_configured": "include" in tools,
+        "enabled_tools": [str(item) for item in tools.get("include") or []],
+    }
+
+
+@method("mcp.catalog.list")
+def _(rid, params: dict) -> dict:
+    try:
+        from hermes_cli import mcp_catalog
+        from hermes_cli.config import get_env_value
+        from hermes_cli.mcp_config import _MCP_PRESETS, _get_mcp_servers
+
+        installed = _get_mcp_servers()
+        rows: list[dict] = []
+        catalog_names: set[str] = set()
+        for entry in mcp_catalog.list_catalog():
+            catalog_names.add(entry.name)
+            rows.append(
+                {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "source": entry.source,
+                    "kind": "catalog",
+                    "transport": entry.transport.type,
+                    "auth_type": entry.auth.type,
+                    "required_env": [
+                        {
+                            "name": item.name,
+                            "prompt": item.prompt,
+                            "required": item.required,
+                            "secret": item.secret,
+                            "default": item.default,
+                        }
+                        for item in entry.auth.env
+                    ],
+                    "missing_env": [
+                        item.name
+                        for item in entry.auth.env
+                        if item.required and not get_env_value(item.name)
+                    ],
+                    "command": entry.transport.command or "",
+                    "args": list(entry.transport.args or []),
+                    "url": entry.transport.url or "",
+                    "needs_install": entry.install is not None,
+                    "default_enabled": entry.tools.default_enabled,
+                    "post_install": entry.post_install,
+                    "installed": entry.name in installed,
+                    "enabled": bool(
+                        entry.name in installed
+                        and installed[entry.name].get("enabled", True) is not False
+                    ),
+                }
+            )
+        for name, preset in sorted(_MCP_PRESETS.items()):
+            if name in catalog_names:
+                continue
+            rows.append(
+                {
+                    "name": name,
+                    "description": f"Hermes built-in {name} MCP preset.",
+                    "source": "Hermes built-in preset",
+                    "kind": "preset",
+                    "transport": "http" if preset.get("url") else "stdio",
+                    "auth_type": "none",
+                    "required_env": [],
+                    "command": str(preset.get("command") or ""),
+                    "args": [str(item) for item in preset.get("args") or []],
+                    "url": str(preset.get("url") or ""),
+                    "needs_install": False,
+                    "default_enabled": None,
+                    "post_install": "",
+                    "installed": name in installed,
+                    "enabled": bool(
+                        name in installed and installed[name].get("enabled", True) is not False
+                    ),
+                }
+            )
+        return _ok(
+            rid,
+            {
+                "entries": rows,
+                "diagnostics": [
+                    {"name": name, "kind": kind, "message": message}
+                    for name, kind, message in mcp_catalog.catalog_diagnostics()
+                ],
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5034, str(e))
+
+
+@method("mcp.servers.list")
+def _(rid, params: dict) -> dict:
+    try:
+        from hermes_cli.mcp_config import _get_mcp_servers
+
+        servers = _get_mcp_servers()
+        return _ok(
+            rid,
+            {"servers": [_mcp_server_row(name, config) for name, config in sorted(servers.items())]},
+        )
+    except Exception as e:
+        return _err(rid, 5035, str(e))
+
+
+@method("mcp.manage")
+def _(rid, params: dict) -> dict:
+    try:
+        from hermes_cli import mcp_catalog
+        from hermes_cli.config import get_env_value, load_config, save_config, save_env_value
+        from hermes_cli.mcp_config import (
+            _get_mcp_servers,
+            _probe_single_server,
+            _remove_mcp_server,
+            _save_mcp_server,
+        )
+
+        action = str(params.get("action") or "").strip().lower()
+        name = str(params.get("name") or "").strip()
+        if action == "install":
+            entry = mcp_catalog.get_entry(name)
+            if entry is None:
+                from hermes_cli.mcp_config import _MCP_PRESETS
+
+                preset = _MCP_PRESETS.get(name)
+                if preset is None:
+                    return _err(rid, 5036, f"unknown MCP catalog entry: {name}")
+                if not _save_mcp_server(name, dict(preset)):
+                    return _err(rid, 5036, "MCP preset configuration rejected")
+                return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+            supplied_env = params.get("env") if isinstance(params.get("env"), dict) else {}
+            for key, value in supplied_env.items():
+                if str(value):
+                    save_env_value(str(key), str(value))
+            missing = [
+                item.name
+                for item in entry.auth.env
+                if item.required and not get_env_value(item.name)
+            ]
+            if missing:
+                return _ok(rid, {"ok": False, "name": name, "missing_env": missing})
+            mcp_catalog.install_entry(entry, enable=bool(params.get("enabled", True)))
+            return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+        if action == "add":
+            server = params.get("server") if isinstance(params.get("server"), dict) else {}
+            if not name or not server:
+                return _err(rid, 5036, "MCP name and server configuration required")
+            if name in _get_mcp_servers():
+                return _err(rid, 5036, f"MCP server already exists: {name}")
+            if not _save_mcp_server(name, dict(server)):
+                return _err(rid, 5036, "MCP server configuration rejected")
+            return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+        if action == "set_enabled":
+            config = load_config()
+            servers = config.get("mcp_servers")
+            if not isinstance(servers, dict) or name not in servers:
+                return _err(rid, 5036, f"MCP server not found: {name}")
+            servers[name]["enabled"] = bool(params.get("enabled", False))
+            save_config(config)
+            return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+        if action == "set_tools":
+            requested_tools = params.get("tools")
+            if not isinstance(requested_tools, list):
+                return _err(rid, 5036, "MCP tools must be a list")
+            config = load_config()
+            servers = config.get("mcp_servers")
+            if not isinstance(servers, dict) or name not in servers:
+                return _err(rid, 5036, f"MCP server not found: {name}")
+            tools = servers[name].get("tools")
+            if not isinstance(tools, dict):
+                tools = {}
+                servers[name]["tools"] = tools
+            tools["include"] = list(
+                dict.fromkeys(
+                    str(tool_name).strip()
+                    for tool_name in requested_tools
+                    if str(tool_name).strip()
+                )
+            )
+            tools.pop("exclude", None)
+            save_config(config)
+            return _ok(
+                rid,
+                {
+                    "ok": True,
+                    "name": name,
+                    "enabled_tools": tools["include"],
+                    "reload_required": True,
+                },
+            )
+        if action == "remove":
+            if not _remove_mcp_server(name):
+                return _err(rid, 5036, f"MCP server not found: {name}")
+            return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+        if action == "test":
+            server = _get_mcp_servers().get(name)
+            if not server:
+                return _err(rid, 5036, f"MCP server not found: {name}")
+            tools = _probe_single_server(name, server)
+            return _ok(
+                rid,
+                {
+                    "ok": True,
+                    "name": name,
+                    "tools": [
+                        {"name": tool_name, "description": description}
+                        for tool_name, description in tools
+                    ],
+                },
+            )
+        return _err(rid, 5036, f"unsupported MCP action: {action or '(empty)'}")
+    except Exception as e:
+        return _err(rid, 5036, str(e))
 
 
 @method("config.show")
