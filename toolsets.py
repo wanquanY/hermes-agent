@@ -102,6 +102,12 @@ TOOLSETS = {
         "tools": ["dovie_video_generate"],
         "includes": []
     },
+
+    "dovie_task_hub": {
+        "description": "Internal conversation-scoped Dovie Task Hub read tools",
+        "tools": ["task_hub_search", "task_hub_get_details", "task_hub_list_my_tasks"],
+        "includes": []
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",
@@ -648,7 +654,13 @@ TOOLSETS = {
     }
 }
 
-INTERNAL_TOOLSETS = {"dovie", "team_mission_read", "team_mission_planning", "team_mission_handoff"}
+INTERNAL_TOOLSETS = {
+    "dovie",
+    "dovie_task_hub",
+    "team_mission_read",
+    "team_mission_planning",
+    "team_mission_handoff",
+}
 
 
 def is_internal_toolset(name: str) -> bool:

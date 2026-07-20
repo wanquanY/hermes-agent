@@ -12,6 +12,7 @@ MODULES = (
     "session_interrupt",
     "session_runtime_controls",
     "runtime_cloud_proxy",
+    "runtime_capabilities",
     "live_session",
     "session_branch",
     "conversation_activity",

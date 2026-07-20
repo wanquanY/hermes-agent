@@ -179,6 +179,7 @@ REQUIRED_RUNTIME_FEATURES = [
     "runtime:dovie_sidecar",
     "runtime:profile_scope",
     "runtime:cloud_proxy_auth",
+    "runtime:agent_capability_auth",
 ]
 
 SUPPORTED_STATE_FEATURES = frozenset(REQUIRED_STATE_FEATURES)
@@ -225,6 +226,8 @@ REQUIRED_GATEWAY_METHODS = {
     "runtime.activity.unsubscribe",
     "runtime.activity.maintenance",
     "runtime.cloud_proxy.update",
+    "runtime.capabilities.update",
+    "runtime.capabilities.clear",
     "conversation.activity.list",
     "conversation.activity.context.change",
     "conversation.render_snapshot",
@@ -358,6 +361,8 @@ def _runtime_features_present() -> set[str]:
         present.add("runtime:profile_scope")
     if "runtime:dovie_sidecar" in present:
         present.add("runtime:cloud_proxy_auth")
+        if _module_exists("agent_capabilities.credentials"):
+            present.add("runtime:agent_capability_auth")
     return present
 
 
