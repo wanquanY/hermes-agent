@@ -7,6 +7,25 @@ import time
 from typing import Any
 
 
+TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
+    {
+        "agent.terminal.output",
+        "terminal.close",
+        "terminal.read.request",
+    }
+)
+
+
+def is_transient_platform_event(frame: dict[str, Any]) -> bool:
+    """Return whether a frame belongs to a renderer-owned side channel.
+
+    Platform frames carry session/run identity for routing, but they are not
+    conversation facts and therefore never enter the durable timeline cursor
+    namespace.
+    """
+    return str(frame.get("type") or "").strip() in TRANSIENT_PLATFORM_EVENT_TYPES
+
+
 class RuntimeSourceSequencer:
     """Allocate causal source order without touching the durable event ledger."""
 
@@ -89,6 +108,8 @@ def _positive_int(value: Any) -> int:
 
 __all__ = [
     "RuntimeSourceSequencer",
+    "TRANSIENT_PLATFORM_EVENT_TYPES",
+    "is_transient_platform_event",
     "mark_transient",
     "reset_for_tests",
     "stamp_runtime_source_seq",

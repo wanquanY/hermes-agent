@@ -766,6 +766,7 @@ def _(rid, params: dict) -> dict:
         active_only=bool(params.get("active_only") or params.get("activeOnly")),
         runtime_scope_key=runtime_scope_key,
         db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
     last_seq = max([int(event.get("seq") or 0) for event in replay], default=after_seq)
     return _ok(

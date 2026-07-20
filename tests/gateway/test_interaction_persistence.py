@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -144,6 +146,14 @@ def test_pending_interaction_replays_after_cursor_with_render_identity_and_no_se
 ) -> None:
     db = open_cli_session_store(tmp_path / "state.db")
     db.sessions.create("conversation-session-1", "hermes")
+    db.runs.upsert(
+        run_id="run-waiting-1",
+        session_id="conversation-session-1",
+        runtime_scope_key="profile:agent-default",
+        execution_session_id="runtime-session-1",
+        status="running",
+        metadata={"gateway_pid": os.getpid()},
+    )
     entry = PendingEntry(
         request_id="req-render-ready",
         kind="clarify",
@@ -215,6 +225,94 @@ def test_pending_interaction_replays_after_cursor_with_render_identity_and_no_se
             "replay_snapshot": True,
         },
     }
+    db.close()
+
+
+def test_pending_interaction_replay_excludes_terminal_owner_run(tmp_path: Path) -> None:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
+    db.runs.upsert(
+        run_id="run-completed-1",
+        session_id="conversation-session-1",
+        runtime_scope_key="profile:agent-default",
+        execution_session_id="runtime-session-1",
+        status="completed",
+    )
+    saved = persist_interaction_event(
+        db,
+        "interaction.requested",
+        PendingEntry(
+            request_id="req-stale",
+            kind="approval",
+            conversation_id="runtime-session-1",
+            session_key="conversation-session-1",
+            scope_key="profile:agent-default",
+            state="pending",
+            request_payload={
+                "run_id": "run-completed-1",
+                "turn_id": "turn-completed-1",
+                "runtime_scope_key": "profile:agent-default",
+            },
+        ),
+    )
+
+    _subscription_id, replay = run_control.subscribe_session_with_id(
+        conversation_session_id="conversation-session-1",
+        transport=None,
+        after_seq=int(saved["seq"]),
+        db=db,
+    )
+
+    assert replay == []
+    db.close()
+
+
+def test_subscribe_recovers_restarted_owner_before_interaction_replay(tmp_path: Path) -> None:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
+    stale_time = time.time() - 301
+    db.runs.upsert(
+        run_id="run-abandoned-1",
+        session_id="conversation-session-1",
+        runtime_scope_key="profile:agent-default",
+        execution_session_id="runtime-session-1",
+        status="running",
+        started_at=stale_time,
+        updated_at=stale_time,
+        metadata={
+            "gateway_pid": os.getpid(),
+            "gateway_instance_id": "previous-gateway",
+        },
+    )
+    saved = persist_interaction_event(
+        db,
+        "interaction.requested",
+        PendingEntry(
+            request_id="req-abandoned",
+            kind="clarify",
+            conversation_id="runtime-session-1",
+            session_key="conversation-session-1",
+            scope_key="profile:agent-default",
+            state="pending",
+            request_payload={
+                "question": "This caller no longer exists",
+                "run_id": "run-abandoned-1",
+                "turn_id": "turn-abandoned-1",
+                "runtime_scope_key": "profile:agent-default",
+            },
+        ),
+    )
+
+    _subscription_id, replay = run_control.subscribe_session_with_id(
+        conversation_session_id="conversation-session-1",
+        transport=None,
+        after_seq=int(saved["seq"]),
+        db=db,
+        current_gateway_instance_id="current-gateway",
+    )
+
+    assert db.runs.get("run-abandoned-1")["status"] == "failed"
+    assert all(event.get("type") != "interaction.requested" for event in replay)
     db.close()
 
 

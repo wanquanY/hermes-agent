@@ -47,6 +47,7 @@ from tui_gateway.services.run_control_events import (
 )
 from tui_gateway.services.run_events import list_runtime_events
 from tui_gateway.services.interaction_registry import pending_interaction_replay_frames
+from tui_gateway.services.run_recovery import recover_orphaned_active_runs
 from tui_gateway.transport import Transport
 
 if TYPE_CHECKING:
@@ -306,48 +307,15 @@ def _recover_orphaned_active_runs(
     current_gateway_instance_id: str = "",
     stale_after_seconds: float = 300.0,
 ) -> int:
-    # S8: orphan-recovery is a main-process responsibility. When the main
-    # sidecar disconnects (crash/restart), worker processes keep polling
-    # ``session_status`` / ``create_run_if_session_idle``, and each call
-    # triggered a recovery scan that found no live main-side run owners —
-    # producing noise (triage counted 79 spurious scans in one session).
-    # Short-circuit in workers so only the main process runs the scan.
-    from tui_gateway.process_role import is_worker_process
-    if is_worker_process():
-        return 0
-    method = _run_method(db, "fail_orphaned")
-    if method is None:
-        return 0
-    try:
-        failed = int(
-            method(
-                live_execution_session_ids=_live_execution_session_ids_snapshot(),
-                current_pid=os.getpid(),
-                current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
-                stale_after_seconds=stale_after_seconds,
-                owner_dead_grace_seconds=2.0,
-                reason="gateway process restarted before run reached terminal state",
-            )
-            or 0
-        )
-        if failed:
-            _diagnostic_warning(
-                "orphaned-active-runs-recovered",
-                db=_db_label(db),
-                failed=failed,
-                current_pid=os.getpid(),
-                current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
-            )
-        return failed
-    except Exception as exc:
-        _diagnostic_warning(
-            "orphaned-active-run-recovery-error",
-            db=_db_label(db),
-            error=str(exc),
-            current_pid=os.getpid(),
-            current_gateway_instance_id=str(current_gateway_instance_id or "").strip(),
-        )
-        return 0
+    return recover_orphaned_active_runs(
+        db,
+        current_gateway_instance_id=current_gateway_instance_id,
+        live_execution_session_ids=_live_execution_session_ids_snapshot(),
+        resolve_fail_orphaned=lambda value: _run_method(value, "fail_orphaned"),
+        report_diagnostic=_diagnostic_warning,
+        db_label=_db_label,
+        stale_after_seconds=stale_after_seconds,
+    )
 
 
 def register_team_mission_ready_scheduler(callback: Any) -> None:
@@ -1888,6 +1856,9 @@ def record_event(
     transient_stream = bool(
         not worker_process and _runtime_streams.is_transient_stream_event(frame)
     )
+    transient_platform = bool(
+        not worker_process and _runtime_event_protocol.is_transient_platform_event(frame)
+    )
     if transient_stream:
         persist = False
         _runtime_event_protocol.mark_transient(frame, params)
@@ -1896,6 +1867,9 @@ def record_event(
             db=db,
             checkpoint_required=not bool(team_mission_binding),
         )
+    elif transient_platform:
+        persist = False
+        _runtime_event_protocol.mark_transient(frame, params)
     elif _flush_streams and not worker_process and stable and run_id:
         _persist_stream_checkpoints(
             conversation_session_id=stable,
@@ -2655,6 +2629,7 @@ def subscribe_session(
     run_id: str = "",
     limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
+    current_gateway_instance_id: str = "",
 ) -> list[dict[str, Any]]:
     _subscription_id, events = subscribe_session_with_id(
         conversation_session_id=conversation_session_id,
@@ -2665,6 +2640,7 @@ def subscribe_session(
         run_id=run_id,
         limit=limit,
         db=db,
+        current_gateway_instance_id=current_gateway_instance_id,
     )
     return events
 
@@ -2905,15 +2881,26 @@ def subscribe_session_with_id(
     limit: int = _MAX_EVENTS_PER_SESSION,
     db: Any = None,
     subscription_id: str = "",
+    current_gateway_instance_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     stable = str(conversation_session_id or "").strip()
     if not stable:
         return "", []
     scope = str(runtime_scope_key or "").strip()
     normalized_run_id = str(run_id or "").strip()
+    # A pending interaction is meaningful only while its owner run is active.
+    # Recover dead owners before taking the active-run snapshot so a gateway
+    # restart cannot resurrect an approval/clarify card whose blocking caller
+    # no longer exists.  Transcript replay remains independent of this filter.
+    if db is not None:
+        _recover_orphaned_active_runs(
+            db,
+            current_gateway_instance_id=current_gateway_instance_id,
+        )
+    interaction_active_run_ids = _active_run_ids_for_session(stable, db=db)
     with _lock:
         normalized_subscription_id = str(subscription_id or uuid.uuid4().hex).strip()
-        active_run_ids = _active_run_ids_for_session(stable, db=db) if active_only else set()
+        active_run_ids = set(interaction_active_run_ids) if active_only else set()
         if transport is not None:
             duplicate_subscription_ids = {
                 sub_id
@@ -3006,7 +2993,7 @@ def subscribe_session_with_id(
         stable,
         runtime_scope_key=scope,
         run_id=normalized_run_id,
-        active_run_ids=active_run_ids if active_only else None,
+        active_run_ids=interaction_active_run_ids,
     ) if db is not None else []
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)

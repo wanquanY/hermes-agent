@@ -35,13 +35,16 @@ def server(tmp_path):
         "hermes_state": MagicMock(),
     }):
         import importlib
-        mod = importlib.import_module("tui_gateway.server")
+        # The gateway is a long-lived module whose extracted method modules
+        # bind back to the active server instance. Reload at fixture setup,
+        # while this test's Hermes home and dependency doubles are installed,
+        # so test order cannot leave handlers bound to the previous fixture.
+        mod = importlib.reload(importlib.import_module("tui_gateway.server"))
         yield mod
         mod._sessions.clear()
         mod._pending.clear()
         mod._answers.clear()
         mod._methods.clear()
-        importlib.reload(mod)
 
 
 @pytest.fixture()

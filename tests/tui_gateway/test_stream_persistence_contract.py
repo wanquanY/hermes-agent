@@ -75,6 +75,31 @@ def test_primary_chat_streams_are_transient_until_full_terminal_message(
     db.close()
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    ["agent.terminal.output", "terminal.close", "terminal.read.request"],
+)
+def test_renderer_platform_events_never_enter_conversation_ledger(tmp_path, event_type):
+    db = open_cli_session_store(tmp_path / "platform-events.db")
+    frame = {
+        "type": event_type,
+        "conversation_session_id": "session-platform",
+        "session_id": "runtime-platform",
+        "run_id": "run-platform",
+        "turn_id": "turn-platform",
+        "runtime_scope_key": "profile:agent-default",
+        "seq": 91,
+        "payload": {"process_id": "proc-1", "chunk": "tick\n", "request_id": "req-1"},
+    }
+
+    run_control.record_event(frame, db=db)
+
+    assert frame["transient"] is True
+    assert "seq" not in frame
+    assert db.runs.list_events("session-platform") == []
+    db.close()
+
+
 def test_transient_source_seq_never_advances_the_durable_subscription_cursor(tmp_path):
     class Transport:
         def __init__(self):
