@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 from types import SimpleNamespace
 
 from tui_gateway import server as _server  # noqa: F401 - initialize composition root first.
 from tui_gateway.core import session_config
+from tui_gateway.methods import prompt_respond
 
 
 def test_persisted_runtime_reads_session_component(monkeypatch):
@@ -81,3 +83,65 @@ def test_set_session_cwd_uses_session_component(monkeypatch, tmp_path):
 
     assert result == str(tmp_path)
     assert updated == [("session-1", str(tmp_path))]
+
+
+def test_inprocess_interaction_registers_owner_identity_before_emit(monkeypatch):
+    registered: list[dict] = []
+    registry = SimpleNamespace(register=lambda **kwargs: registered.append(kwargs))
+    monkeypatch.setattr(prompt_respond, "_pending_registry", lambda: registry)
+    monkeypatch.setattr(session_config, "_sessions_lock", threading.RLock())
+    monkeypatch.setattr(session_config, "_sessions", {
+        "runtime-1": {
+            "session_key": "conversation-1",
+            "active_run_id": "run-1",
+            "active_turn_id": "turn-1",
+            "runtime_scope_key": "profile:agent-1",
+        },
+    })
+
+    result = session_config._register_pending_interaction(
+        "clarify.request",
+        "runtime-1",
+        {"question": "Choose", "choices": ["A", "B"]},
+        "request-1",
+    )
+
+    assert result is registry
+    assert registered == [{
+        "request_id": "request-1",
+        "kind": "clarify",
+        "conversation_id": "runtime-1",
+        "session_key": "conversation-1",
+        "scope_key": "profile:agent-1",
+        "request_payload": {
+            "question": "Choose",
+            "choices": ["A", "B"],
+            "run_id": "run-1",
+            "turn_id": "turn-1",
+            "participant_id": "agent",
+            "activity_id": "chat:conversation-1",
+            "activity_kind": "chat",
+            "runtime_scope_key": "profile:agent-1",
+        },
+    }]
+
+
+def test_inprocess_interaction_timeout_publishes_expired_lifecycle(monkeypatch):
+    expired: list[str] = []
+    registry = SimpleNamespace(mark_expired=lambda request_id: expired.append(request_id))
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        session_config,
+        "_register_pending_interaction",
+        lambda _event, _sid, _payload, _request_id: registry,
+    )
+    monkeypatch.setattr(
+        session_config,
+        "_emit",
+        lambda event, sid, payload: emitted.append((event, sid, dict(payload))),
+    )
+    monkeypatch.setattr(session_config, "_project_block_state", lambda *_args, **_kwargs: None)
+
+    assert session_config._block("sudo.request", "runtime-1", {}, timeout=0) == ""
+    assert emitted[0][0:2] == ("sudo.request", "runtime-1")
+    assert expired == [emitted[0][2]["request_id"]]

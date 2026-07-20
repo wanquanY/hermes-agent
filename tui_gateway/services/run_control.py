@@ -46,6 +46,7 @@ from tui_gateway.services.run_control_events import (
     terminal_delivery_identity as _terminal_delivery_identity,
 )
 from tui_gateway.services.run_events import list_runtime_events
+from tui_gateway.services.interaction_registry import pending_interaction_replay_frames
 from tui_gateway.transport import Transport
 
 if TYPE_CHECKING:
@@ -3000,15 +3001,27 @@ def subscribe_session_with_id(
         active_run_ids=active_run_ids if active_only else None,
         db=db,
     )
+    interaction_replay_snapshots = pending_interaction_replay_frames(
+        db,
+        stable,
+        runtime_scope_key=scope,
+        run_id=normalized_run_id,
+        active_run_ids=active_run_ids if active_only else None,
+    ) if db is not None else []
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if subscription is not None:
             subscription["last_seq"] = _max_event_seq(events, after_seq)
     if after_seq <= 0:
-        return normalized_subscription_id, [*events, *replay_snapshots]
+        return normalized_subscription_id, [
+            *events,
+            *replay_snapshots,
+            *interaction_replay_snapshots,
+        ]
     return normalized_subscription_id, [
         *[event for event in events if int(event.get("seq") or 0) > after_seq],
         *replay_snapshots,
+        *interaction_replay_snapshots,
     ]
 
 

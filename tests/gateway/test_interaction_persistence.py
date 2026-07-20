@@ -8,6 +8,7 @@ import pytest
 from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services.interaction_registry import pending_interactions
 from tui_gateway.services.interaction_registry import persist_interaction_event
+from tui_gateway.services import run_control
 from hermes_agent.orchestration.worker_frame_router import PendingEntry
 
 
@@ -136,6 +137,85 @@ def test_pending_interactions_recovery_excludes_resolved_and_expired(tmp_path: P
             "seq": 1,
         }
     ]
+
+
+def test_pending_interaction_replays_after_cursor_with_render_identity_and_no_secret_values(
+    tmp_path: Path,
+) -> None:
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create("conversation-session-1", "hermes")
+    entry = PendingEntry(
+        request_id="req-render-ready",
+        kind="clarify",
+        conversation_id="runtime-session-1",
+        session_key="conversation-session-1",
+        scope_key="profile:agent-default",
+        state="pending",
+        request_payload={
+            "question": "Choose an environment",
+            "choices": ["staging", "production", "staging"],
+            "run_id": "run-waiting-1",
+            "turn_id": "turn-waiting-1",
+            "participant_id": "agent:profile-default",
+            "activity_id": "chat:conversation-session-1",
+            "activity_kind": "chat",
+            "runtime_scope_key": "profile:agent-default",
+            "value": "must-not-persist",
+            "password": "must-not-persist",
+            "command": "must-not-persist",
+            "metadata": {"token": "must-not-persist"},
+        },
+    )
+    saved = persist_interaction_event(db, "interaction.requested", entry)
+
+    recovered = pending_interactions(db, "conversation-session-1")
+    assert recovered[0]["request"] == {
+        "question": "Choose an environment",
+        "choices": ["staging", "production"],
+        "run_id": "run-waiting-1",
+        "turn_id": "turn-waiting-1",
+        "participant_id": "agent:profile-default",
+        "activity_id": "chat:conversation-session-1",
+        "activity_kind": "chat",
+        "runtime_scope_key": "profile:agent-default",
+    }
+
+    _subscription_id, replay = run_control.subscribe_session_with_id(
+        conversation_session_id="conversation-session-1",
+        transport=None,
+        after_seq=int(saved["seq"]),
+        db=db,
+    )
+
+    assert len(replay) == 1
+    assert replay[0] == {
+        "type": "interaction.requested",
+        "conversation_session_id": "conversation-session-1",
+        "session_id": "conversation-session-1",
+        "run_id": "run-waiting-1",
+        "turn_id": "turn-waiting-1",
+        "participant_id": "agent:profile-default",
+        "runtime_scope_key": "profile:agent-default",
+        "transient": True,
+        "source_seq": int(saved["seq"]),
+        "runtime_source_seq": int(saved["seq"]),
+        "payload": {
+            "question": "Choose an environment",
+            "choices": ["staging", "production"],
+            "run_id": "run-waiting-1",
+            "turn_id": "turn-waiting-1",
+            "participant_id": "agent:profile-default",
+            "activity_id": "chat:conversation-session-1",
+            "activity_kind": "chat",
+            "runtime_scope_key": "profile:agent-default",
+            "request_id": "req-render-ready",
+            "kind": "clarify",
+            "status": "pending",
+            "source_event_type": "clarify.request",
+            "replay_snapshot": True,
+        },
+    }
+    db.close()
 
 
 def test_pending_interactions_recovery_uses_run_component(tmp_path: Path, monkeypatch) -> None:

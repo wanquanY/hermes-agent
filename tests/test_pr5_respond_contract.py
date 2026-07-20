@@ -169,6 +169,20 @@ class TestPendingRegistryMarkResolved:
 
 
 class TestPendingRegistryExpiry:
+    def test_mark_expired_publishes_one_terminal_transition(self):
+        events = []
+        reg = PendingRegistry(
+            publish_event=lambda event_type, entry: events.append((event_type, entry.state)),
+        )
+        reg.register(request_id="rid-1", kind="clarify")
+
+        assert reg.mark_expired("rid-1") is True
+        assert reg.mark_expired("rid-1") is False
+        assert events == [
+            ("interaction.requested", "pending"),
+            ("interaction.expired", "expired"),
+        ]
+
     def test_lazy_expiry_on_lookup(self):
         clock = [1000.0]
         reg = PendingRegistry(ttl_seconds=10, clock=lambda: clock[0])
@@ -661,6 +675,56 @@ class TestInteractionEvents:
         # The respond triggers a registry lookup which flips to expired
         event_types = [e[0] for e in events]
         assert "interaction.expired" in event_types
+
+    def test_inprocess_terminal_transition_is_published_without_response_value(
+        self,
+        monkeypatch,
+    ):
+        from tui_gateway.methods import prompt_respond
+        from tui_gateway.services import interaction_registry
+
+        emitted = []
+        monkeypatch.setattr(prompt_respond, "_db_for_stable_session", lambda _stable: object())
+        monkeypatch.setattr(
+            interaction_registry,
+            "persist_interaction_event",
+            lambda _db, _event_type, _entry: {"seq": 1},
+        )
+        monkeypatch.setattr(
+            prompt_respond,
+            "_emit",
+            lambda event_type, sid, payload: emitted.append((event_type, sid, payload)),
+        )
+        entry = PendingEntry(
+            request_id="rid-secret",
+            kind="secret",
+            conversation_id="runtime-1",
+            session_key="conversation-1",
+            state="resolved",
+            choice="must-not-publish",
+            request_payload={
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "profile:agent-1",
+                "value": "must-not-publish",
+            },
+        )
+
+        prompt_respond._publish_interaction_event("interaction.resolved", entry)
+
+        assert emitted == [(
+            "interaction.resolved",
+            "runtime-1",
+            {
+                "request_id": "rid-secret",
+                "kind": "secret",
+                "status": "resolved",
+                "source_event_type": "interaction.resolved",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "runtime_scope_key": "profile:agent-1",
+            },
+        )]
 
 
 # =========================================================================

@@ -18,6 +18,55 @@ PUBLIC_TO_INTERNAL_EVENT_TYPE = {
     InteractionFrameType.EXPIRED.value: InternalRunEventType.INTERACTION_EXPIRED.value,
 }
 
+_INTERACTION_KINDS = frozenset({"approval", "clarify", "secret", "sudo"})
+_REQUEST_TEXT_FIELDS = (
+    "prompt",
+    "question",
+    "description",
+    "env_var",
+    "expires_at",
+    "run_id",
+    "turn_id",
+    "participant_id",
+    "activity_id",
+    "activity_kind",
+    "runtime_scope_key",
+)
+
+
+def _safe_request_payload(kind: str, value: Any) -> dict[str, Any]:
+    """Keep only fields required to render and address a recovered prompt.
+
+    Response values, sudo passwords, secret values, arbitrary metadata, and
+    executable command text never enter the durable interaction projection.
+    """
+    source = value if isinstance(value, dict) else {}
+    result = {
+        field: str(source.get(field) or "").strip()
+        for field in _REQUEST_TEXT_FIELDS
+        if str(source.get(field) or "").strip()
+    }
+    choices = source.get("choices")
+    if kind == "clarify" and isinstance(choices, list):
+        normalized = [str(item or "").strip() for item in choices]
+        result["choices"] = list(dict.fromkeys(item for item in normalized if item))
+    raw_context = source.get("run_context")
+    if isinstance(raw_context, dict):
+        context = {
+            key: str(raw_context.get(key) or "").strip()
+            for key in (
+                "participant_id",
+                "activity_id",
+                "activity_kind",
+                "execution_scope_key",
+                "runtime_scope_key",
+            )
+            if str(raw_context.get(key) or "").strip()
+        }
+        if context:
+            result["run_context"] = context
+    return result
+
 
 class InteractionRegistry:
     """Durable interaction lifecycle registry.
@@ -69,8 +118,16 @@ class InteractionRegistry:
             "state": status,
             "anchor_seq": anchor_seq,
         }
-        if status == "resolved":
-            payload["choice"] = getattr(entry, "choice", None)
+        if status == "pending":
+            request = _safe_request_payload(
+                kind,
+                getattr(entry, "request_payload", None),
+            )
+            if request:
+                payload["request"] = request
+        if status == "resolved" and kind == "approval":
+            choice = str(getattr(entry, "choice", "") or "").strip().lower()
+            payload["decision"] = "deny" if choice == "deny" else "approved"
 
         frame = {
             "type": internal_type,
@@ -138,6 +195,11 @@ class InteractionRegistry:
                 "status": status,
                 "anchor_seq": int(payload.get("anchor_seq") or 0),
                 "seq": int(event.get("seq") or 0),
+                **(
+                    {"request": dict(payload.get("request"))}
+                    if isinstance(payload.get("request"), dict)
+                    else {}
+                ),
             }
         return [
             value
@@ -159,6 +221,63 @@ def find_interaction_anchor_seq(db: Any, session_id: str, request_id: str) -> in
 
 def pending_interactions(db: Any, session_id: str) -> list[dict[str, Any]]:
     return InteractionRegistry(db).list_pending(session_id)
+
+
+def pending_interaction_replay_frames(
+    db: Any,
+    session_id: str,
+    *,
+    runtime_scope_key: str = "",
+    run_id: str = "",
+    active_run_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Project durable pending records into transient replay snapshots.
+
+    The internal ledger remains the lifecycle source of truth. Subscribers get
+    a render-ready, non-cursor-bearing frame on every reconnect so no second
+    frontend pending store or guessed identity is required.
+    """
+    stable = str(session_id or "").strip()
+    scope = str(runtime_scope_key or "").strip()
+    selected_run = str(run_id or "").strip()
+    frames: list[dict[str, Any]] = []
+    for item in pending_interactions(db, stable):
+        kind = str(item.get("kind") or "").strip()
+        request_id = str(item.get("request_id") or "").strip()
+        request = item.get("request") if isinstance(item.get("request"), dict) else {}
+        owner_run_id = str(request.get("run_id") or "").strip()
+        owner_scope = str(request.get("runtime_scope_key") or scope or stable).strip()
+        if kind not in _INTERACTION_KINDS or not request_id or not owner_run_id:
+            continue
+        if scope and owner_scope != scope:
+            continue
+        if selected_run and owner_run_id != selected_run:
+            continue
+        if active_run_ids is not None and owner_run_id not in active_run_ids:
+            continue
+        source_seq = max(1, int(item.get("seq") or item.get("anchor_seq") or 1))
+        payload = {
+            **request,
+            "request_id": request_id,
+            "kind": kind,
+            "status": "pending",
+            "source_event_type": f"{kind}.request",
+            "replay_snapshot": True,
+        }
+        frames.append({
+            "type": "interaction.requested",
+            "conversation_session_id": stable,
+            "session_id": stable,
+            "run_id": owner_run_id,
+            "turn_id": str(request.get("turn_id") or "").strip(),
+            "participant_id": str(request.get("participant_id") or "agent").strip(),
+            "runtime_scope_key": owner_scope,
+            "transient": True,
+            "source_seq": source_seq,
+            "runtime_source_seq": source_seq,
+            "payload": payload,
+        })
+    return frames
 
 
 def _status_for_internal_event(internal_type: str, entry_state: Any) -> str:

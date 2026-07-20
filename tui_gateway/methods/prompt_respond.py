@@ -50,7 +50,7 @@ def _pending_registry():
 
 
 def _publish_interaction_event(event_type: str, entry: Any) -> None:
-    """Persist interaction lifecycle transitions outside the canonical stream."""
+    """Persist lifecycle truth and publish terminal transitions to subscribers."""
     from tui_gateway.services.interaction_registry import persist_interaction_event
 
     stable = str(getattr(entry, "session_key", "") or getattr(entry, "conversation_id", "") or "").strip()
@@ -62,6 +62,37 @@ def _publish_interaction_event(event_type: str, entry: Any) -> None:
         raise RuntimeError(
             f"interaction persistence failed type={event_type} request_id={getattr(entry, 'request_id', '')}"
         )
+    if event_type == "interaction.requested":
+        return
+    execution_session_id = str(getattr(entry, "conversation_id", "") or "").strip()
+    if not execution_session_id:
+        return
+    request = getattr(entry, "request_payload", None)
+    request = request if isinstance(request, dict) else {}
+    kind = str(getattr(entry, "kind", "") or "").strip()
+    status = "resolved" if event_type == "interaction.resolved" else "expired"
+    payload = {
+        "request_id": str(getattr(entry, "request_id", "") or "").strip(),
+        "kind": kind,
+        "status": status,
+        "source_event_type": event_type,
+        **{
+            key: request[key]
+            for key in (
+                "run_id",
+                "turn_id",
+                "participant_id",
+                "activity_id",
+                "activity_kind",
+                "runtime_scope_key",
+            )
+            if request.get(key)
+        },
+    }
+    if kind == "approval" and status == "resolved":
+        choice = str(getattr(entry, "choice", "") or "").strip().lower()
+        payload["decision"] = "deny" if choice == "deny" else "approved"
+    _emit(event_type, execution_session_id, payload)
 
 
 def has_pending_prompt(request_id: str) -> bool:
@@ -153,9 +184,8 @@ def _respond(rid, params, key):
         sid = entry[0] if isinstance(entry, tuple) else ""
         ev = entry[1] if isinstance(entry, tuple) else entry
 
-    # Lazy registration: _register_inprocess_pending only wrote _pending,
-    # not the registry. Register now so the TTL/expiry check fires on the
-    # next lookup, and a subsequent respond returns 4409.
+    # Compatibility path for legacy callers/tests that populated only the
+    # unblock dictionary. Production in-process prompts register before emit.
     if known is None:
         reg.register(
             request_id=r, kind=_key_to_kind(key), conversation_id=sid,

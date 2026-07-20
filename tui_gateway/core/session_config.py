@@ -125,21 +125,97 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
+_INTERACTION_KIND_BY_EVENT = {
+    "approval.request": "approval",
+    "clarify.request": "clarify",
+    "secret.request": "secret",
+    "sudo.request": "sudo",
+}
+
+
+def _register_pending_interaction(event: str, sid: str, payload: dict, request_id: str):
+    """Persist in-process prompt ownership before it becomes visible.
+
+    Scoped workers register the same lifecycle in ``WorkerFrameRouter``. This
+    keeps legacy in-process runs on the identical owner contract so reconnects
+    recover pending cards without relying on renderer memory.
+    """
+    kind = _INTERACTION_KIND_BY_EVENT.get(str(event or "").strip())
+    if not kind:
+        return None
+    from tui_gateway.methods.prompt_respond import _pending_registry
+
+    with _sessions_lock:
+        session = dict(_sessions.get(sid) or {})
+    stable = str(session.get("session_key") or sid or "").strip()
+    run_context = session.get("run_context")
+    run_id = str(payload.get("run_id") or session.get("active_run_id") or "").strip()
+    turn_id = str(payload.get("turn_id") or session.get("active_turn_id") or "").strip()
+    scope = str(
+        payload.get("runtime_scope_key")
+        or session.get("active_runtime_scope_key")
+        or session.get("runtime_scope_key")
+        or stable
+    ).strip()
+    activity_id = str(
+        payload.get("activity_id")
+        or payload.get("activityId")
+        or getattr(run_context, "activity_id", "")
+        or (f"chat:{stable}" if stable else "")
+    ).strip()
+    participant_id = str(
+        payload.get("participant_id")
+        or payload.get("participantId")
+        or getattr(run_context, "participant_id", "")
+        or "agent"
+    ).strip()
+    registry = _pending_registry()
+    registry.register(
+        request_id=request_id,
+        kind=kind,
+        conversation_id=sid,
+        session_key=stable,
+        scope_key=scope,
+        request_payload={
+            **payload,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "participant_id": participant_id,
+            "activity_id": activity_id,
+            "activity_kind": str(
+                payload.get("activity_kind")
+                or getattr(run_context, "activity_kind", "")
+                or "chat"
+            ).strip(),
+            "runtime_scope_key": scope,
+        },
+    )
+    return registry
+
+
 def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
     with _prompt_lock:
         _pending[rid] = (sid, ev)
         payload["request_id"] = rid
+    try:
+        registry = _register_pending_interaction(event, sid, payload, rid)
+    except Exception:
+        with _prompt_lock:
+            _pending.pop(rid, None)
+        raise
     _emit(event, sid, payload)
     # Project pending state AFTER emit so the FE receives the event before
     # the sidebar flips — preserves the "popup shows, then spinner becomes
     # waiting badge" intuition for users watching both views.
     _project_block_state(sid, present=True)
     try:
-        ev.wait(timeout=timeout)
+        answered = ev.wait(timeout=timeout)
     finally:
         _project_block_state(sid, present=False)
+    if not answered and registry is not None:
+        registry.mark_expired(rid)
     with _prompt_lock:
         _pending.pop(rid, None)
         return _answers.pop(rid, "")
@@ -223,13 +299,24 @@ def _clear_pending(sid: str | None = None) -> None:
     None, every pending prompt is released (used during shutdown).
     """
     cleared_sids: set[str] = set()
+    cleared_request_ids: list[str] = []
     with _prompt_lock:
         for rid, (owner_sid, ev) in list(_pending.items()):
             if sid is None or owner_sid == sid:
                 _answers[rid] = ""
                 ev.set()
+                cleared_request_ids.append(rid)
                 if owner_sid:
                     cleared_sids.add(owner_sid)
+    if cleared_request_ids:
+        try:
+            from tui_gateway.methods.prompt_respond import _pending_registry
+
+            registry = _pending_registry()
+            for rid in cleared_request_ids:
+                registry.mark_expired(rid)
+        except Exception:
+            logger.warning("failed to expire cleared interaction requests", exc_info=True)
     # Mirror the unblock into session_index so the sidebar doesn't keep
     # waiting_approval=1 after a session.interrupt cleared every pending
     # prompt under us. The _block(...) finally-clause covers the normal

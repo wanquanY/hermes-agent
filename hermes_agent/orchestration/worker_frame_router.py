@@ -164,6 +164,7 @@ class PendingEntry:
     created_at: float = 0.0
     resolved_at: float = 0.0
     choice: Any = None
+    request_payload: dict[str, Any] | None = None
 
 
 class PendingRegistry:
@@ -211,6 +212,7 @@ class PendingRegistry:
         session_key: str = "",
         scope_key: str = "",
         anchor_seq: int = 0,
+        request_payload: dict[str, Any] | None = None,
     ) -> PendingEntry:
         """Register a new pending interactive request.
 
@@ -233,6 +235,7 @@ class PendingRegistry:
             anchor_seq=max(0, int(anchor_seq or 0)),
             state="pending",
             created_at=now,
+            request_payload=dict(request_payload or {}),
         )
         self._emit("interaction.requested", entry)
         with self._lock:
@@ -287,6 +290,18 @@ class PendingRegistry:
             entry.choice = resolved.choice
         return True
 
+    def mark_expired(self, request_id: str) -> bool:
+        """Expire a pending entry and publish the terminal lifecycle event."""
+        rid = str(request_id or "").strip()
+        if not rid:
+            return False
+        with self._lock:
+            entry = self._entries.get(rid)
+            if entry is None or entry.state != "pending":
+                return False
+            self._expire_locked(entry)
+        return True
+
     def is_pending(self, request_id: str) -> bool:
         """True if the entry exists and is in the pending state."""
         entry = self.lookup(request_id)
@@ -323,6 +338,9 @@ class PendingRegistry:
             return
         if (self._clock() - entry.created_at) <= self._ttl:
             return
+        self._expire_locked(entry)
+
+    def _expire_locked(self, entry: PendingEntry) -> None:
         expired = replace(entry, state="expired", resolved_at=self._clock())
         self._emit("interaction.expired", expired)
         entry.state = expired.state
@@ -585,6 +603,32 @@ class WorkerFrameRouter:
             state="pending" if status == "requested" else status,
             anchor_seq=anchor_seq,
             choice=payload.get("choice"),
+            request_payload={
+                **payload,
+                "run_id": str(params.get("run_id") or payload.get("run_id") or payload.get("runId") or ""),
+                "turn_id": str(params.get("turn_id") or payload.get("turn_id") or payload.get("turnId") or ""),
+                "participant_id": str(
+                    params.get("participant_id")
+                    or payload.get("participant_id")
+                    or payload.get("participantId")
+                    or getattr(run_context, "participant_id", "")
+                    or ""
+                ),
+                "activity_id": str(
+                    params.get("activity_id")
+                    or payload.get("activity_id")
+                    or payload.get("activityId")
+                    or getattr(run_context, "activity_id", "")
+                    or ""
+                ),
+                "activity_kind": str(
+                    payload.get("activity_kind")
+                    or payload.get("activityKind")
+                    or getattr(run_context, "activity_kind", "")
+                    or "chat"
+                ),
+                "runtime_scope_key": runtime_scope_key,
+            } if status == "requested" else None,
         )
         if self._persist_interaction_event is not None:
             self._persist_interaction_event(f"interaction.{status}", entry)
