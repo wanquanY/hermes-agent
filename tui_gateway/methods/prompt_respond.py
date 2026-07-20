@@ -205,6 +205,21 @@ def _respond(rid, params, key):
     return _ok(rid, {"status": "resolved", "resolved": 1})
 
 
+def _respond_ephemeral(rid, params, key):
+    """Resolve a renderer-owned request without creating durable interaction state."""
+    r = str(params.get("request_id", "") or "").strip()
+    if not r:
+        return _err(rid, 4404, "unknown_request")
+    with _prompt_lock:
+        entry = _pending.get(r)
+        if not entry:
+            return _err(rid, 4404, "unknown_request")
+        ev = entry[1] if isinstance(entry, tuple) else entry
+        _answers[r] = params.get(key, "")
+        ev.set()
+    return _ok(rid, {"status": "resolved", "resolved": 1})
+
+
 def _respond_gateway_clarify(rid, params: dict):
     """Three-state respond for gateway clarify requests.
 
@@ -326,6 +341,11 @@ def _(rid, params: dict) -> dict:
 @method("sudo.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "password")
+
+
+@method("terminal.read.respond")
+def _(rid, params: dict) -> dict:
+    return _respond_ephemeral(rid, params, "text")
 
 
 @method("secret.respond")

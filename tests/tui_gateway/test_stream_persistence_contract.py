@@ -96,6 +96,7 @@ def test_renderer_platform_events_never_enter_conversation_ledger(tmp_path, even
 
     assert frame["transient"] is True
     assert "seq" not in frame
+    assert frame["event_domain"] == "terminal"
     assert db.runs.list_events("session-platform") == []
     db.close()
 

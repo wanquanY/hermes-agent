@@ -209,11 +209,13 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     # Project pending state AFTER emit so the FE receives the event before
     # the sidebar flips — preserves the "popup shows, then spinner becomes
     # waiting badge" intuition for users watching both views.
-    _project_block_state(sid, present=True)
+    if registry is not None:
+        _project_block_state(sid, present=True)
     try:
         answered = ev.wait(timeout=timeout)
     finally:
-        _project_block_state(sid, present=False)
+        if registry is not None:
+            _project_block_state(sid, present=False)
     if not answered and registry is not None:
         registry.mark_expired(rid)
     with _prompt_lock:

@@ -614,6 +614,16 @@ class GatewayToolEventBridge:
                 sid, str(kind), None if text is None else str(text)
             ),
             "clarify_callback": lambda q, c: block("clarify.request", sid, {"question": q, "choices": c}),
+            "read_terminal_callback": lambda start=None, count=None: block(
+                "terminal.read.request",
+                sid,
+                {
+                    key: value
+                    for key, value in (("start", start), ("count", count))
+                    if value is not None
+                },
+                timeout=30,
+            ),
         }
 
 

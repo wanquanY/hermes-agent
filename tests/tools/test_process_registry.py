@@ -1561,3 +1561,85 @@ class TestSigkillEscalation:
         monkeypatch.setattr(cfg_mod, "read_raw_config",
                             lambda: {"terminal": {"daemon_term_grace_seconds": -5}})
         assert ProcessRegistry._daemon_term_grace_seconds() == 0.0
+
+
+def test_request_close_terminal_invokes_sink_without_killing(registry):
+    session = _make_session(sid="proc_close_live")
+    registry._running[session.id] = session
+    calls = []
+    registry.on_close = lambda process_session, process_id: calls.append(
+        (process_session, process_id)
+    )
+
+    result = registry.request_close_terminal(session.id)
+
+    assert result["status"] == "ok"
+    assert calls == [(session, session.id)]
+    assert session.id in registry._running
+
+
+def test_request_close_terminal_requires_desktop_sink(registry):
+    result = registry.request_close_terminal("proc_missing_sink")
+    assert result["status"] == "error"
+    assert "desktop" in result["error"].lower()
+
+
+def test_close_terminal_tool_routes_to_registry(monkeypatch):
+    import tools.close_terminal_tool as close_tool
+
+    seen = {}
+    monkeypatch.setattr(
+        close_tool.process_registry,
+        "request_close_terminal",
+        lambda process_id: seen.setdefault("result", {"status": "ok", "closed": process_id}),
+    )
+
+    result = json.loads(close_tool.close_terminal_tool("proc_abc"))
+    assert result["closed"] == "proc_abc"
+    assert seen["result"]["closed"] == "proc_abc"
+
+
+def test_read_terminal_tool_passes_window_to_callback():
+    from tools.read_terminal_tool import read_terminal_tool
+
+    seen = {}
+
+    def callback(**window):
+        seen.update(window)
+        return json.dumps({"total_lines": 20, "start": 4, "end": 7, "text": "a\nb\nc"})
+
+    result = json.loads(read_terminal_tool(start_line=4, count=3, callback=callback))
+    assert seen == {"start": 4, "count": 3}
+    assert result["text"] == "a\nb\nc"
+
+
+def test_reader_loop_streams_incremental_chunks(registry, monkeypatch):
+    class FakeBuffer:
+        def __init__(self):
+            self.chunks = [b"tick 1\n", b"tick 2\n", b""]
+
+        def read1(self, _size):
+            return self.chunks.pop(0)
+
+    class FakeStdout:
+        def __init__(self):
+            self.buffer = FakeBuffer()
+
+    class FakeProcess:
+        stdout = FakeStdout()
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    session = _make_session(sid="proc_reader_live")
+    session.process = FakeProcess()
+    emitted = []
+    registry.on_output = lambda _session, chunk: emitted.append(chunk)
+    monkeypatch.setattr(registry, "_check_watch_patterns", lambda *_args: None)
+    monkeypatch.setattr(registry, "_move_to_finished", lambda *_args: None)
+
+    registry._reader_loop(session)
+
+    assert emitted == ["tick 1\n", "tick 2\n"]
+    assert session.output_buffer == "tick 1\ntick 2\n"

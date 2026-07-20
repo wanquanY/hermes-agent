@@ -70,6 +70,11 @@ _CONTROL_PLANE_METHODS = frozenset(
         "team_mission.result.get",
         "team_mission.message.submit",
         "team_mission.node.history",
+        "terminal.session.close",
+        "terminal.session.list",
+        "terminal.session.open",
+        "terminal.session.resize",
+        "terminal.session.write",
     }
 )
 
@@ -111,6 +116,7 @@ _INTERACTIVE_RESPONSE_METHODS = frozenset(
         "clarify.respond",
         "secret.respond",
         "sudo.respond",
+        "terminal.read.respond",
     }
 )
 

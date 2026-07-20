@@ -15,6 +15,17 @@ TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
     }
 )
 
+TERMINAL_EVENT_DOMAIN = "terminal"
+
+
+def event_domain_for_type(event_type: str) -> str:
+    """Return the renderer side-channel domain for a gateway event type."""
+    return (
+        TERMINAL_EVENT_DOMAIN
+        if str(event_type or "").strip() in TRANSIENT_PLATFORM_EVENT_TYPES
+        else ""
+    )
+
 
 def is_transient_platform_event(frame: dict[str, Any]) -> bool:
     """Return whether a frame belongs to a renderer-owned side channel.
@@ -88,6 +99,9 @@ def mark_transient(
     candidates = (frame,) if params is None or params is frame else (frame, params)
     for candidate in candidates:
         candidate["transient"] = True
+        event_domain = event_domain_for_type(str(candidate.get("type") or ""))
+        if event_domain:
+            candidate["event_domain"] = event_domain
         candidate.pop("seq", None)
         payload = candidate.get("payload")
         if isinstance(payload, dict):
@@ -108,7 +122,9 @@ def _positive_int(value: Any) -> int:
 
 __all__ = [
     "RuntimeSourceSequencer",
+    "TERMINAL_EVENT_DOMAIN",
     "TRANSIENT_PLATFORM_EVENT_TYPES",
+    "event_domain_for_type",
     "is_transient_platform_event",
     "mark_transient",
     "reset_for_tests",

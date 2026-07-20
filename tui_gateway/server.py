@@ -57,6 +57,9 @@ from tui_gateway.services.profile_context import (
     profile_context_for_params as _profile_context_for_params,
 )
 from tui_gateway.services import run_control
+from tui_gateway.services.runtime_event_protocol import (
+    event_domain_for_type as _event_domain_for_type,
+)
 from tui_gateway.services.session_store import (
     db_unavailable_detail as _db_unavailable_detail,
     get_session_db_for_home as _get_session_db_for_home,
@@ -888,6 +891,9 @@ def write_json(obj: dict) -> bool:
 
 def _emit(event: str, sid: str, payload: dict | None = None):
     params = {"type": event, "session_id": sid}
+    event_domain = _event_domain_for_type(event)
+    if event_domain:
+        params["event_domain"] = event_domain
     event_payload = payload or {}
     conversation_session_id = ""
     run_id = ""
@@ -1901,3 +1907,12 @@ from tui_gateway.core.agent_session import (
 from tui_gateway.services.completions import fuzzy_cache as _fuzzy_cache
 
 _register_extracted_method_modules()
+
+from tui_gateway.services.agent_terminal_bridge import wire_agent_terminal_events
+
+wire_agent_terminal_events(
+    enabled=is_truthy_value(os.environ.get("HERMES_DESKTOP")),
+    sessions=_sessions,
+    sessions_lock=_sessions_lock,
+    emit=_emit,
+)
