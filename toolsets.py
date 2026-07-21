@@ -105,7 +105,12 @@ TOOLSETS = {
 
     "dovie_task_hub": {
         "description": "Internal conversation-scoped Dovie Task Hub read tools",
-        "tools": ["task_hub_search", "task_hub_get_details", "task_hub_list_my_tasks"],
+        "tools": [
+            "task_hub_search",
+            "task_hub_get_details",
+            "task_hub_list_my_tasks",
+            "task_hub_open_source",
+        ],
         "includes": []
     },
     

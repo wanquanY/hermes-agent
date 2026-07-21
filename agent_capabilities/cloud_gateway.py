@@ -15,6 +15,7 @@ _TASK_HUB_PATHS = {
     "task_hub_get_details": "/api/v1/agent-capabilities/task-hub/v1/details",
     "task_hub_list_my_tasks": "/api/v1/agent-capabilities/task-hub/v1/my-tasks",
     "task_hub_prepare_changes": "/api/v1/agent-capabilities/task-hub/v1/changes:prepare",
+    "task_hub_open_source": "/api/v1/agent-capabilities/task-hub/v1/source:open",
 }
 
 

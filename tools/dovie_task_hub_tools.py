@@ -147,3 +147,27 @@ registry.register(
     check_fn=lambda: capability_credentials.has_active(CAPABILITY),
     requires_env=[],
 )
+
+registry.register(
+    name="task_hub_open_source",
+    toolset="dovie_task_hub",
+    schema={
+        "name": "task_hub_open_source",
+        "description": (
+            "Request that Dovie open a Task Hub catalog item's original source "
+            "in the trusted embedded browser. Use only when the user asks to open it. "
+            "The source URL is intentionally never exposed to the model."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "catalog_item_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["catalog_item_id"],
+            "additionalProperties": False,
+        },
+    },
+    handler=lambda args, **kwargs: _invoke("task_hub_open_source", args, **kwargs),
+    check_fn=lambda: capability_credentials.has_active(CAPABILITY),
+    requires_env=[],
+)
