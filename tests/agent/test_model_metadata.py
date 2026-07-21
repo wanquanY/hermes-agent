@@ -26,6 +26,7 @@ from agent.model_metadata import (
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
+    estimate_request_tokens_rough,
     get_model_context_length,
     get_next_probe_tier,
     get_cached_context_length,
@@ -123,6 +124,56 @@ class TestEstimateMessagesTokensRough:
         assert result < 5000
 
 
+class TestEstimateRequestTokensRough:
+    def test_caches_tools_estimate(self):
+        import agent.model_metadata as model_metadata
+
+        model_metadata._TOOLS_TOKENS_CACHE.clear()
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        with patch(
+            "agent.model_metadata.json.dumps",
+            wraps=__import__("json").dumps,
+        ) as dumps:
+            estimate_request_tokens_rough(messages, tools=tools)
+            estimate_request_tokens_rough(messages, tools=tools)
+            assert dumps.call_count == 1
+
+    def test_tools_cache_is_bounded(self):
+        import agent.model_metadata as model_metadata
+
+        model_metadata._TOOLS_TOKENS_CACHE.clear()
+        cap = model_metadata._TOOLS_TOKENS_CACHE_MAX
+        held = []
+        for index in range(cap + 50):
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"tool_{index}",
+                        "description": "d",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+            held.append(tools)
+            model_metadata._estimate_tools_tokens_rough(tools)
+            assert len(model_metadata._TOOLS_TOKENS_CACHE) <= cap
+        assert len(model_metadata._TOOLS_TOKENS_CACHE) == cap
+
+
 # =========================================================================
 # Default context lengths
 # =========================================================================
@@ -136,7 +187,8 @@ class TestDefaultContextLengths:
             # API pricing (no long-context premium).  Older Claude 4.x and
             # 3.x models cap at 200k.
             if any(tag in key for tag in (
-                "4.6", "4-6", "4.7", "4-7", "4.8", "4-8", "fable"
+                "4.6", "4-6", "4.7", "4-7", "4.8", "4-8", "fable",
+                "sonnet-5",
             )):
                 assert value == 1000000, f"{key} should be 1000000"
             else:

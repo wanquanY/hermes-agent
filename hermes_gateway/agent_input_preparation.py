@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from agent.replay_cleanup import sanitize_replay_history
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,7 @@ class PreparedAgentInput:
     message: Any
     agent_history: list[dict[str, Any]]
     history_media_paths: set[str]
+    persist_user_message: Any = None
 
 
 class AgentInputPreparation:
@@ -30,6 +34,7 @@ class AgentInputPreparation:
         is_fresh_gateway_interruption: Callable[..., bool],
         auto_continue_freshness_window: Callable[[], float],
         consume_native_image_paths: Callable[[str | None], list[str]],
+        turn_context_notes: list[str] | None = None,
     ) -> None:
         self._runner = runner
         self._session_key = session_key
@@ -40,21 +45,32 @@ class AgentInputPreparation:
         self._is_fresh_gateway_interruption = is_fresh_gateway_interruption
         self._auto_continue_freshness_window = auto_continue_freshness_window
         self._consume_native_image_paths = consume_native_image_paths
+        self._turn_context_notes = list(turn_context_notes or [])
 
     def prepare(self, message: str) -> PreparedAgentInput:
-        agent_history = self._convert_history()
+        replay_history = sanitize_replay_history(self._history, now=time.time())
+        agent_history = self._convert_history(replay_history)
         history_media_paths = self._collect_history_media_paths(agent_history)
         prepared_message = self._apply_pending_notes(message, agent_history)
         run_message = self._build_run_message(prepared_message)
+        persist_user_message = (
+            message
+            if isinstance(run_message, str) and prepared_message != message
+            else None
+        )
         return PreparedAgentInput(
             message=run_message,
             agent_history=agent_history,
             history_media_paths=history_media_paths,
+            persist_user_message=persist_user_message,
         )
 
-    def _convert_history(self) -> list[dict[str, Any]]:
+    def _convert_history(
+        self,
+        source_history: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         agent_history: list[dict[str, Any]] = []
-        for msg in self._history:
+        for msg in self._history if source_history is None else source_history:
             role = msg.get("role")
             if not role or role in {"session_meta", "system"}:
                 continue
@@ -80,6 +96,8 @@ class AgentInputPreparation:
         message: str,
         agent_history: list[dict[str, Any]],
     ) -> str:
+        if self._turn_context_notes:
+            message = "\n\n".join([*self._turn_context_notes, message])
         message = self._prepend_pending_model_note(message)
         message = self._prepend_auto_continue_note(message, agent_history)
         return self._prepend_pending_skills_reload_note(message)

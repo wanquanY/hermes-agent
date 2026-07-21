@@ -199,8 +199,14 @@ TOOLSETS = {
             "image_url) — the active backend auto-routes. Configure via "
             "``hermes tools`` → Video Generation."
         ),
-        "tools": ["video_generate"],
+        "tools": ["video_generate", "xai_video_edit", "xai_video_extend"],
         "includes": []
+    },
+
+    "project": {
+        "description": "Desktop Projects — create and switch named workspaces",
+        "tools": ["project_list", "project_create", "project_switch"],
+        "includes": [],
     },
 
     "computer_use": {

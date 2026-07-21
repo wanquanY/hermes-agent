@@ -5,10 +5,96 @@ from unittest.mock import patch, MagicMock
 
 from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 from agent.context_compressor import (
+    COMPRESSED_SUMMARY_METADATA_KEY,
     ContextCompressor,
     HISTORICAL_TASK_HEADING,
     SUMMARY_PREFIX,
 )
+
+
+def test_summary_task_snapshot_is_grounded_to_latest_user_turn():
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = (
+        "## Historical Task Snapshot\n"
+        "User asked: 'invented stale task'\n\n"
+        "## Goal\nContinue."
+    )
+    with patch(
+        "agent.context_compressor.get_model_context_length",
+        return_value=100_000,
+    ):
+        instance = ContextCompressor(model="test", quiet_mode=True)
+    latest = "RUN_THE_REAL_CURRENT_TASK"
+
+    with patch(
+        "agent.context_compressor.call_llm",
+        return_value=response,
+    ):
+        summary = instance._generate_summary(
+            [
+                {"role": "user", "content": latest},
+                {"role": "assistant", "content": "working"},
+            ]
+        )
+
+    assert "invented stale task" not in summary
+    assert latest in summary
+    assert "deterministic, from compacted turns" in summary
+
+
+def test_task_grounding_skips_synthetic_scaffolding(compressor):
+    snapshot = compressor._latest_user_task_snapshot(
+        [
+            {"role": "user", "content": "fix the real login bug"},
+            {"role": "assistant", "content": "working"},
+            {
+                "role": "user",
+                "content": "[Your active task list was preserved across context compression]",
+                "_todo_snapshot_synthetic": True,
+            },
+        ]
+    )
+    assert snapshot is not None
+    assert "fix the real login bug" in snapshot
+    assert "task list was preserved" not in snapshot
+
+
+def test_grounding_keeps_following_sections_across_rewrites(compressor):
+    summary = (
+        f"{HISTORICAL_TASK_HEADING}\nUser asked: stale\n\n"
+        "## Historical Remaining Work\n- keep me\n\n"
+        "## Goal\nfinish"
+    )
+    turns = [{"role": "user", "content": "real ask"}]
+
+    first = compressor._ground_historical_task_snapshot(summary, turns)
+    second = compressor._ground_historical_task_snapshot(first, turns)
+
+    assert "## Historical Remaining Work\n- keep me" in second
+    assert "## Goal\nfinish" in second
+    assert second.count(HISTORICAL_TASK_HEADING) == 1
+
+
+def test_merged_tail_summary_is_detected_and_stripped():
+    from agent.context_compressor import (
+        _MERGED_PRIOR_CONTEXT_HEADER,
+        _MERGED_SUMMARY_DELIMITER,
+        _SUMMARY_END_MARKER,
+    )
+
+    merged = (
+        _MERGED_PRIOR_CONTEXT_HEADER
+        + "\nold tail content\n\n"
+        + _MERGED_SUMMARY_DELIMITER
+        + "\n\n"
+        + SUMMARY_PREFIX
+        + "\nTHE_SUMMARY_BODY\n\n"
+        + _SUMMARY_END_MARKER
+    )
+
+    assert ContextCompressor._is_context_summary_content(merged)
+    assert ContextCompressor._strip_summary_prefix(merged) == "THE_SUMMARY_BODY"
 
 
 @pytest.fixture()
@@ -113,6 +199,55 @@ class TestCompress:
         msgs = self._make_messages(4)  # protect_first=2 + protect_last=2 + 1 = 5 needed
         result = compressor.compress(msgs)
         assert result == msgs
+
+    def test_compress_strips_db_persisted_from_assembled_messages(
+        self,
+        compressor,
+    ):
+        msgs = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"m{i}",
+                "_db_persisted": True,
+            }
+            for i in range(10)
+        ]
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=RuntimeError("no provider"),
+        ):
+            result = compressor.compress(msgs)
+        assert len(result) < len(msgs)
+        assert all("_db_persisted" not in msg for msg in result)
+
+    def test_terminal_sweep_strips_marker_when_copy_site_leaks(
+        self,
+        compressor,
+    ):
+        import agent.context_compressor as context_compressor_module
+
+        msgs = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"m{i}",
+                "_db_persisted": True,
+            }
+            for i in range(10)
+        ]
+        with (
+            patch.object(
+                context_compressor_module,
+                "_fresh_compaction_message_copy",
+                lambda message: message.copy(),
+            ),
+            patch(
+                "agent.context_compressor.call_llm",
+                side_effect=RuntimeError("no provider"),
+            ),
+        ):
+            result = compressor.compress(msgs)
+        assert len(result) < len(msgs)
+        assert all("_db_persisted" not in msg for msg in result)
 
     def test_truncation_fallback_no_client(self, compressor):
         # Simulate "no summarizer available" explicitly. call_llm can otherwise
@@ -318,9 +453,9 @@ class TestNonStringContent:
 
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
-        # None content → empty string → standardized compaction handoff prefix added
-        assert summary is not None
-        assert summary == SUMMARY_PREFIX
+        # Empty provider output is a failed handoff, never a prefix-only
+        # summary that silently replaces the compacted turns.
+        assert summary is None
 
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
@@ -1477,7 +1612,7 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             result = c.compress(msgs)
         summary_msg = [
-            m for m in result if (m.get("content") or "").startswith(SUMMARY_PREFIX)
+            m for m in result if m.get(COMPRESSED_SUMMARY_METADATA_KEY)
         ]
         assert len(summary_msg) == 1
         assert summary_msg[0]["role"] == "user"
@@ -1510,7 +1645,7 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             result = c.compress(msgs)
         summary_msg = [
-            m for m in result if (m.get("content") or "").startswith(SUMMARY_PREFIX)
+            m for m in result if m.get(COMPRESSED_SUMMARY_METADATA_KEY)
         ]
         assert len(summary_msg) == 1
         assert summary_msg[0]["role"] == "assistant"
@@ -1624,7 +1759,11 @@ class TestCompressWithClient:
             if m.get("role") == "user" and isinstance(m.get("content"), list)
         )
         assert isinstance(merged_tail["content"], list)
-        assert "summary text" in merged_tail["content"][0]["text"]
+        assert any(
+            "summary text" in (block.get("text") or "")
+            for block in merged_tail["content"]
+            if isinstance(block, dict)
+        )
         assert any(
             isinstance(block, dict) and block.get("text") == "msg 6"
             for block in merged_tail["content"]

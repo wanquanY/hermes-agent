@@ -554,6 +554,56 @@ def test_run_conversation_codex_plain_text(monkeypatch):
     assert result["messages"][-1]["content"] == "OK"
 
 
+def test_run_conversation_crosses_both_llm_middleware_boundaries(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    setattr(agent, "_disable_streaming", True)
+    captured = {}
+    contexts = []
+
+    def request_middleware(request, **context):
+        contexts.append(("request", context))
+        replacement = dict(request)
+        replacement["instructions"] = (
+            str(request.get("instructions") or "") + "\nrequest-middleware"
+        )
+        return SimpleNamespace(
+            payload=replacement,
+            original_payload=request,
+            changed=True,
+            trace=[{"source": "test"}],
+        )
+
+    def execution_middleware(request, next_call, **context):
+        contexts.append(("execution", context))
+        assert "request-middleware" in request["instructions"]
+        replacement = dict(request)
+        replacement["instructions"] += "\nexecution-middleware"
+        return next_call(replacement)
+
+    def capture(api_kwargs):
+        captured.update(api_kwargs)
+        return _codex_message_response("OK")
+
+    monkeypatch.setattr(
+        "hermes_cli.middleware.apply_llm_request_middleware",
+        request_middleware,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.middleware.run_llm_execution_middleware",
+        execution_middleware,
+    )
+    monkeypatch.setattr(agent, "_interruptible_api_call", capture)
+
+    result = agent.run_conversation("Say OK")
+
+    assert result["completed"] is True
+    assert "request-middleware" in captured["instructions"]
+    assert "execution-middleware" in captured["instructions"]
+    assert [name for name, _context in contexts] == ["request", "execution"]
+    assert all(context["turn_id"] for _name, context in contexts)
+    assert all(context["api_request_id"] for _name, context in contexts)
+
+
 def test_run_conversation_codex_empty_output_with_output_text(monkeypatch):
     """Regression: empty response.output + valid output_text should succeed,
     not trigger retry/fallback. The validation stage must defer to
@@ -2176,3 +2226,65 @@ def test_run_conversation_codex_invalid_encrypted_content_without_replay_state_d
     assert all(not any(item.get("type") == "reasoning" for item in payload["input"]) for payload in request_payloads)
     assert agent._codex_reasoning_replay_enabled is True
     assert result["messages"][0].get("codex_reasoning_items") is None
+
+
+def test_run_conversation_compresses_mid_turn_before_next_request(monkeypatch):
+    """Large tool results are compacted before the next provider call."""
+    agent = _build_agent(monkeypatch)
+    agent.context_compressor.context_length = 20_000
+    agent.context_compressor.threshold_tokens = 20_000
+
+    responses = [
+        _codex_tool_call_response(),
+        _codex_message_response("Summary after compaction."),
+    ]
+    requests = []
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
+    )
+
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        api_call_count=0,
+    ):
+        del effective_task_id, api_call_count
+        for call in assistant_message.tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "x" * 80_000,
+                }
+            )
+
+    compress_calls = []
+
+    def _fake_compress_context(
+        messages,
+        system_message,
+        *,
+        approx_tokens=None,
+        task_id="default",
+        focus_topic=None,
+    ):
+        del messages, system_message, task_id, focus_topic
+        compress_calls.append(approx_tokens)
+        agent._last_compaction_in_place = True
+        return [
+            {"role": "user", "content": "[summary of prior tool-heavy work]"}
+        ], "You are Hermes."
+
+    monkeypatch.setattr(agent, "_execute_tool_calls", _fake_execute_tool_calls)
+    monkeypatch.setattr(agent, "_compress_context", _fake_compress_context)
+
+    result = agent.run_conversation("do a tool-heavy task")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "Summary after compaction."
+    assert len(compress_calls) == 1
+    assert compress_calls[0] >= 15_000
+    assert len(requests) == 2

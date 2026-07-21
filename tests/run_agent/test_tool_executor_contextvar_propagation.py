@@ -187,14 +187,24 @@ def test_run_agent_concurrent_executor_wraps_submit_with_copy_context():
         # Unfixed: executor.submit(_run_tool, ...) → first arg is a Name
         if isinstance(first, ast.Name) and first.id == "_run_tool":
             tool_submits.append(("unfixed", call))
-        # Fixed: executor.submit(ctx.run, _run_tool, ...) → first arg is
-        # ctx.run (Attribute), and _run_tool is the second arg.
+        # Legacy fixed shape: executor.submit(ctx.run, _run_tool, ...).
         elif (
             isinstance(first, ast.Attribute)
             and first.attr == "run"
             and len(call.args) >= 2
             and isinstance(call.args[1], ast.Name)
             and call.args[1].id == "_run_tool"
+        ):
+            tool_submits.append(("fixed", call))
+        # Canonical fixed shape: one audited wrapper carries ContextVars and
+        # approval/sudo callbacks together.
+        elif (
+            isinstance(first, ast.Call)
+            and isinstance(first.func, ast.Name)
+            and first.func.id == "propagate_context_to_thread"
+            and first.args
+            and isinstance(first.args[0], ast.Name)
+            and first.args[0].id == "_run_tool"
         ):
             tool_submits.append(("fixed", call))
 
@@ -206,11 +216,10 @@ def test_run_agent_concurrent_executor_wraps_submit_with_copy_context():
     unfixed = [c for kind, c in tool_submits if kind == "unfixed"]
     assert not unfixed, (
         "run_agent.py contains `executor.submit(_run_tool, ...)` without a "
-        "`ctx.run` wrapper. This is the pre-#16660 shape: worker threads "
+        "context-propagation wrapper. Worker threads "
         "will read a fresh ContextVar and approval-session routing "
-        "collapses to the os.environ fallback. Wrap with "
-        "`ctx = contextvars.copy_context(); executor.submit(ctx.run, "
-        "_run_tool, ...)`."
+        "collapses to the os.environ fallback. Wrap the target with "
+        "`propagate_context_to_thread(_run_tool)`."
     )
 
 

@@ -35,6 +35,7 @@ import time
 
 from typing import Any, Dict, Optional, Set
 
+from agent.secret_scope import get_profile_env
 from channels.config import Platform, PlatformConfig
 from channels.platforms.base import (
     BasePlatformAdapter,
@@ -52,14 +53,15 @@ logger = logging.getLogger(__name__)
 
 from channels.platforms import matrix_support as _matrix_support
 from channels.platforms.matrix_crypto import MatrixCryptoMixin
+from channels.platforms.matrix_choice_picker import MatrixChoicePickerMixin
 from channels.platforms.matrix_formatting import MatrixFormattingMixin
 from channels.platforms.matrix_reactions import MatrixReactionMixin
 from channels.platforms.matrix_room_ops import MatrixRoomOpsMixin
 from channels.platforms.matrix_support import (
     ContentURI,
+    DEFAULT_MAX_MESSAGE_LENGTH,
     EventID,
     EventType,
-    MAX_MESSAGE_LENGTH,
     PaginationDirection,
     RoomID,
     SyncToken,
@@ -73,6 +75,7 @@ from channels.platforms.matrix_support import (
     _STORE_DIR,
     _create_matrix_session,
     _looks_like_matrix_image_filename,
+    resolve_max_message_length,
 )
 
 _SUPPORT_CHECK_E2EE_DEPS = _matrix_support._check_e2ee_deps
@@ -91,32 +94,55 @@ def check_matrix_requirements() -> bool:
         _matrix_support._check_e2ee_deps = original
 
 
-class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMixin, MatrixCryptoMixin, BasePlatformAdapter):
+def _apply_yaml_config(_yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
+    """Bridge the Matrix-specific chunk limit into runtime config.
+
+    Returning the field keeps it profile-local in ``PlatformConfig.extra``;
+    seeding the environment preserves compatibility with standalone callers
+    that construct an adapter without going through gateway config loading.
+    """
+    if "max_message_length" not in matrix_cfg:
+        return None
+    value = matrix_cfg["max_message_length"]
+    if not os.getenv("MATRIX_MAX_MESSAGE_LENGTH"):
+        os.environ["MATRIX_MAX_MESSAGE_LENGTH"] = str(value)
+    return {"max_message_length": value}
+
+
+class MatrixAdapter(MatrixChoicePickerMixin, MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMixin, MatrixCryptoMixin, BasePlatformAdapter):
     """Gateway adapter for Matrix (any homeserver)."""
 
-    # Threshold for detecting Matrix client-side message splits.
-    # When a chunk is near the ~4000-char practical limit, a continuation
-    # is almost certain.
-    _SPLIT_THRESHOLD = 3900
+    max_message_length = DEFAULT_MAX_MESSAGE_LENGTH
+    _split_threshold = DEFAULT_MAX_MESSAGE_LENGTH - 100
+    _SPLIT_THRESHOLD = _split_threshold
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.MATRIX)
 
+        self.max_message_length = resolve_max_message_length(config)
+        self.MAX_MESSAGE_LENGTH = self.max_message_length
+        self._split_threshold = max(100, self.max_message_length - 100)
+        self._SPLIT_THRESHOLD = self._split_threshold
+
         self._homeserver: str = (
-            config.extra.get("homeserver", "") or os.getenv("MATRIX_HOMESERVER", "")
+            config.extra.get("homeserver", "")
+            or get_profile_env("MATRIX_HOMESERVER", "")
         ).rstrip("/")
-        self._access_token: str = config.token or os.getenv("MATRIX_ACCESS_TOKEN", "")
-        self._user_id: str = config.extra.get("user_id", "") or os.getenv(
+        self._access_token: str = config.token or get_profile_env(
+            "MATRIX_ACCESS_TOKEN", ""
+        )
+        self._user_id: str = config.extra.get("user_id", "") or get_profile_env(
             "MATRIX_USER_ID", ""
         )
-        self._password: str = config.extra.get("password", "") or os.getenv(
+        self._password: str = config.extra.get("password", "") or get_profile_env(
             "MATRIX_PASSWORD", ""
         )
         self._encryption: bool = config.extra.get(
             "encryption",
-            os.getenv("MATRIX_ENCRYPTION", "").lower() in {"true", "1", "yes"},
+            get_profile_env("MATRIX_ENCRYPTION", "").lower()
+            in {"true", "1", "yes"},
         )
-        self._device_id: str = config.extra.get("device_id", "") or os.getenv(
+        self._device_id: str = config.extra.get("device_id", "") or get_profile_env(
             "MATRIX_DEVICE_ID", ""
         )
 
@@ -154,13 +180,13 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
         self._threads = ThreadParticipationTracker("matrix")
 
         # Mention/thread gating — parsed once from env vars.
-        self._require_mention: bool = os.getenv(
+        self._require_mention: bool = get_profile_env(
             "MATRIX_REQUIRE_MENTION", "true"
         ).lower() not in {"false", "0", "no"}
         self._thread_require_mention: bool = self._parse_thread_require_mention(config)
         free_rooms_raw = config.extra.get("free_response_rooms")
         if free_rooms_raw is None:
-            free_rooms_raw = os.getenv("MATRIX_FREE_RESPONSE_ROOMS", "")
+            free_rooms_raw = get_profile_env("MATRIX_FREE_RESPONSE_ROOMS", "")
         if isinstance(free_rooms_raw, list):
             self._free_rooms: Set[str] = {
                 str(r).strip() for r in free_rooms_raw if str(r).strip()
@@ -172,7 +198,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
         # If non-empty, bot ONLY responds in these rooms (whitelist); DMs exempt.
         allowed_rooms_raw = config.extra.get("allowed_rooms")
         if allowed_rooms_raw is None:
-            allowed_rooms_raw = os.getenv("MATRIX_ALLOWED_ROOMS", "")
+            allowed_rooms_raw = get_profile_env("MATRIX_ALLOWED_ROOMS", "")
         if isinstance(allowed_rooms_raw, list):
             self._allowed_rooms: Set[str] = {
                 str(r).strip() for r in allowed_rooms_raw if str(r).strip()
@@ -181,20 +207,22 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
             self._allowed_rooms: Set[str] = {
                 r.strip() for r in str(allowed_rooms_raw).split(",") if r.strip()
             }
-        self._auto_thread: bool = os.getenv("MATRIX_AUTO_THREAD", "true").lower() in {
+        self._auto_thread: bool = get_profile_env(
+            "MATRIX_AUTO_THREAD", "true"
+        ).lower() in {
             "true",
             "1",
             "yes",
         }
-        self._dm_auto_thread: bool = os.getenv(
+        self._dm_auto_thread: bool = get_profile_env(
             "MATRIX_DM_AUTO_THREAD", "false"
         ).lower() in {"true", "1", "yes"}
-        self._dm_mention_threads: bool = os.getenv(
+        self._dm_mention_threads: bool = get_profile_env(
             "MATRIX_DM_MENTION_THREADS", "false"
         ).lower() in {"true", "1", "yes"}
 
         # Reactions: configurable via MATRIX_REACTIONS (default: true).
-        self._reactions_enabled: bool = os.getenv(
+        self._reactions_enabled: bool = get_profile_env(
             "MATRIX_REACTIONS", "true"
         ).lower() not in {"false", "0", "no"}
         self._pending_reactions: dict[tuple[str, str], str] = {}
@@ -213,10 +241,12 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
         # Text batching: merge rapid successive messages (Telegram-style).
         # Matrix clients split long messages around 4000 chars.
         self._text_batch_delay_seconds = float(
-            os.getenv("HERMES_MATRIX_TEXT_BATCH_DELAY_SECONDS", "0.6")
+            get_profile_env("HERMES_MATRIX_TEXT_BATCH_DELAY_SECONDS", "0.6")
         )
         self._text_batch_split_delay_seconds = float(
-            os.getenv("HERMES_MATRIX_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0")
+            get_profile_env(
+                "HERMES_MATRIX_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0"
+            )
         )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
@@ -228,7 +258,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
         }
         self._approval_prompts_by_event: Dict[str, _MatrixApprovalPrompt] = {}
         self._approval_prompt_by_session: Dict[str, str] = {}
-        allowed_users_raw = os.getenv("MATRIX_ALLOWED_USERS", "")
+        allowed_users_raw = get_profile_env("MATRIX_ALLOWED_USERS", "")
         self._allowed_user_ids: Set[str] = {
             u.strip() for u in allowed_users_raw.split(",") if u.strip()
         }
@@ -263,7 +293,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
                 return configured.lower() not in {"false", "0", "no", "off"}
             # int, float, etc. — truthiness fallback
             return bool(configured)
-        return os.getenv(
+        return get_profile_env(
             "MATRIX_THREAD_REQUIRE_MENTION", "false"
         ).lower() in {"true", "1", "yes", "on"}
 
@@ -470,7 +500,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
                 # (fresh crypto.db, share_keys re-upload) — otherwise the
                 # device's self-signing signature is stale and peers refuse
                 # to share Megolm sessions with the rotated device.
-                recovery_key = os.getenv("MATRIX_RECOVERY_KEY", "").strip()
+                recovery_key = get_profile_env("MATRIX_RECOVERY_KEY", "").strip()
                 if recovery_key:
                     try:
                         await olm.verify_with_recovery_key(recovery_key)
@@ -648,7 +678,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
             return SendResult(success=True)
 
         formatted = self.format_message(content)
-        chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
+        chunks = self.truncate_message(formatted, self.max_message_length)
 
         last_event_id = None
         for i, chunk in enumerate(chunks):
@@ -1772,7 +1802,7 @@ class MatrixAdapter(MatrixReactionMixin, MatrixRoomOpsMixin, MatrixFormattingMix
         try:
             pending = self._pending_text_batches.get(key)
             last_len = getattr(pending, "_last_chunk_len", 0) if pending else 0
-            if last_len >= self._SPLIT_THRESHOLD:
+            if last_len >= self._split_threshold:
                 delay = self._text_batch_split_delay_seconds
             else:
                 delay = self._text_batch_delay_seconds

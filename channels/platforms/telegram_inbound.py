@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from agent.secret_scope import get_profile_env
 try:
     from telegram import Message, Update
     from telegram.ext import ContextTypes
@@ -25,7 +26,6 @@ except ImportError:  # pragma: no cover - optional platform dependency
 from channels.platforms.base import (
     MessageEvent,
     MessageType,
-    ProcessingOutcome,
     SUPPORTED_DOCUMENT_TYPES,
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
     SUPPORTED_VIDEO_TYPES,
@@ -39,6 +39,7 @@ from channels.platforms.telegram import (
     _strip_mdv2,
     _wrap_markdown_tables,
 )
+from channels.platforms.telegram_security import redact_telegram_error
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,6 @@ class TelegramInboundMixin:
             _protect_fenced,
             text,
         )
-    
         # 2) Protect inline code (`...`)
         #    Escape \ inside inline code per MarkdownV2 spec.
         text = re.sub(
@@ -232,7 +232,12 @@ class TelegramInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("TELEGRAM_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env("TELEGRAM_REQUIRE_MENTION", "false").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
     
     def _telegram_observe_unmentioned_group_messages(self) -> bool:
         """Return whether skipped unmentioned group messages are stored as context.
@@ -249,7 +254,9 @@ class TelegramInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env(
+            "TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "false"
+        ).lower() in {"true", "1", "yes", "on"}
     
     def _telegram_guest_mode(self) -> bool:
         """Return whether non-allowlisted groups may trigger via direct @mention."""
@@ -258,7 +265,12 @@ class TelegramInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("TELEGRAM_GUEST_MODE", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env("TELEGRAM_GUEST_MODE", "false").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
     
     def _telegram_exclusive_bot_mentions(self) -> bool:
         """Return whether explicit @...bot mentions exclusively route group messages."""
@@ -267,12 +279,14 @@ class TelegramInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("TELEGRAM_EXCLUSIVE_BOT_MENTIONS", "true").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env(
+            "TELEGRAM_EXCLUSIVE_BOT_MENTIONS", "true"
+        ).lower() in {"true", "1", "yes", "on"}
     
     def _telegram_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
         if raw is None:
-            raw = os.getenv("TELEGRAM_FREE_RESPONSE_CHATS", "")
+            raw = get_profile_env("TELEGRAM_FREE_RESPONSE_CHATS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
@@ -287,7 +301,7 @@ class TelegramInboundMixin:
         """
         raw = self.config.extra.get("allowed_chats")
         if raw is None:
-            raw = os.getenv("TELEGRAM_ALLOWED_CHATS", "")
+            raw = get_profile_env("TELEGRAM_ALLOWED_CHATS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
@@ -296,7 +310,7 @@ class TelegramInboundMixin:
         """Return Telegram chats authorized at group scope."""
         raw = self.config.extra.get("group_allowed_chats")
         if raw is None:
-            raw = os.getenv("TELEGRAM_GROUP_ALLOWED_CHATS", "")
+            raw = get_profile_env("TELEGRAM_GROUP_ALLOWED_CHATS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
@@ -326,7 +340,7 @@ class TelegramInboundMixin:
         """
         raw = self.config.extra.get("allowed_topics")
         if raw is None:
-            raw = os.getenv("TELEGRAM_ALLOWED_TOPICS", "")
+            raw = get_profile_env("TELEGRAM_ALLOWED_TOPICS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
@@ -334,7 +348,7 @@ class TelegramInboundMixin:
     def _telegram_ignored_threads(self) -> set[int]:
         raw = self.config.extra.get("ignored_threads")
         if raw is None:
-            raw = os.getenv("TELEGRAM_IGNORED_THREADS", "")
+            raw = get_profile_env("TELEGRAM_IGNORED_THREADS", "")
     
         if isinstance(raw, list):
             values = raw
@@ -356,7 +370,7 @@ class TelegramInboundMixin:
         """Compile optional regex wake-word patterns for group triggers."""
         patterns = self.config.extra.get("mention_patterns")
         if patterns is None:
-            raw = os.getenv("TELEGRAM_MENTION_PATTERNS", "").strip()
+            raw = get_profile_env("TELEGRAM_MENTION_PATTERNS", "").strip()
             if raw:
                 try:
                     loaded = json.loads(raw)
@@ -385,7 +399,12 @@ class TelegramInboundMixin:
             try:
                 compiled.append(re.compile(pattern, re.IGNORECASE))
             except re.error as exc:
-                logger.warning("[%s] Invalid Telegram mention pattern %r: %s", self.name, pattern, exc)
+                logger.warning(
+                    "[%s] Invalid Telegram mention pattern %r: %s",
+                    self.name,
+                    pattern,
+                    redact_telegram_error(exc),
+                )
         if compiled:
             logger.info("[%s] Loaded %d Telegram mention pattern(s)", self.name, len(compiled))
         return compiled
@@ -600,7 +619,10 @@ class TelegramInboundMixin:
         # Only observe messages skipped by the require_mention gate.  If the
         # message would be processed normally, let the dispatcher handle it;
         # if require_mention is disabled, every group message is a request.
-        if chat_id_str in self._telegram_free_response_chats():
+        if (
+            chat_id_str in self._telegram_free_response_chats()
+            or self._telegram_is_free_response_topic(message)
+        ):
             return False
         if not self._telegram_require_mention():
             return False
@@ -709,7 +731,10 @@ class TelegramInboundMixin:
                 filename = os.path.basename(getattr(file_obj, "file_path", "") or "")
             cached = cache_media_bytes(data, filename=filename, mime_type=mime, default_kind=kind)
         except Exception as exc:
-            logger.warning("[Telegram] Failed to cache observed group media: %s", exc, exc_info=True)
+            logger.warning(
+                "[Telegram] Failed to cache observed group media: %s",
+                redact_telegram_error(exc),
+            )
             return
     
         if cached is None:
@@ -754,7 +779,10 @@ class TelegramInboundMixin:
                 filename = os.path.basename(getattr(file_obj, "file_path", "") or "")
             cached = cache_media_bytes(data, filename=filename, mime_type=mime, default_kind=kind)
         except Exception as exc:
-            logger.warning("[Telegram] Failed to cache replied-to media: %s", exc, exc_info=True)
+            logger.warning(
+                "[Telegram] Failed to cache replied-to media: %s",
+                redact_telegram_error(exc),
+            )
             return
     
         if cached is None:
@@ -829,7 +857,11 @@ class TelegramInboundMixin:
             )
         except Exception as exc:
             adapter_name = getattr(self, "name", "telegram")
-            logger.warning("[%s] Failed to observe Telegram group message: %s", adapter_name, exc)
+            logger.warning(
+                "[%s] Failed to observe Telegram group message: %s",
+                adapter_name,
+                redact_telegram_error(exc),
+            )
     
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
         """Apply Telegram group trigger rules.
@@ -897,7 +929,10 @@ class TelegramInboundMixin:
     
         if guest_mention:
             return True
-        if chat_id_str in self._telegram_free_response_chats():
+        if (
+            chat_id_str in self._telegram_free_response_chats()
+            or self._telegram_is_free_response_topic(message)
+        ):
             return True
         if not self._telegram_require_mention():
             return True
@@ -932,7 +967,11 @@ class TelegramInboundMixin:
                 self._forum_command_registered.add(chat_id)
                 logger.info("[%s] Lazy-registered %d commands for forum chat %s", self.name, len(bot_commands), chat_id)
             except Exception as e:
-                logger.warning("[%s] Forum command lazy-registration failed: %s", self.name, e)
+                logger.warning(
+                    "[%s] Forum command lazy-registration failed: %s",
+                    self.name,
+                    redact_telegram_error(e),
+                )
     
     def _effective_update_message(self, update: Update) -> Optional[Message]:
         """Return the message-like payload for normal messages and channel posts.
@@ -1228,7 +1267,10 @@ class TelegramInboundMixin:
                 return
     
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
+                logger.warning(
+                    "[Telegram] Failed to cache photo: %s",
+                    redact_telegram_error(e),
+                )
     
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:
@@ -1246,7 +1288,10 @@ class TelegramInboundMixin:
                 event.media_types = ["audio/ogg"]
                 logger.info("[Telegram] Cached user voice at %s", cached_path)
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache voice: %s", e, exc_info=True)
+                logger.warning(
+                    "[Telegram] Failed to cache voice: %s",
+                    redact_telegram_error(e),
+                )
         elif msg.audio:
             try:
                 allowed, note = self._telegram_media_size_allowed(msg.audio, "audio file")
@@ -1262,10 +1307,25 @@ class TelegramInboundMixin:
                 event.media_types = ["audio/mp3"]
                 logger.info("[Telegram] Cached user audio at %s", cached_path)
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache audio: %s", e, exc_info=True)
+                logger.warning(
+                    "[Telegram] Failed to cache audio: %s",
+                    redact_telegram_error(e),
+                )
     
         elif msg.video:
             try:
+                allowed, note = self._telegram_media_size_allowed(
+                    msg.video,
+                    "video file",
+                )
+                if not allowed:
+                    event.text = self._append_observed_note(event.text, note or "")
+                    logger.info(
+                        "[Telegram] Skipped oversized user video (size=%s)",
+                        getattr(msg.video, "file_size", None),
+                    )
+                    await self.handle_message(event)
+                    return
                 file_obj = await msg.video.get_file()
                 video_bytes = await file_obj.download_as_bytearray()
                 ext = ".mp4"
@@ -1279,7 +1339,10 @@ class TelegramInboundMixin:
                 event.media_types = [SUPPORTED_VIDEO_TYPES.get(ext, "video/mp4")]
                 logger.info("[Telegram] Cached user video at %s", cached_path)
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache video: %s", e, exc_info=True)
+                logger.warning(
+                    "[Telegram] Failed to cache video: %s",
+                    redact_telegram_error(e),
+                )
     
         # Download document files to cache for agent processing
         elif msg.document:
@@ -1325,7 +1388,10 @@ class TelegramInboundMixin:
                     try:
                         cached_path = _telegram_public_attr("cache_image_from_bytes")( bytes(image_bytes), ext=image_ext)
                     except ValueError as e:
-                        logger.warning("[Telegram] Failed to cache image document: %s", e, exc_info=True)
+                        logger.warning(
+                            "[Telegram] Failed to cache image document: %s",
+                            redact_telegram_error(e),
+                        )
                         event.text = (
                             f"Image document '{original_filename or doc_mime or ext or 'unknown'}' "
                             "could not be read as an image."
@@ -1410,12 +1476,14 @@ class TelegramInboundMixin:
                             event.text = injection
                     except UnicodeDecodeError:
                         logger.warning(
-                            "[Telegram] Could not decode text file as UTF-8, skipping content injection",
-                            exc_info=True,
+                            "[Telegram] Could not decode text file as UTF-8, skipping content injection"
                         )
     
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
+                logger.warning(
+                    "[Telegram] Failed to cache document: %s",
+                    redact_telegram_error(e),
+                )
     
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
@@ -1519,7 +1587,10 @@ class TelegramInboundMixin:
                     emoji, set_name,
                 )
         except Exception as e:
-            logger.warning("[Telegram] Sticker analysis error: %s", e, exc_info=True)
+            logger.warning(
+                "[Telegram] Sticker analysis error: %s",
+                redact_telegram_error(e),
+            )
             event.text = build_sticker_injection(
                 f"a sticker with emoji {emoji}" if emoji else "a sticker",
                 emoji, set_name,
@@ -1575,7 +1646,11 @@ class TelegramInboundMixin:
                                 self.name, cache_key, tid,
                             )
         except Exception as e:
-            logger.debug("[%s] Failed to reload dm_topics from config: %s", self.name, e)
+            logger.debug(
+                "[%s] Failed to reload dm_topics from config: %s",
+                self.name,
+                redact_telegram_error(e),
+            )
     
     def _get_dm_topic_info(self, chat_id: str, thread_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Look up DM topic config by chat_id and thread_id.
@@ -1858,80 +1933,3 @@ class TelegramInboundMixin:
             channel_prompt=_channel_prompt,
             timestamp=message.date,
         )
-    
-    def _reactions_enabled(self) -> bool:
-        """Check if message reactions are enabled via config/env."""
-        return os.getenv("TELEGRAM_REACTIONS", "false").lower() not in {"false", "0", "no"}
-    
-    async def _set_reaction(self, chat_id: str, message_id: str, emoji: str) -> bool:
-        """Set a single emoji reaction on a Telegram message."""
-        if not self._bot:
-            return False
-        try:
-            await self._bot.set_message_reaction(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
-                reaction=emoji,
-            )
-            return True
-        except Exception as e:
-            logger.debug("[%s] set_message_reaction failed (%s): %s", self.name, emoji, e)
-            return False
-    
-    async def _clear_reactions(self, chat_id: str, message_id: str) -> bool:
-        """Clear all reactions from a Telegram message.
-    
-        Calling ``set_message_reaction`` with ``reaction=None`` (or an empty
-        sequence) is the documented Bot API way to remove all bot-set
-        reactions on a message — equivalent to Bot API 10.0's
-        ``deleteMessageReaction`` but supported in PTB 22.6 already.
-        """
-        if not self._bot:
-            return False
-        try:
-            await self._bot.set_message_reaction(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
-                reaction=None,
-            )
-            return True
-        except Exception as e:
-            logger.debug("[%s] clear reactions failed: %s", self.name, e)
-            return False
-    
-    async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add an in-progress reaction when message processing begins."""
-        if not self._reactions_enabled():
-            return
-        chat_id = getattr(event.source, "chat_id", None)
-        message_id = getattr(event, "message_id", None)
-        if chat_id and message_id:
-            await self._set_reaction(chat_id, message_id, "\U0001f440")
-    
-    async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Swap the in-progress reaction for a final success/failure reaction.
-    
-        Unlike Discord (additive reactions), Telegram's set_message_reaction
-        replaces all existing reactions in one call — no remove step needed.
-    
-        On CANCELLED outcomes (e.g. the user runs ``/stop``, or a session is
-        interrupted mid-flight), we explicitly clear the 👀 in-progress
-        reaction so it doesn't linger on the user's message indefinitely.
-        Without this clear, the only way to remove the 👀 was to wait for
-        another agent run to swap it to 👍/👎 — which never happens if the
-        cancellation was the last activity in the chat.
-        """
-        if not self._reactions_enabled():
-            return
-        chat_id = getattr(event.source, "chat_id", None)
-        message_id = getattr(event, "message_id", None)
-        if not (chat_id and message_id):
-            return
-        if outcome == ProcessingOutcome.CANCELLED:
-            await self._clear_reactions(chat_id, message_id)
-        else:
-            await self._set_reaction(
-                chat_id,
-                message_id,
-                "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
-            )

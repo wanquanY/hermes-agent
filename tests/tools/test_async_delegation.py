@@ -10,8 +10,10 @@ processes in the per-file parallel runner.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,6 +124,10 @@ def test_delegate_task_async_returns_persistent_handle_without_blocking(
     assert result["execution_mode"] == "async"
     assert result["activity_id"].startswith("act-agent_dispatch:")
     assert result["child_activity_ids"] == [result["activity_id"]]
+    assert len(result["live_transcripts"]) == 1
+    live_transcript = result["live_transcripts"][0]
+    assert live_transcript.endswith("task-0.log")
+    assert os.path.exists(live_transcript)
     assert child not in parent._active_children
     assert legacy_async.active_count() == 1
     assert process_registry.completion_queue.empty()
@@ -131,6 +137,8 @@ def test_delegate_task_async_returns_persistent_handle_without_blocking(
     activity = parent._session_db.activities.get(result["activity_id"])
     assert activity["status"] == "completed"
     assert activity["result_summary"] == "done: inspect repository"
+    transcript_text = Path(live_transcript).read_text(encoding="utf-8")
+    assert "end status=completed" in transcript_text
     events = parent._session_db.runs.list_events_by_activity(
         result["activity_id"],
         include_internal=True,

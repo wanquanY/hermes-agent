@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import os
 import re
 import socket as _socket
 import subprocess
 import sys
 from urllib.parse import urlsplit
 
+from agent.secret_scope import get_profile_env
 from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def _split_host_port(value: str) -> tuple[str, int | None]:
 def _no_proxy_entries() -> list[str]:
     entries: list[str] = []
     for key in ("NO_PROXY", "no_proxy"):
-        raw = os.environ.get(key, "")
+        raw = get_profile_env(key, "")
         entries.extend(part.strip() for part in raw.split(",") if part.strip())
     return entries
 
@@ -182,26 +182,32 @@ def resolve_proxy_url(
     platform_env_var: str | None = None,
     *,
     target_hosts: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    explicit_url: str | None = None,
 ) -> str | None:
     """Return a proxy URL from env vars, or macOS system proxy.
 
     Check order:
       0. *platform_env_var* (e.g. ``DISCORD_PROXY``) — highest priority
-      1. HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (and lowercase variants)
-      2. macOS system proxy via ``scutil --proxy`` (auto-detect)
+      1. *explicit_url* from the owning adapter's immutable configuration
+      2. HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (and lowercase variants)
+      3. macOS system proxy via ``scutil --proxy`` (auto-detect)
 
     Returns *None* if no proxy is found, or if NO_PROXY/no_proxy matches one
     of ``target_hosts``.
     """
     if platform_env_var:
-        value = (os.environ.get(platform_env_var) or "").strip()
+        value = (get_profile_env(platform_env_var, "") or "").strip()
         if value:
             if should_bypass_proxy(target_hosts):
                 return None
             return normalize_proxy_url(value)
+    if explicit_url and str(explicit_url).strip():
+        if should_bypass_proxy(target_hosts):
+            return None
+        return normalize_proxy_url(str(explicit_url).strip())
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
-        value = (os.environ.get(key) or "").strip()
+        value = (get_profile_env(key, "") or "").strip()
         if value:
             if should_bypass_proxy(target_hosts):
                 return None
@@ -288,7 +294,7 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
     """
     raw = no_proxy_value
     if raw is None:
-        raw = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+        raw = get_profile_env("NO_PROXY") or get_profile_env("no_proxy") or ""
 
     raw = raw.strip()
     if not raw:
@@ -311,5 +317,3 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
             return True
 
     return False
-
-

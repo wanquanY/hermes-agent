@@ -18,6 +18,7 @@ import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
+import { flashPet } from './petFlashStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
@@ -77,7 +78,7 @@ const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): Sub
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: GatewayEvent) => void {
   const { rpc } = ctx.gateway
   const { STARTUP_RESUME_ID, newSession, resumeById, setCatalog } = ctx.session
-  const { bellOnComplete, stdout, sys } = ctx.system
+  const { bellOnComplete, onReaction, stdout, sys } = ctx.system
   const { appendMessage, panel, setHistoryItems } = ctx.transcript
   const { setInput } = ctx.composer
   const { submitRef } = ctx.submission
@@ -326,6 +327,38 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       }
+
+      case 'reaction':
+        if (ev.payload?.kind === 'vibe') {
+          onReaction()
+          flashPet('jump')
+        }
+
+        return
+
+      case 'notification.show': {
+        const p = ev.payload
+
+        if (!p?.text) {
+          return
+        }
+
+        turnController.showNotice({
+          id: p.id,
+          key: p.key,
+          kind: p.kind ?? 'sticky',
+          level: p.level ?? 'info',
+          text: p.text,
+          ttl_ms: p.ttl_ms ?? null
+        })
+
+        return
+      }
+
+      case 'notification.clear':
+        turnController.clearNotice(ev.payload?.key)
+
+        return
 
       case 'message.start':
         turnController.startMessage()

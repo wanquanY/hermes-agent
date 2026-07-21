@@ -10,7 +10,8 @@ from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 from hermes_constants import get_hermes_home
 from hermes_cli.config import cfg_get
 from hermes_gateway.config import Platform
-from utils import atomic_yaml_write, is_truthy_value
+from hermes_cli.config import atomic_config_write
+from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 GATEWAY_HOME = get_hermes_home()
@@ -85,7 +86,7 @@ class GatewayVerboseCommandService:
             if platform_key not in display["platforms"] or not isinstance(display["platforms"].get(platform_key), dict):
                 display["platforms"][platform_key] = {}
             display["platforms"][platform_key]["tool_progress"] = new_mode
-            atomic_yaml_write(config_path, user_config)
+            atomic_config_write(config_path, user_config)
             return (
                 f"{descriptions[new_mode]}\n"
                 + t("gateway.verbose.saved_suffix", platform=platform_key)

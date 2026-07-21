@@ -1,14 +1,14 @@
 ---
-title: "Canvas — Canvas LMS integration — fetch enrolled courses and assignments using API token authentication"
+title: "Canvas — Manage Canvas LMS courses and assignments through its API"
 sidebar_label: "Canvas"
-description: "Canvas LMS integration — fetch enrolled courses and assignments using API token authentication"
+description: "Manage Canvas LMS courses and assignments through its API"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Canvas
 
-Canvas LMS integration — fetch enrolled courses and assignments using API token authentication.
+Manage Canvas LMS courses and assignments through its API.
 
 ## Skill metadata
 
@@ -42,7 +42,7 @@ Read-only access to Canvas LMS for listing courses and assignments.
 2. Go to **Account → Settings** (click your profile icon, then Settings)
 3. Scroll to **Approved Integrations** and click **+ New Access Token**
 4. Name the token (e.g., "Hermes Agent"), set an optional expiry, and click **Generate Token**
-5. Copy the token and add to `~/.hermes/.env`:
+5. Copy the token and add to `${HERMES_HOME:-~/.hermes}/.env`:
 
 ```
 CANVAS_API_TOKEN=your_token_here

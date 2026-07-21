@@ -56,6 +56,16 @@ class ProviderProfile:
     auth_type: str = "api_key"   # api_key|oauth_device_code|oauth_external|copilot|aws_sdk
     supports_health_check: bool = True  # False → doctor skips /models probe for this provider
 
+    # ── Vision support ────────────────────────────────────────
+    # Provider-level capabilities are transport facts, not guesses derived
+    # from a model name. Model-catalog/config overrides remain the finer-grain
+    # source for individual models.
+    supports_vision: bool = False
+    # Some providers accept images in user messages but reject multipart tool
+    # results. Keep that distinction explicit so the runtime can downgrade the
+    # tool result before it becomes invalid canonical history.
+    supports_vision_tool_messages: bool = True
+
     # ── Model catalog ─────────────────────────────────────────
     # fallback_models: curated list shown in /model picker when live fetch fails.
     # Only agentic models that support tool calling should appear here.
@@ -129,6 +139,14 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def default_vision_model(self) -> str | None:
+        """Return this provider's preferred vision model, if it has one.
+
+        Providers with live catalogs can override this hook without leaking
+        provider-specific discovery logic into the auxiliary model router.
+        """
+        return None
+
     def get_max_tokens(self, model: str | None) -> int | None:
         """Return the output-token default for a model served by this profile.
 
@@ -141,6 +159,7 @@ class ProviderProfile:
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
         """Fetch the live model list from the provider's models endpoint.
@@ -153,7 +172,8 @@ class ProviderProfile:
              endpoint differs from the inference base URL, e.g. OpenRouter
              exposes a public catalog at /api/v1/models while inference is
              at /api/v1)
-          2. self.base_url + "/models"  (standard OpenAI-compat fallback)
+          2. caller-supplied base_url (custom endpoint override)
+          3. self.base_url + "/models"  (standard OpenAI-compat fallback)
 
         The default implementation sends Bearer auth when api_key is given
         and forwards self.default_headers. Override to customise auth, path,
@@ -162,11 +182,12 @@ class ProviderProfile:
         Callers must always fall back to the static _PROVIDER_MODELS list
         when this returns None.
         """
+        effective_base = base_url or self.base_url
         url = (self.models_url or "").strip()
         if not url:
-            if not self.base_url:
+            if not effective_base:
                 return None
-            url = self.base_url.rstrip("/") + "/models"
+            url = effective_base.rstrip("/") + "/models"
 
         import json
         import urllib.request

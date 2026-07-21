@@ -9,6 +9,27 @@ from hermes_gateway.runtime_status_writer import runtime_status_for
 
 logger = logging.getLogger(__name__)
 
+# Every runner mapping keyed by routing key whose value belongs to the current
+# durable conversation must be registered here. A conversation boundary reuses
+# the routing key for a different session_id, so leaving any of these entries
+# behind leaks state across otherwise-independent conversations.
+#
+# Deliberately excluded:
+# - running-agent/timestamp/busy/turn-lease state: turn-scoped;
+# - run generations: monotonic stale-run ownership counters;
+# - agent cache: evicted through its resource-aware lifecycle;
+# - source cache and voice mode: routing/user preferences, not conversation data.
+CONVERSATION_SCOPED_STATE: tuple[str, ...] = (
+    "_session_model_overrides",
+    "_pending_one_turn_model_restores",
+    "_session_reasoning_overrides",
+    "_session_service_tier_overrides",
+    "_pending_model_notes",
+    "_session_context_prompt_pins",
+    "_session_voice_context",
+    "_queued_events",
+)
+
 
 class GatewaySessionRuntimeStateService:
     def __init__(self, runner):
@@ -82,6 +103,29 @@ class GatewaySessionRuntimeStateService:
                 session_key,
                 exc,
             )
+
+    def clear_conversation_scope(self, session_key: str, *, reason: str) -> None:
+        """Clear all transient state owned by the current conversation.
+
+        This is the sole cleanup funnel for durable conversation boundaries:
+        explicit reset/resume, idle or scheduled auto-reset, expiry
+        finalization, and compression-exhausted reset. New conversation-owned
+        dictionaries must be registered in :data:`CONVERSATION_SCOPED_STATE`
+        so every boundary remains correct by construction.
+        """
+        if not session_key:
+            return
+        runner = self._runner
+        for attribute in CONVERSATION_SCOPED_STATE:
+            store = getattr(runner, attribute, None)
+            if isinstance(store, dict):
+                store.pop(session_key, None)
+        self.clear_session_boundary_security_state(session_key)
+        logger.debug(
+            "Cleared conversation scope for %s (%s)",
+            session_key,
+            reason,
+        )
 
     def begin_session_run_generation(self, session_key: str) -> int:
         """Claim a fresh run generation token for ``session_key``."""

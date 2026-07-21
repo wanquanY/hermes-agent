@@ -17,6 +17,9 @@ ASSISTANT_REPLAY_FIELDS: tuple[str, ...] = (
 def build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[str, Any]:
     """Build a replay entry while preserving assistant continuity fields."""
     entry: Dict[str, Any] = {"role": role, "content": content}
+    api_content = msg.get("api_content")
+    if role in {"user", "assistant"} and isinstance(api_content, str) and api_content:
+        entry["api_content"] = api_content
     if role == "assistant":
         for key in ASSISTANT_REPLAY_FIELDS:
             if key not in msg:

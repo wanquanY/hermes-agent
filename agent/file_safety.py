@@ -165,3 +165,19 @@ def get_read_block_error(path: str) -> Optional[str]:
     if resolved.name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES:
         return f"Access denied: {path} is a secret-bearing environment file."
     return None
+
+
+def raise_if_read_blocked(path: str) -> None:
+    """Raise when a model-supplied local file targets credential material.
+
+    Provider-facing tools use this shared chokepoint before opening a local
+    input. Unexpected policy-resolution failures remain fail-soft so the
+    defense-in-depth guard cannot break ordinary file loading, while a real
+    match always propagates as a clear ``ValueError``.
+    """
+    try:
+        blocked = get_read_block_error(path)
+    except Exception:
+        return
+    if blocked:
+        raise ValueError(blocked)

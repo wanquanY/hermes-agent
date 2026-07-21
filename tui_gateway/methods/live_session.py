@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.pending_prompt_queue import (
+    pending_prompt_queue,
+    queue_scope_for_db,
+)
 
 _server = bind_server_globals(globals())
 
@@ -71,6 +75,31 @@ def _message_preview(history: list) -> str:
     return ""
 
 
+def _queued_prompt_snapshot(session: dict) -> dict | None:
+    conversation_session_id = str(session.get("session_key") or "").strip()
+    if not conversation_session_id:
+        return None
+    db = _db_for_stable_session(conversation_session_id)
+    queued = pending_prompt_queue.snapshot(
+        queue_scope_for_db(db),
+        conversation_session_id,
+    )
+    if not queued:
+        return None
+    first = queued[0]
+    text = str(first.get("text") or "").strip()
+    attachments = first.get("attachments") if isinstance(first.get("attachments"), list) else []
+    if not text and attachments:
+        text = f"[{len(attachments)} attachment{'s' if len(attachments) != 1 else ''}]"
+    return {
+        "user": text,
+        "run_id": str(first.get("run_id") or ""),
+        "turn_id": str(first.get("turn_id") or ""),
+        "attachments": attachments,
+        "count": len(queued),
+    }
+
+
 def _session_live_title(session: dict, key: str) -> str:
     title = str(session.get("pending_title") or "").strip()
     db = _get_db()
@@ -88,10 +117,13 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     history = list(session.get("history") or [])
     status = _session_live_status(sid, session)
     inflight = _inflight_snapshot(session)
+    queued = _queued_prompt_snapshot(session)
     preview = _message_preview(history)
     if inflight:
         preview = inflight.get("assistant") or inflight.get("user") or preview
         preview = " ".join(str(preview).split())[:160]
+    elif queued:
+        preview = " ".join(str(queued.get("user") or preview).split())[:160]
     now = time.time()
     return {
         "current": sid == current_sid,
@@ -119,9 +151,11 @@ def _find_live_session_by_key(session_key: str) -> tuple[str, dict] | None:
 def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
-        return _session_info(agent)
+        return _session_info(agent, session)
     return {
         "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "branch": str(session.get("git_branch") or ""),
+        "project": session.get("project"),
         "lazy": True,
         "model": _resolve_model(),
         "skills": {},
@@ -148,6 +182,7 @@ def _live_session_payload(
             session.get("history") or []
         )
         inflight = _inflight_snapshot(session)
+        queued = _queued_prompt_snapshot(session)
         running = bool(session.get("running"))
     payload = {
         "info": _fallback_session_info(session),
@@ -161,6 +196,8 @@ def _live_session_payload(
     }
     if inflight:
         payload["inflight"] = inflight
+    if queued:
+        payload["queued"] = queued
     return payload
 
 

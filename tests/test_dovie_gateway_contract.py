@@ -378,6 +378,23 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
                 },
             },
         )
+        db.runs.append_event(
+            "stored-ordinary-1",
+            {
+                "type": "artifact.created",
+                "session_id": "runtime-1",
+                "conversation_session_id": "stored-ordinary-1",
+                "run_id": "run-1",
+                "turn_id": "turn-1",
+                "payload": {
+                    "id": "artifact:launch-brief",
+                    "title": "launch-brief.md",
+                    "path": str(tmp_path / "launch-brief.md"),
+                    "mime_type": "text/markdown",
+                    "produced_by_run_id": "run-1",
+                },
+            },
+        )
         monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
         monkeypatch.setattr(session_methods, "_get_db", lambda: db)
 
@@ -391,7 +408,11 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         assert response["result"]["conversation_session_id"] == "stored-ordinary-1"
         assert response["result"]["messages"][0]["text"] == "我会读取文件。"
         run_events = response["result"]["runEvents"]
-        assert [event["type"] for event in run_events] == ["tool.complete", "message.delta"]
+        assert [event["type"] for event in run_events] == [
+            "tool.complete",
+            "message.delta",
+            "artifact.created",
+        ]
         assert run_events[0]["payload"]["tool_id"] == "tool-read-1"
         assert run_events[1]["payload"]["text"] == "正在输出但尚未收到终结帧"
         assert response["result"]["last_event_seq"] == run_events[-1]["seq"]
@@ -412,6 +433,13 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
             event["type"] != "message.delta"
             for event in completed_response["result"]["runEvents"]
         )
+        completed_artifacts = [
+            event
+            for event in completed_response["result"]["runEvents"]
+            if event["type"] == "artifact.created"
+        ]
+        assert len(completed_artifacts) == 1
+        assert completed_artifacts[0]["payload"]["id"] == "artifact:launch-brief"
         assert completed_response["result"]["last_event_seq"] > response["result"]["last_event_seq"]
     finally:
         db.close()

@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_profile_env
 import httpx
 
 from channels.platforms.base import (
@@ -720,7 +721,7 @@ class AutoSetHomeMiddleware(InboundMiddleware):
 
     Triggers when no home channel is configured, or when an existing group-chat
     home is superseded by the first DM (direct > group upgrade).
-    Silent: writes config.yaml and env, no user-facing message.
+    Silent: persists the current profile's home channel, no user-facing message.
     """
 
     name = "auto-sethome"
@@ -728,7 +729,12 @@ class AutoSetHomeMiddleware(InboundMiddleware):
     async def handle(self, ctx: InboundContext, next_fn) -> None:
         adapter = ctx.adapter
         if not adapter._auto_sethome_done:
-            _cur_home = os.getenv("YUANBAO_HOME_CHANNEL", "")
+            configured_home = adapter.config.home_channel
+            _cur_home = (
+                configured_home.chat_id
+                if configured_home is not None
+                else get_profile_env("YUANBAO_HOME_CHANNEL", "")
+            )
             _should_set = (
                 not _cur_home
                 or (_cur_home.startswith("group:") and ctx.chat_type == "dm")
@@ -737,19 +743,15 @@ class AutoSetHomeMiddleware(InboundMiddleware):
                 adapter._auto_sethome_done = True  # DM seen — no further upgrades needed
             if _should_set:
                 try:
-                    from hermes_constants import get_hermes_home
-                    from utils import atomic_yaml_write
-                    import yaml
+                    from channels.config import HomeChannel, Platform
+                    from hermes_cli.config import save_env_value
 
-                    _home = get_hermes_home()
-                    config_path = _home / "config.yaml"
-                    user_config: dict = {}
-                    if config_path.exists():
-                        with open(config_path, encoding="utf-8") as f:
-                            user_config = yaml.safe_load(f) or {}
-                    user_config["YUANBAO_HOME_CHANNEL"] = ctx.chat_id
-                    atomic_yaml_write(config_path, user_config)
-                    os.environ["YUANBAO_HOME_CHANNEL"] = str(ctx.chat_id)
+                    save_env_value("YUANBAO_HOME_CHANNEL", str(ctx.chat_id))
+                    adapter.config.home_channel = HomeChannel(
+                        platform=Platform.YUANBAO,
+                        chat_id=str(ctx.chat_id),
+                        name=ctx.chat_name or str(ctx.chat_id),
+                    )
                     logger.info(
                         "[%s] Auto-sethome: designated %s (%s) as Yuanbao home channel",
                         adapter.name, ctx.chat_id, ctx.chat_name,
@@ -1882,4 +1884,3 @@ class InboundPipelineBuilder:
         for mw_cls in cls._DEFAULT_MIDDLEWARES:
             pipeline.use(mw_cls())
         return pipeline
-

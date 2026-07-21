@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -29,6 +30,47 @@ MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversation
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+_MEDIA_IMG_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+_MEDIA_DATA_URL_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _resolve_media_to_data_urls(text: str) -> str:
+    """Inline safe local image MEDIA tags for remote API clients."""
+    if not text or "MEDIA:" not in text:
+        return text
+
+    from channels.platforms.base import (
+        MEDIA_TAG_CLEANUP_RE,
+        validate_media_delivery_path,
+    )
+
+    def _replacement(match) -> str:
+        safe_path = validate_media_delivery_path(match.group("path"))
+        if not safe_path:
+            return match.group(0)
+        path = Path(safe_path)
+        mime = _MEDIA_IMG_MIME.get(path.suffix.lower())
+        if mime is None:
+            return match.group(0)
+        try:
+            if path.stat().st_size > _MEDIA_DATA_URL_MAX_BYTES:
+                return match.group(0)
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError:
+            return match.group(0)
+        return f"![image](data:{mime};base64,{encoded})"
+
+    try:
+        return MEDIA_TAG_CLEANUP_RE.sub(_replacement, text)
+    except Exception:
+        return text
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -37,6 +79,22 @@ def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _hermes_version() -> str:
+    """Return installed or source-tree version without breaking health."""
+    try:
+        from importlib.metadata import version
+
+        return version("hermes-agent")
+    except Exception:
+        pass
+    try:
+        from hermes_cli import __version__
+
+        return __version__
+    except Exception:
+        return "dev"
 
 
 _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
@@ -507,12 +565,20 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
     """OpenAI-style error envelope."""
     return {
         "error": {
-            "message": message,
+            "message": _redact_api_error_text(message),
             "type": err_type,
             "param": param,
             "code": code,
         }
     }
+
+
+def _redact_api_error_text(value: Any, *, limit: int | None = None) -> str:
+    """Redact error text before it crosses an HTTP, SSE, or header boundary."""
+    from agent.redact import redact_sensitive_text
+
+    redacted = redact_sensitive_text(str(value), force=True)
+    return redacted[:limit] if limit is not None else redacted
 
 
 if AIOHTTP_AVAILABLE:

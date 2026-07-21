@@ -226,9 +226,12 @@ class CodexEventProjector:
 
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        call_id = _deterministic_call_id(
-            canonical_mcp_tool_name(server, tool), item_id
+        tool_name = (
+            str(tool)
+            if server == "hermes-tools"
+            else canonical_mcp_tool_name(server, tool)
         )
+        call_id = _deterministic_call_id(tool_name, item_id)
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}
@@ -240,7 +243,7 @@ class CodexEventProjector:
                     "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": f"mcp.{server}.{tool}",
+                        "name": tool_name,
                         "arguments": _format_tool_args(args),
                     },
                 }

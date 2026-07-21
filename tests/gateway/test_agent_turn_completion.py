@@ -90,3 +90,46 @@ async def test_final_delivery_does_not_suppress_empty_or_transformed_response():
             tool_progress=_ToolProgress(),
         )
         assert "already_sent" not in response
+
+
+@pytest.mark.asyncio
+async def test_previewed_commentary_does_not_suppress_different_final_response():
+    response = {
+        "final_response": "Final answer after compression.",
+        "response_previewed": True,
+    }
+    consumer = SimpleNamespace(
+        final_response_sent=False,
+        final_content_delivered=False,
+        has_delivered_text=lambda text: text == "I'll inspect the repo first.",
+    )
+
+    agent_final_delivery_for().mark_stream_delivery_and_register_cleanup(
+        response=response,
+        stream_consumer=consumer,
+        session_key="session-1",
+        run_generation=3,
+        tool_progress=_ToolProgress(),
+    )
+
+    assert "already_sent" not in response
+
+
+@pytest.mark.asyncio
+async def test_previewed_exact_final_response_is_confirmed():
+    response = {"final_response": "done", "response_previewed": True}
+    consumer = SimpleNamespace(
+        final_response_sent=False,
+        final_content_delivered=False,
+        has_delivered_text=lambda text: text == "done",
+    )
+
+    agent_final_delivery_for().mark_stream_delivery_and_register_cleanup(
+        response=response,
+        stream_consumer=consumer,
+        session_key="session-1",
+        run_generation=3,
+        tool_progress=_ToolProgress(),
+    )
+
+    assert response["already_sent"] is True

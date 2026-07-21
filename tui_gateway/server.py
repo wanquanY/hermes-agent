@@ -233,6 +233,10 @@ _READ_ONLY_DB_METHODS = frozenset(
         "profile.growth.summary",
         "profile.learning.graph",
         "profile.learning.node.detail",
+        "learning.frames",
+        "learning.detail",
+        "pet.cells",
+        "pet.gallery",
         "profile.list",
         "rollback.diff",
         "rollback.list",
@@ -242,6 +246,7 @@ _READ_ONLY_DB_METHODS = frozenset(
         "subagent.events.list",
         "subagent.runs.list",
         "session.history",
+        "session.context_breakdown",
         "session.list",
         "session.messages",
         "session.most_recent",
@@ -437,14 +442,31 @@ _methods: MutableMapping[str, Callable[..., Any]] = _RegistryMethodView()
 # response writes are safe.
 _LONG_HANDLERS = frozenset(
     {
+        "billing.auto_reload",
+        "billing.charge",
+        "billing.charge_status",
+        "billing.state",
+        "billing.step_up",
         "browser.manage",
         "cli.exec",
+        "projects.discover_repos",
+        "projects.for_cwd",
+        "projects.project_sessions",
+        "projects.record_repos",
+        "projects.tree",
+        "session.active_list",
         "session.branch",
         "session.compress",
         "session.resume",
         "shell.exec",
         "skills.manage",
         "slash.exec",
+        "subscription.change",
+        "subscription.preview",
+        "subscription.resume",
+        "subscription.state",
+        "subscription.upgrade",
+        "usage.bars",
     }
 )
 
@@ -505,6 +527,24 @@ def _finalize_session(
     try:
         if stop_event is not None:
             stop_event.set()
+
+        conversation_session_id = str(
+            session.get("session_key") or runtime_sid or ""
+        ).strip()
+        if conversation_session_id:
+            try:
+                from tui_gateway.services.pending_prompt_queue import (
+                    pending_prompt_queue,
+                    queue_scope_for_db,
+                )
+
+                queue_db = _db_for_stable_session(conversation_session_id)
+                pending_prompt_queue.clear(
+                    queue_scope_for_db(queue_db),
+                    conversation_session_id,
+                )
+            except Exception:
+                logger.debug("pending prompt cleanup failed", exc_info=True)
 
         _terminalize_active_run_for_shutdown(
             session,
@@ -749,7 +789,8 @@ def _db_unavailable_error(rid, *, code: int):
 #     the worker if the session is gone.
 #
 # Idempotency: every teardown path (session.close, ws disconnect, idle
-# reaper, shutdown, ws-orphan-reap) reaches _close_session_by_id ->
+# reaper, shutdown, ws-orphan-reap) reaches _pop_session_by_id ->
+# _teardown_popped_session ->
 # _finalize_session, and _finalize_session is guarded by the `_finalized`
 # flag (already present), so concurrent / repeat calls are no-ops.
 
@@ -785,23 +826,39 @@ def _attach_worker(sid: str, session: dict, worker) -> bool:
     return False
 
 
-def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
-    """Single idempotent teardown for one session.
+def _pop_session_by_id(sid: str) -> tuple[str, dict] | None:
+    """Atomically detach a runtime session by runtime or conversation id.
 
-    Pops the session under ``_sessions_lock`` (RLock — safe to re-enter via
-    _finalize_session, which itself doesn't take this lock but is sometimes
-    called from inside `with _sessions_lock` blocks elsewhere). The
-    ``_finalized`` guard inside _finalize_session makes concurrent or
-    repeat calls (session.close racing the WS-orphan reaper) harmless.
-
-    Returns True iff this call popped a live session — useful when callers
-    want to log "closed by reaper" vs "already gone".
+    Detaching is the ownership claim for teardown.  Slow finalization never
+    belongs under ``_sessions_lock`` or ``_session_resume_lock``; callers that
+    must serialize against resume hold the latter only around this function.
     """
+    stable_id = str(sid or "")
     with _sessions_lock:
-        session = _sessions.pop(sid, None)
+        runtime_sid = stable_id
+        session = _sessions.pop(runtime_sid, None)
+        if session is None and stable_id:
+            for candidate_sid, candidate in list(_sessions.items()):
+                if str(candidate.get("session_key") or "") == stable_id:
+                    runtime_sid = candidate_sid
+                    session = _sessions.pop(candidate_sid, None)
+                    break
     if session is None:
+        return None
+    session["_sid"] = runtime_sid
+    return runtime_sid, session
+
+
+def _teardown_popped_session(
+    claimed: tuple[str, dict] | None,
+    *,
+    end_reason: str = "tui_close",
+) -> bool:
+    """Finalize a session after its atomic registry ownership claim."""
+    if claimed is None:
         return False
-    runtime_sid = session.get("execution_session_id") or ""
+    runtime_sid, session = claimed
+    runtime_sid = session.get("execution_session_id") or runtime_sid
     _finalize_session(session, end_reason=end_reason, runtime_sid=runtime_sid)
     # tools.approval can hold a notify callback bound to this session_key
     try:
@@ -830,6 +887,14 @@ def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
     except Exception:
         pass
     return True
+
+
+def _close_session_by_id(sid: str, *, end_reason: str = "tui_close") -> bool:
+    """Convenience close for paths that do not race ``session.resume``."""
+    return _teardown_popped_session(
+        _pop_session_by_id(sid),
+        end_reason=end_reason,
+    )
 
 
 def _close_sessions_for_transport(
@@ -1866,6 +1931,7 @@ from tui_gateway.core.runtime_settings import (
     _load_reasoning_config,
     _load_service_tier,
     _load_show_reasoning,
+    _load_interim_assistant_messages,
     _load_tool_progress_mode,
     _load_enabled_toolsets,
     _load_disabled_toolsets,
@@ -1873,7 +1939,13 @@ from tui_gateway.core.runtime_settings import (
     _session_verbose,
     _tool_progress_enabled,
     _restart_slash_worker,
+    _call_restart_slash_worker,
     _persist_model_switch,
+    _ONE_TURN_MODEL_RESTORE_KEY,
+    _snapshot_agent_model_runtime,
+    _snapshot_session_model_runtime,
+    _restore_agent_model_runtime,
+    _restore_session_model_runtime,
     _apply_model_switch,
     _compress_session_history,
     _sync_session_key_after_compress,

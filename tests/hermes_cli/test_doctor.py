@@ -16,6 +16,64 @@ from hermes_cli import doctor as doctor_mod
 from hermes_cli.doctor import _has_provider_env_config
 
 
+class TestDeprecatedConfigurationDiagnostics:
+    def test_collects_legacy_config_paths(self):
+        findings = doctor.collect_deprecated_config_keys(
+            {
+                "display": {"tool_progress_overrides": {}},
+                "delegation": {"max_async_children": 3},
+                "compression": {
+                    "summary_model": "summary-model",
+                    "summary_provider": "provider",
+                    "summary_base_url": "https://example.test/v1",
+                },
+            }
+        )
+
+        assert findings == [
+            ("display.tool_progress_overrides", "display.platforms"),
+            (
+                "delegation.max_async_children",
+                "delegation.max_concurrent_children",
+            ),
+            ("compression.summary_model", "auxiliary.compression"),
+            ("compression.summary_provider", "auxiliary.compression"),
+            ("compression.summary_base_url", "auxiliary.compression"),
+        ]
+
+    def test_collects_only_nonempty_on_disk_env_values(self):
+        findings = doctor.collect_deprecated_env_vars(
+            {
+                "TERMINAL_CWD": "/workspace",
+                "MESSAGING_CWD": "",
+                "QQ_HOME_CHANNEL": "legacy-room",
+            }
+        )
+
+        assert findings == [
+            ("TERMINAL_CWD", "terminal.cwd in config.yaml"),
+            ("QQ_HOME_CHANNEL", "QQBOT_HOME_CHANNEL"),
+        ]
+
+    def test_report_is_warning_only_and_does_not_mutate_inputs(self, capsys):
+        raw_config = {"display": {"tool_progress_overrides": {}}}
+        env_map = {"TERMINAL_CWD": "/workspace"}
+
+        findings = doctor.report_deprecated_config_and_env(raw_config, env_map)
+
+        output = capsys.readouterr().out
+        assert "Deprecated: display.tool_progress_overrides" in output
+        assert "Deprecated: TERMINAL_CWD" in output
+        assert "warn-only; not auto-migrated" in output
+        assert raw_config == {"display": {"tool_progress_overrides": {}}}
+        assert env_map == {"TERMINAL_CWD": "/workspace"}
+        assert len(findings) == 2
+
+    def test_report_clean_state(self, capsys):
+        assert doctor.report_deprecated_config_and_env({}, {}) == []
+        assert "No deprecated config keys or env vars" in capsys.readouterr().out
+
+
 class TestDoctorPlatformHints:
     def test_termux_package_hint(self, monkeypatch):
         monkeypatch.setenv("TERMUX_VERSION", "0.118.3")

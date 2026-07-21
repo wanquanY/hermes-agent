@@ -6,6 +6,9 @@ import asyncio
 import logging
 
 from hermes_agent.composition.async_sqlite import run_sqlite_io
+from hermes_gateway.checkpoint_config import checkpoint_agent_kwargs
+from hermes_gateway.session_navigation_commands import session_navigation_for
+from hermes_gateway.session_turn_lease import session_turn_lease_for
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,7 @@ class GatewayAgentTurnHygieneService:
         session_key: str,
         event,
         quick_key: str,
+        run_generation: int,
         load_gateway_config,
         runtime_config_for,
         agent_cache_for,
@@ -245,6 +249,7 @@ class GatewayAgentTurnHygieneService:
                                     skip_memory=True,
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
+                                    **checkpoint_agent_kwargs(_hyg_data),
                                 )
                                 try:
                                     # The hygiene agent rotates the session
@@ -271,11 +276,29 @@ class GatewayAgentTurnHygieneService:
                                     # and searchable via session_search.
                                     _hyg_new_sid = _hyg_agent.session_id
                                     if _hyg_new_sid != session_entry.session_id:
-                                        await run_sqlite_io(
+                                        updated = await run_sqlite_io(
                                             runner.session_store.update_entry_session_id,
                                             session_entry.session_key,
                                             _hyg_new_sid,
                                         )
+                                        if updated:
+                                            session_entry.session_id = _hyg_new_sid
+                                            session_turn_lease_for(runner).rebind(
+                                                quick_key,
+                                                run_generation,
+                                                _hyg_new_sid,
+                                            )
+                                            try:
+                                                await run_sqlite_io(
+                                                    session_navigation_for(runner).record_telegram_topic_binding,
+                                                    source,
+                                                    session_entry,
+                                                )
+                                            except Exception:
+                                                logger.debug(
+                                                    "Failed to synchronize topic binding after hygiene rotation",
+                                                    exc_info=True,
+                                                )
 
                                     await run_sqlite_io(
                                         runner.session_store.rewrite_transcript,

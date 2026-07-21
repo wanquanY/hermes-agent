@@ -1051,6 +1051,9 @@ class TestAnthropicStreamCallbacks:
 
         agent._anthropic_client = MagicMock()
         agent._anthropic_client.messages.stream.return_value = mock_stream
+        agent._create_request_anthropic_client = MagicMock(
+            return_value=agent._anthropic_client
+        )
 
         agent._interruptible_streaming_api_call({})
 
@@ -1100,12 +1103,15 @@ class TestAnthropicStreamCallbacks:
             _BadStream(),
             good_stream,
         ]
+        agent._create_request_anthropic_client = MagicMock(
+            return_value=agent._anthropic_client
+        )
 
         response = agent._interruptible_streaming_api_call({})
 
         assert response is final_message
         assert agent._anthropic_client.messages.stream.call_count == 2
-        assert mock_replace.call_count == 1
+        assert mock_replace.call_count == 0
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     def test_generic_anthropic_valueerror_still_propagates_without_stream_retry(
@@ -1130,6 +1136,9 @@ class TestAnthropicStreamCallbacks:
         agent._anthropic_client = MagicMock()
         agent._anthropic_client.messages.stream.side_effect = ValueError(
             "invalid local request shape"
+        )
+        agent._create_request_anthropic_client = MagicMock(
+            return_value=agent._anthropic_client
         )
 
         with pytest.raises(ValueError, match="invalid local request shape"):

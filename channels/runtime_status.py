@@ -39,6 +39,30 @@ _gateway_lock_handle = None
 # past the JSON payload so runtime status / PID readers can still read the file
 # while another process holds the mutual-exclusion lock.
 _WINDOWS_LOCK_OFFSET = 1024 * 1024
+_DRAINABLE_GATEWAY_STATES = frozenset({"running"})
+
+
+def parse_active_agents(raw: Any) -> int:
+    """Return the canonical non-negative in-flight agent count."""
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def derive_gateway_busy(
+    *,
+    gateway_running: bool,
+    gateway_state: Any,
+    active_agents: Any,
+) -> bool:
+    if not gateway_running or gateway_state not in _DRAINABLE_GATEWAY_STATES:
+        return False
+    return parse_active_agents(active_agents) > 0
+
+
+def derive_gateway_drainable(*, gateway_running: bool, gateway_state: Any) -> bool:
+    return bool(gateway_running) and gateway_state in _DRAINABLE_GATEWAY_STATES
 
 
 def _get_pid_path() -> Path:
@@ -146,6 +170,23 @@ def _get_process_start_time(pid: int) -> Optional[int]:
 def get_process_start_time(pid: int) -> Optional[int]:
     """Public wrapper for retrieving a process start time when available."""
     return _get_process_start_time(pid)
+
+
+def process_identity_is_alive(pid: object, started_at: object) -> bool:
+    """Return whether a recorded ``(pid, start time)`` still owns work."""
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if not _pid_exists(normalized_pid):
+        return False
+    current_start = get_process_start_time(normalized_pid)
+    if current_start is None or started_at is None:
+        return True
+    try:
+        return int(current_start) == int(started_at)
+    except (TypeError, ValueError):
+        return True
 
 
 def _read_process_cmdline(pid: int) -> Optional[str]:

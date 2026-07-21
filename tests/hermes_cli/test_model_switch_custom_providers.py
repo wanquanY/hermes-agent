@@ -192,6 +192,7 @@ def test_list_groups_same_name_custom_providers_into_one_row(monkeypatch):
             {"name": "Moonshot", "base_url": "https://api.moonshot.ai/v1", "model": "kimi-k2-thinking"},
         ],
         max_models=50,
+        probe_custom_providers=False,
     )
 
     ollama_rows = [p for p in providers if p["name"] == "Ollama Cloud"]

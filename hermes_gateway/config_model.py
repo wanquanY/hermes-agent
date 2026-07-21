@@ -150,6 +150,15 @@ DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 24
 DEFAULT_STREAMING_CURSOR: str = " ▉"
 
 
+def _normalize_streaming_transport(value: Any, default: str = "auto") -> str:
+    """Normalize streaming mode tokens, including YAML 1.1 on/off booleans."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "auto" if value else "off"
+    return str(value).strip().lower() or default
+
+
 @dataclass
 class StreamingConfig:
     """Configuration for real-time token streaming to messaging platforms."""
@@ -188,11 +197,24 @@ class StreamingConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StreamingConfig":
-        if not data:
+        if not isinstance(data, dict) or not data:
             return cls()
+
+        raw_transport = data.get("transport")
+        raw_mode = data.get("mode")
+        picked_transport = raw_transport if raw_transport is not None else raw_mode
+        transport = _normalize_streaming_transport(picked_transport, default="edit")
+        if "enabled" in data:
+            enabled = _coerce_bool(data.get("enabled"), False)
+        elif raw_mode is not None:
+            enabled = _normalize_streaming_transport(raw_mode) != "off"
+        else:
+            # `transport` selects how an already-enabled stream is delivered;
+            # only the ergonomic `mode` alias implies activation.
+            enabled = False
         return cls(
-            enabled=_coerce_bool(data.get("enabled"), False),
-            transport=data.get("transport", "edit"),
+            enabled=enabled,
+            transport=transport,
             edit_interval=_coerce_float(
                 data.get("edit_interval"), DEFAULT_STREAMING_EDIT_INTERVAL,
             ),
@@ -274,10 +296,17 @@ class GatewayConfig:
 
     # STT settings
     stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
+    stt_echo_transcripts: bool = True  # Whether to echo raw transcripts to the user
 
     # Session isolation in shared chats
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
+
+    # One process can serve isolated profile runtimes. Sources are stamped
+    # before authorization/session lookup, and every turn enters that profile's
+    # home + credential scope.
+    multiplex_profiles: bool = False
+    profile_routes: list = field(default_factory=list)
 
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
@@ -293,14 +322,14 @@ class GatewayConfig:
     session_store_max_age_days: int = 90
 
     def get_connected_platforms(self) -> List[Platform]:
-        """Return list of platforms that are enabled and configured."""
+        """Return configured platforms in a byte-stable order."""
         connected = []
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
             if self._is_platform_connected(platform, config):
                 connected.append(platform)
-        return connected
+        return sorted(connected, key=lambda platform: str(platform.value))
 
     def _is_platform_connected(self, platform: Platform, config: PlatformConfig) -> bool:
         """Check whether a single platform is sufficiently configured."""
@@ -380,8 +409,24 @@ class GatewayConfig:
             "sessions_dir": str(self.sessions_dir),
             "always_log_local": self.always_log_local,
             "stt_enabled": self.stt_enabled,
+            "stt_echo_transcripts": self.stt_echo_transcripts,
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
+            "multiplex_profiles": self.multiplex_profiles,
+            "profile_routes": [
+                {
+                    "name": route.name,
+                    "platform": route.platform,
+                    "profile": route.profile,
+                    "scope_id": route.scope_id,
+                    "chat_id": route.chat_id,
+                    "thread_id": route.thread_id,
+                    "enabled": route.enabled,
+                }
+                if hasattr(route, "profile")
+                else route
+                for route in self.profile_routes
+            ],
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
@@ -424,9 +469,29 @@ class GatewayConfig:
         stt_enabled = data.get("stt_enabled")
         if stt_enabled is None:
             stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
+        stt_echo_transcripts = data.get("stt_echo_transcripts")
+        if stt_echo_transcripts is None and isinstance(data.get("stt"), dict):
+            stt_echo_transcripts = data["stt"].get("echo_transcripts")
 
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
+        nested_gateway = data.get("gateway")
+        if not isinstance(nested_gateway, dict):
+            nested_gateway = {}
+        multiplex_profiles = data.get(
+            "multiplex_profiles",
+            nested_gateway.get("multiplex_profiles"),
+        )
+        env_multiplex = os.getenv("GATEWAY_MULTIPLEX_PROFILES", "").strip().lower()
+        if env_multiplex in {"true", "1", "yes", "on"}:
+            multiplex_profiles = True
+        elif env_multiplex in {"false", "0", "no", "off"}:
+            multiplex_profiles = False
+        from hermes_gateway.profile_routing import parse_profile_routes
+
+        profile_routes = parse_profile_routes(
+            data.get("profile_routes", nested_gateway.get("profile_routes")) or []
+        )
         unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
             data.get("unauthorized_dm_behavior"),
             "pair",
@@ -448,8 +513,11 @@ class GatewayConfig:
             sessions_dir=sessions_dir,
             always_log_local=_coerce_bool(data.get("always_log_local"), True),
             stt_enabled=_coerce_bool(stt_enabled, True),
+            stt_echo_transcripts=_coerce_bool(stt_echo_transcripts, True),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
+            multiplex_profiles=_coerce_bool(multiplex_profiles, False),
+            profile_routes=profile_routes,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,

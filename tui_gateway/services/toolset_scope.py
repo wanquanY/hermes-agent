@@ -193,6 +193,11 @@ def refresh_agent_tool_filter(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=getattr(agent, "quiet_mode", True),
+        tool_search_context_length=getattr(
+            getattr(agent, "context_compressor", None),
+            "context_length",
+            None,
+        ),
     )
     agent.valid_tool_names = {
         tool["function"]["name"]

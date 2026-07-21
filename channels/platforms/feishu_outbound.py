@@ -39,7 +39,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _MARKDOWN_HINT_RE = re.compile(
-    r"(^#{1,6}\s)|(```)|(`[^`]+`)|"
+    r"(^\|.*\|\s*\n\|[-:|\s]+\|)|(^#{1,6}\s)|(```)|(`[^`]+`)|"
     r"(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(__[^_]+__)|(_[^_\n]+_)|"
     r"(\[[^\]]+\]\([^)]+\))|(^\s*[-*+]\s)|(^\s*\d+\.\s)|(^>)|(<u>)|(~~)",
     re.MULTILINE,
@@ -91,11 +91,15 @@ class FeishuOutboundMixin:
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        prefer_post = bool(_MARKDOWN_HINT_RE.search(formatted))
         last_response = None
 
         try:
             for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(chunk)
+                msg_type, payload = self._build_outbound_payload(
+                    chunk,
+                    prefer_post=prefer_post,
+                )
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -575,14 +579,14 @@ class FeishuOutboundMixin:
         """Feishu text messages are plain text by default."""
         return content.strip()
 
-    def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
+    def _build_outbound_payload(
+        self,
+        content: str,
+        *,
+        prefer_post: bool = False,
+    ) -> tuple[str, str]:
+        """Build a stable Feishu payload for a whole Markdown document chunk."""
+        if prefer_post or _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
@@ -687,17 +691,19 @@ class FeishuOutboundMixin:
             )
             request = self._build_create_message_request("thread_id", body)
         else:
+            receive_id = chat_id
+            receive_id_type = "chat_id"
+            if chat_id.startswith("feishu_user_id:"):
+                receive_id = chat_id.split(":", 1)[1]
+                receive_id_type = "user_id"
+            elif chat_id.startswith("ou_"):
+                receive_id_type = "open_id"
             body = self._build_create_message_body(
-                receive_id=chat_id,
+                receive_id=receive_id,
                 msg_type=msg_type,
                 content=payload,
                 uuid_value=str(uuid.uuid4()),
             )
-            # Detect whether chat_id is a user open_id (DM) or a chat_id (group).
-            if chat_id.startswith("ou_"):
-                receive_id_type = "open_id"
-            else:
-                receive_id_type = "chat_id"
             request = self._build_create_message_request(receive_id_type, body)
         return await asyncio.to_thread(self._client.im.v1.message.create, request)
 

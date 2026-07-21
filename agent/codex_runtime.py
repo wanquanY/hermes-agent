@@ -23,6 +23,8 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
+
 logger = logging.getLogger(__name__)
 
 
@@ -692,9 +694,11 @@ def _codex_tool_summary(item: Dict[str, Any]) -> str:
                 return "patch " + ", ".join(paths)
         return "patch"
     if item_type == "mcpToolCall":
-        return f"mcp:{item.get('name') or item.get('toolName') or ''}"
+        return _codex_tool_name(item)
     if item_type == "dynamicToolCall":
-        return f"tool:{item.get('name') or ''}"
+        return f"tool:{item.get('tool') or item.get('name') or ''}"
+    if item_type == "webSearch":
+        return str(item.get("query") or "web search")[:160]
     return item_type or "tool"
 
 
@@ -705,9 +709,20 @@ def _codex_tool_name(item: Dict[str, Any]) -> str:
     if item_type == "fileChange":
         return "apply_patch"
     if item_type == "mcpToolCall":
-        return f"mcp:{item.get('name') or item.get('toolName') or 'mcp'}"
+        from tools.mcp_identity import canonical_mcp_tool_name
+
+        server = str(item.get("server") or "mcp")
+        tool = str(
+            item.get("tool")
+            or item.get("name")
+            or item.get("toolName")
+            or "unknown"
+        )
+        return tool if server == "hermes-tools" else canonical_mcp_tool_name(server, tool)
     if item_type == "dynamicToolCall":
-        return str(item.get("name") or "tool")
+        return str(item.get("tool") or item.get("name") or "tool")
+    if item_type == "webSearch":
+        return "web_search"
     return item_type or "tool"
 
 
@@ -719,7 +734,13 @@ def _forward_codex_tool_event(agent: Any, note: Dict[str, Any]) -> None:
     params = note.get("params") or {}
     item = params.get("item") or {}
     item_type = str(item.get("type") or "")
-    if item_type not in ("commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"):
+    if item_type not in (
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "dynamicToolCall",
+        "webSearch",
+    ):
         return
     item_id = str(item.get("id") or "")
     if not item_id:
@@ -750,6 +771,8 @@ def _forward_codex_tool_event(agent: Any, note: Dict[str, Any]) -> None:
             elif item_type in ("mcpToolCall", "dynamicToolCall"):
                 r = item.get("result") or item.get("output") or ""
                 output = str(r)[:2000] if not isinstance(r, str) else r[:2000]
+            elif item_type == "webSearch":
+                output = str(item.get("query") or "")[:2000]
             try:
                 cb(item_id, tool_name, {"summary": _codex_tool_summary(item)}, output)
             except Exception:
@@ -1125,10 +1148,15 @@ def run_codex_app_server_turn(
     # assistant message. The internal requirement is never added to Hermes'
     # canonical transcript.
     verification_attempts = 0
+    pre_verify_attempts = 0
     api_calls = 1
     while not turn.interrupted and turn.error is None:
         try:
-            from agent.verification_runtime import completion_requirement_for_agent
+            from agent.verification_runtime import (
+                completion_requirement_for_agent,
+                plugin_verification_continue_message,
+                verification_requirement_prompt,
+            )
 
             verification_requirement = completion_requirement_for_agent(
                 agent,
@@ -1137,19 +1165,34 @@ def run_codex_app_server_turn(
         except Exception:
             logger.warning("codex verification completion decision failed", exc_info=True)
             verification_requirement = None
-        if verification_requirement is None:
-            break
-        verification_attempts += 1
-        logger.info(
-            "Rejected unverified Codex final response: session=%s root=%s "
-            "generation=%d status=%s attempt=%d/%d",
-            getattr(agent, "session_id", None) or "none",
-            verification_requirement.workspace_root,
-            verification_requirement.edit_generation,
-            verification_requirement.status,
-            verification_requirement.attempt,
-            verification_requirement.max_attempts,
-        )
+        if verification_requirement is not None:
+            verification_attempts += 1
+            continuation_prompt = verification_requirement_prompt(
+                verification_requirement
+            )
+            logger.info(
+                "Rejected unverified Codex final response: session=%s root=%s "
+                "generation=%d status=%s attempt=%d/%d",
+                getattr(agent, "session_id", None) or "none",
+                verification_requirement.workspace_root,
+                verification_requirement.edit_generation,
+                verification_requirement.status,
+                verification_requirement.attempt,
+                verification_requirement.max_attempts,
+            )
+        else:
+            continuation_prompt = plugin_verification_continue_message(
+                agent,
+                final_response=str(turn.final_text or ""),
+                attempt=pre_verify_attempts,
+            )
+            if not continuation_prompt:
+                break
+            pre_verify_attempts += 1
+            logger.info(
+                "Codex pre_verify plugin continuation required attempt=%d",
+                pre_verify_attempts,
+            )
 
         # Account for the rejected protocol turn, but keep its plain assistant
         # text out of the visible transcript. Tool-call/result projections are
@@ -1174,7 +1217,7 @@ def run_codex_app_server_turn(
         prior_tool_iterations = int(turn.tool_iterations or 0)
         try:
             continued = agent._codex_session.run_turn(
-                user_input=verification_requirement.prompt(),
+                user_input=continuation_prompt,
                 model_override=codex_app_server_turn_model(agent),
             )
         except Exception as exc:
@@ -1382,6 +1425,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_projector = ResponsesStreamProjector()
         try:
             with active_client.responses.stream(**api_kwargs) as stream:
+                writer_token = claim_stream_writer(agent)
                 for event in stream:
                     # Mark stream activity for the TTFB watchdog in
                     # interruptible_api_call. The Codex backend can accept the
@@ -1389,6 +1433,13 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     # staying None tells the watchdog no bytes are flowing.
                     agent._codex_stream_last_event_ts = time.time()
                     agent._touch_activity("receiving stream response")
+                    if not stream_writer_is_current(agent, writer_token):
+                        logger.warning(
+                            "Codex stream superseded by a newer writer; "
+                            "stopping consumption (model=%s)",
+                            api_kwargs.get("model", "unknown"),
+                        )
+                        break
                     if agent._interrupt_requested:
                         break
                     projection = stream_projector.project(event)

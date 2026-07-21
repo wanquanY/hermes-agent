@@ -61,6 +61,7 @@ def _make_runner():
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()
     runner._session_model_overrides = {}
+    runner._session_service_tier_overrides = {}
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config = SimpleNamespace(streaming=None)
     runner.session_store = SimpleNamespace(
@@ -124,7 +125,7 @@ def test_turn_route_skips_priority_processing_for_unsupported_models():
 
 
 @pytest.mark.asyncio
-async def test_handle_fast_command_persists_config(monkeypatch, tmp_path):
+async def test_handle_fast_command_defaults_to_current_session(monkeypatch, tmp_path):
     runner = _make_runner()
 
     monkeypatch.setattr(fast_command, "GATEWAY_HOME", tmp_path)
@@ -136,8 +137,41 @@ async def test_handle_fast_command_persists_config(monkeypatch, tmp_path):
     assert "FAST" in response
     assert runner._service_tier == "priority"
 
+    session_key = runner._session_key_for_source(_make_source())
+    assert runner._session_service_tier_overrides[session_key] == "priority"
+    assert not (tmp_path / "config.yaml").exists()
+
+
+@pytest.mark.asyncio
+async def test_handle_fast_command_persists_only_with_global(monkeypatch, tmp_path):
+    runner = _make_runner()
+
+    monkeypatch.setattr(fast_command, "GATEWAY_HOME", tmp_path)
+    monkeypatch.setattr(fast_command, "load_gateway_config", lambda: {})
+    monkeypatch.setattr(fast_command, "resolve_gateway_model", lambda config=None: "gpt-5.4")
+
+    response = await fast_command.fast_command_for(runner).handle_fast_command(
+        _make_event("/fast fast --global")
+    )
+
+    assert "FAST" in response
     saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert saved["agent"]["service_tier"] == "fast"
+    session_key = runner._session_key_for_source(_make_source())
+    assert session_key not in runner._session_service_tier_overrides
+
+
+def test_session_fast_overrides_are_isolated_and_explicit_normal_wins(monkeypatch):
+    runner = _make_runner()
+    service = fast_command.fast_command_for(runner)
+    monkeypatch.setattr(service, "load_service_tier", lambda: "priority")
+
+    service.set_session_service_tier_override("session-a", None)
+    service.set_session_service_tier_override("session-b", "priority")
+
+    assert service.resolve_session_service_tier(session_key="session-a") is None
+    assert service.resolve_session_service_tier(session_key="session-b") == "priority"
+    assert service.resolve_session_service_tier(session_key="session-c") == "priority"
 
 
 @pytest.mark.asyncio

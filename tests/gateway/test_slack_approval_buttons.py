@@ -49,7 +49,11 @@ from hermes_gateway.config import Platform, PlatformConfig
 
 def _make_adapter():
     """Create a SlackAdapter instance with mocked internals."""
-    config = PlatformConfig(enabled=True, token="xoxb-test-token")
+    config = PlatformConfig(
+        enabled=True,
+        token="xoxb-test-token",
+        extra={"allow_from": ["*"]},
+    )
     adapter = SlackAdapter(config)
     adapter._app = MagicMock()
     adapter._bot_user_id = "U_BOT"
@@ -167,7 +171,7 @@ class TestSlackApprovalAction:
                 ],
             },
             "channel": {"id": "C1"},
-            "user": {"name": "norbert"},
+            "user": {"id": "U_NORBERT", "name": "norbert"},
         }
         action = {
             "action_id": "hermes_approve_once",
@@ -197,7 +201,7 @@ class TestSlackApprovalAction:
         body = {
             "message": {"ts": "1234.5678", "blocks": []},
             "channel": {"id": "C1"},
-            "user": {"name": "norbert"},
+            "user": {"id": "U_NORBERT", "name": "norbert"},
         }
         action = {
             "action_id": "hermes_approve_once",
@@ -222,7 +226,7 @@ class TestSlackApprovalAction:
                 {"type": "section", "text": {"type": "mrkdwn", "text": "cmd"}},
             ]},
             "channel": {"id": "C1"},
-            "user": {"name": "alice"},
+            "user": {"id": "U_ALICE", "name": "alice"},
         }
         action = {"action_id": "hermes_deny", "value": "session-key"}
 

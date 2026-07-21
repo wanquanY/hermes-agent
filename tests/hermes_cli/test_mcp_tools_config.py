@@ -68,8 +68,8 @@ def test_no_changes_when_checklist_cancelled(capsys):
     assert "no changes" in captured.out.lower()
 
 
-def test_disabling_tool_writes_exclude_list(capsys):
-    """Unchecking a tool adds it to the exclude list."""
+def test_disabling_tool_writes_include_list(capsys):
+    """Unchecking a tool persists the selected tools as a whitelist."""
     config = {
         "mcp_servers": {
             "github": {"command": "npx"},
@@ -89,8 +89,8 @@ def test_disabling_tool_writes_exclude_list(capsys):
 
     mock_save.assert_called_once()
     tools_cfg = config["mcp_servers"]["github"]["tools"]
-    assert tools_cfg["exclude"] == ["delete_repo"]
-    assert "include" not in tools_cfg
+    assert tools_cfg["include"] == ["create_issue", "search_repos"]
+    assert "exclude" not in tools_cfg
 
 
 def test_enabling_all_clears_filters(capsys):
@@ -244,8 +244,8 @@ def test_description_truncation_in_labels():
     assert len(label) < len(long_desc) + 30  # truncated + tool name + parens
 
 
-def test_switching_from_include_to_exclude(capsys):
-    """When user modifies selection, include list is replaced by exclude list."""
+def test_modifying_include_rewrites_include(capsys):
+    """A changed whitelist remains in the canonical include-mode shape."""
     config = {
         "mcp_servers": {
             "github": {
@@ -264,8 +264,8 @@ def test_switching_from_include_to_exclude(capsys):
         _configure_mcp_tools_interactive(config)
 
     tools_cfg = config["mcp_servers"]["github"]["tools"]
-    assert tools_cfg["exclude"] == ["delete"]
-    assert "include" not in tools_cfg
+    assert tools_cfg["include"] == ["create_issue", "search"]
+    assert "exclude" not in tools_cfg
 
 
 def test_empty_tools_server_skipped(capsys):

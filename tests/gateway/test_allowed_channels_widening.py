@@ -138,10 +138,12 @@ class TestTelegramAllowedChats:
         monkeypatch.setenv("TELEGRAM_ALLOWED_CHATS", "__sentinel__")
         monkeypatch.delenv("TELEGRAM_ALLOWED_CHATS")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os as _os
-        assert _os.environ["TELEGRAM_ALLOWED_CHATS"] == "-100,-200"
+        assert config.platforms[Platform.TELEGRAM].extra["allowed_chats"] == [
+            -100,
+            -200,
+        ]
 
     def test_config_bridge_env_takes_precedence(self, monkeypatch, tmp_path):
         from hermes_gateway.config import load_gateway_config
@@ -231,10 +233,12 @@ class TestDingTalkAllowedChats:
         monkeypatch.setenv("DINGTALK_ALLOWED_CHATS", "__sentinel__")
         monkeypatch.delenv("DINGTALK_ALLOWED_CHATS")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os as _os
-        assert _os.environ["DINGTALK_ALLOWED_CHATS"] == "cidABC,cidDEF"
+        assert config.platforms[Platform.DINGTALK].extra["allowed_chats"] == [
+            "cidABC",
+            "cidDEF",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +311,12 @@ class TestMattermostAllowedChannels:
         monkeypatch.setenv("MATTERMOST_ALLOWED_CHANNELS", "__sentinel__")
         monkeypatch.delenv("MATTERMOST_ALLOWED_CHANNELS")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os as _os
-        assert _os.environ["MATTERMOST_ALLOWED_CHANNELS"] == "chanABC,chanDEF"
+        assert config.platforms[Platform.MATTERMOST].extra["allowed_channels"] == [
+            "chanABC",
+            "chanDEF",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +374,9 @@ class TestMatrixAllowedRooms:
         monkeypatch.setenv("MATRIX_ALLOWED_ROOMS", "__sentinel__")
         monkeypatch.delenv("MATRIX_ALLOWED_ROOMS")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os as _os
-        assert _os.environ["MATRIX_ALLOWED_ROOMS"] == "!room1:srv,!room2:srv"
+        assert config.platforms[Platform.MATRIX].extra["allowed_rooms"] == [
+            "!room1:srv",
+            "!room2:srv",
+        ]

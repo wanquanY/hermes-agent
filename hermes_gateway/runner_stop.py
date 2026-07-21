@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 import time
 
 from hermes_constants import get_hermes_home
@@ -39,6 +41,30 @@ async def stop_gateway_runner(
     if self._stop_task is not None:
         await self._stop_task
         return
+
+    from hermes_gateway.shutdown_watchdog import (
+        arm_shutdown_watchdog,
+        resolve_shutdown_watchdog_delay,
+    )
+
+    watchdog_done = threading.Event()
+    self._shutdown_watchdog_done = watchdog_done
+
+    def _shutdown_snapshot() -> dict:
+        return {
+            "restart_requested": bool(self._restart_requested),
+            "draining": bool(self._draining),
+            "running_agents": len(self._running_agents),
+            "background_tasks": len(self._background_tasks),
+            "restart_drain_timeout": self._restart_drain_timeout,
+        }
+
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        arm_shutdown_watchdog(
+            resolve_shutdown_watchdog_delay(self._restart_drain_timeout),
+            done_event=watchdog_done,
+            snapshot_fn=_shutdown_snapshot,
+        )
 
     async def _stop_impl() -> None:
         def _kill_tool_subprocesses(phase: str) -> None:
@@ -272,6 +298,10 @@ async def stop_gateway_runner(
 
         await asyncio.to_thread(_finalize_all_agents)
 
+        from hermes_gateway.profile_runtime import profile_runtime_for
+
+        await profile_runtime_for(self).stop_secondary_adapters()
+
         for platform, adapter in list(self.adapters.items()):
             _adapter_started_at = time.monotonic()
             try:
@@ -408,4 +438,7 @@ async def stop_gateway_runner(
         logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
 
     self._stop_task = asyncio.create_task(_stop_impl())
-    await self._stop_task
+    try:
+        await self._stop_task
+    finally:
+        watchdog_done.set()

@@ -714,7 +714,12 @@ def test_load_enabled_toolsets_rejects_disabled_mcp_env(monkeypatch, capsys):
 
     # Platform-required toolsets are restored even when the explicit MCP
     # selection is invalid or disabled.
-    assert server._load_enabled_toolsets() == ["kanban", "memory", "subagent"]
+    assert server._load_enabled_toolsets() == [
+        "kanban",
+        "memory",
+        "project",
+        "subagent",
+    ]
     err = capsys.readouterr().err
     assert "ignoring disabled MCP servers" in err
     assert "mcp-off" in err
@@ -735,7 +740,12 @@ def test_load_enabled_toolsets_falls_back_when_tui_env_invalid(monkeypatch, caps
         config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["memory"]}}
     )
 
-    assert server._load_enabled_toolsets() == ["kanban", "memory", "subagent"]
+    assert server._load_enabled_toolsets() == [
+        "kanban",
+        "memory",
+        "project",
+        "subagent",
+    ]
     assert "using configured CLI toolsets" in capsys.readouterr().err
 
 
@@ -1697,7 +1707,7 @@ def test_config_set_yolo_toggles_session_scope():
         server._sessions.clear()
 
 
-def test_config_set_fast_updates_live_agent_and_config(monkeypatch):
+def test_config_set_fast_updates_live_agent_without_global_config(monkeypatch):
     writes = []
     emits = []
     agent = types.SimpleNamespace(
@@ -1731,7 +1741,8 @@ def test_config_set_fast_updates_live_agent_and_config(monkeypatch):
             "foo": "bar",
             "service_tier": "priority",
         }
-        assert ("agent.service_tier", "fast") in writes
+        assert writes == []
+        assert server._sessions["sid"]["create_service_tier_override"] == "priority"
         assert ("session.info", "sid", {"model": "x"}) in emits
 
         resp_normal = server.handle_request(
@@ -1744,7 +1755,8 @@ def test_config_set_fast_updates_live_agent_and_config(monkeypatch):
         assert resp_normal["result"]["value"] == "normal"
         assert agent.service_tier is None
         assert agent.request_overrides == {"foo": "bar"}
-        assert ("agent.service_tier", "normal") in writes
+        assert writes == []
+        assert server._sessions["sid"]["create_service_tier_override"] == ""
     finally:
         server._sessions.pop("sid", None)
 
@@ -3775,7 +3787,7 @@ def test_apply_model_switch_same_model_skips_marker_and_worker_restart(monkeypat
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_: fake_result)
     monkeypatch.setattr("hermes_cli.model_switch.resolve_persist_behavior", lambda *_a, **_kw: False)
     monkeypatch.setattr(
-        "hermes_cli.model_switch.parse_model_flags",
+        "hermes_cli.model_switch.parse_model_flags_detailed",
         lambda _raw: ("deepseek-v4-pro", "", False, False, False),
     )
     monkeypatch.setattr(
@@ -3842,7 +3854,7 @@ def test_apply_model_switch_real_switch_still_appends_marker(monkeypatch):
     monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_: fake_result)
     monkeypatch.setattr("hermes_cli.model_switch.resolve_persist_behavior", lambda *_a, **_kw: False)
     monkeypatch.setattr(
-        "hermes_cli.model_switch.parse_model_flags",
+        "hermes_cli.model_switch.parse_model_flags_detailed",
         lambda _raw: ("claude-opus-4-7", "anthropic", False, False, False),
     )
     monkeypatch.setattr(

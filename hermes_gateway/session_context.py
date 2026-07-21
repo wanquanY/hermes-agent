@@ -196,7 +196,10 @@ def build_session_context_prompt(
             else:
                 id_lines.append(f"  - Channel: `{src.chat_id}`")
             if src.message_id:
-                id_lines.append(f"  - Triggering message: `{src.message_id}`")
+                id_lines.append(
+                    "  - Triggering message: provided per-turn in the incoming "
+                    "user message (use it as `message_id` for reply/react/pin)"
+                )
             lines.extend(id_lines)
         else:
             lines.append("")
@@ -207,6 +210,11 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+        lines.append("")
+        lines.append(
+            "Voice-channel state, when relevant, appears in the current "
+            "message as a `[Voice channel now: ...]` note."
+        )
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(

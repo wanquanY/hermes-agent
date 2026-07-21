@@ -52,6 +52,56 @@ List the files in /home/user/projects and summarize the repo structure.
 
 Hermes will discover the MCP server's tools and use them like any other tool.
 
+## Curated MCP catalog
+
+Hermes ships a reviewed catalog for integrations whose transport, setup, and
+default tool policy are known. Catalog entries are disabled until you install
+them; installation writes the same `mcp_servers` configuration used by custom
+servers, so there is only one runtime path.
+
+```bash
+# Interactive catalog and configured-server picker
+hermes mcp
+
+# Deterministic text listing (also works without a TTY)
+hermes mcp catalog
+
+# Install a reviewed entry
+hermes mcp install figma-desktop
+
+# Revisit the discovered per-tool allowlist
+hermes mcp configure figma-desktop
+```
+
+The catalog supports local stdio servers, local or remote HTTP servers, API-key
+setup, and native MCP OAuth. Install-time discovery writes a `tools.include`
+allowlist when an entry declares conservative defaults. Reinstalling an entry
+preserves the user's existing selection.
+
+### Figma Desktop
+
+The `figma-desktop` entry connects Hermes to Figma's official local MCP server
+at `http://127.0.0.1:3845/mcp`.
+
+1. Open or update the Figma Desktop app and open a Design or FigJam file.
+2. Switch to Dev Mode and enable the MCP server in the right sidebar.
+3. Run `hermes mcp install figma-desktop` on the same machine.
+4. Start a new Hermes session, then provide the full Figma file or selection
+   URL. For selection-based work, select the target frame or layer in Figma.
+
+Hermes enables a read-first subset by default: design context, metadata,
+screenshots, variables, Code Connect inspection, and FigJam reads. Canvas and
+Code Connect mutations must be explicitly enabled with
+`hermes mcp configure figma-desktop` after reviewing the discovered tool list.
+
+Figma also documents `https://mcp.figma.com/mcp` as its remote endpoint, but
+the remote service currently accepts only clients listed in Figma's MCP
+Catalog. Hermes therefore does not advertise remote OAuth as a ready-to-use
+catalog entry. It remains possible to add that URL as a custom MCP after Figma
+grants the Hermes client access. See Figma's
+[Desktop setup](https://developers.figma.com/docs/figma-mcp-server/desktop-server-installation/)
+and [remote-client requirements](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/).
+
 ## Two kinds of MCP servers
 
 ### Stdio servers

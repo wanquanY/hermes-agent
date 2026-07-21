@@ -7,6 +7,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from hermes_gateway.final_delivery_confirmation import (
+    stream_confirmed_final_delivery,
+)
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
 
@@ -122,19 +125,21 @@ class AgentFinalDeliveryRuntime:
             return
         final_response = response.get("final_response") or ""
         is_empty_sentinel = not final_response or final_response == "(empty)"
-        streamed = bool(
-            stream_consumer and getattr(stream_consumer, "final_response_sent", False)
-        )
         previewed = bool(response.get("response_previewed"))
         content_delivered = bool(
             stream_consumer
             and getattr(stream_consumer, "final_content_delivered", False)
         )
+        streamed = stream_confirmed_final_delivery(
+            stream_consumer,
+            final_response,
+            previewed=previewed,
+        )
         transformed = bool(response.get("response_transformed"))
         if (
             not is_empty_sentinel
             and not transformed
-            and (streamed or previewed or content_delivered)
+            and streamed
         ):
             logger.info(
                 "Suppressing normal final send for session %s: final delivery already confirmed "

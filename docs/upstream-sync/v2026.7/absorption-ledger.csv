@@ -33,7 +33,7 @@ CX1,capability,9,absorb,Codex native compaction,d1c8c0341;87b65e24a,阶段9 nati
 CX2,capability,9,absorb,Codex app-server reasoning delta,b3b1e58ad;538173f67,阶段9 reasoning 流式投影测试通过,当前只累积最终 reasoning 字段,
 CX3,capability,0,equivalent,Codex 272K auto-raise,948993cd6;60391d0ee,账本校验与既有 GPT-5.6 回归通过,b49f60b82 已落地可关闭 auto-raise,
 CX4,capability,9,absorb,Verification 通用 hook,verification-hook,阶段9 verification evidence 与 hook 测试通过,本地缺少通用 verification aggregate,
-CB1,product,0,skip-with-reason,Context breakdown popover,fd324562d;6aefc9d92,账本 skip reason 复核通过,Doxie UI 产品面不属于 Hermes 引擎本轮吸收范围,
+CB1,product,14,absorb,Context breakdown 全运行面投影,fd324562d;6aefc9d92,CLI/TUI/Gateway/API 共用 breakdown 合同与专项测试通过,上下文构成是运行时事实而非单一 UI 产品逻辑,
 CB2,capability,0,equivalent,Copilot x-initiator per turn,6f052b7ff,账本校验与既有 Copilot 回归通过,hermes_cli copilot auth 已按 turn 切换,
 CB3,capability,8,absorb,delegation headroom 分配与 spill,35a0803a3,预算幂等/headroom/fan-in 顺序/安全 spill 专项及全量通过,delegation_summary 成为唯一预算 owner,
 U1,capability,1,absorb,macOS SQLite synchronous FULL,9aba95b05317,阶段1真实 reopen 与 PRAGMA 测试通过,本地连接工厂未统一设置 synchronous,
@@ -104,3 +104,27 @@ LG2,capability,13,absorb,Journey 成长时间线与 CLI,e971dc1e9;ce82b0c3c;7e03
 LG3,capability,13,absorb,Journey 节点统一查看编辑删除,a0576560e;08be8e5ef;2fc67a3a5,阶段13原子 mutation 与 stale id 测试通过,当前消费端缺少领域 mutation seam,
 LG4,architecture,13,superseded,成长摘要改为 Learning Graph 派生,96552c31e,阶段13 summary/graph 同源测试通过,移除现有独立 memory/skill 计数规则,
 BR1,capability,13,absorb,后台复盘 aux 路由、隔离与安全成长写入,87c4a5ebb;e2fa509bf;b5267671f;437dcacbb;2e828d4b7;17cfa0f0a;8ef006933;20871c1d9;96bc524a7;525e1e775;56abbaeac,阶段13后台复盘成本、隔离、先读后写、所有权与可恢复归档测试通过,当前固定主模型完整历史且隔离和技能写入边界不完整,
+UP1,capability,14,absorb,结构化文档读取与统一图像来源,tools/read_extract.py;tools/image_source.py,分页提取、路径边界、远程与容器图像、SVG 和非原生格式专项测试通过,文件读取和视觉工具需要共享安全来源解析与规范化边界,
+UP2,capability,14,absorb,Skill AST 深度审计,tools/skills_ast_audit.py;hermes_cli/skills_hub.py,CLI 与 slash deep audit 合同及 AST 专项测试通过,纯文本审计无法证明危险调用和语法结构,
+UP3,capability,14,absorb,后台线程上下文传播与 daemon 池,tools/thread_context.py;tools/daemon_pool.py,ContextVar 归属与后台退出专项测试通过,裸线程池会丢失请求归属并阻塞进程退出,
+UP4,architecture,14,superseded,Project 一等领域能力,hermes_cli/projects_db.py;tools/project_tools.py;tui_gateway/projects.py,领域服务、统一状态库、CLI/RPC/Agent tools 与 Git 投影专项测试通过,用统一 project repository 取代上游独立 projects.db,UP4
+UP5,architecture,14,superseded,Compute host 隔离运行时,tui_gateway/compute_host.py;tui_gateway/host_supervisor.py,worker supervisor、租约、frame router 与隔离开关专项测试通过,本地 orchestration 分层覆盖且强化上游单体 host 实现,UP5
+UP6,capability,14,absorb,Computer Use 诊断与权限入口,tools/computer_use/doctor.py;tools/computer_use/permissions.py;hermes_cli/subcommands/doctor.py,CLI 与 profile-scoped Web API 诊断和授权专项测试通过,Computer Use 需要可操作的依赖和系统权限闭环,
+UP7,capability,14,absorb,xAI 视频编辑与扩展,tools/xai_video_tools.py,provider plugin 委派、动态工具发现和 toolset 专项测试通过,生成之外还需编辑和扩展能力且凭据归 provider owner,
+UP8,security,14,absorb,execute_code 审批和 RPC token 边界,tools/approval.py;tools/code_execution_tool.py,smart-deny 单次 owner override、host mount 检查、env scrub 与 RPC token 专项测试通过,代码执行子进程和本地 RPC 必须共享最小权限边界,
+UP9,capability,14,absorb,Project 与会话 Git 上下文统一,tui_gateway/git_probe.py;tui_gateway/project_tree.py,项目发现、repo root/branch 持久化、session.info 和树投影专项测试通过,Project 选择必须改变规范化会话工作区而不是维护旁路状态,
+UP10,architecture,14,superseded,内置消息平台 Plugin 化,plugins/platforms;channels/builtin_platform_plugins.py,全部内置 manifest 经统一 registry 注册且 Gateway 优先从 Plugin 构造,复用本地分层 channel adapter 并取代上游每插件复制巨型实现,UP10
+UP11,capability,14,absorb,Telegram username chat target,plugins/platforms/telegram/telegram_ids.py,工具目标解析、独立发送与 adapter 出站的数字和 username 专项测试通过,Telegram Bot API 合法 username 目标不能被强制 int 转换,
+UP12,capability,14,absorb,Slack Block Kit final projection,plugins/platforms/slack/block_kit.py,纯 renderer、单块发送、final edit、fallback 与 feedback 专项测试通过,结构化 Slack 输出属于可选投影且必须保留 text fallback,
+UP13,capability,14,absorb,Discord continuous voice mixer,plugins/platforms/discord/voice_mixer.py,PCM 混音、duck、ack、join/play/leave 降级专项测试通过,连续语音和环境音必须由单一 AudioSource 混合避免播放竞态,
+UP14,capability,14,absorb,Feishu meeting invitation event,plugins/platforms/feishu/feishu_meeting_invite.py,WebSocket/Webhook 解析、去重、用户路由和 user_id 发送专项测试通过,会议邀请需进入统一 Gateway 会话和交付管线,
+UP15,capability,14,absorb,Checkpoint 与文件工具共享规范路径,hermes_cli/checkpoints.py;tools/checkpoint_manager.py;tools/file_tools.py,checkpoint 路径与 tool executor 专项测试通过,路径等价必须在单一 canonical seam 收敛而不能由各入口分别展开,
+UP16,capability,14,absorb,Matrix 容量与 Feishu 富文本投影,channels/platforms/matrix.py;channels/platforms/feishu.py,Matrix 16KiB 分段和 Feishu post+md 专项测试通过,平台限制和富文本降级属于 delivery adapter 的确定性合同,
+UP17,capability,14,absorb,Gateway prompt tail 冻结提示,hermes_gateway/agent_input_preparation.py;apps/desktop/src/app/session/hooks/use-message-stream/gateway-event.ts,prompt tail 与跨 turn 回归测试通过,运行期提示必须随 turn 输入冻结而不能读取漂移的后续状态,
+UP18,capability,14,absorb,Kimi 与 Moonshot provider 身份统一,agent/moonshot_schema.py;plugins/model-providers/kimi-coding/__init__.py,provider listing、schema、thinking replay 和 endpoint 专项测试通过,模型名和 endpoint 都必须解析到同一 provider policy,
+UP19,architecture,14,superseded,Custom endpoint 领域服务,apps/desktop/src/app/settings/custom-endpoints-settings.tsx;plugins/model-providers/custom/plugin.yaml,创建更新删除、持久化和 stale endpoint 回归测试通过,本地以 hermes_cli custom endpoint service 取代 UI 直接拼接配置,UP19
+UP20,capability,14,absorb,message.interim 规范事件,apps/desktop/src/app/session/hooks/use-message-stream/interim-sealing.test.tsx;apps/desktop/src/app/session/hooks/use-message-stream/gateway-event.ts,Gateway callback、共享 JSON-RPC 和 Doxie projection 专项测试通过,interim assistant 内容必须是可封口的规范事件而不是 UI 私有缓存,
+UP21,capability,14,absorb,LSP stale diagnostics 淘汰,agent/lsp/client.py;agent/lsp/manager.py,版本推进与迟到 diagnostics 专项测试通过,旧文档版本的诊断不得覆盖新版本事实,
+UP22,architecture,14,superseded,Skill Plugin MCP 三层资产图与 Figma 能力,apps/desktop/src/app/settings/plugins-settings.tsx;apps/desktop/src/app/skills/mcp-tab.tsx;hermes_cli/mcp_catalog.py,资产越界、Plugin Skill、共享 MCP catalog、Figma 离线安装和 capability market 专项测试通过,本地由 plugin manifest 统一声明 Skill 与 MCP 并将 Figma 作为一个能力包而非复制三份目录,UP22
+UP23,architecture,14,superseded,Auxiliary task 单一目录,hermes_cli/main.py;hermes_cli/web_server.py;hermes_cli/plugins.py,默认配置、CLI、Dashboard 与 Plugin reserved key 精确一致测试通过,本地 auxiliary_tasks catalog 取代三个独立维护列表,UP23
+UP24,product,14,absorb,Desktop 多窗口与电源生命周期,apps/desktop/electron/main.ts;apps/desktop/electron/session-windows.ts;apps/desktop/electron/event-dedupe.ts;apps/desktop/electron/power-save.ts,Doxie window manager、event dedupe、menu、keep-awake 和 Electron 聚合测试通过,多窗口必须由主进程生命周期 owner 统一管理并在 renderer 保持事件幂等,

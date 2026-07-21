@@ -281,3 +281,17 @@ def async_delivery_supported() -> bool:
     if value is _UNSET:
         return True
     return bool(value)
+
+
+def declare_stateless_channel():
+    """Disable detached delivery without engaging the full session context.
+
+    Returns the ContextVar token so in-process callers and tests can restore
+    their prior capability after the one-shot scope ends.
+    """
+    return _SESSION_ASYNC_DELIVERY.set(False)
+
+
+def restore_async_delivery_capability(token) -> None:
+    """Restore a token returned by :func:`declare_stateless_channel`."""
+    _SESSION_ASYNC_DELIVERY.reset(token)

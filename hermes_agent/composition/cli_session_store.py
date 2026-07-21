@@ -15,8 +15,12 @@ from channels.platforms.telegram_topic_store import TelegramTopicStore
 from hermes_agent.application.activity_service import ActivityService
 from hermes_agent.application.compression_lease_service import CompressionLeaseService
 from hermes_agent.application.conversation_memory_service import ConversationMemoryService
+from hermes_agent.application.delivery_obligation_service import (
+    DeliveryObligationService,
+)
 from hermes_agent.application.message_service import MessageService
 from hermes_agent.application.participant_service import ParticipantService
+from hermes_agent.application.project_service import ProjectService
 from hermes_agent.application.run_event_maintenance_service import RunEventMaintenanceService
 from hermes_agent.application.run_service import RunService
 from hermes_agent.application.runtime_stability_service import (
@@ -37,13 +41,18 @@ from hermes_agent.application.team_mission_maintenance_service import (
 )
 from hermes_agent.application.verification_service import VerificationService
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
+from hermes_agent.read_models.cron_run_history import CronRunHistoryReadModel
 from hermes_agent.read_models.team_missions import TeamMissionReadModel
 from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
 from hermes_agent.repositories.agent_profile_repo import AgentProfileRepoImpl
 from hermes_agent.repositories.compression_lease_repo import CompressionLeaseRepository
 from hermes_agent.repositories.conversation_memory_repo import ConversationMemoryRepo
 from hermes_agent.repositories.conversation_participant_repo import ConversationParticipantRepo
+from hermes_agent.repositories.delivery_obligation_repo import (
+    DeliveryObligationRepository,
+)
 from hermes_agent.repositories.runtime_stability_repo import RuntimeStabilityRepository
+from hermes_agent.repositories.project_repo import ProjectRepository
 from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_capability_repo import TeamCapabilityRepo
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
@@ -92,6 +101,10 @@ class CliSessionStore(TeamMissionStateMixin):
             self._db_path = Path(str(file_value or ""))
         self._unit_of_work = SqliteUnitOfWork(conn, self._lock)
         self._session_repo = SessionRepoImpl(conn)
+        self.delivery_obligations = DeliveryObligationService(
+            DeliveryObligationRepository(conn),
+            self._unit_of_work,
+        )
         self.team_mission_rows = TeamMissionRowMapper()
         self.team_mission_conversation_deliverables = ConversationDeliverableReadModel(
             conn,
@@ -112,6 +125,10 @@ class CliSessionStore(TeamMissionStateMixin):
         )
         self.verification = VerificationService(
             VerificationRepository(conn),
+            self._unit_of_work,
+        )
+        self.projects = ProjectService(
+            ProjectRepository(conn),
             self._unit_of_work,
         )
         self.profiles = AgentProfileRepoImpl(conn)
@@ -174,6 +191,7 @@ class CliSessionStore(TeamMissionStateMixin):
             self.messages,
         )
         self._recall = SessionRecallReadModel(conn)
+        self.cron_run_history = CronRunHistoryReadModel(conn)
         self.sessions = SessionService(
             conn,
             self._session_repo,

@@ -57,6 +57,10 @@ def test_empty_database_init_applies_all_migrations(tmp_path: Path):
             row[1] for row in conn.execute('PRAGMA table_info("runs")').fetchall()
         }
         assert {"worker_id", "agent_profile_id"}.issubset(run_columns)
+        message_columns = {
+            row[1] for row in conn.execute('PRAGMA table_info("messages")').fetchall()
+        }
+        assert "api_content" in message_columns
     finally:
         conn.close()
 
@@ -90,7 +94,7 @@ def test_half_upgraded_database_runs_pending_owner_migrations(
             row[1] for row in conn.execute('PRAGMA table_info("runs")').fetchall()
         }
         assert {"worker_id", "agent_profile_id"}.issubset(run_columns)
-        assert "participant_id" in message_columns
+        assert {"participant_id", "api_content"}.issubset(message_columns)
         assert {
             "session_system_prompts",
             "session_runtime_state",

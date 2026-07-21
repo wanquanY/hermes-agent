@@ -6,6 +6,10 @@ from tui_gateway.methods.session import (
     _interrupt_trace,
     _request_session_interrupt_side_effects_async,
 )
+from tui_gateway.services.pending_prompt_queue import (
+    pending_prompt_queue,
+    queue_scope_for_db,
+)
 
 _server = bind_server_globals(globals())
 
@@ -25,6 +29,8 @@ def _(rid, params: dict) -> dict:
     interrupt_seq = 0
     should_interrupt_agent = False
     should_clear_current = False
+    clear_queued_prompts = not params.get("_preserve_queued_prompts")
+    conversation_session_id = str(session.get("session_key") or sid).strip()
     with session["history_lock"]:
         active_run_id = str(session.get("active_run_id") or "")
         active_turn_id = str(session.get("active_turn_id") or "")
@@ -49,6 +55,12 @@ def _(rid, params: dict) -> dict:
             session["active_run_id"] = None
             session["active_turn_id"] = None
             session["run_updated_at"] = time.time()
+    if clear_queued_prompts:
+        db = _db_for_stable_session(conversation_session_id)
+        pending_prompt_queue.clear(
+            queue_scope_for_db(db),
+            conversation_session_id,
+        )
     _interrupt_trace(
         "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.state "
         f"sid={sid} requested_run_id={requested_run_id or '-'} requested_turn_id={requested_turn_id or '-'} "

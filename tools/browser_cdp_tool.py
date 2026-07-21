@@ -28,6 +28,30 @@ logger = logging.getLogger(__name__)
 
 CDP_DOCS_URL = "https://chromedevtools.github.io/devtools-protocol/"
 
+_CDP_PRIVATE_PAGE_ALLOWED_METHODS = frozenset(
+    {
+        "Browser.getVersion",
+        "Target.getTargets",
+        "Target.attachToTarget",
+        "Target.detachFromTarget",
+        "Page.navigate",
+        "Page.reload",
+        "Page.stopLoading",
+    }
+)
+
+
+def _redact_cdp_output(value: Any) -> Any:
+    from agent.redact import redact_sensitive_text
+
+    if isinstance(value, str):
+        return redact_sensitive_text(value, force=True)
+    if isinstance(value, list):
+        return [_redact_cdp_output(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_cdp_output(item) for key, item in value.items()}
+    return value
+
 # ``websockets`` is a transitive dependency of hermes-agent (via fal_client
 # and firecrawl-py) and is already imported by gateway/platforms/feishu.py.
 # Wrap the import so a clean error surfaces if the package is ever absent.
@@ -84,6 +108,54 @@ def _resolve_cdp_endpoint() -> str:
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
         return ""
+
+
+def _browser_cdp_private_guard(
+    *,
+    task_id: str,
+    method: str,
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Close raw-CDP sibling bypasses around browser private-page guards."""
+    try:
+        from tools import browser_tool as browser
+
+        if not browser._eval_ssrf_guard_active(task_id):
+            return None
+        if method == "Page.navigate":
+            target_url = str((params or {}).get("url") or "").strip()
+            if target_url and (
+                browser._is_always_blocked_url(target_url)
+                or not browser._is_safe_url(target_url)
+            ):
+                return tool_error(
+                    f"Blocked: CDP Page.navigate targets a private/internal address ({target_url}).",
+                    method=method,
+                    cdp_docs=CDP_DOCS_URL,
+                )
+        if method == "Runtime.evaluate":
+            expression = str((params or {}).get("expression") or "")
+            blocked_literal = browser._expression_targets_private_url(expression)
+            if blocked_literal:
+                return tool_error(
+                    "Blocked: CDP Runtime.evaluate expression targets a "
+                    f"private/internal address ({blocked_literal}).",
+                    method=method,
+                    cdp_docs=CDP_DOCS_URL,
+                )
+        if method not in _CDP_PRIVATE_PAGE_ALLOWED_METHODS:
+            blocked_url = browser._current_page_private_url(task_id)
+            if blocked_url:
+                return tool_error(
+                    "Blocked: page URL targets a private/internal address "
+                    f"({blocked_url}); raw CDP method {method!r} could expose "
+                    "private page content or state.",
+                    method=method,
+                    cdp_docs=CDP_DOCS_URL,
+                )
+    except Exception as exc:
+        logger.debug("browser_cdp private-page guard probe failed: %s", exc)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +365,7 @@ def _browser_cdp_via_supervisor(
         "method": method,
         "frame_id": frame_id,
         "session_id": child_sid,
-        "result": result_msg.get("result", {}),
+        "result": _redact_cdp_output(result_msg.get("result", {})),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -331,17 +403,24 @@ def browser_cdp(
         JSON string ``{"success": True, "method": ..., "result": {...}}`` on
         success, or ``{"error": "..."}`` on failure.
     """
+    effective_task_id = task_id or "default"
+    blocked = _browser_cdp_private_guard(
+        task_id=effective_task_id,
+        method=method,
+        params=params or {},
+    )
+    if blocked:
+        return blocked
+
     # --- Route iframe-scoped calls through the supervisor ---------------
     if frame_id:
         return _browser_cdp_via_supervisor(
-            task_id=task_id or "default",
+            task_id=effective_task_id,
             frame_id=frame_id,
             method=method,
             params=params,
             timeout=timeout,
         )
-    del task_id  # stateless path below
-
     if not method or not isinstance(method, str):
         return tool_error(
             "'method' is required (e.g. 'Target.getTargets')",
@@ -413,7 +492,7 @@ def browser_cdp(
     payload: Dict[str, Any] = {
         "success": True,
         "method": method,
-        "result": result,
+        "result": _redact_cdp_output(result),
     }
     if target_id:
         payload["target_id"] = target_id

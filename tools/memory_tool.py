@@ -56,6 +56,14 @@ def get_memory_dir() -> Path:
     """Return the profile-scoped memories directory."""
     return get_hermes_home() / "memories"
 
+
+# Stable prefixes shared with compression's prompt-cache validation. Keep
+# these values in lockstep with ``MemoryStore._render_block``.
+MEMORY_BLOCK_HEADERS = {
+    "memory": "MEMORY (your personal notes)",
+    "user": "USER PROFILE (who the user is)",
+}
+
 ENTRY_DELIMITER = "\n§\n"
 
 
@@ -710,9 +718,9 @@ class MemoryStore:
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
         if target == "user":
-            header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            header = f"{MEMORY_BLOCK_HEADERS['user']} [{pct}% — {current:,}/{limit:,} chars]"
         else:
-            header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            header = f"{MEMORY_BLOCK_HEADERS['memory']} [{pct}% — {current:,}/{limit:,} chars]"
 
         separator = "═" * 46
         return f"{separator}\n{header}\n{separator}\n{content}"
@@ -826,6 +834,32 @@ class MemoryStore:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 
 
+def load_on_disk_store() -> "MemoryStore":
+    """Load the profile-scoped store with the same limits as a live agent.
+
+    Review surfaces do not necessarily own an active ``AIAgent``. They still
+    need to apply an approved record against the correct ``HERMES_HOME`` and
+    enforce the configured limits rather than silently using different caps.
+    """
+    memory_char_limit = 2200
+    user_char_limit = 1375
+    try:
+        from hermes_cli.config import load_config
+
+        memory_config = (load_config() or {}).get("memory", {}) or {}
+        memory_char_limit = int(memory_config.get("memory_char_limit", memory_char_limit))
+        user_char_limit = int(memory_config.get("user_char_limit", user_char_limit))
+    except Exception:
+        logger.debug("using default memory limits for approval replay", exc_info=True)
+
+    store = MemoryStore(
+        memory_char_limit=memory_char_limit,
+        user_char_limit=user_char_limit,
+    )
+    store.load_from_disk()
+    return store
+
+
 def _apply_write_gate(action: str, target: str, content: Optional[str],
                       old_text: Optional[str]) -> Optional[str]:
     """Evaluate the memory write gate. Returns a JSON tool-result string when
@@ -871,11 +905,17 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
         "content": content,
         "old_text": old_text,
     }
-    record = wa.stage_write(
-        wa.MEMORY, payload,
-        summary=f"{summary}: {detail[:120]}",
-        origin=wa.current_origin(),
-    )
+    try:
+        record = wa.stage_write(
+            wa.MEMORY, payload,
+            summary=f"{summary}: {detail[:120]}",
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Memory write was not saved: approval staging failed ({exc}).",
+            success=False,
+        )
     return json.dumps(
         {"success": True, "staged": True, "pending_id": record["id"],
          "message": decision.message},
@@ -918,11 +958,17 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
         return tool_error(decision.message, success=False)
 
     payload = {"action": "batch", "target": target, "operations": operations}
-    record = wa.stage_write(
-        wa.MEMORY, payload,
-        summary=f"{summary}: {detail[:120]}",
-        origin=wa.current_origin(),
-    )
+    try:
+        record = wa.stage_write(
+            wa.MEMORY, payload,
+            summary=f"{summary}: {detail[:120]}",
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Memory batch was not saved: approval staging failed ({exc}).",
+            success=False,
+        )
     return json.dumps(
         {"success": True, "staged": True, "pending_id": record["id"],
          "message": decision.message},
@@ -1146,5 +1192,3 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-

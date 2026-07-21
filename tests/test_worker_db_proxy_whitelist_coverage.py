@@ -49,6 +49,7 @@ EXPLICITLY_ALLOWED_WITHOUT_STATIC_WORKER_CALL = {
     "runtime_stability.get",
     "runtime_stability.record_stream_stale_failure",
     "runtime_stability.write_compression",
+    "runs.fail_orphaned",
     "verification.completion_requirement",
     "verification.mark_edited",
     "verification.record_terminal",
@@ -123,7 +124,12 @@ class _WorkerDBCallVisitor(ast.NodeVisitor):
         # Component discovery is not a root DB method call. Calls on the
         # returned component are scanned separately as
         # `participants.<method>`.
-        if name_arg.value in {"participants", "runtime_stability", "verification"}:
+        if name_arg.value in {
+            "participants",
+            "runs",
+            "runtime_stability",
+            "verification",
+        }:
             return
         if _is_public_db_method_name(name_arg.value):
             self.call_sites.append(DBCallSite(name_arg.value, self.path, node.lineno))

@@ -6,6 +6,7 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from agent.usage_pricing import (
@@ -77,6 +78,9 @@ def record_model_response_usage(
     attribution: ModelUsageAttribution,
     canonical_usage: CanonicalUsage | None = None,
     reported_total_tokens: int | None = None,
+    known_cost_usd: Decimal | float | str | None = None,
+    known_cost_status: str = "estimated",
+    known_cost_source: str = "none",
     update_context: bool = False,
 ) -> ModelUsageRecord:
     """Record exactly one provider response in memory and SQLite.
@@ -94,18 +98,26 @@ def record_model_response_usage(
         int(reported_total_tokens or 0),
         usage.total_tokens,
     )
-    cost = (
-        estimate_usage_cost(
-            attribution.model,
-            usage,
-            provider=attribution.provider,
-            base_url=attribution.base_url,
-            api_key=getattr(agent, "api_key", ""),
-            allow_network_discovery=False,
+    if known_cost_usd is not None:
+        cost = CostResult(
+            amount_usd=Decimal(str(known_cost_usd)),
+            status=known_cost_status,
+            source=known_cost_source,
+            label="pre-priced model usage",
         )
-        if response_usage or usage.total_tokens
-        else None
-    )
+    else:
+        cost = (
+            estimate_usage_cost(
+                attribution.model,
+                usage,
+                provider=attribution.provider,
+                base_url=attribution.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                allow_network_discovery=False,
+            )
+            if response_usage or usage.total_tokens
+            else None
+        )
     record = ModelUsageRecord(
         attribution=attribution,
         usage=usage,

@@ -1102,3 +1102,13 @@ def test_project_runtime_state_event_is_owned_by_session_repo():
     assert row["execution_session_id"] == "exec-1"
     assert row["runtime_scope_key"] == "profile:agent-default"
     assert row["source_seq"] == 7
+
+
+def test_session_titles_scrub_lone_surrogates_before_sqlite_bind():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s1", source="test"))
+
+    assert repo.set_title("s1", "release\ud800plan") is True
+
+    assert repo.get_title("s1") == "release\ufffdplan"

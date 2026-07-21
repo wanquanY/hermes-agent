@@ -611,6 +611,37 @@ class TestTruncateMessage:
         assert "(1/" in chunks[0]
         assert f"({len(chunks)}/{len(chunks)})" in chunks[-1]
 
+    @pytest.mark.parametrize("max_length", [0, 1, 2])
+    def test_pathological_small_limits_terminate_and_preserve_content(
+        self,
+        max_length,
+    ):
+        import re
+
+        chunks = self._adapter().truncate_message(
+            "abcdefghij",
+            max_length=max_length,
+        )
+
+        assert chunks
+        reassembled = "".join(
+            re.sub(r"\s*\(\d+/\d+\)$", "", chunk)
+            for chunk in chunks
+        )
+        assert all(character in reassembled for character in "abcdefghij")
+
+    def test_pathological_utf16_limit_consumes_surrogate_pairs(self):
+        from channels.platforms.base import utf16_len
+
+        chunks = self._adapter().truncate_message(
+            "😀😀😀",
+            max_length=1,
+            len_fn=utf16_len,
+        )
+
+        assert chunks
+        assert "😀" in "".join(chunks)
+
     def test_code_block_first_chunk_closed(self):
         adapter = self._adapter()
         msg = "Before\n```python\n" + "x = 1\n" * 100 + "```\nAfter"

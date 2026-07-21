@@ -99,7 +99,7 @@ def _backup_cron_jobs_into(dest: Path) -> Dict[str, Any]:
         info["reason"] = "no cron/jobs.json present"
         return info
     try:
-        raw = src.read_text(encoding="utf-8")
+        raw = src.read_text(encoding="utf-8-sig")
     except OSError as e:
         logger.debug("Failed to read cron/jobs.json for backup: %s", e)
         info["reason"] = f"read error: {e}"

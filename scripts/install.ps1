@@ -970,7 +970,16 @@ function Install-Repository {
             # EAP=Stop.  We rely on $LASTEXITCODE for actual failures.
             $prevEAP = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
+            $autostashRef = ""
             try {
+                $dirtyFiles = @(git -c windows.appendAtomically=false status --porcelain)
+                if ($dirtyFiles.Count -gt 0) {
+                    $stashName = "hermes-install-autostash-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+                    Write-Info "Local changes detected, stashing before update..."
+                    git -c windows.appendAtomically=false stash push --include-untracked -m $stashName
+                    if ($LASTEXITCODE -ne 0) { throw "git stash failed (exit $LASTEXITCODE)" }
+                    $autostashRef = "stash@{0}"
+                }
                 git -c windows.appendAtomically=false fetch origin
                 if ($LASTEXITCODE -ne 0) { throw "git fetch failed (exit $LASTEXITCODE)" }
                 # Precedence: Commit > Tag > Branch.  Commit and Tag check
@@ -989,10 +998,73 @@ function Install-Repository {
                 } else {
                     git -c windows.appendAtomically=false checkout $Branch
                     if ($LASTEXITCODE -ne 0) { throw "git checkout $Branch failed (exit $LASTEXITCODE)" }
-                    git -c windows.appendAtomically=false pull origin $Branch
-                    if ($LASTEXITCODE -ne 0) { throw "git pull failed (exit $LASTEXITCODE)" }
+                    git -c windows.appendAtomically=false pull --ff-only origin $Branch
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warn "Fast-forward not possible; resetting managed install to origin/$Branch..."
+                        git -c windows.appendAtomically=false reset --hard "origin/$Branch"
+                        if ($LASTEXITCODE -ne 0) { throw "git reset --hard origin/$Branch failed (exit $LASTEXITCODE)" }
+                    }
+                }
+
+                if ($autostashRef) {
+                    $restoreNow = $true
+                    $hasConsole = $false
+                    try {
+                        $hasConsole = (
+                            [Environment]::UserInteractive `
+                            -and (-not [Console]::IsInputRedirected) `
+                            -and (-not [Console]::IsOutputRedirected) `
+                            -and ($Host.Name -eq "ConsoleHost")
+                        )
+                    } catch { $hasConsole = $false }
+                    if ($hasConsole) {
+                        Write-Warn "Local changes were stashed before updating."
+                        Write-Warn "Restoring them may reapply local customizations onto the updated codebase."
+                        $restoreAnswer = Read-Host "Restore local changes now? [Y/n]"
+                        if ($restoreAnswer -match '^(n|no)$') { $restoreNow = $false }
+                    }
+
+                    if ($restoreNow) {
+                        Write-Info "Restoring local changes..."
+                        $restoreOutput = @(git -c windows.appendAtomically=false stash apply $autostashRef 2>&1)
+                        $restoreExit = $LASTEXITCODE
+                        $conflictedFiles = @(
+                            git -c windows.appendAtomically=false diff --name-only --diff-filter=U 2>$null |
+                                Where-Object { $_ -and $_.ToString().Trim() }
+                        )
+                        if (($restoreExit -eq 0) -and ($conflictedFiles.Count -eq 0)) {
+                            git -c windows.appendAtomically=false stash drop $autostashRef 2>$null
+                            Write-Warn "Local changes were restored on top of the updated codebase."
+                            Write-Warn "Review git diff / git status if Hermes behaves unexpectedly."
+                        } else {
+                            Write-Err "Update pulled new code, but restoring local changes hit conflicts."
+                            foreach ($line in $restoreOutput) {
+                                if ($line -and $line.ToString().Trim()) { Write-Host $line }
+                            }
+                            if ($conflictedFiles.Count -gt 0) {
+                                Write-Host ""
+                                Write-Host "Conflicted files:"
+                                foreach ($file in $conflictedFiles) { Write-Host "  - $file" }
+                            }
+                            Write-Host ""
+                            Write-Info "Your stashed changes are preserved -- nothing is lost."
+                            Write-Info "  Stash ref: $autostashRef"
+                            git -c windows.appendAtomically=false reset --hard HEAD 2>$null | Out-Null
+                            Write-Info "Working tree reset to clean state."
+                            Write-Info "Restore your changes later with: git stash apply $autostashRef"
+                        }
+                    } else {
+                        Write-Info "Skipped restoring local changes."
+                        Write-Info "Your changes are still preserved in git stash."
+                        Write-Info "Restore manually with: git stash apply $autostashRef"
+                    }
+                    $autostashRef = ""
                 }
             } finally {
+                if ($autostashRef) {
+                    Write-Warn "Update did not complete. Your local changes are preserved in git stash."
+                    Write-Info "Restore manually with: git stash apply $autostashRef"
+                }
                 $ErrorActionPreference = $prevEAP
                 Pop-Location
             }

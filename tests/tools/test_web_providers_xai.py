@@ -516,7 +516,8 @@ class TestXAIProviderSearchErrors:
                 raise unauthorized
             return _mock_resp(_responses_payload(json.dumps({"results": []})))
 
-        def fake_resolve(*, force_refresh=False):
+        def fake_resolve(*, force_refresh=False, api_key_hint=None):
+            assert api_key_hint in {None, "stale-token"}
             if force_refresh:
                 calls["refresh_count"] += 1
                 return {
@@ -555,7 +556,8 @@ class TestXAIProviderSearchErrors:
             calls["posts"] += 1
             raise unauthorized
 
-        def fake_resolve(*, force_refresh=False):
+        def fake_resolve(*, force_refresh=False, api_key_hint=None):
+            assert api_key_hint is None
             if force_refresh:
                 calls["refreshed"] = True
             # provider=="xai" signals env-var path; retry must be skipped.
@@ -588,7 +590,8 @@ class TestXAIProviderSearchErrors:
             calls["posts"] += 1
             raise unauthorized
 
-        def fake_resolve(*, force_refresh=False):
+        def fake_resolve(*, force_refresh=False, api_key_hint=None):
+            assert api_key_hint in {None, "same-dead-token"}
             if force_refresh:
                 calls["refresh_count"] += 1
             return {
@@ -625,7 +628,8 @@ class TestXAIProviderSearchErrors:
             calls["posts"] += 1
             raise err
 
-        def fake_resolve(*, force_refresh=False):
+        def fake_resolve(*, force_refresh=False, api_key_hint=None):
+            assert api_key_hint is None
             if force_refresh:
                 calls["refreshed"] = True
             return {"provider": "xai-oauth", "api_key": "tok", "base_url": "https://api.x.ai/v1"}
@@ -729,9 +733,9 @@ class TestXAIBackendWiring:
 class TestXAIProviderOAuthPath:
     """Verifies the provider works when credentials come from the OAuth
     runtime resolver (``hermes auth`` sign-in) rather than an env-var key.
-    Patches at the ``hermes_cli.runtime_provider.resolve_runtime_provider``
-    boundary so the full ``tools.xai_http.resolve_xai_http_credentials``
-    chain is exercised end-to-end.
+    Patches the credential-pool loader so the full
+    ``tools.xai_http.resolve_xai_http_credentials`` chain is exercised without
+    bypassing the request-local multi-account selection boundary.
     """
 
     def test_search_uses_oauth_bearer_token_and_base_url(self, monkeypatch):
@@ -740,13 +744,13 @@ class TestXAIProviderOAuthPath:
         # Force the env-var fallback to fail so resolution must go via OAuth.
         monkeypatch.delenv("XAI_API_KEY", raising=False)
 
-        oauth_runtime = {
-            "provider": "xai-oauth",
-            "api_mode": "codex_responses",
-            "base_url": "https://api.x.ai/v1",
-            "api_key": "ya29.fake-oauth-access-token",
-            "source": "hermes-auth-store",
-        }
+        oauth_entry = MagicMock()
+        oauth_entry.runtime_api_key = "ya29.fake-oauth-access-token"
+        oauth_entry.access_token = "ya29.fake-oauth-access-token"
+        oauth_entry.runtime_base_url = "https://api.x.ai/v1"
+        oauth_entry.base_url = "https://api.x.ai/v1"
+        oauth_pool = MagicMock()
+        oauth_pool.select.return_value = oauth_entry
 
         captured: dict = {}
 
@@ -756,8 +760,11 @@ class TestXAIProviderOAuthPath:
             return _mock_resp(_responses_payload(json.dumps({"results": []})))
 
         with patch(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            return_value=oauth_runtime,
+            "agent.credential_pool.load_pool",
+            return_value=oauth_pool,
+        ), patch(
+            "tools.xai_http.get_env_value",
+            return_value=None,
         ), patch.object(xai_provider, "_load_xai_web_config", return_value={}), \
              patch("httpx.post", side_effect=fake_post):
             result = xai_provider.XAIWebSearchProvider().search("q", limit=3)

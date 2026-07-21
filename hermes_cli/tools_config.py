@@ -1742,6 +1742,39 @@ def _plugin_video_gen_providers() -> list[dict]:
     return rows
 
 
+def _plugin_tts_providers() -> list[dict]:
+    """Build TTS picker rows from the typed plugin provider registry."""
+    try:
+        from agent.tts_registry import list_providers
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = list_providers()
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    for provider in providers:
+        try:
+            schema = provider.get_setup_schema()
+        except Exception:
+            continue
+        if not isinstance(schema, dict):
+            continue
+        row = {
+            "name": schema.get("name", provider.display_name),
+            "badge": schema.get("badge", ""),
+            "tag": schema.get("tag", ""),
+            "env_vars": schema.get("env_vars", []),
+            "tts_provider": provider.name,
+            "tts_plugin_name": provider.name,
+        }
+        if schema.get("post_setup"):
+            row["post_setup"] = schema["post_setup"]
+        rows.append(row)
+    return rows
+
+
 # Mirror of _plugin_image_gen_providers for web search backends. Surfaces
 # every plugin-registered web provider so it appears in the
 # "Web Search & Extract" picker. All seven providers (brave-free, ddgs,
@@ -1875,6 +1908,11 @@ def _visible_providers(cat: dict, config: dict) -> list[dict]:
     # video_gen has NO hardcoded providers — every backend is a plugin.
     if cat.get("name") == "Video Generation":
         visible.extend(_plugin_video_gen_providers())
+
+    # TTS retains its native providers while external/cloud integrations use
+    # the same typed plugin registry as the runtime dispatcher.
+    if cat.get("name") == "Text-to-Speech":
+        visible.extend(_plugin_tts_providers())
 
     # Inject plugin-registered web search backends. After PR #25182, this
     # is the SOLE source of provider rows for the Web Search & Extract
@@ -3095,8 +3133,8 @@ def _configure_mcp_tools_interactive(config: dict):
     """Probe MCP servers for available tools and let user toggle them on/off.
 
     Connects to each configured MCP server, discovers tools, then shows
-    a per-server curses checklist.  Writes changes back as ``tools.exclude``
-    entries in config.yaml.
+    a per-server curses checklist. Writes partial selections back as a
+    ``tools.include`` whitelist in config.yaml.
     """
     from hermes_cli.curses_ui import curses_checklist
 
@@ -3188,21 +3226,22 @@ def _configure_mcp_tools_interactive(config: dict):
             _print_info(f"  {server_name}: no changes")
             continue
 
-        # Compute new exclude list based on unchecked tools
-        new_exclude = [tool_names[i] for i in range(len(tool_names)) if i not in chosen]
+        # Standardize interactive selection on the same include-mode contract
+        # used by catalog installs and `hermes mcp configure`.
+        chosen_names = [tool_names[i] for i in sorted(chosen)]
 
         # Update config
         srv_cfg = mcp_servers.setdefault(server_name, {})
         tools_cfg = srv_cfg.setdefault("tools", {})
 
-        if new_exclude:
-            tools_cfg["exclude"] = new_exclude
-            # Remove include if present — we're switching to exclude mode
-            tools_cfg.pop("include", None)
-        else:
+        if len(chosen) == len(tools):
             # All tools enabled — clear filters
             tools_cfg.pop("exclude", None)
             tools_cfg.pop("include", None)
+        else:
+            # An empty list intentionally disables every discovered tool.
+            tools_cfg["include"] = chosen_names
+            tools_cfg.pop("exclude", None)
 
         enabled_count = len(chosen)
         disabled_count = len(tools) - enabled_count

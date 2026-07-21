@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from collections import OrderedDict
 
 from channels.platforms.base_models import MessageEvent, MessageType
 from hermes_agent.composition.async_sqlite import run_sqlite_io
@@ -22,6 +24,12 @@ class GatewayProcessWatcherService:
 
     def __init__(self, runner):
         self._runner = runner
+        self._completion_delivery_lock = threading.Lock()
+        self._completion_deliveries_inflight: set[tuple[str, str, object]] = set()
+        self._completion_deliveries_delivered: OrderedDict[
+            tuple[str, str, object], None
+        ] = OrderedDict()
+        self._completion_delivery_retention = 2048
 
     def build_process_event_source(self, evt: dict):
         """Resolve the canonical source for a synthetic background-process event."""
@@ -86,7 +94,7 @@ class GatewayProcessWatcherService:
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
 
-    async def inject_watch_notification(self, synth_text: str, evt: dict) -> None:
+    async def inject_watch_notification(self, synth_text: str, evt: dict) -> bool:
         """Deliver a watch-pattern notification as a status message."""
         runner = self._runner
         source = await run_sqlite_io(self.build_process_event_source, evt)
@@ -95,7 +103,7 @@ class GatewayProcessWatcherService:
                 "Dropping watch notification with no routing metadata for process %s",
                 evt.get("session_id", "unknown"),
             )
-            return
+            return False
         platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         adapter = None
         for p, a in runner.adapters.items():
@@ -103,7 +111,7 @@ class GatewayProcessWatcherService:
                 adapter = a
                 break
         if not adapter:
-            return
+            return False
         try:
             message_id = str(evt.get("message_id") or "").strip() or None
             metadata = runner._thread_metadata_for_source(source, message_id)
@@ -113,9 +121,99 @@ class GatewayProcessWatcherService:
                 source.chat_id,
                 source.thread_id,
             )
-            await adapter.send(source.chat_id, synth_text, metadata=metadata)
+            result = await adapter.send(source.chat_id, synth_text, metadata=metadata)
+            return getattr(result, "success", True) is not False
         except Exception as e:
             logger.error("Watch notification delivery error: %s", e)
+            return False
+
+    @staticmethod
+    def completion_delivery_identity(
+        evt: dict,
+    ) -> tuple[str, str, object] | None:
+        """Return a producer-stable identity for a process incarnation."""
+        if str(evt.get("type") or "") != "completion":
+            return None
+        session_id = str(evt.get("session_id") or "")
+        started_at = evt.get("started_at")
+        if not session_id or started_at is None:
+            return None
+        return "completion", session_id, started_at
+
+    async def _inject_completion_notification(
+        self,
+        synth_text: str,
+        evt: dict,
+    ) -> bool | None:
+        """Inject one terminal completion as a new internal agent turn."""
+        runner = self._runner
+        source = await run_sqlite_io(self.build_process_event_source, evt)
+        if not source:
+            logger.warning(
+                "Dropping completion notification with no routing metadata for process %s",
+                evt.get("session_id", "unknown"),
+            )
+            return None
+        adapter = runner.adapters.get(source.platform)
+        if not adapter or not source.chat_id:
+            return None
+        try:
+            synth_event = MessageEvent(
+                text=synth_text,
+                message_type=MessageType.TEXT,
+                source=source,
+                internal=True,
+                message_id=str(evt.get("message_id") or "").strip() or None,
+            )
+            logger.info(
+                "Process %s finished — injecting agent notification for session %s chat=%s thread=%s",
+                evt.get("session_id", "unknown"),
+                evt.get("session_key", ""),
+                source.chat_id,
+                source.thread_id,
+            )
+            await adapter.handle_message(synth_event)
+            return True
+        except Exception as exc:
+            logger.error("Agent notify injection error: %s", exc)
+            return False
+
+    async def deliver_completion_notification(
+        self,
+        synth_text: str,
+        evt: dict,
+    ) -> bool | None:
+        """Deliver once per gateway lifecycle, releasing failed claims."""
+        identity = self.completion_delivery_identity(evt)
+        if identity is not None:
+            with self._completion_delivery_lock:
+                if (
+                    identity in self._completion_deliveries_inflight
+                    or identity in self._completion_deliveries_delivered
+                ):
+                    return None
+                self._completion_deliveries_inflight.add(identity)
+
+        accepted = False
+        try:
+            result = await self._inject_completion_notification(synth_text, evt)
+            if result is not True:
+                return result
+            accepted = True
+            if identity is not None:
+                with self._completion_delivery_lock:
+                    self._completion_deliveries_inflight.discard(identity)
+                    self._completion_deliveries_delivered[identity] = None
+                    while (
+                        len(self._completion_deliveries_delivered)
+                        > self._completion_delivery_retention
+                    ):
+                        self._completion_deliveries_delivered.popitem(last=False)
+            return True
+        finally:
+            if identity is not None and not accepted:
+                with self._completion_delivery_lock:
+                    self._completion_deliveries_inflight.discard(identity)
 
     async def run_process_watcher(self, watcher: dict) -> None:
         """Periodically check a background process and push updates to the user."""
@@ -168,6 +266,7 @@ class GatewayProcessWatcherService:
 
                 if agent_notify and not _pr_check.is_completion_consumed(session_id):
                     from tools.ansi_strip import strip_ansi
+                    from tools.process_registry import format_process_notification
 
                     raw_output = strip_ansi(session.output_buffer) if session.output_buffer else ""
                     limit = 2000
@@ -178,55 +277,43 @@ class GatewayProcessWatcherService:
                         output = f"[… output truncated — showing last {len(tail)} chars]\n{tail}"
                     else:
                         output = raw_output
-                    synth_text = (
-                        f"[IMPORTANT: Background process {session_id} completed "
-                        f"(exit code {session.exit_code}).\n"
-                        f"Command: {session.command}\n"
-                        f"Output:\n{output}]"
-                    )
-                    source = await run_sqlite_io(
-                        self.build_process_event_source,
-                        {
-                            "session_id": session_id,
-                            "session_key": session_key,
-                            "platform": platform_name,
-                            "chat_id": chat_id,
-                            "thread_id": thread_id,
-                            "user_id": user_id,
-                            "user_name": user_name,
-                        },
-                    )
-                    if not source:
-                        logger.warning(
-                            "Dropping completion notification with no routing metadata for process %s",
-                            session_id,
-                        )
+                    completion_event = {
+                        "type": "completion",
+                        "session_id": session_id,
+                        "session_key": session_key,
+                        "platform": platform_name,
+                        "chat_type": watcher.get("chat_type", ""),
+                        "chat_id": chat_id,
+                        "thread_id": thread_id,
+                        "user_id": user_id,
+                        "user_name": user_name,
+                        "message_id": message_id,
+                        "started_at": getattr(session, "started_at", None),
+                        "command": getattr(session, "command", "") or "",
+                        "exit_code": session.exit_code,
+                        "completion_reason": getattr(
+                            session,
+                            "completion_reason",
+                            "exited",
+                        ),
+                        "termination_source": getattr(
+                            session,
+                            "termination_source",
+                            "",
+                        ),
+                        "output": output,
+                    }
+                    synth_text = format_process_notification(completion_event)
+                    if not synth_text:
                         break
-
-                    adapter = None
-                    for p, a in runner.adapters.items():
-                        if p == source.platform:
-                            adapter = a
-                            break
-                    if adapter and source.chat_id:
-                        try:
-                            synth_event = MessageEvent(
-                                text=synth_text,
-                                message_type=MessageType.TEXT,
-                                source=source,
-                                internal=True,
-                                message_id=message_id,
-                            )
-                            logger.info(
-                                "Process %s finished — injecting agent notification for session %s chat=%s thread=%s",
-                                session_id,
-                                session_key,
-                                source.chat_id,
-                                source.thread_id,
-                            )
-                            await adapter.handle_message(synth_event)
-                        except Exception as e:
-                            logger.error("Agent notify injection error: %s", e)
+                    delivered = await self.deliver_completion_notification(
+                        synth_text,
+                        completion_event,
+                    )
+                    if delivered is False:
+                        # The terminal state remains available; retry only after
+                        # a confirmed injection failure.
+                        continue
                     break
 
                 should_notify = (

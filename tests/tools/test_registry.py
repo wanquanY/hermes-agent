@@ -329,6 +329,21 @@ class TestCheckFnExceptionHandling:
 
 
 class TestBuiltinDiscovery:
+    def test_text_prefilter_skips_ast_for_helper_module(self, tmp_path):
+        helper = tmp_path / "helper.py"
+        helper.write_text("VALUE = 1\n", encoding="utf-8")
+
+        with patch("tools.registry.ast.parse") as parse:
+            assert _module_registers_tools(helper) is False
+
+        parse.assert_not_called()
+
+    def test_text_prefilter_preserves_loader_adapter(self, tmp_path):
+        adapter = tmp_path / "adapter.py"
+        adapter.write_text("TOOL_LOADER_MODULE = True\n", encoding="utf-8")
+
+        assert _module_registers_tools(adapter) is True
+
     def test_discovers_all_real_self_registering_builtin_tool_modules(self):
         tools_dir = Path(__file__).resolve().parents[2] / "tools"
         expected = [

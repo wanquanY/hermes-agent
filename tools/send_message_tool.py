@@ -346,6 +346,13 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+        from channels.platforms.telegram_ids import (
+            parse_telegram_username_target,
+        )
+
+        username = parse_telegram_username_target(target_ref)
+        if username:
+            return username, None, True
     if platform_name == "feishu":
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -858,7 +865,11 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 bot = Bot(token=token)
         else:
             bot = Bot(token=token)
-        int_chat_id = int(chat_id)
+        from channels.platforms.telegram_ids import (
+            normalize_telegram_chat_id,
+        )
+
+        int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = {}
         if thread_id is not None:
@@ -946,6 +957,16 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 
             ext = os.path.splitext(media_path)[1].lower()
             try:
+                duration = None
+                if (ext in _VOICE_EXTS and is_voice) or ext in _TELEGRAM_SEND_AUDIO_EXTS:
+                    from channels.platforms.telegram import (
+                        _probe_voice_duration_seconds,
+                    )
+
+                    duration = await asyncio.to_thread(
+                        _probe_voice_duration_seconds,
+                        media_path,
+                    )
                 with open(media_path, "rb") as f:
                     media_kwargs = dict(thread_kwargs)
                     try:
@@ -959,11 +980,17 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                             )
                         elif ext in _VOICE_EXTS and is_voice:
                             last_msg = await bot.send_voice(
-                                chat_id=int_chat_id, voice=f, **media_kwargs
+                                chat_id=int_chat_id,
+                                voice=f,
+                                duration=duration,
+                                **media_kwargs,
                             )
                         elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
                             last_msg = await bot.send_audio(
-                                chat_id=int_chat_id, audio=f, **media_kwargs
+                                chat_id=int_chat_id,
+                                audio=f,
+                                duration=duration,
+                                **media_kwargs,
                             )
                         else:
                             last_msg = await bot.send_document(
@@ -990,11 +1017,17 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                                 )
                             elif ext in _VOICE_EXTS and is_voice:
                                 last_msg = await bot.send_voice(
-                                    chat_id=int_chat_id, voice=f, **media_kwargs
+                                    chat_id=int_chat_id,
+                                    voice=f,
+                                    duration=duration,
+                                    **media_kwargs,
                                 )
                             elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
                                 last_msg = await bot.send_audio(
-                                    chat_id=int_chat_id, audio=f, **media_kwargs
+                                    chat_id=int_chat_id,
+                                    audio=f,
+                                    duration=duration,
+                                    **media_kwargs,
                                 )
                             else:
                                 last_msg = await bot.send_document(

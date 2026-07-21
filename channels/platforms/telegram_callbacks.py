@@ -17,6 +17,8 @@ except ImportError:  # pragma: no cover - optional platform dependency
 
 from channels.platforms.base import SendResult
 from channels.platforms.telegram import _PROVIDER_GROUP_FALLBACKS
+from channels.platforms.telegram_security import redact_telegram_error
+from channels.platforms.telegram_ids import normalize_telegram_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,134 @@ def _telegram_public_attr(name: str, fallback: Any = None) -> Any:
 
 
 class TelegramCallbacksMixin:
+    async def send_choice_picker(
+        self,
+        chat_id: str,
+        title: str,
+        choices: list,
+        session_key: str,
+        on_choice_selected,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a flat inline keyboard for finite command choices."""
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            buttons = []
+            for index, choice in enumerate(choices):
+                label = str(choice.get("label") or choice.get("value") or "")
+                if choice.get("is_current"):
+                    label = f"✓ {label}"
+                buttons.append(
+                    InlineKeyboardButton(label, callback_data=f"cp:{index}")
+                )
+            if not buttons:
+                return SendResult(success=False, error="No choices")
+
+            thread_id = (metadata or {}).get("thread_id")
+            reply_to_id = self._reply_to_message_id_for_send(
+                None,
+                metadata,
+                reply_to_mode=self._reply_to_mode,
+            )
+            message = await self._send_message_with_thread_fallback(
+                chat_id=normalize_telegram_chat_id(chat_id),
+                text=self.format_message(title),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup(
+                    [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+                ),
+                reply_to_message_id=reply_to_id,
+                **self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode,
+                ),
+                **self._link_preview_kwargs(),
+            )
+            self._choice_picker_state[str(chat_id)] = {
+                "msg_id": message.message_id,
+                "choices": choices,
+                "session_key": session_key,
+                "on_choice_selected": on_choice_selected,
+            }
+            return SendResult(success=True, message_id=str(message.message_id))
+        except Exception as exc:
+            safe_error = redact_telegram_error(exc)
+            logger.warning("[%s] send_choice_picker failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
+
+    async def _handle_choice_picker_callback(
+        self,
+        query,
+        data: str,
+        chat_id: str,
+    ) -> None:
+        state = self._choice_picker_state.get(chat_id)
+        if not state:
+            await query.answer(text="Picker expired — run the command again.")
+            return
+
+        query_message = getattr(query, "message", None)
+        query_chat = getattr(query_message, "chat", None)
+        if not self._is_callback_user_authorized(
+            str(getattr(query.from_user, "id", "")),
+            chat_id=getattr(query_message, "chat_id", None),
+            chat_type=(
+                str(getattr(query_chat, "type", None))
+                if getattr(query_chat, "type", None) is not None
+                else None
+            ),
+            thread_id=(
+                str(getattr(query_message, "message_thread_id", None))
+                if getattr(query_message, "message_thread_id", None) is not None
+                else None
+            ),
+            user_name=getattr(query.from_user, "first_name", None),
+        ):
+            await query.answer(
+                text="⛔ You are not authorized to change this setting."
+            )
+            return
+
+        try:
+            choice = state["choices"][int(data[3:])]
+        except (ValueError, IndexError):
+            await query.answer(text="Invalid selection.")
+            return
+
+        callback = state.get("on_choice_selected")
+        if not callback:
+            await query.answer(text="Picker expired.")
+            return
+        try:
+            result_text = await callback(chat_id, str(choice.get("value") or ""))
+        except Exception as exc:
+            safe_error = redact_telegram_error(exc)
+            logger.error("Choice picker selection failed: %s", safe_error)
+            result_text = f"Error applying selection: {safe_error}"
+
+        try:
+            await query.edit_message_text(
+                text=self.format_message(result_text),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=None,
+            )
+        except Exception:
+            try:
+                await query.edit_message_text(
+                    text=result_text,
+                    parse_mode=None,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+        await query.answer()
+        self._choice_picker_state.pop(chat_id, None)
+
     async def send_model_picker(
         self,
         chat_id: str,
@@ -72,7 +202,7 @@ class TelegramCallbacksMixin:
             thread_id = metadata.get("thread_id") if metadata else None
             reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             msg = await self._send_message_with_thread_fallback(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 text=text,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=keyboard,
@@ -99,8 +229,9 @@ class TelegramCallbacksMixin:
     
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_model_picker failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            safe_error = redact_telegram_error(e)
+            logger.warning("[%s] send_model_picker failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
     
     _MODEL_PAGE_SIZE = 8
     
@@ -335,8 +466,9 @@ class TelegramCallbacksMixin:
             try:
                 result_text = await callback(chat_id, model_id, provider_slug)
             except Exception as exc:
-                logger.error("Model picker switch failed: %s", exc)
-                result_text = f"Error switching model: {exc}"
+                safe_error = redact_telegram_error(exc)
+                logger.error("Model picker switch failed: %s", safe_error)
+                result_text = f"Error switching model: {safe_error}"
                 switch_failed = True
     
             try:
@@ -414,8 +546,9 @@ class TelegramCallbacksMixin:
             try:
                 result_text = await callback(chat_id, model_id, provider_slug)
             except Exception as exc:
-                logger.error("Model picker switch failed: %s", exc)
-                result_text = f"Error switching model: {exc}"
+                safe_error = redact_telegram_error(exc)
+                logger.error("Model picker switch failed: %s", safe_error)
+                result_text = f"Error switching model: {safe_error}"
                 switch_failed = True
     
             # Edit message to show confirmation, remove buttons
@@ -533,6 +666,13 @@ class TelegramCallbacksMixin:
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
     
+        # --- Finite-choice callbacks ---
+        if data.startswith("cp:"):
+            chat_id = str(query.message.chat_id) if query.message else None
+            if chat_id:
+                await self._handle_choice_picker_callback(query, data, chat_id)
+            return
+
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
@@ -611,7 +751,10 @@ class TelegramCallbacksMixin:
                         count, session_key, choice, user_display,
                     )
                 except Exception as exc:
-                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                    logger.error(
+                        "Failed to resolve gateway approval from Telegram button: %s",
+                        redact_telegram_error(exc),
+                    )
                     count = 0
     
                 # Resume the typing indicator — paused when the approval was
@@ -720,7 +863,11 @@ class TelegramCallbacksMixin:
                             )
                         await self._send_message_with_thread_fallback(**send_kwargs)
                 except Exception as exc:
-                    logger.error("[%s] slash-confirm callback failed: %s", self.name, exc, exc_info=True)
+                    logger.error(
+                        "[%s] slash-confirm callback failed: %s",
+                        self.name,
+                        redact_telegram_error(exc),
+                    )
             return
     
         # --- Clarify callbacks (cl:clarify_id:idx | cl:clarify_id:other) ---
@@ -759,7 +906,11 @@ class TelegramCallbacksMixin:
                         from tools.clarify_gateway import mark_awaiting_text
                         mark_awaiting_text(clarify_id)
                     except Exception as exc:
-                        logger.warning("[%s] mark_awaiting_text failed: %s", self.name, exc)
+                        logger.warning(
+                            "[%s] mark_awaiting_text failed: %s",
+                            self.name,
+                            redact_telegram_error(exc),
+                        )
     
                     await query.answer(text="✏️ Type your answer in the chat.")
                     try:
@@ -803,7 +954,11 @@ class TelegramCallbacksMixin:
                     from tools.clarify_gateway import resolve_gateway_clarify
                     resolved = resolve_gateway_clarify(clarify_id, resolved_text)
                 except Exception as exc:
-                    logger.error("[%s] resolve_gateway_clarify failed: %s", self.name, exc)
+                    logger.error(
+                        "[%s] resolve_gateway_clarify failed: %s",
+                        self.name,
+                        redact_telegram_error(exc),
+                    )
                     resolved = False
     
                 await query.answer(text=f"✓ {resolved_text[:60]}")
@@ -864,7 +1019,10 @@ class TelegramCallbacksMixin:
             logger.info("Telegram update prompt answered '%s' by user %s",
                         answer, getattr(query.from_user, "id", "unknown"))
         except Exception as exc:
-            logger.error("Failed to write update response from callback: %s", exc)
+            logger.error(
+                "Failed to write update response from callback: %s",
+                redact_telegram_error(exc),
+            )
     
     _GT_VERB_DISPATCH = {
         "send":         ("send-draft.sh",      [],         "✓ sent draft",         False),
@@ -940,19 +1098,22 @@ class TelegramCallbacksMixin:
             else:
                 stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
                 last_line = stderr_text.splitlines()[-1] if stderr_text else f"exit {proc.returncode}"
-                label = f"❌ {verb} failed: {last_line[:80]}"
+                safe_stderr = redact_telegram_error(stderr_text)
+                safe_last_line = redact_telegram_error(last_line)
+                label = f"❌ {verb} failed: {safe_last_line[:80]}"
                 logger.error(
                     "[%s] gmail-triage callback failed: verb=%s arg=%s rc=%s stderr=%s",
-                    self.name, verb, arg, proc.returncode, stderr_text,
+                    self.name, verb, arg, proc.returncode, safe_stderr,
                 )
         except asyncio.TimeoutError:
             label = f"❌ {verb} timed out"
             logger.error("[%s] gmail-triage callback timed out: verb=%s arg=%s", self.name, verb, arg)
         except Exception as exc:
-            label = f"❌ {verb} error: {exc}"
+            safe_error = redact_telegram_error(exc)
+            label = f"❌ {verb} error: {safe_error}"
             logger.error(
                 "[%s] gmail-triage callback exception: verb=%s arg=%s err=%s",
-                self.name, verb, arg, exc, exc_info=True,
+                self.name, verb, arg, safe_error,
             )
     
         await query.answer(text=label)

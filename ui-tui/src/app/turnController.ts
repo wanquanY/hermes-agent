@@ -19,6 +19,7 @@ import {
 } from '../lib/text.js'
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from '../types.js'
 
+import type { Notice } from './interfaces.js'
 import { resetFlowOverlays } from './overlayStore.js'
 import { pushSnapshot } from './spawnHistoryStore.js'
 import { archiveDoneTodos, getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
@@ -131,6 +132,9 @@ class TurnController {
   private streamTimer: Timer = null
   private streamDelay = STREAM_IDLE_BATCH_MS
   private toolProgressTimer: Timer = null
+  private pendingNotice: Notice | null = null
+  private noticeTimer: Timer = null
+  private noticeIdSeq = 0
 
   boostStreamingForTyping() {
     this.streamDelay = STREAM_TYPING_BATCH_MS
@@ -155,6 +159,69 @@ class TurnController {
 
   clearStatusTimer() {
     this.statusTimer = clear(this.statusTimer)
+  }
+
+  showNotice(notice: Notice) {
+    const stamped: Notice = { ...notice, id: notice.id || `n${++this.noticeIdSeq}` }
+
+    if (getUiState().busy) {
+      this.pendingNotice = stamped
+
+      return
+    }
+
+    this.applyNotice(stamped)
+  }
+
+  clearNotice(key?: string) {
+    if (this.pendingNotice?.key === key) {
+      this.pendingNotice = null
+    }
+
+    if (getUiState().notice?.key === key) {
+      this.clearNoticeTimer()
+      patchUiState({ notice: null })
+    }
+  }
+
+  private applyNotice(notice: Notice) {
+    this.clearNoticeTimer()
+    patchUiState({ notice })
+
+    if (notice.kind === 'ttl' && typeof notice.ttl_ms === 'number' && notice.ttl_ms > 0) {
+      const id = notice.id
+
+      this.noticeTimer = setTimeout(() => {
+        this.noticeTimer = null
+
+        if (getUiState().notice?.id === id) {
+          patchUiState({ notice: null })
+        }
+      }, notice.ttl_ms)
+    }
+  }
+
+  private clearNoticeTimer() {
+    this.noticeTimer = clear(this.noticeTimer)
+  }
+
+  private flushPendingNotice() {
+    if (!this.pendingNotice) {
+      return
+    }
+
+    const notice = this.pendingNotice
+    this.pendingNotice = null
+    this.applyNotice(notice)
+  }
+
+  private clearNoticeState() {
+    this.pendingNotice = null
+    this.clearNoticeTimer()
+
+    if (getUiState().notice) {
+      patchUiState({ notice: null })
+    }
   }
 
   endReasoningPhase() {
@@ -225,6 +292,7 @@ class TurnController {
       this.statusTimer = null
       patchUiState({ status: 'ready' })
     }, INTERRUPT_COOLDOWN_MS)
+    this.flushPendingNotice()
   }
 
   pruneTransient() {
@@ -427,6 +495,7 @@ class TurnController {
     this.segmentMessages = []
     this.turnTools = []
     this.persistedToolLabels.clear()
+    this.flushPendingNotice()
   }
 
   recordMessageComplete(payload: { rendered?: string; reasoning?: string; text?: string }) {
@@ -519,6 +588,7 @@ class TurnController {
     this.bufRef = ''
     this.interrupted = false
     patchTurnState({ activity: [], outcome: '' })
+    this.flushPendingNotice()
 
     return { finalMessages, finalText, wasInterrupted }
   }
@@ -722,6 +792,7 @@ class TurnController {
     this.turnTools = []
     this.toolTokenAcc = 0
     this.persistedToolLabels.clear()
+    this.clearNoticeState()
     patchTurnState({ activity: [], outcome: '' })
   }
 
@@ -767,6 +838,12 @@ class TurnController {
     this.toolTokenAcc = 0
     this.interrupted = false
     this.persistedToolLabels.clear()
+    const yieldingNoticeKey = getUiState().notice?.key
+
+    if (yieldingNoticeKey === 'credits.usage' || yieldingNoticeKey === 'credits.grant_spent') {
+      this.clearNotice(yieldingNoticeKey)
+    }
+
     patchUiState({ busy: true })
     patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
   }

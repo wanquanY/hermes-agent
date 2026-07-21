@@ -5,6 +5,7 @@ and run_agent.py for pre-flight context checks.
 """
 
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -152,6 +153,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # OpenRouter-prefixed models resolve via OpenRouter live API or models.dev.
     "claude-fable-5": 1000000,
     "claude-fable": 1000000,
+    "claude-sonnet-5": 1000000,
     "claude-opus-4-8": 1000000,
     "claude-opus-4.8": 1000000,
     "claude-opus-4-7": 1000000,
@@ -210,9 +212,11 @@ DEFAULT_CONTEXT_LENGTHS = {
     "llama": 131072,
     # Qwen — specific model families before the catch-all.
     # Official docs: https://help.aliyun.com/zh/model-studio/developer-reference/
+    "qwen3.7-plus": 1048576,      # 1M context (DashScope/Alibaba)
     "qwen3.6-plus": 1048576,      # 1M context (DashScope/Alibaba & OpenRouter)
     "qwen3-coder-plus": 1000000,  # 1M context
     "qwen3-coder": 262144,        # 256K context
+    "qwen3-max": 262144,          # 256K context (Coding Plan snapshot)
     "qwen": 131072,
     # MiniMax — M3 is 1M context (max output 512K); M2.x series is 204,800.
     # Keys use substring matching (longest-first), so "minimax-m3" wins over
@@ -243,7 +247,9 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
     "grok-2": 131072,           # grok-2, grok-2-1212, grok-2-latest
     "grok": 131072,             # catch-all (grok-beta, unknown grok-*)
-    # Kimi
+    # Kimi K3 has a 1 Mi context window. Longest-key-first matching below
+    # ensures the precise family wins over the conservative Kimi fallback.
+    "kimi-k3": 1_048_576,
     "kimi": 262144,
     # Tencent — Hy3 Preview (Hunyuan) with 256K context window.
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
@@ -436,6 +442,29 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
 
 def _is_known_provider_base_url(base_url: str) -> bool:
     return _infer_provider_from_url(base_url) is not None
+
+
+def _endpoint_scoped_context_length(model: str, base_url: str) -> Optional[int]:
+    """Return metadata validated specifically for the Kimi Coding endpoint."""
+    normalized = _normalize_base_url(base_url)
+    try:
+        parsed = urlparse(normalized)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "api.kimi.com"
+        and port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.rstrip("/") in {"/coding", "/coding/v1"}
+        and not parsed.query
+        and not parsed.fragment
+        and model.strip().lower() in {"k3", "kimi-k3", "kimi-k3-cot"}
+    ):
+        return 1_048_576
+    return None
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -1609,6 +1638,42 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
+    # MoA is a virtual provider whose model is a preset name. The aggregator
+    # is the acting model and therefore owns the context window.
+    if (provider or "").strip().lower() == "moa":
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.moa_config import resolve_moa_preset
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            preset = resolve_moa_preset(load_config().get("moa") or {}, model)
+            aggregator = preset.get("aggregator") or {}
+            aggregator_provider = str(
+                aggregator.get("provider") or ""
+            ).strip()
+            aggregator_model = str(aggregator.get("model") or "").strip()
+            if (
+                aggregator_model
+                and aggregator_provider
+                and aggregator_provider.lower() != "moa"
+            ):
+                runtime = resolve_runtime_provider(
+                    requested=aggregator_provider,
+                    target_model=aggregator_model,
+                )
+                return get_model_context_length(
+                    aggregator_model,
+                    base_url=runtime.get("base_url", "") or "",
+                    api_key=runtime.get("api_key", "") or "",
+                    provider=aggregator_provider,
+                    allow_network_discovery=allow_network_discovery,
+                )
+        except Exception:
+            logger.debug(
+                "MoA aggregator context-length resolution failed",
+                exc_info=True,
+            )
+
     # 0b. custom_providers per-model override — check before any probe.
     # This closes the gap where /model switch and display paths used to fall
     # back to 128K despite the user having a per-model context_length set.
@@ -1631,6 +1696,12 @@ def get_model_context_length(
     # local servers actually know about.  Ollama "model:tag" colons are preserved.
     model = _strip_provider_prefix(model)
 
+    # Endpoint-scoped metadata must precede persistent cache reads so values
+    # learned through another endpoint cannot override the validated target.
+    endpoint_context = _endpoint_scoped_context_length(model, base_url)
+    if endpoint_context is not None:
+        return endpoint_context
+
     effective_provider = provider
     if not effective_provider or effective_provider in {"openrouter", "custom"}:
         if base_url:
@@ -1638,12 +1709,19 @@ def get_model_context_length(
             if inferred:
                 effective_provider = inferred
 
+    is_bedrock_context = provider == "bedrock" or (
+        base_url
+        and base_url_hostname(base_url).startswith("bedrock-runtime.")
+        and base_url_host_matches(base_url, "amazonaws.com")
+    )
+
     # 1. Check persistent cache (model+provider)
     # LM Studio is excluded — its loaded context length is transient (the
     # user can reload the model with a different context_length at any time
     # via /api/v1/models/load), so a stale cached value would mask reloads.
-    if base_url and provider != "lmstudio":
-        cached = get_cached_context_length(model, base_url)
+    cache_base_url = base_url or ("bedrock://" if is_bedrock_context else "")
+    if cache_base_url and provider != "lmstudio":
+        cached = get_cached_context_length(model, cache_base_url)
         if cached is not None:
             # Invalidate stale Codex OAuth cache entries: pre-PR #14935 builds
             # resolved gpt-5.x to the direct-API value (e.g. 1.05M) via
@@ -1655,17 +1733,17 @@ def get_model_context_length(
                 logger.info(
                     "Dropping stale Codex cache entry %s@%s -> %s (pre-fix value); "
                     "re-resolving via live /models probe",
-                    model, base_url, f"{cached:,}",
+                    model, cache_base_url, f"{cached:,}",
                 )
-                _invalidate_cached_context_length(model, base_url)
+                _invalidate_cached_context_length(model, cache_base_url)
             # Invalidate stale 32k cache entries for Kimi-family models.
             elif cached <= 32768 and _model_name_suggests_kimi(model):
                 logger.info(
                     "Dropping stale Kimi cache entry %s@%s -> %s (OpenRouter underreport); "
                     "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
+                    model, cache_base_url, f"{cached:,}",
                 )
-                _invalidate_cached_context_length(model, base_url)
+                _invalidate_cached_context_length(model, cache_base_url)
             # Invalidate stale ≤204,800 cache entries for MiniMax-M3.  Pre-catalog
             # builds resolved M3 via the generic ``minimax`` catch-all (204,800)
             # and persisted it before the ``minimax-m3`` (1M) entry existed; that
@@ -1676,9 +1754,9 @@ def get_model_context_length(
                 logger.info(
                     "Dropping stale MiniMax-M3 cache entry %s@%s -> %s (pre-catalog value); "
                     "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
+                    model, cache_base_url, f"{cached:,}",
                 )
-                _invalidate_cached_context_length(model, base_url)
+                _invalidate_cached_context_length(model, cache_base_url)
             # Invalidate stale ≤256,000 cache entries for Grok-4.3.  The
             # ``grok-4.3`` (1M) entry was added to DEFAULT_CONTEXT_LENGTHS on
             # 2026-05-15; prior to that, grok-4.3 slugs resolved via the
@@ -1689,9 +1767,9 @@ def get_model_context_length(
                 logger.info(
                     "Dropping stale Grok-4.3 cache entry %s@%s -> %s (pre-catalog value); "
                     "re-resolving via hardcoded defaults",
-                    model, base_url, f"{cached:,}",
+                    model, cache_base_url, f"{cached:,}",
                 )
-                _invalidate_cached_context_length(model, base_url)
+                _invalidate_cached_context_length(model, cache_base_url)
             # Nous Portal: the portal /v1/models endpoint is authoritative.
             # Bypass the persistent cache so step 5b can always reconcile
             # against it — this corrects pre-fix entries seeded from the
@@ -1700,34 +1778,72 @@ def get_model_context_length(
             # touching the on-disk file when the portal is unreachable.
             # The in-memory 300s endpoint metadata cache makes the per-call
             # cost amortise to ~0 within a process.
-            elif _infer_provider_from_url(base_url) == "nous":
+            elif base_url and _infer_provider_from_url(base_url) == "nous":
                 logger.debug(
                     "Bypassing persistent cache for %s@%s (Nous portal authoritative)",
                     model, base_url,
                 )
                 # Fall through; step 5b reconciles and overwrites if portal responds.
+            elif is_bedrock_context:
+                # Correct cache entries created by older 200K Claude 4.6+
+                # tables, while preserving authoritative values learned from
+                # a prior live probe.
+                try:
+                    from agent.bedrock_adapter import get_bedrock_context_length
+
+                    static_context = get_bedrock_context_length(model, probe=False)
+                except ImportError:
+                    static_context = 0
+                if static_context >= 1_000_000 and cached < static_context:
+                    logger.info(
+                        "Dropping stale Bedrock cache entry %s@%s -> %s; "
+                        "static floor is %s",
+                        model,
+                        cache_base_url,
+                        f"{cached:,}",
+                        f"{static_context:,}",
+                    )
+                    _invalidate_cached_context_length(model, cache_base_url)
+                else:
+                    return cached
             else:
                 return cached
 
-    # 1b. AWS Bedrock — use static context length table.
+    # 1b. AWS Bedrock — live probe when allowed, otherwise use the static
+    # table as a conservative floor.
     # Bedrock's ListFoundationModels API doesn't expose context window sizes,
     # so we maintain a curated table in bedrock_adapter.py that reflects
-    # AWS-imposed limits (e.g. 200K for Claude models vs 1M on the native
-    # Anthropic API).  This must run BEFORE the custom-endpoint probe at
+    # AWS-imposed limits. This must run BEFORE the custom-endpoint probe at
     # step 2 — bedrock-runtime.<region>.amazonaws.com is not in
     # _URL_TO_PROVIDER, so it would otherwise be treated as a custom endpoint,
     # fail the /models probe (Bedrock doesn't expose that shape), and fall
     # back to the 128K default before reaching the original step 4b branch.
-    if provider == "bedrock" or (
-        base_url
-        and base_url_hostname(base_url).startswith("bedrock-runtime.")
-        and base_url_host_matches(base_url, "amazonaws.com")
-    ):
+    if is_bedrock_context:
         try:
-            from agent.bedrock_adapter import get_bedrock_context_length
-            return get_bedrock_context_length(model)
+            from agent.bedrock_adapter import (
+                get_bedrock_context_length,
+                probe_bedrock_context_length,
+                resolve_bedrock_region,
+            )
         except ImportError:
             pass  # boto3 not installed — fall through to generic resolution
+        else:
+            region = ""
+            if base_url:
+                match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url)
+                if match:
+                    region = match.group(1)
+            if not region:
+                try:
+                    region = resolve_bedrock_region()
+                except Exception:
+                    region = ""
+            if allow_network_discovery and region:
+                probed_context = probe_bedrock_context_length(model, region)
+                if probed_context:
+                    save_context_length(model, base_url or "bedrock://", probed_context)
+                    return probed_context
+            return get_bedrock_context_length(model, probe=False)
 
     if allow_network_discovery and (
         provider == "novita"
@@ -2038,5 +2154,66 @@ def estimate_request_tokens_rough(
     if messages:
         total += estimate_messages_tokens_rough(messages)
     if tools:
-        total += (len(str(tools)) + 3) // 4
+        total += _estimate_tools_tokens_rough(tools)
     return total
+
+
+# Tool schemas can be large and remain stable for many model calls. Keep their
+# rough size behind a bounded identity cache so hot request/compression paths do
+# not repeatedly serialize the same nested JSON schema under the GIL.
+_TOOLS_TOKENS_CACHE: dict[int, Tuple[int, str, str, int]] = {}
+_TOOLS_TOKENS_CACHE_MAX = 256
+
+
+def _tool_name_for_cache(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str):
+            return name
+    name = tool.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def _estimate_tools_tokens_rough(tools: List[Dict[str, Any]]) -> int:
+    """Estimate tool-schema tokens without reserializing stable toolsets."""
+    if not tools:
+        return 0
+
+    key = id(tools)
+    count = len(tools)
+    first = _tool_name_for_cache(tools[0])
+    last = _tool_name_for_cache(tools[-1])
+    cached = _TOOLS_TOKENS_CACHE.get(key)
+    if cached is not None:
+        cached_count, cached_first, cached_last, cached_tokens = cached
+        if (cached_count, cached_first, cached_last) == (count, first, last):
+            return cached_tokens
+
+    total_chars = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        schema = function if isinstance(function, dict) else tool
+        name = schema.get("name") or ""
+        description = schema.get("description") or ""
+        parameters = schema.get("parameters") or {}
+        if isinstance(name, str):
+            total_chars += len(name)
+        if isinstance(description, str):
+            total_chars += len(description)
+        try:
+            total_chars += len(
+                json.dumps(parameters, ensure_ascii=False, separators=(",", ":"))
+            )
+        except Exception:
+            total_chars += len(str(parameters))
+
+    tokens = (total_chars + 3) // 4
+    if len(_TOOLS_TOKENS_CACHE) >= _TOOLS_TOKENS_CACHE_MAX:
+        _TOOLS_TOKENS_CACHE.pop(next(iter(_TOOLS_TOKENS_CACHE)), None)
+    _TOOLS_TOKENS_CACHE[key] = (count, first, last, tokens)
+    return tokens

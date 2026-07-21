@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import nullcontext
 from typing import Optional
 
 _mcp_discovery_lock = threading.Lock()
@@ -36,9 +37,7 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
 
         def _discover() -> None:
             try:
-                from tools.mcp_tool import discover_mcp_tools
-
-                discover_mcp_tools()
+                _discover_mcp_tools_without_interactive_oauth()
             except Exception:
                 logger.debug("Background MCP tool discovery failed", exc_info=True)
 
@@ -54,20 +53,34 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
 def _resolve_discovery_timeout(explicit: "float | None") -> float:
     """Resolve the MCP discovery wait bound: explicit arg > config > default.
 
-    Reads ``mcp_discovery_timeout`` from config.yaml.  Kept lazy and
-    fail-safe — a missing/invalid value falls back to the historical 0.75s so
-    a broken config can never make startup hang or crash.
+    Reads ``mcp_discovery_timeout`` from config.yaml and uses ``DEFAULT_CONFIG``
+    as the single source of truth. Kept lazy and fail-safe so a broken config
+    can never make startup hang or crash.
     """
     if explicit is not None:
         return explicit
     try:
-        from hermes_cli.config import load_config
+        from hermes_cli.config import DEFAULT_CONFIG, load_config
 
-        raw = (load_config() or {}).get("mcp_discovery_timeout", 5.0)
+        default = float(DEFAULT_CONFIG.get("mcp_discovery_timeout", 1.5))
+        raw = (load_config() or {}).get("mcp_discovery_timeout", default)
         val = float(raw)
-        return val if val > 0 else 0.75
+        return val if val > 0 else default
     except Exception:
-        return 0.75
+        return 1.5
+
+
+def _discover_mcp_tools_without_interactive_oauth() -> None:
+    """Run discovery without allowing a background thread to read stdin."""
+    try:
+        from tools.mcp_oauth import suppress_interactive_oauth
+    except Exception:
+        suppress_interactive_oauth = nullcontext
+
+    with suppress_interactive_oauth():
+        from tools.mcp_tool import discover_mcp_tools
+
+        discover_mcp_tools()
 
 
 def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
@@ -84,3 +97,18 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     if thread is None or not thread.is_alive():
         return
     thread.join(timeout=_resolve_discovery_timeout(timeout))
+
+
+def mcp_discovery_in_flight() -> bool:
+    """Return whether the process-wide MCP discovery task is still running."""
+    thread = _mcp_discovery_thread
+    return thread is not None and thread.is_alive()
+
+
+def join_mcp_discovery(timeout: "float | None" = None) -> bool:
+    """Join process-wide discovery and report whether it has completed."""
+    thread = _mcp_discovery_thread
+    if thread is None:
+        return True
+    thread.join(timeout=timeout)
+    return not thread.is_alive()

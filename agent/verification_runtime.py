@@ -153,6 +153,11 @@ def record_tool_verification(
             paths = _extract_file_mutation_targets(tool_name, dict(args))
             if paths:
                 service.mark_edited(scope_id, cwd, paths)
+                changed = getattr(agent, "_turn_verification_changed_paths", None)
+                if not isinstance(changed, set):
+                    changed = set()
+                    agent._turn_verification_changed_paths = changed
+                changed.update(str(path) for path in paths if path)
                 hold_verification_stream(agent)
             return
         if tool_name not in {"terminal", "shell"}:
@@ -205,6 +210,11 @@ def record_codex_item_verification(agent: Any, item: Mapping[str, Any]) -> None:
                     verification_cwd(agent, item),
                     paths,
                 )
+                changed = getattr(agent, "_turn_verification_changed_paths", None)
+                if not isinstance(changed, set):
+                    changed = set()
+                    agent._turn_verification_changed_paths = changed
+                changed.update(str(path) for path in paths if path)
                 hold_verification_stream(agent)
             return
         if item_type != "commandExecution":
@@ -269,13 +279,70 @@ def completion_requirement_for_agent(
     return None
 
 
+def verification_requirement_prompt(requirement: VerificationRequirement) -> str:
+    """Render built-in evidence policy plus optional shipped coding guidance."""
+    prompt = requirement.prompt()
+    try:
+        from agent.verify_hooks import coding_verify_guidance
+
+        guidance = coding_verify_guidance()
+    except Exception:
+        guidance = None
+    return f"{prompt}\n\n{guidance}" if guidance else prompt
+
+
+def plugin_verification_continue_message(
+    agent: Any,
+    *,
+    final_response: str,
+    attempt: int,
+) -> str | None:
+    """Ask registered ``pre_verify`` hooks whether this edited turn may stop."""
+    changed_paths = sorted(
+        str(path)
+        for path in (
+            getattr(agent, "_turn_verification_changed_paths", set()) or set()
+        )
+        if str(path).strip()
+    )
+    if not changed_paths:
+        return None
+    try:
+        from agent.coding_context import is_coding_context
+        from agent.verify_hooks import max_verify_nudges
+        from hermes_cli.plugins import (
+            get_pre_verify_continue_message,
+            has_hook,
+        )
+
+        if attempt >= max_verify_nudges() or not has_hook("pre_verify"):
+            return None
+        return get_pre_verify_continue_message(
+            session_id=verification_scope_id(agent),
+            platform=str(getattr(agent, "platform", "") or ""),
+            model=str(getattr(agent, "model", "") or ""),
+            coding=is_coding_context(
+                platform=str(getattr(agent, "platform", "") or ""),
+                cwd=verification_cwd(agent),
+            ),
+            attempt=max(0, int(attempt)),
+            final_response=str(final_response or ""),
+            changed_paths=changed_paths,
+        )
+    except Exception:
+        logger.debug("pre_verify plugin decision failed", exc_info=True)
+        return None
+
+
 __all__ = [
     "completion_requirement_for_agent",
     "hold_verification_stream",
     "record_codex_item_verification",
     "record_tool_verification",
+    "plugin_verification_continue_message",
     "release_verification_stream",
     "verification_completion_guard_enabled",
     "verification_cwd",
     "verification_scope_id",
+    "verification_requirement_prompt",
 ]

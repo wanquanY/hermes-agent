@@ -21,6 +21,18 @@ from tools.skills_tool import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_plugin_skill_assets(monkeypatch):
+    """Keep local Skill scanner tests independent of bundled plugin assets."""
+    monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+    manager = type(
+        "EmptyPluginManager",
+        (),
+        {"list_plugin_skill_entries": lambda self: []},
+    )()
+    monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+
 def _make_skill(
     skills_dir, name, frontmatter_extra="", body="Step 1: Do the thing.", category=None
 ):

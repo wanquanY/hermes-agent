@@ -52,7 +52,7 @@ class AgentExecutionMonitor:
             done, _ = await asyncio.wait({executor_task}, timeout=self.POLL_INTERVAL)
             if done:
                 return executor_task.result()
-            self._backup_interrupt_if_pending()
+            await self._backup_interrupt_if_pending()
 
     async def _wait_with_inactivity_timeout(
         self,
@@ -67,9 +67,9 @@ class AgentExecutionMonitor:
             await self._send_inactivity_warning_if_needed(idle_secs)
             if idle_secs >= self._agent_timeout:
                 return self._timeout_response(idle_secs)
-            self._backup_interrupt_if_pending()
+            await self._backup_interrupt_if_pending()
 
-    def _backup_interrupt_if_pending(self) -> None:
+    async def _backup_interrupt_if_pending(self) -> None:
         if self._interrupt_detected.is_set() or not self._session_key:
             return
         adapter = self._runner.adapters.get(self._source.platform)
@@ -87,6 +87,15 @@ class AgentExecutionMonitor:
             else None
         )
         pending_text = event.text if event else None
+        if event is not None and self._runner._pending_event_audio_paths(event):
+            pending_text, _ = await self._runner._transcribe_and_echo_pending_voice(
+                event,
+                adapter,
+                self._source,
+                pending_text or "",
+                log_context="Voice-backup-interrupt",
+                metadata=self._status_thread_metadata,
+            )
         logger.info(
             "Backup interrupt detected for session %s (monitor task state: %s)",
             self._session_key,

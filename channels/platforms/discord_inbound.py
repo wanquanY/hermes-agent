@@ -6,6 +6,7 @@ import os
 import re
 from typing import Any
 
+from agent.secret_scope import get_profile_env
 try:
     import discord
 except ImportError:  # pragma: no cover - optional platform dependency
@@ -134,8 +135,14 @@ class DiscordInboundMixin:
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
     
-    async def _handle_message(self, message: DiscordMessage) -> None:
-        """Handle incoming Discord messages."""
+    async def _handle_message(
+        self,
+        message: DiscordMessage,
+        role_authorized: bool = False,
+        *,
+        recovered: bool = False,
+    ) -> bool:
+        """Handle one Discord message and report whether it reached dispatch."""
         # In server channels (not DMs), require the bot to be @mentioned
         # UNLESS the channel is in the free-response list or the message is
         # in a thread where the bot has already participated.
@@ -184,16 +191,14 @@ class DiscordInboundMixin:
                 channel_ids.add(parent_channel_id)
     
             # Check allowed channels - if set, only respond in these channels
-            allowed_channels_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
-            if allowed_channels_raw:
-                allowed_channels = {ch.strip() for ch in allowed_channels_raw.split(",") if ch.strip()}
+            allowed_channels = self._discord_allowed_channel_entries()
+            if allowed_channels:
                 if "*" not in allowed_channels and not (channel_ids & allowed_channels):
                     logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_ids)
                     return
     
             # Check ignored channels - never respond even when mentioned
-            ignored_channels_raw = os.getenv("DISCORD_IGNORED_CHANNELS", "")
-            ignored_channels = {ch.strip() for ch in ignored_channels_raw.split(",") if ch.strip()}
+            ignored_channels = self._discord_ignored_channel_entries()
             if "*" in ignored_channels or (channel_ids & ignored_channels):
                 logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_ids)
                 return
@@ -234,10 +239,14 @@ class DiscordInboundMixin:
         # no_thread_channels: channels where bot responds directly without thread.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
-            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
+            no_thread_channels_raw = get_profile_env(
+                "DISCORD_NO_THREAD_CHANNELS", ""
+            )
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
-            auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
+            auto_thread = get_profile_env(
+                "DISCORD_AUTO_THREAD", "true"
+            ).lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
                 thread = await self._auto_create_thread(message)
@@ -318,6 +327,17 @@ class DiscordInboundMixin:
             guild_id=str(guild.id) if guild else None,
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
+            role_authorized=role_authorized,
+            auto_thread_created=auto_threaded_channel is not None,
+            auto_thread_initial_name=(
+                getattr(
+                    auto_threaded_channel,
+                    "_hermes_auto_thread_initial_name",
+                    None,
+                )
+                if auto_threaded_channel is not None
+                else None
+            ),
         )
     
         # Build media URLs -- download image attachments to local cache so the
@@ -518,10 +538,15 @@ class DiscordInboundMixin:
     
         # Only batch plain text messages — commands, media, etc. dispatch
         # immediately since they won't be split by the Discord client.
-        if msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0:
+        if (
+            not recovered
+            and msg_type == MessageType.TEXT
+            and self._text_batch_delay_seconds > 0
+        ):
             self._enqueue_text_event(event)
         else:
             await self.handle_message(event)
+        return True
     
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text message batching."""

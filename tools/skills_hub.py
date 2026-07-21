@@ -299,6 +299,7 @@ class GitHubAuth:
             result = subprocess.run(
                 ["gh", "auth", "token"],
                 capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -3657,7 +3658,8 @@ def parallel_search_sources(
     *on_source_done* is an optional callback ``(source_id, count) -> None``
     invoked as each source completes — useful for progress indicators.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
+    from tools.daemon_pool import DaemonThreadPoolExecutor
 
     per_source_limits = per_source_limits or {}
 
@@ -3698,7 +3700,7 @@ def parallel_search_sources(
     # caller blocked for minutes and renders ``overall_timeout`` a no-op.
     # Manage the executor manually and shut it down with ``wait=False`` so
     # the timeout is actually honoured.
-    pool = ThreadPoolExecutor(max_workers=min(len(active), 8))
+    pool = DaemonThreadPoolExecutor(max_workers=min(len(active), 8))
     futures = {}
     for src in active:
         lim = per_source_limits.get(src.source_id(), 50)

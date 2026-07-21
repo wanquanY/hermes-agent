@@ -32,6 +32,7 @@ from typing import Any
 
 _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
+    "live_status": "full",
     "show_reasoning": False,
     "tool_preview_length": 0,
     "streaming": None,  # None = follow top-level streaming config
@@ -53,6 +54,7 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
 
 _TIER_HIGH = {
     "tool_progress": "all",
+    "live_status": "full",
     "show_reasoning": False,
     "tool_preview_length": 40,
     "streaming": None,  # follow global
@@ -60,6 +62,7 @@ _TIER_HIGH = {
 
 _TIER_MEDIUM = {
     "tool_progress": "new",
+    "live_status": "full",
     "show_reasoning": False,
     "tool_preview_length": 40,
     "streaming": None,
@@ -67,6 +70,7 @@ _TIER_MEDIUM = {
 
 _TIER_LOW = {
     "tool_progress": "off",
+    "live_status": "off",
     "show_reasoning": False,
     "tool_preview_length": 40,
     "streaming": False,
@@ -74,6 +78,7 @@ _TIER_LOW = {
 
 _TIER_MINIMAL = {
     "tool_progress": "off",
+    "live_status": "off",
     "show_reasoning": False,
     "tool_preview_length": 0,
     "streaming": False,

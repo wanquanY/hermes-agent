@@ -16,13 +16,14 @@ from typing import Any
 from hermes_constants import get_hermes_home
 from hermes_agent.domain.seq_allocator import ensure_seq_counter_table
 from hermes_agent.repositories.agent_profile_repo import ensure_agent_profile_repository_schema
-from hermes_agent.repositories.session_repo import (
-    SessionRepoImpl,
-    ensure_session_lineage_repository_schema,
-)
+from hermes_agent.repositories.session_repo import SessionRepoImpl
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
 from hermes_agent.repositories.team_registry_repo import ensure_team_registry_repository_schema
-from hermes_agent.storage.state_schema import RUNTIME_DEFERRED_INDEX_SQL, SCHEMA_SQL
+from hermes_agent.storage.state_schema import (
+    CRON_RUN_HISTORY_INDEX_SQL,
+    RUNTIME_DEFERRED_INDEX_SQL,
+    SCHEMA_SQL,
+)
 from hermes_agent.composition.execution_session_migration import (
     reconcile_legacy_delegate_execution_sessions,
     reconcile_team_mission_session_classification,
@@ -30,6 +31,9 @@ from hermes_agent.composition.execution_session_migration import (
 from hermes_agent.storage.fts_schema import ensure_message_fts
 from hermes_agent.composition.migration_operations import reconcile_declared_columns
 from hermes_agent.composition.migrations import CURRENT_SCHEMA_VERSION, MigrationRunner
+from hermes_agent.composition.migrations.support.session_lineage_reconcile import (
+    ensure_session_lineage_repository_schema,
+)
 from hermes_agent.storage.session_store_health import set_last_init_error
 from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
@@ -129,6 +133,8 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             display_title TEXT DEFAULT '',
             display_title_source TEXT DEFAULT '',
             cwd TEXT,
+            git_branch TEXT NOT NULL DEFAULT '',
+            git_repo_root TEXT NOT NULL DEFAULT '',
             archived INTEGER NOT NULL DEFAULT 0,
             session_kind TEXT NOT NULL DEFAULT 'hermes_session',
             conversation_kind TEXT NOT NULL DEFAULT 'direct',
@@ -222,6 +228,7 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
             platform_message_id TEXT,
             conversation_message_id TEXT NOT NULL DEFAULT '',
             metadata_json TEXT,
+            api_content TEXT,
             active INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
@@ -236,6 +243,7 @@ def ensure_session_repository_schema(conn: sqlite3.Connection) -> None:
     # Existing tables are not changed by CREATE TABLE IF NOT EXISTS. Reconcile
     # every declarative column before creating indexes or running read models.
     reconcile_declared_columns(conn.cursor())
+    conn.executescript(CRON_RUN_HISTORY_INDEX_SQL)
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_session_index_updated

@@ -33,6 +33,7 @@ from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_profile_env
 from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -101,10 +102,10 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
     
 def check_email_requirements() -> bool:
     """Check if email platform dependencies are available."""
-    addr = os.getenv("EMAIL_ADDRESS")
-    pwd = os.getenv("EMAIL_PASSWORD")
-    imap = os.getenv("EMAIL_IMAP_HOST")
-    smtp = os.getenv("EMAIL_SMTP_HOST")
+    addr = get_profile_env("EMAIL_ADDRESS")
+    pwd = get_profile_env("EMAIL_PASSWORD")
+    imap = get_profile_env("EMAIL_IMAP_HOST")
+    smtp = get_profile_env("EMAIL_SMTP_HOST")
     if not all([addr, pwd, imap, smtp]):
         return False
     return True
@@ -248,13 +249,13 @@ class EmailAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
 
-        self._address = os.getenv("EMAIL_ADDRESS", "")
-        self._password = os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = os.getenv("EMAIL_IMAP_HOST", "")
-        self._imap_port = int(os.getenv("EMAIL_IMAP_PORT", "993"))
-        self._smtp_host = os.getenv("EMAIL_SMTP_HOST", "")
-        self._smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-        self._poll_interval = int(os.getenv("EMAIL_POLL_INTERVAL", "15"))
+        self._address = get_profile_env("EMAIL_ADDRESS", "")
+        self._password = get_profile_env("EMAIL_PASSWORD", "")
+        self._imap_host = get_profile_env("EMAIL_IMAP_HOST", "")
+        self._imap_port = int(get_profile_env("EMAIL_IMAP_PORT", "993"))
+        self._smtp_host = get_profile_env("EMAIL_SMTP_HOST", "")
+        self._smtp_port = int(get_profile_env("EMAIL_SMTP_PORT", "587"))
+        self._poll_interval = int(get_profile_env("EMAIL_POLL_INTERVAL", "15"))
 
         # Skip attachments — configured via config.yaml:
         #   platforms:
@@ -446,7 +447,7 @@ class EmailAdapter(BasePlatformAdapter):
         # that the gateway will never authorize.  Without this early guard,
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
-        allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
+        allowed_raw = get_profile_env("EMAIL_ALLOWED_USERS", "").strip()
         if allowed_raw:
             allowed = {addr.strip().lower() for addr in allowed_raw.split(",") if addr.strip()}
             if sender_addr.lower() not in allowed:

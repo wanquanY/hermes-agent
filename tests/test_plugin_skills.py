@@ -85,12 +85,14 @@ class TestPluginSkillRegistry:
         skill_md.parent.mkdir()
         skill_md.write_text("---\nname: foo\n---\nBody.\n")
 
-        pm._plugin_skills["myplugin:foo"] = {
-            "path": skill_md,
-            "plugin": "myplugin",
-            "bare_name": "foo",
-            "description": "test",
-        }
+        pm._assets.register_skill(
+            plugin_name="myplugin",
+            plugin_key="myplugin",
+            plugin_root=tmp_path,
+            name="foo",
+            path=skill_md,
+            description="test",
+        )
 
         assert pm.find_plugin_skill("myplugin:foo") == skill_md
         assert pm.find_plugin_skill("myplugin:bar") is None
@@ -100,9 +102,13 @@ class TestPluginSkillRegistry:
             md = tmp_path / name / "SKILL.md"
             md.parent.mkdir()
             md.write_text(f"---\nname: {name}\n---\n")
-            pm._plugin_skills[f"myplugin:{name}"] = {
-                "path": md, "plugin": "myplugin", "bare_name": name, "description": "",
-            }
+            pm._assets.register_skill(
+                plugin_name="myplugin",
+                plugin_key="myplugin",
+                plugin_root=tmp_path,
+                name=name,
+                path=md,
+            )
 
         assert pm.list_plugin_skills("myplugin") == ["bar", "baz", "foo"]
         assert pm.list_plugin_skills("other") == []
@@ -110,7 +116,13 @@ class TestPluginSkillRegistry:
     def test_remove_plugin_skill(self, pm, tmp_path):
         md = tmp_path / "SKILL.md"
         md.write_text("---\nname: x\n---\n")
-        pm._plugin_skills["p:x"] = {"path": md, "plugin": "p", "bare_name": "x", "description": ""}
+        pm._assets.register_skill(
+            plugin_name="p",
+            plugin_key="p",
+            plugin_root=tmp_path,
+            name="x",
+            path=md,
+        )
 
         pm.remove_plugin_skill("p:x")
         assert pm.find_plugin_skill("p:x") is None
@@ -183,9 +195,13 @@ class TestSkillViewQualifiedName:
         skill_dir.mkdir(parents=True, exist_ok=True)
         md = skill_dir / "SKILL.md"
         md.write_text(content or f"---\nname: {name}\ndescription: {name} desc\n---\n\n{name} body.\n")
-        self.pm._plugin_skills[f"{plugin}:{name}"] = {
-            "path": md, "plugin": plugin, "bare_name": name, "description": "",
-        }
+        self.pm._assets.register_skill(
+            plugin_name=plugin,
+            plugin_key=plugin,
+            plugin_root=tmp_path,
+            name=name,
+            path=md,
+        )
         return md
 
     def test_resolves_plugin_skill(self, tmp_path):
@@ -291,9 +307,13 @@ class TestSkillViewPluginGuards:
         d.mkdir(parents=True, exist_ok=True)
         md = d / "SKILL.md"
         md.write_text(content)
-        self.pm._plugin_skills[f"{plugin}:{name}"] = {
-            "path": md, "plugin": plugin, "bare_name": name, "description": "",
-        }
+        self.pm._assets.register_skill(
+            plugin_name=plugin,
+            plugin_key=plugin,
+            plugin_root=tmp_path,
+            name=name,
+            path=md,
+        )
 
     def test_disabled_plugin(self, tmp_path, monkeypatch):
         from tools.skills_tool import skill_view
@@ -348,9 +368,13 @@ class TestBundleContextBanner:
             d.mkdir(parents=True, exist_ok=True)
             md = d / "SKILL.md"
             md.write_text(f"---\nname: {name}\ndescription: {name} desc\n---\n\n{name} body.\n")
-            self.pm._plugin_skills[f"myplugin:{name}"] = {
-                "path": md, "plugin": "myplugin", "bare_name": name, "description": "",
-            }
+            self.pm._assets.register_skill(
+                plugin_name="myplugin",
+                plugin_key="myplugin",
+                plugin_root=tmp_path,
+                name=name,
+                path=md,
+            )
 
     def test_banner_present(self, tmp_path):
         from tools.skills_tool import skill_view

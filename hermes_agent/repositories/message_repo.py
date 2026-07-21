@@ -7,11 +7,12 @@ message mutations. Read projection remains in ``MessageHistoryReadModel``.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, TypeVar, runtime_checkable
 
 from agent.memory_manager import sanitize_context
 from hermes_agent.repositories.base import RepositoryConnection
@@ -24,7 +25,15 @@ from hermes_agent.repositories.session_repo import (
     SessionRepoImpl,
 )
 from hermes_agent.domain.tool_effect import persist_tool_effect, tool_effect_from_metadata
+from hermes_agent.domain.text_safety import scrub_lone_surrogates
+from hermes_agent.storage.fts_schema import (
+    is_fts_write_corruption_error,
+    rebuild_message_fts,
+)
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
+
+logger = logging.getLogger(__name__)
+_WriteResult = TypeVar("_WriteResult")
 
 
 class PageDirection(str, Enum):
@@ -45,6 +54,7 @@ class MessageSpec:
     reasoning: str = ""
     conversation_message_id: str = ""
     platform_message_id: str = ""
+    api_content: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: float = 0.0
 
@@ -64,6 +74,7 @@ class Message:
     reasoning: str = ""
     conversation_message_id: str = ""
     platform_message_id: str = ""
+    api_content: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     active: bool = True
 
@@ -129,7 +140,9 @@ class MessageRepoImpl:
             raise ValueError("session_id and role are required")
         ts = float(message.timestamp or time.time())
         metadata_json = json.dumps(
-            persist_tool_effect(message.metadata, message.effect_disposition),
+            scrub_lone_surrogates(
+                persist_tool_effect(message.metadata, message.effect_disposition)
+            ),
             ensure_ascii=False,
         )
         cursor = self._conn.execute(
@@ -138,22 +151,23 @@ class MessageRepoImpl:
                 session_id, role, content, participant_id, tool_call_id,
                 tool_calls, tool_name, timestamp, reasoning,
                 conversation_message_id, platform_message_id, metadata_json,
-                active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                active, api_content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """,
             (
                 stable_sid,
                 role,
-                str(message.content or ""),
-                str(message.participant_id or ""),
-                str(message.tool_call_id or ""),
-                str(message.tool_calls or ""),
-                str(message.tool_name or ""),
+                _safe_text(message.content),
+                _safe_text(message.participant_id),
+                _safe_text(message.tool_call_id),
+                _safe_text(message.tool_calls),
+                _safe_text(message.tool_name),
                 ts,
-                str(message.reasoning or ""),
-                str(message.conversation_message_id or ""),
-                str(message.platform_message_id or ""),
+                _safe_text(message.reasoning),
+                _safe_text(message.conversation_message_id),
+                _safe_text(message.platform_message_id),
                 metadata_json,
+                _safe_text(message.api_content),
             ),
         )
         last_row = cursor.lastrowid
@@ -186,6 +200,7 @@ class MessageRepoImpl:
             "SELECT id, session_id, role, content, participant_id, tool_call_id, "
             "tool_calls, tool_name, timestamp, reasoning, conversation_message_id, "
             "platform_message_id, metadata_json, active "
+            ", api_content "
             "FROM messages "
             f"WHERE {' AND '.join(clauses)} "
             f"ORDER BY id {order} "
@@ -227,6 +242,7 @@ class MessageRepoImpl:
             "SELECT id, session_id, role, content, participant_id, tool_call_id, "
             "tool_calls, tool_name, timestamp, reasoning, conversation_message_id, "
             "platform_message_id, metadata_json, active "
+            ", api_content "
             "FROM messages "
             f"WHERE {' AND '.join(clauses)} "
             "ORDER BY id DESC "
@@ -269,7 +285,7 @@ class MessageRepoImpl:
         merged = {**current, **(patch or {})}
         self._conn.execute(
             "UPDATE messages SET metadata_json = ? WHERE id = ? AND session_id = ?",
-            (json.dumps(merged, ensure_ascii=False), int(message_id), stable_sid),
+            (_json_or_none(merged), int(message_id), stable_sid),
         )
         got = self._fetch_by_id(int(message_id))
         assert got is not None
@@ -311,14 +327,14 @@ class MessageRepoImpl:
                 session_id, role, content, tool_call_id, tool_calls, tool_name,
                 timestamp, token_count, finish_reason, reasoning, reasoning_content,
                 reasoning_details, codex_reasoning_items, codex_message_items,
-                platform_message_id, metadata_json
+                platform_message_id, metadata_json, api_content
             )
             SELECT
                 ?, role, content, tool_call_id, tool_calls, tool_name,
                 ? + (ROW_NUMBER() OVER (ORDER BY id) * 0.000001),
                 token_count, finish_reason, reasoning,
                 reasoning_content, reasoning_details, codex_reasoning_items,
-                codex_message_items, platform_message_id, metadata_json
+                codex_message_items, platform_message_id, metadata_json, api_content
             FROM messages
             WHERE session_id IN ({placeholders}) AND id <= ?
             ORDER BY id
@@ -381,7 +397,7 @@ class MessageRepoImpl:
             SELECT id, session_id, role, content, participant_id, tool_call_id,
                    tool_calls, tool_name, timestamp, reasoning,
                    conversation_message_id, platform_message_id, metadata_json,
-                   active
+                   active, api_content
               FROM messages
              WHERE id = ?
             """,
@@ -397,63 +413,63 @@ class MessageRepository:
         self._conn = conn
         self._lock = lock_for_connection(conn)
         self._sessions = session_repo if session_repo is not None else SessionRepoImpl(conn)
+        self._fts_runtime_rebuild_attempted = False
 
     def append_conversation_message(self, session_id: str, message: dict[str, Any]) -> int:
         stable_sid = str(session_id or "").strip()
         if not stable_sid:
             raise ValueError("session_id is required")
-        role = str(message.get("role") or "unknown")
+        role = _safe_text(message.get("role") or "unknown")
         timestamp = _message_timestamp(message, time.time())
-        participant_id = str(message.get("participant_id") or "").strip()
+        participant_id = _safe_text(message.get("participant_id")).strip()
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        with self._lock:
-            self._begin_write()
-            try:
-                existing_id = self._select_existing_message_id_for_persist_key(
-                    stable_sid,
-                    role=role,
-                    metadata=metadata,
-                )
-                if existing_id is not None:
-                    self._conn.commit()
-                    return existing_id
 
-                projected_id = self._select_projected_team_message_id_for_append(
-                    stable_sid,
-                    role=role,
-                    message=message,
+        def _append() -> int:
+            existing_id = self._select_existing_message_id_for_persist_key(
+                stable_sid,
+                role=role,
+                metadata=metadata,
+            )
+            if existing_id is not None:
+                self._update_api_content(existing_id, message.get("api_content"))
+                return existing_id
+
+            projected_id = self._select_projected_team_message_id_for_append(
+                stable_sid,
+                role=role,
+                message=message,
+                participant_id=participant_id,
+                metadata=metadata,
+            )
+            if projected_id is not None:
+                self._merge_projected_message(
+                    projected_id,
                     participant_id=participant_id,
                     metadata=metadata,
+                    reasoning=_safe_text(message.get("reasoning")),
                 )
-                if projected_id is not None:
-                    self._merge_projected_message(
-                        projected_id,
-                        participant_id=participant_id,
-                        metadata=metadata,
-                        reasoning=str(message.get("reasoning") or ""),
-                    )
-                    self._conn.commit()
-                    return projected_id
+                self._update_api_content(projected_id, message.get("api_content"))
+                return projected_id
 
-                message_id = self._insert_message(stable_sid, message, timestamp)
-                self._sessions.record_message_append(
-                    stable_sid,
-                    SessionMessageAppendProjection(
-                        timestamp=timestamp,
-                        tool_call_count=_tool_call_count(message.get("tool_calls")),
-                        user_preview=_message_preview_text(message.get("content"))
-                        if role == "user"
-                        else "",
-                        user_display_title=_message_display_title_text(message.get("content"))
-                        if role == "user"
-                        else "",
-                    ),
-                )
-                self._conn.commit()
-                return message_id
-            except Exception:
-                self._conn.rollback()
-                raise
+            message_id = self._insert_message(stable_sid, message, timestamp)
+            self._sessions.record_message_append(
+                stable_sid,
+                SessionMessageAppendProjection(
+                    timestamp=timestamp,
+                    tool_call_count=_tool_call_count(message.get("tool_calls")),
+                    user_preview=_message_preview_text(message.get("content"))
+                    if role == "user"
+                    else "",
+                    user_display_title=_message_display_title_text(
+                        message.get("content")
+                    )
+                    if role == "user"
+                    else "",
+                ),
+            )
+            return message_id
+
+        return self._execute_write(_append)
 
     def merge_metadata(
         self,
@@ -468,7 +484,8 @@ class MessageRepository:
     ) -> dict[str, Any] | None:
         if not metadata:
             return None
-        with self._lock:
+
+        def _merge() -> dict[str, Any] | None:
             row = self._select_metadata_target(
                 session_id,
                 message_id=message_id,
@@ -480,25 +497,135 @@ class MessageRepository:
             if row is None:
                 return None
             next_metadata = _merge_metadata(_row_metadata(row), metadata)
-            raw = json.dumps(next_metadata, ensure_ascii=False)
+            raw = _json_or_none(next_metadata) or "{}"
             self._conn.execute(
                 "UPDATE messages SET metadata_json = ? WHERE id = ?",
                 (raw, row["id"]),
             )
-            self._conn.commit()
             updated = dict(row)
             updated["metadata_json"] = raw
             return _row_as_conversation(updated, include_storage_metadata=True)
 
+        return self._execute_write(_merge)
+
+    def rewrite_content(
+        self,
+        session_id: str,
+        content: Any,
+        *,
+        message_id: str | int | None = None,
+        conversation_message_id: str | None = None,
+        role: str | None = None,
+        persist_message_key: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        turn_message_index: str | int | None = None,
+    ) -> dict[str, Any] | None:
+        """Rewrite one active message selected by a stable storage identity.
+
+        This is deliberately separate from idempotent append. Replayed appends
+        must not silently mutate canonical transcript rows, while completion
+        paths occasionally need to fill content on a row that was durably
+        written earlier in the same turn (for example an assistant tool-call
+        row whose final text arrived through stream recovery).
+        """
+        canonical_session_id = str(session_id or "").strip()
+        if not canonical_session_id:
+            raise ValueError("session_id is required")
+
+        def _rewrite() -> dict[str, Any] | None:
+            row = self._select_content_rewrite_target(
+                canonical_session_id,
+                message_id=message_id,
+                conversation_message_id=conversation_message_id,
+                role=role,
+                persist_message_key=persist_message_key,
+                run_id=run_id,
+                turn_id=turn_id,
+                turn_message_index=turn_message_index,
+            )
+            if row is None:
+                return None
+            encoded_content = _encode_content(content)
+            self._conn.execute(
+                "UPDATE messages SET content = ?, api_content = NULL WHERE id = ?",
+                (encoded_content, int(row["id"])),
+            )
+            updated = self._conn.execute(
+                f"SELECT {_conversation_message_columns()} FROM messages WHERE id = ?",
+                (int(row["id"]),),
+            ).fetchone()
+            return _row_as_conversation(updated, include_storage_metadata=True)
+
+        return self._execute_write(_rewrite)
+
     def replace_conversation(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        with self._lock:
-            self._begin_write()
-            try:
-                self._replace_conversation_locked(session_id, messages)
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+        self._execute_write(
+            lambda: self._replace_conversation_locked(session_id, messages)
+        )
+
+    def compact_active_conversation(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str,
+    ) -> None:
+        """Atomically archive the old live view and persist a compacted one."""
+        self._execute_write(
+            lambda: self._replace_conversation_locked(
+                session_id,
+                messages,
+                archive_existing=True,
+                system_prompt=system_prompt,
+            )
+        )
+
+    def set_current_user_api_content(
+        self,
+        session_id: str,
+        *,
+        content: Any,
+        api_content: str,
+        conversation_message_id: str = "",
+    ) -> int:
+        """Backfill exact-wire content onto an already-persisted user row."""
+        canonical_session_id = str(session_id or "").strip()
+        stable_sidecar = (
+            scrub_lone_surrogates(api_content)
+            if isinstance(api_content, str)
+            else ""
+        )
+        if not canonical_session_id or not stable_sidecar:
+            return 0
+        encoded_content = _encode_content(content)
+        stable_message_id = str(conversation_message_id or "").strip()
+
+        def _set_sidecar() -> int:
+            if stable_message_id:
+                cursor = self._conn.execute(
+                    "UPDATE messages SET api_content = ? "
+                    "WHERE session_id = ? AND role = 'user' AND active = 1 "
+                    "AND conversation_message_id = ? AND content IS ?",
+                    (
+                        stable_sidecar,
+                        canonical_session_id,
+                        stable_message_id,
+                        encoded_content,
+                    ),
+                )
+            else:
+                cursor = self._conn.execute(
+                    "UPDATE messages SET api_content = ? WHERE id = ("
+                    "SELECT id FROM messages WHERE session_id = ? "
+                    "AND role = 'user' AND active = 1 "
+                    "ORDER BY id DESC LIMIT 1"
+                    ") AND content IS ?",
+                    (stable_sidecar, canonical_session_id, encoded_content),
+                )
+            return int(cursor.rowcount or 0)
+
+        return self._execute_write(_set_sidecar)
 
     def rebuild_session_projection(self, session_id: str) -> None:
         stable_sid = str(session_id or "").strip()
@@ -563,25 +690,20 @@ class MessageRepository:
             raise ValueError("session_id is required")
         if not stable_message_id:
             raise ValueError("conversation_message_id is required")
-        with self._lock:
-            self._begin_write()
-            try:
-                row = self._upsert_team_message_by_id_locked(
-                    session_id=stable_sid,
-                    conversation_message_id=stable_message_id,
-                    role=role,
-                    content=content,
-                    participant_id=participant_id,
-                    metadata=metadata,
-                    status=status,
-                    reasoning=reasoning,
-                    tool_calls=tool_calls,
-                )
-                self._conn.commit()
-                return row
-            except Exception:
-                self._conn.rollback()
-                raise
+        return self._execute_write(
+            lambda: self._upsert_team_message_by_id_locked(
+                session_id=stable_sid,
+                conversation_message_id=stable_message_id,
+                role=role,
+                content=content,
+                participant_id=participant_id,
+                metadata=metadata,
+                status=status,
+                reasoning=reasoning,
+                tool_calls=tool_calls,
+                timestamp=timestamp,
+            )
+        )
 
     def upsert_team_message_by_id_locked(
         self,
@@ -616,8 +738,21 @@ class MessageRepository:
             timestamp=timestamp,
         )
 
-    def _replace_conversation_locked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    def _replace_conversation_locked(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        archive_existing: bool = False,
+        system_prompt: str | None = None,
+    ) -> None:
+        if archive_existing:
+            self._conn.execute(
+                "UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1",
+                (session_id,),
+            )
+        else:
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         total_messages = 0
         total_tool_calls = 0
         first_user_preview = ""
@@ -646,6 +781,8 @@ class MessageRepository:
                 last_message_ts=last_message_ts,
             ),
         )
+        if system_prompt is not None:
+            self._sessions.update_system_prompt(session_id, system_prompt)
 
     def _upsert_team_message_by_id_locked(
         self,
@@ -669,9 +806,9 @@ class MessageRepository:
         projection_status = str(status or "").strip()
         if projection_status:
             next_metadata["projection_status"] = projection_status
-        metadata_json = json.dumps(next_metadata, ensure_ascii=False) if next_metadata else None
+        metadata_json = _json_or_none(next_metadata)
         stored_content = _encode_content(content)
-        stored_reasoning = str(reasoning or "")
+        stored_reasoning = _safe_text(reasoning)
         message_timestamp = float(timestamp) if timestamp is not None else time.time()
         stored_tool_calls = _json_or_none(tool_calls) if tool_calls is not None else None
 
@@ -698,11 +835,11 @@ class MessageRepository:
                 """,
                 (
                     session_id,
-                    normalized_role,
+                    _safe_text(normalized_role),
                     stored_content,
-                    normalized_participant_id,
+                    _safe_text(normalized_participant_id),
                     message_timestamp,
-                    conversation_message_id,
+                    _safe_text(conversation_message_id),
                     metadata_json,
                     stored_reasoning,
                     stored_tool_calls,
@@ -739,12 +876,12 @@ class MessageRepository:
                  WHERE id = ?
                 """,
                 (
-                    normalized_role,
+                    _safe_text(normalized_role),
                     stored_content,
-                    normalized_participant_id,
+                    _safe_text(normalized_participant_id),
                     message_timestamp,
-                    conversation_message_id,
-                    json.dumps(merged_metadata, ensure_ascii=False),
+                    _safe_text(conversation_message_id),
+                    _json_or_none(merged_metadata),
                     next_reasoning,
                     next_tool_calls,
                     int(existing["id"]),
@@ -805,6 +942,105 @@ class MessageRepository:
                 client_message_id=target_client_message_id,
             ):
                 return row
+        return None
+
+    def _select_content_rewrite_target(
+        self,
+        session_id: str,
+        *,
+        message_id: str | int | None,
+        conversation_message_id: str | None,
+        role: str | None,
+        persist_message_key: str | None,
+        run_id: str | None,
+        turn_id: str | None,
+        turn_message_index: str | int | None,
+    ) -> sqlite3.Row | None:
+        """Resolve an exact active row; never fall back to fuzzy turn matching."""
+        target_role = str(role or "").strip()
+        role_clause = " AND role = ?" if target_role else ""
+
+        target_message_id = str(message_id or "").strip()
+        if target_message_id:
+            try:
+                numeric_message_id = int(target_message_id)
+            except (TypeError, ValueError):
+                numeric_message_id = None
+            if numeric_message_id is not None:
+                params: list[Any] = [numeric_message_id, session_id]
+                if target_role:
+                    params.append(target_role)
+                row = self._conn.execute(
+                    "SELECT * FROM messages "
+                    "WHERE id = ? AND session_id = ? AND active = 1"
+                    f"{role_clause}",
+                    tuple(params),
+                ).fetchone()
+                if row is not None:
+                    return row
+
+        target_conversation_id = str(conversation_message_id or "").strip()
+        if target_conversation_id:
+            params = [session_id, target_conversation_id]
+            if target_role:
+                params.append(target_role)
+            row = self._conn.execute(
+                "SELECT * FROM messages "
+                "WHERE session_id = ? AND conversation_message_id = ? AND active = 1"
+                f"{role_clause} ORDER BY id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+            if row is not None:
+                return row
+
+        target_persist_key = str(persist_message_key or "").strip()
+        if target_persist_key:
+            params = [session_id, target_persist_key]
+            if target_role:
+                params.append(target_role)
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? AND active = 1 "
+                "AND COALESCE(json_extract(metadata_json, '$.persist_message_key'), "
+                "json_extract(metadata_json, '$.persistMessageKey')) = ?"
+                f"{role_clause} ORDER BY id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+            if row is not None:
+                return row
+
+        target_run_id = str(run_id or "").strip()
+        target_turn_id = str(turn_id or "").strip()
+        target_index = str(turn_message_index if turn_message_index is not None else "").strip()
+        if target_run_id and target_turn_id and target_index:
+            params = [session_id, target_run_id, target_turn_id, target_index]
+            if target_role:
+                params.append(target_role)
+            row = self._conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? AND active = 1 "
+                "AND COALESCE(json_extract(metadata_json, '$.run_id'), "
+                "json_extract(metadata_json, '$.runId')) = ? "
+                "AND COALESCE(json_extract(metadata_json, '$.turn_id'), "
+                "json_extract(metadata_json, '$.turnId')) = ? "
+                "AND CAST(COALESCE(json_extract(metadata_json, '$.turn_message_index'), "
+                "json_extract(metadata_json, '$.turnMessageIndex')) AS TEXT) = ?"
+                f"{role_clause} ORDER BY id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
+            if row is not None:
+                return row
+        if target_run_id and target_turn_id:
+            params = [session_id, target_run_id, target_turn_id]
+            if target_role:
+                params.append(target_role)
+            return self._conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? AND active = 1 "
+                "AND COALESCE(json_extract(metadata_json, '$.run_id'), "
+                "json_extract(metadata_json, '$.runId')) = ? "
+                "AND COALESCE(json_extract(metadata_json, '$.turn_id'), "
+                "json_extract(metadata_json, '$.turnId')) = ?"
+                f"{role_clause} ORDER BY id DESC LIMIT 1",
+                tuple(params),
+            ).fetchone()
         return None
 
     def _select_team_message_by_conversation_id(
@@ -868,26 +1104,27 @@ class MessageRepository:
                 session_id, role, content, participant_id, tool_call_id,
                 tool_calls, tool_name, timestamp, token_count, finish_reason,
                 reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                codex_message_items, platform_message_id, conversation_message_id, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                codex_message_items, platform_message_id, conversation_message_id,
+                metadata_json, api_content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 role,
                 _encode_content(message.get("content")),
-                str(message.get("participant_id") or ""),
-                message.get("tool_call_id"),
-                json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                message.get("tool_name"),
+                _safe_text(message.get("participant_id")),
+                _safe_text_or_none(message.get("tool_call_id")),
+                _json_or_none(tool_calls),
+                _safe_text_or_none(message.get("tool_name")),
                 timestamp,
                 message.get("token_count"),
-                message.get("finish_reason"),
-                message.get("reasoning") if role == "assistant" else None,
-                message.get("reasoning_content") if role == "assistant" else None,
+                _safe_text_or_none(message.get("finish_reason")),
+                _safe_text_or_none(message.get("reasoning")) if role == "assistant" else None,
+                _safe_text_or_none(message.get("reasoning_content")) if role == "assistant" else None,
                 _json_or_none(message.get("reasoning_details")) if role == "assistant" else None,
                 _json_or_none(message.get("codex_reasoning_items")) if role == "assistant" else None,
                 _json_or_none(message.get("codex_message_items")) if role == "assistant" else None,
                 _platform_message_id(message),
-                str(message.get("conversation_message_id") or ""),
+                _safe_text(message.get("conversation_message_id")),
                 _json_or_none(
                     persist_tool_effect(
                         message.get("metadata")
@@ -896,9 +1133,61 @@ class MessageRepository:
                         message.get("effect_disposition"),
                     )
                 ),
+                scrub_lone_surrogates(message.get("api_content"))
+                if isinstance(message.get("api_content"), str)
+                else None,
             ),
         )
         return int(cursor.lastrowid or 0)
+
+    def _update_api_content(self, message_id: int, api_content: Any) -> None:
+        if not isinstance(api_content, str) or not api_content:
+            return
+        self._conn.execute(
+            "UPDATE messages SET api_content = ? WHERE id = ?",
+            (scrub_lone_surrogates(api_content), int(message_id)),
+        )
+
+    def _execute_write(self, operation: Callable[[], _WriteResult]) -> _WriteResult:
+        """Run one message transaction with one-shot FTS shadow recovery."""
+        with self._lock:
+            while True:
+                self._begin_write()
+                try:
+                    result = operation()
+                    self._conn.commit()
+                    return result
+                except Exception as exc:
+                    self._conn.rollback()
+                    if (
+                        isinstance(exc, sqlite3.DatabaseError)
+                        and self._try_runtime_fts_rebuild(exc)
+                    ):
+                        continue
+                    raise
+
+    def _try_runtime_fts_rebuild(self, exc: sqlite3.DatabaseError) -> bool:
+        if self._fts_runtime_rebuild_attempted:
+            return False
+        if not is_fts_write_corruption_error(exc):
+            return False
+        self._fts_runtime_rebuild_attempted = True
+        logger.warning(
+            "Message write hit FTS corruption (%s); rebuilding derived indexes "
+            "using canonical transcript rows once.",
+            exc,
+        )
+        try:
+            rebuild_message_fts(self._conn)
+            self._conn.commit()
+        except Exception as rebuild_exc:
+            self._conn.rollback()
+            logger.error(
+                "Runtime FTS rebuild failed; offline state repair is required: %s",
+                rebuild_exc,
+            )
+            return False
+        return True
 
     def _begin_write(self) -> None:
         self._conn.execute("BEGIN IMMEDIATE")
@@ -1029,9 +1318,9 @@ class MessageRepository:
              WHERE id = ?
             """,
             (
-                participant_id or str(row["participant_id"] or ""),
-                json.dumps(merged_metadata, ensure_ascii=False) if merged_metadata else None,
-                reasoning or str(row["reasoning"] or ""),
+                _safe_text(participant_id or row["participant_id"]),
+                _json_or_none(merged_metadata),
+                _safe_text(reasoning or row["reasoning"]),
                 int(message_id),
             ),
         )
@@ -1041,6 +1330,8 @@ def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[st
     if row["role"] in {"user", "assistant"} and isinstance(content, str):
         content = sanitize_context(content).strip()
     message: dict[str, Any] = {"role": row["role"], "content": content}
+    if row["api_content"]:
+        message["api_content"] = row["api_content"]
     if include_storage_metadata:
         message["message_id"] = str(row["id"])
         message["timestamp"] = row["timestamp"]
@@ -1102,6 +1393,7 @@ def _row_to_message(row: Any) -> Message:
         reasoning=str(_get("reasoning", 9) or ""),
         conversation_message_id=str(_get("conversation_message_id", 10) or ""),
         platform_message_id=str(_get("platform_message_id", 11) or ""),
+        api_content=str(_get("api_content", 14) or ""),
         metadata=metadata,
         active=bool(int(_get("active", 13) or 0)),
     )
@@ -1165,7 +1457,8 @@ def _conversation_message_columns() -> str:
     return (
         "id, session_id, role, content, participant_id, tool_call_id, tool_calls, tool_name, timestamp, "
         "finish_reason, reasoning, reasoning_content, reasoning_details, "
-        "codex_reasoning_items, codex_message_items, platform_message_id, conversation_message_id, metadata_json"
+        "codex_reasoning_items, codex_message_items, platform_message_id, "
+        "conversation_message_id, metadata_json, api_content"
     )
 
 
@@ -1179,10 +1472,10 @@ def _message_timestamp(message: dict[str, Any], fallback: float) -> float:
 def _platform_message_id(message: dict[str, Any]) -> str:
     explicit = str(message.get("platform_message_id") or "").strip()
     if explicit:
-        return explicit
+        return _safe_text(explicit)
     candidate = str(message.get("message_id") or "").strip()
     if candidate and not (candidate.isdigit() and message.get("timestamp") is not None):
-        return candidate
+        return _safe_text(candidate)
     return ""
 
 
@@ -1228,10 +1521,20 @@ def _plain_content_text(content: Any, *, fallback: str) -> str:
     return " ".join(text.split())
 
 
+def _safe_text(value: Any) -> str:
+    return scrub_lone_surrogates(str(value or ""))
+
+
+def _safe_text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return scrub_lone_surrogates(str(value))
+
+
 def _json_or_none(value: Any) -> str | None:
     if not value:
         return None
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(scrub_lone_surrogates(value), ensure_ascii=False)
 
 
 def _json_or(value: Any, default: Any) -> Any:

@@ -281,6 +281,43 @@ def test_merge_pending_message_event_promotes_document_followups_over_text():
     assert merged.media_types == ["application/pdf"]
 
 
+def test_media_merge_invalidates_cached_pending_transcription():
+    pending = {}
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        user_id="u1",
+    )
+    session_key = build_session_key(source)
+    first_voice = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/voice-one.ogg"],
+        media_types=["audio/ogg"],
+    )
+    first_voice._gateway_pending_stt_text = "stale transcript"
+    first_voice._gateway_pending_stt_transcripts = ["stale transcript"]
+    first_voice._gateway_pending_stt_echo_sent = True
+    second_voice = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/voice-two.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+    pending[session_key] = first_voice
+    merge_pending_message_event(pending, session_key, second_voice, merge_text=True)
+
+    merged = pending[session_key]
+    assert merged.media_urls == ["/tmp/voice-one.ogg", "/tmp/voice-two.ogg"]
+    assert not hasattr(merged, "_gateway_pending_stt_text")
+    assert not hasattr(merged, "_gateway_pending_stt_transcripts")
+    assert not hasattr(merged, "_gateway_pending_stt_echo_sent")
+
+
 @pytest.mark.asyncio
 async def test_recent_telegram_text_followup_is_queued_without_interrupt():
     runner = _make_runner()

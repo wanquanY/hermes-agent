@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -251,10 +250,9 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
     pip_pkgs = ["playwright", "websockets"]
     print(f"\n[1/3] pip install: {' '.join(pip_pkgs)}")
     try:
-        res = _sp.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", *pip_pkgs],
-            check=False,
-        )
+        from hermes_cli.tools_config import _pip_install
+
+        res = _pip_install(["--upgrade", *pip_pkgs], capture_output=False)
         if res.returncode != 0:
             print("  pip install failed")
             return 1
@@ -268,6 +266,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
         res = _sp.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             check=False,
+            stdin=_sp.DEVNULL,
         )
         if res.returncode != 0:
             print("  playwright install failed (may already be installed)")
@@ -289,13 +288,17 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
                 else:
                     cmd = ["sudo", "apt-get", "install", "-y", "pulseaudio-utils"]
                     print(f"  $ {' '.join(cmd)}")
-                    res = _sp.run(cmd, check=False)
+                    res = _sp.run(cmd, check=False, stdin=_sp.DEVNULL)
                     if res.returncode != 0:
                         print("  apt install failed — install pulseaudio-utils manually")
         elif system == "Darwin":
             have_bh = False
             try:
-                out = _sp.check_output(["system_profiler", "SPAudioDataType"], text=True)
+                out = _sp.check_output(
+                    ["system_profiler", "SPAudioDataType"],
+                    text=True,
+                    stdin=_sp.DEVNULL,
+                )
                 have_bh = "BlackHole" in out
             except Exception:
                 pass
@@ -318,7 +321,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
                 else:
                     cmd = ["brew", "install", *needs]
                     print(f"  $ {' '.join(cmd)}")
-                    res = _sp.run(cmd, check=False)
+                    res = _sp.run(cmd, check=False, stdin=_sp.DEVNULL)
                     if res.returncode != 0:
                         print("  brew install failed — install them manually")
             print(
@@ -348,7 +351,7 @@ def _cmd_auth() -> int:
     path = _auth_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"opening Chromium — sign in to Google, then return here and press Enter.")
+    print("opening Chromium — sign in to Google, then return here and press Enter.")
     print(f"saving storage state to: {path}")
     try:
         with sync_playwright() as pw:

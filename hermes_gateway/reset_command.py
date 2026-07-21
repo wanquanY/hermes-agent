@@ -205,12 +205,12 @@ class GatewayResetCommandMixin:
                     cleanup_exc,
                 )
 
-        # Discard any /queue overflow for this session — /new is a
-        # conversation-boundary operation, queued follow-ups from the
-        # previous conversation must not bleed into the new one.
-        _qe = getattr(self, "_queued_events", None)
-        if _qe is not None:
-            _qe.pop(session_key, None)
+        # Clear every conversation-owned transient through the single boundary
+        # funnel. The routing key is reused by the new durable conversation.
+        session_runtime_state_for(self).clear_conversation_scope(
+            session_key,
+            reason="session_reset",
+        )
 
         try:
             from tools.env_passthrough import clear_env_passthrough
@@ -226,18 +226,6 @@ class GatewayResetCommandMixin:
 
         # Reset the session
         new_entry = await run_sqlite_io(self.session_store.reset_session, session_key)
-
-        # Clear any session-scoped model/reasoning overrides so the next agent
-        # picks up configured defaults instead of previous session switches.
-        self._session_model_overrides.pop(session_key, None)
-        runtime_config_for(self).set_session_reasoning_override(session_key, None)
-        if hasattr(self, "_pending_model_notes"):
-            self._pending_model_notes.pop(session_key, None)
-
-        # Clear session-scoped dangerous-command approvals and /yolo state.
-        # /new is a conversation-boundary operation — approval state from the
-        # previous conversation must not survive the reset.
-        session_runtime_state_for(self).clear_session_boundary_security_state(session_key)
 
         # Fire plugin on_session_finalize hook (session boundary)
         try:

@@ -638,6 +638,38 @@ class TestServerRequestRouting:
         # The session must have responded to the server request with "accept"
         assert ("req-1", {"decision": "accept"}) in client.responses
 
+    def test_on_event_fires_during_approval_drain(self):
+        client = FakeClient()
+        client.queue_notification(
+            "item/started",
+            item={
+                "type": "commandExecution",
+                "id": "exec-1",
+                "command": "echo drained",
+                "cwd": "/tmp",
+            },
+        )
+        client.queue_server_request(
+            "item/commandExecution/requestApproval",
+            request_id="req-d",
+            command="echo drained",
+            cwd="/tmp",
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        events: list[dict] = []
+
+        def cb(command, description, *, allow_permanent=True):
+            return "once"
+
+        s = make_session(client, approval_callback=cb, on_event=events.append)
+        s.run_turn("hi", turn_timeout=1.0)
+
+        assert any(event.get("method") == "item/started" for event in events)
+
     def test_exec_approval_no_callback_denies(self):
         client = FakeClient()
         client.queue_server_request("item/commandExecution/requestApproval", request_id="req-1",

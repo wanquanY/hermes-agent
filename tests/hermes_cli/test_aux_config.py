@@ -44,13 +44,16 @@ def test_background_review_appears_in_auxiliary_model_config():
 
 
 def test_aux_tasks_keys_all_exist_in_default_config():
-    """Every task the menu offers must be defined in DEFAULT_CONFIG."""
+    """The canonical catalog and default config cannot drift apart."""
     aux_keys = {k for k, _name, _desc in _AUX_TASKS}
     default_keys = set(DEFAULT_CONFIG["auxiliary"].keys())
-    missing = aux_keys - default_keys
-    assert not missing, (
-        f"_AUX_TASKS references tasks not in DEFAULT_CONFIG.auxiliary: {missing}"
-    )
+    assert aux_keys == default_keys
+
+
+def test_cli_and_dashboard_share_auxiliary_task_order():
+    from hermes_cli.web_server import _AUX_TASK_SLOTS
+
+    assert tuple(key for key, _name, _desc in _AUX_TASKS) == _AUX_TASK_SLOTS
 
 
 # ── _format_aux_current ─────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ and MoonshotAI/kimi-cli#1595:
    single object schema applied to every array element.  Collapse tuple
    ``items`` to the first element schema (or ``{}`` if the tuple is empty).
    (Ported from anomalyco/opencode#24730.)
+6. Every object schema must carry a ``required`` array, even when empty.
 
 The ``#/definitions/...`` → ``#/$defs/...`` rewrite for draft-07 refs is
 handled separately in ``tools/mcp_tool._normalize_mcp_input_schema`` so it
@@ -161,12 +162,38 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     if "$ref" in repaired:
         return {"$ref": repaired["$ref"]}
 
+    if repaired.get("type") == "object":
+        repaired = _ensure_required_array(repaired)
+
     return repaired
+
+
+def _ensure_required_array(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Guarantee a valid Moonshot ``required`` array for object schemas."""
+    properties = node.get("properties")
+    required = node.get("required")
+    if isinstance(required, list):
+        if isinstance(properties, dict):
+            node["required"] = [name for name in required if name in properties]
+    else:
+        node["required"] = []
+    return node
 
 
 def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
     """Infer a reasonable ``type`` if this schema node has none."""
-    if "type" in node and node["type"] not in {None, ""}:
+    node_type = node.get("type")
+    if isinstance(node_type, list):
+        concrete = next(
+            (
+                value
+                for value in node_type
+                if isinstance(value, str) and value not in {"", "null"}
+            ),
+            "string",
+        )
+        return {**node, "type": concrete}
+    if "type" in node and node_type not in {None, ""}:
         return node
 
     # Heuristic: presence of ``properties`` → object, ``items`` → array, ``enum``
@@ -198,17 +225,18 @@ def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
     applied.  Input is not mutated.
     """
     if not isinstance(parameters, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     repaired = _repair_schema(copy.deepcopy(parameters), is_schema=True)
     if not isinstance(repaired, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     # Top-level must be an object schema
     if repaired.get("type") != "object":
         repaired["type"] = "object"
     if "properties" not in repaired:
         repaired["properties"] = {}
+    _ensure_required_array(repaired)
 
     return repaired
 
@@ -255,6 +283,8 @@ def is_moonshot_model(model: str | None) -> bool:
     # Last path segment (covers aggregator-prefixed slugs)
     tail = bare.rsplit("/", 1)[-1]
     if tail.startswith("kimi-") or tail == "kimi":
+        return True
+    if tail == "k3" or tail.startswith(("k3.", "k3-")):
         return True
     # Vendor-prefixed forms commonly used on aggregators
     if "moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"):

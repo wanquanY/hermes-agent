@@ -58,6 +58,7 @@ def test_absorption_ledger_covers_all_audited_ids() -> None:
         *(f"SEC-PLUGIN-{i:02d}" for i in range(1, 8)),
         *(f"SEC-SURFACE-{i:02d}" for i in range(1, 7)),
         *(f"LG{i}" for i in range(1, 5)),
+        *(f"UP{i}" for i in range(1, 25)),
         "BR1",
     }
     assert ids == expected

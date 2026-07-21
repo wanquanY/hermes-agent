@@ -327,7 +327,7 @@ def _conversation_message_columns() -> str:
         "id, session_id, role, content, participant_id, tool_call_id, tool_calls, "
         "tool_name, timestamp, finish_reason, reasoning, reasoning_content, "
         "reasoning_details, codex_reasoning_items, codex_message_items, "
-        "platform_message_id, conversation_message_id, metadata_json"
+        "platform_message_id, conversation_message_id, metadata_json, api_content"
     )
 
 
@@ -336,6 +336,10 @@ def _row_as_conversation(row: Any, *, include_storage_metadata: bool) -> dict[st
     if row["role"] in {"user", "assistant"} and isinstance(content, str):
         content = sanitize_context(content).strip()
     message: dict[str, Any] = {"role": row["role"], "content": content}
+    # Exact provider-wire bytes are intentionally returned verbatim. The clean
+    # content above remains sanitized for display and durable semantics.
+    if row["api_content"]:
+        message["api_content"] = row["api_content"]
     if include_storage_metadata:
         message["message_id"] = str(row["id"])
         message["timestamp"] = row["timestamp"]

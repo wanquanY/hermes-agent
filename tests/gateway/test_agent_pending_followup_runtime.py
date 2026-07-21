@@ -105,6 +105,107 @@ async def test_pending_followup_uses_adapter_public_contracts():
 
 
 @pytest.mark.asyncio
+async def test_pending_followup_delivers_finalized_failure_before_next_turn():
+    adapter = _Adapter()
+    runner = _Runner(adapter)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1")
+    event = MessageEvent(text="next turn", source=source, message_id="m-next")
+    adapter.queue_pending_message_event("session-1", event)
+
+    await agent_pending_followup_for(runner).process(
+        response={
+            "final_response": "⚠️ provider failed",
+            "failed": True,
+            "messages": [],
+        },
+        result={"final_response": "", "failed": True, "messages": []},
+        context=PendingFollowupContext(
+            message="original",
+            context_prompt="ctx",
+            history=[],
+            source=source,
+            session_id="sid-1",
+            session_key="session-1",
+            run_generation=8,
+            interrupt_depth=0,
+            status_thread_metadata=None,
+            stream_consumer=None,
+            stream_task=None,
+        ),
+    )
+
+    assert adapter.sent == [("chat-1", "⚠️ provider failed")]
+    assert len(runner.followup_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_followup_filters_finalized_silence_before_next_turn():
+    adapter = _Adapter()
+    runner = _Runner(adapter)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1")
+    event = MessageEvent(text="next turn", source=source, message_id="m-next")
+    adapter.queue_pending_message_event("session-1", event)
+
+    await agent_pending_followup_for(runner).process(
+        response={"final_response": "NO_REPLY", "messages": []},
+        result={"final_response": "raw response", "messages": []},
+        context=PendingFollowupContext(
+            message="original",
+            context_prompt="ctx",
+            history=[],
+            source=source,
+            session_id="sid-1",
+            session_key="session-1",
+            run_generation=8,
+            interrupt_depth=0,
+            status_thread_metadata=None,
+            stream_consumer=None,
+            stream_task=None,
+        ),
+    )
+
+    assert adapter.sent == []
+    assert len(runner.followup_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_followup_resends_final_after_unrelated_preview():
+    adapter = _Adapter()
+    runner = _Runner(adapter)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-1")
+    event = MessageEvent(text="next turn", source=source, message_id="m-next")
+    adapter.queue_pending_message_event("session-1", event)
+
+    await agent_pending_followup_for(runner).process(
+        response={
+            "final_response": "final answer",
+            "response_previewed": True,
+            "messages": [],
+        },
+        result={"final_response": "final answer", "messages": []},
+        context=PendingFollowupContext(
+            message="original",
+            context_prompt="ctx",
+            history=[],
+            source=source,
+            session_id="sid-1",
+            session_key="session-1",
+            run_generation=8,
+            interrupt_depth=0,
+            status_thread_metadata=None,
+            stream_consumer=SimpleNamespace(
+                final_response_sent=False,
+                final_content_delivered=False,
+                has_delivered_text=lambda text: text == "commentary",
+            ),
+            stream_task=None,
+        ),
+    )
+
+    assert adapter.sent == [("chat-1", "final answer")]
+
+
+@pytest.mark.asyncio
 async def test_pending_followup_returns_none_without_pending_input():
     adapter = _Adapter()
     runner = _Runner(adapter)

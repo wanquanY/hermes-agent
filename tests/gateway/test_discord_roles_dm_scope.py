@@ -257,12 +257,53 @@ def test_user_id_allowlist_works_in_guild():
     )
 
 
-def test_empty_allowlists_allow_everyone():
+def test_empty_allowlists_deny_without_opt_in():
     adapter = _make_adapter()
     assert (
         adapter._is_allowed_user("42", author=None, guild=None, is_dm=True)
-        is True
+        is False
     )
+
+
+def test_channel_allowlist_requires_channel_context(monkeypatch):
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "999")
+    guild = SimpleNamespace(id=111111, get_member=lambda _user_id: None)
+    adapter = _make_adapter(guilds=[guild])
+
+    assert adapter._is_allowed_user(
+        "42",
+        author=None,
+        guild=guild,
+        is_dm=False,
+    ) is False
+
+
+def test_channel_allowlist_authorizes_matching_context(monkeypatch):
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "999")
+    guild = SimpleNamespace(id=111111, get_member=lambda _user_id: None)
+    adapter = _make_adapter(guilds=[guild])
+
+    assert adapter._is_allowed_user(
+        "42",
+        author=None,
+        guild=guild,
+        is_dm=False,
+        channel_ids={"999"},
+    ) is True
+
+
+def test_channel_allowlist_rejects_non_matching_context(monkeypatch):
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "999")
+    guild = SimpleNamespace(id=111111, get_member=lambda _user_id: None)
+    adapter = _make_adapter(guilds=[guild])
+
+    assert adapter._is_allowed_user(
+        "42",
+        author=None,
+        guild=guild,
+        is_dm=False,
+        channel_ids={"123"},
+    ) is False
 
 
 # ---------------------------------------------------------------------------

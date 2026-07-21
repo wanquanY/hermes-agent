@@ -592,12 +592,16 @@ class TestHealthDetailedEndpoint:
             "active_agents": 2,
             "exit_reason": None,
             "updated_at": "2026-04-14T00:00:00Z",
-        }):
+        }), patch(
+            "hermes_gateway.readiness.collect_runtime_readiness",
+            return_value={"status": "ok", "checks": {}},
+        ):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
                 assert resp.status == 200
                 data = await resp.json()
                 assert data["status"] == "ok"
+                assert data["readiness"] == {"status": "ok", "checks": {}}
                 assert data["platform"] == "hermes-agent"
                 assert data["gateway_state"] == "running"
                 assert data["platforms"] == {"telegram": {"state": "connected"}}
@@ -614,18 +618,23 @@ class TestHealthDetailedEndpoint:
                 resp = await cli.get("/health/detailed")
                 assert resp.status == 200
                 data = await resp.json()
-                assert data["status"] == "ok"
+                assert data["status"] == "degraded"
                 assert data["gateway_state"] is None
                 assert data["platforms"] == {}
 
     @pytest.mark.asyncio
-    async def test_health_detailed_does_not_require_auth(self, auth_adapter):
-        """Health detailed endpoint should be accessible without auth, like /health."""
+    async def test_health_detailed_requires_auth(self, auth_adapter):
+        """Detailed diagnostics must not be exposed by the public liveness route."""
         app = _create_app(auth_adapter)
         with patch("channels.runtime_status.read_runtime_status", return_value=None):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
-                assert resp.status == 200
+                assert resp.status == 401
+                authed = await cli.get(
+                    "/health/detailed",
+                    headers={"Authorization": "Bearer sk-secret"},
+                )
+                assert authed.status == 200
 
 
 # ---------------------------------------------------------------------------
@@ -3385,7 +3394,10 @@ class TestSessionIdHeader:
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run, \
-                 patch("channels.platforms.api_server.open_cli_session_store", side_effect=Exception("DB unavailable")):
+                patch(
+                    "channels.platforms.api_server_session_store.open_cli_session_store",
+                    side_effect=Exception("DB unavailable"),
+                ):
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
 
                 resp = await cli.post(

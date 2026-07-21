@@ -71,6 +71,7 @@ model_catalog:
   url: https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
   ttl_hours: 24
   providers: {}
+  excluded_providers: []
 ```
 
 Set `enabled: false` to disable remote fetch entirely and always use the in-repo snapshot.
@@ -87,6 +88,24 @@ model_catalog:
 ```
 
 The overriding manifest only needs to populate the provider block(s) it cares about. Other providers continue to resolve against the master URL.
+
+### Hiding providers from model pickers
+
+`excluded_providers` hides providers from the CLI, Gateway, TUI, and Desktop
+model pickers while leaving their runtime configuration intact. Matching is
+case-insensitive and includes canonical aliases.
+
+```yaml
+model_catalog:
+  excluded_providers:
+    - copilot
+    - openrouter
+    - openai
+```
+
+Use `providers.<name>.enabled: false` when a provider must also be rejected by
+runtime resolution. Omit either setting (or use an empty exclusion list) to
+preserve the default behavior.
 
 ## Updating the manifest
 

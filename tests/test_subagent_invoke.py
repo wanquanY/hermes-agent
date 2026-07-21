@@ -83,7 +83,8 @@ def test_invoke_subagent_happy_path_returns_output_and_usage(monkeypatch, tmp_pa
     assert result.usage["input_tokens"] == 3
     assert result.usage["output_tokens"] == 5
     assert result.usage["total_tokens"] == 8
-    assert client.chat.completions.calls[0]["messages"][0]["content"] == "Worker soul"
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert system_prompt.startswith("Worker soul\n\n# Skills")
 
 
 def test_invoke_subagent_target_profile_missing_raises_value_error(monkeypatch, tmp_path):
@@ -213,8 +214,10 @@ def test_nested_subagent_context_isolation(monkeypatch, tmp_path):
     assert observed["inner_output"] == "inner done"
     assert observed["before"] == profile_a
     assert observed["after"] == profile_a
-    assert client.chat.completions.calls[0]["messages"][0]["content"] == "Soul A"
-    assert client.chat.completions.calls[1]["messages"][0]["content"] == "Soul B"
+    outer_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert outer_prompt.startswith("Soul A\n\n# Skills")
+    inner_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+    assert inner_prompt.startswith("Soul B\n\n# Skills")
     assert get_hermes_home() == Path(str(tmp_path))
     assert profile_b.is_dir()
 

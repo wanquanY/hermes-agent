@@ -37,6 +37,8 @@ def create_platform_adapter(
 
     plugin_adapter = _create_plugin_adapter(platform, config)
     if plugin_adapter is not _PLUGIN_MISS:
+        if plugin_adapter is not None and hasattr(plugin_adapter, "gateway_runner"):
+            plugin_adapter.gateway_runner = gateway_runner
         return plugin_adapter
 
     if platform == Platform.TELEGRAM:

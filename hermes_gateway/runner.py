@@ -130,6 +130,7 @@ class GatewayRunner(
     _restart_via_service: bool = False
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
+    _pending_one_turn_model_restores: Dict[str, Dict[str, Any]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, config: Optional[GatewayConfig] = None):
@@ -173,8 +174,18 @@ class GatewayRunner(
     def _platform_connect_timeout_secs(self) -> float:
         return platform_runtime_for(self).platform_connect_timeout_secs()
 
-    async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
-        return await platform_runtime_for(self).connect_adapter_with_timeout(adapter, platform)
+    async def _connect_adapter_with_timeout(
+        self,
+        adapter,
+        platform,
+        *,
+        is_reconnect: bool = False,
+    ) -> bool:
+        return await platform_runtime_for(self).connect_adapter_with_timeout(
+            adapter,
+            platform,
+            is_reconnect=is_reconnect,
+        )
 
     @property
     def should_exit_cleanly(self) -> bool:
@@ -686,6 +697,7 @@ class GatewayRunner(
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        turn_context_notes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return await agent_run_runtime_for(self).run(
             message=message,
@@ -698,6 +710,7 @@ class GatewayRunner(
             _interrupt_depth=_interrupt_depth,
             event_message_id=event_message_id,
             channel_prompt=channel_prompt,
+            turn_context_notes=turn_context_notes,
         )
 
 

@@ -11,6 +11,7 @@ from hermes_gateway.session import SessionSource
 def _make_adapter(
     require_mention=None,
     free_response_chats=None,
+    free_response_topics=None,
     mention_patterns=None,
     exclusive_bot_mentions=None,
     ignored_threads=None,
@@ -30,6 +31,8 @@ def _make_adapter(
         extra["require_mention"] = require_mention
     if free_response_chats is not None:
         extra["free_response_chats"] = free_response_chats
+    if free_response_topics is not None:
+        extra["free_response_topics"] = free_response_topics
     if mention_patterns is not None:
         extra["mention_patterns"] = mention_patterns
     if exclusive_bot_mentions is not None:
@@ -421,6 +424,39 @@ def test_free_response_chats_bypass_mention_requirement():
     assert adapter._should_process_message(_group_message("hello everyone", chat_id=-201)) is False
 
 
+def test_free_response_topics_bypass_mention_requirement_only_for_topic():
+    adapter = _make_adapter(require_mention=True, free_response_topics=["-200:31"])
+
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=31)) is True
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=32)) is False
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-201, thread_id=31)) is False
+
+
+def test_free_response_topics_treat_missing_thread_as_general_topic():
+    adapter = _make_adapter(require_mention=True, free_response_topics=["-200:1"])
+
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=None)) is True
+    assert adapter._should_process_message(_group_message("hello everyone", chat_id=-200, thread_id=31)) is False
+
+
+def test_free_response_topic_messages_are_dispatched_not_observed():
+    adapter = _make_adapter(
+        require_mention=True,
+        allowed_chats=["-200"],
+        group_allowed_chats=["-200"],
+        observe_unmentioned_group_messages=True,
+        free_response_topics=["-200:31"],
+    )
+
+    in_topic = _group_message("hello everyone", chat_id=-200, thread_id=31)
+    assert adapter._should_process_message(in_topic) is True
+    assert adapter._should_observe_unmentioned_group_message(in_topic) is False
+
+    other_topic = _group_message("side chatter", chat_id=-200, thread_id=32)
+    assert adapter._should_process_message(other_topic) is False
+    assert adapter._should_observe_unmentioned_group_message(other_topic) is True
+
+
 def test_guest_mode_allows_only_direct_mentions_outside_allowed_chats():
     adapter = _make_adapter(
         require_mention=True,
@@ -550,17 +586,11 @@ def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
-    assert __import__("os").environ["TELEGRAM_REQUIRE_MENTION"] == "true"
-    assert __import__("os").environ["TELEGRAM_GUEST_MODE"] == "true"
-    assert __import__("os").environ["TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"] == "true"
-    assert __import__("os").environ["TELEGRAM_EXCLUSIVE_BOT_MENTIONS"] == "true"
-    assert json.loads(__import__("os").environ["TELEGRAM_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
-    assert __import__("os").environ["TELEGRAM_FREE_RESPONSE_CHATS"] == "-123"
-    assert __import__("os").environ["TELEGRAM_ALLOWED_CHATS"] == "-100"
-    assert __import__("os").environ["TELEGRAM_GROUP_ALLOWED_CHATS"] == "-100"
-    assert __import__("os").environ["TELEGRAM_ALLOWED_TOPICS"] == "8"
     tg_cfg = config.platforms.get(Platform.TELEGRAM)
     assert tg_cfg is not None
+    assert tg_cfg.extra.get("require_mention") is True
+    assert tg_cfg.extra.get("mention_patterns") == [r"^\s*chompy\b"]
+    assert tg_cfg.extra.get("free_response_chats") == ["-123"]
     assert tg_cfg.extra.get("guest_mode") is True
     assert tg_cfg.extra.get("allowed_chats") == ["-100"]
     assert tg_cfg.extra.get("group_allowed_chats") == ["-100"]
@@ -592,9 +622,10 @@ def test_config_bridges_telegram_user_allowlists(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
-    assert __import__("os").environ["TELEGRAM_ALLOWED_USERS"] == "111,222"
-    assert __import__("os").environ["TELEGRAM_GROUP_ALLOWED_USERS"] == "333"
-    assert __import__("os").environ["TELEGRAM_GROUP_ALLOWED_CHATS"] == "-100"
+    telegram_config = config.platforms[Platform.TELEGRAM]
+    assert telegram_config.extra["allow_from"] == ["111", "222"]
+    assert telegram_config.extra["group_allow_from"] == ["333"]
+    assert telegram_config.extra["group_allowed_chats"] == ["-100"]
 
 
 def test_config_env_overrides_telegram_user_allowlists(monkeypatch, tmp_path):
@@ -650,13 +681,8 @@ def test_top_level_require_mention_bridges_to_telegram(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
-    assert __import__("os").environ.get("TELEGRAM_REQUIRE_MENTION") == "true"
-
-    # The adapter's extra dict must also carry the setting so that
-    # _telegram_require_mention() works even without the env var.
-    tg_cfg = config.platforms.get(__import__("hermes_gateway.config", fromlist=["Platform"]).Platform.TELEGRAM)
-    if tg_cfg is not None:
-        assert tg_cfg.extra.get("require_mention") is True
+    tg_cfg = config.platforms[Platform.TELEGRAM]
+    assert tg_cfg.extra.get("require_mention") is True
 
 
 def test_top_level_require_mention_does_not_override_telegram_section(monkeypatch, tmp_path):
@@ -679,7 +705,31 @@ def test_top_level_require_mention_does_not_override_telegram_section(monkeypatc
 
     assert config is not None
     # The telegram-specific "false" must win over the top-level "true".
-    assert __import__("os").environ.get("TELEGRAM_REQUIRE_MENTION") == "false"
+    assert config.platforms[Platform.TELEGRAM].extra["require_mention"] is False
+
+
+def test_config_bridges_telegram_free_response_topics(monkeypatch, tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "telegram:\n"
+        "  free_response_topics:\n"
+        '    - "-1001234567:3"\n'
+        '    - "-1001234567:9"\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("TELEGRAM_FREE_RESPONSE_TOPICS", raising=False)
+
+    config = load_gateway_config()
+
+    assert config is not None
+    telegram_config = config.platforms[Platform.TELEGRAM]
+    assert telegram_config.extra.get("free_response_topics") == [
+        "-1001234567:3",
+        "-1001234567:9",
+    ]
 
 
 def test_config_bridges_telegram_ignored_threads(monkeypatch, tmp_path):
@@ -699,7 +749,10 @@ def test_config_bridges_telegram_ignored_threads(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
-    assert __import__("os").environ["TELEGRAM_IGNORED_THREADS"] == "31,42"
+    assert config.platforms[Platform.TELEGRAM].extra["ignored_threads"] == [
+        31,
+        "42",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -35,7 +35,8 @@ def _conn() -> sqlite3.Connection:
             platform_message_id TEXT,
             conversation_message_id TEXT NOT NULL DEFAULT '',
             metadata_json TEXT,
-            active INTEGER NOT NULL DEFAULT 1
+            active INTEGER NOT NULL DEFAULT 1,
+            api_content TEXT
         );
         """
     )

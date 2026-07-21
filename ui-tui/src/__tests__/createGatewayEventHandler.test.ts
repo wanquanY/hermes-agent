@@ -35,6 +35,7 @@ const buildCtx = (appended: Msg[]) =>
     },
     system: {
       bellOnComplete: false,
+      onReaction: vi.fn(),
       sys: vi.fn()
     },
     transcript: {

@@ -19,7 +19,7 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
 
-MEDIA_TAG_CLEANUP_RE = re.compile('[`"\']?MEDIA:\\s*(?P<path>`[^`\\n]+`|"[^"\\n]+"|\'[^\'\\n]+\'|(?:~/|/)\\S+(?:[^\\S\\n]+\\S+)*?\\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|csv|apk|ipa)(?=[\\s`"\',;:)\\]}]|$))[`"\']?')
+from channels.platforms.media_tags import MEDIA_TAG_CLEANUP_RE
 
 
 def _platform_name(platform) -> str:
@@ -39,6 +39,41 @@ def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bo
 
 
 class BaseDeliveryMixin:
+    # Text-rendering typing indicators (currently Slack assistant status) opt
+    # into per-tool status phrases. Textless typing indicators leave this off.
+    supports_status_text: bool = False
+
+    def set_status_text(self, chat_id: str, text: Optional[str]) -> None:
+        """Set the in-memory working-state phrase rendered by ``send_typing``."""
+        store = getattr(self, "_status_text", None)
+        if store is None:
+            store = {}
+            self._status_text = store
+        if text:
+            store[str(chat_id)] = text
+        else:
+            store.pop(str(chat_id), None)
+
+    def supports_draft_streaming(
+        self,
+        chat_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Whether this adapter supports native streaming-draft updates."""
+        return False
+
+    async def send_draft(
+        self,
+        chat_id: str,
+        draft_id: int,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send or update a native draft preview when the platform supports it."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement send_draft"
+        )
+
     async def send(
         self,
         chat_id: str,

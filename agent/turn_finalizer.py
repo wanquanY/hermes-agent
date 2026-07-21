@@ -25,6 +25,14 @@ from __future__ import annotations
 import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.message_content import flatten_message_text
+
+
+def _is_pure_tool_call_tail(message: dict) -> bool:
+    """Return whether an assistant tool-call row has no visible text."""
+    if not message.get("tool_calls"):
+        return False
+    return not flatten_message_text(message.get("content")).strip()
 
 
 def finalize_turn(
@@ -166,7 +174,28 @@ def finalize_turn(
             from agent.message_sanitization import close_interrupted_tool_sequence
 
             close_interrupted_tool_sequence(messages, final_response)
+
+        # Every response delivered to the caller must also close the durable
+        # transcript turn. Recovery paths can produce a final response without
+        # appending a matching assistant row; pure tool-call tails are filled
+        # in place to preserve provider tool-call structure.
+        _filled_tool_call_tail = None
+        if final_response and not interrupted:
+            _tail = messages[-1] if messages else None
+            _tail_role = _tail.get("role") if isinstance(_tail, dict) else None
+            if _tail_role != "assistant":
+                messages.append({"role": "assistant", "content": final_response})
+            elif isinstance(_tail, dict) and _is_pure_tool_call_tail(_tail):
+                _tail["content"] = final_response
+                _filled_tool_call_tail = _tail
+
         agent._persist_session(messages, conversation_history)
+        if _filled_tool_call_tail is not None:
+            _rewrite = getattr(agent, "_rewrite_persisted_message_content", None)
+            if callable(_rewrite) and _rewrite(_filled_tool_call_tail) is False:
+                raise RuntimeError(
+                    "could not resolve the persisted assistant tool-call row"
+                )
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
         logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)

@@ -70,6 +70,22 @@ class MessageDeduplicator:
                 self._seen = dict(newest)
         return False
 
+    def contains(self, msg_id: str) -> bool:
+        """Return whether *msg_id* is live without claiming it."""
+        if not msg_id:
+            return False
+        seen_at = self._seen.get(msg_id)
+        if seen_at is None:
+            return False
+        if time.time() - seen_at < self._ttl:
+            return True
+        del self._seen[msg_id]
+        return False
+
+    def discard(self, msg_id: str) -> None:
+        """Release a claim after a cancelled or failed dispatch handoff."""
+        self._seen.pop(msg_id, None)
+
     def clear(self):
         """Clear all tracked messages."""
         self._seen.clear()

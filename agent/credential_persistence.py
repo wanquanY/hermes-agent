@@ -1,0 +1,155 @@
+"""Credential-pool policy for the final disk persistence boundary."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from typing import Any, Dict, Mapping
+
+
+_PERSISTABLE_PROVIDER_SOURCES = frozenset(
+    {
+        ("anthropic", "hermes_pkce"),
+        ("minimax-oauth", "oauth"),
+        ("nous", "device_code"),
+        ("openai-codex", "device_code"),
+        ("xai-oauth", "device_code"),
+    }
+)
+
+_SAFE_SECRETISH_METADATA_KEYS = frozenset(
+    {
+        "secret_fingerprint",
+        "secret_source",
+        "token_type",
+        "scope",
+        "client_id",
+        "agent_key_id",
+        "agent_key_expires_at",
+        "agent_key_expires_in",
+        "agent_key_reused",
+        "agent_key_obtained_at",
+        "expires_at",
+        "expires_at_ms",
+        "expires_in",
+        "last_refresh",
+        "last_status",
+        "last_status_at",
+        "last_error_code",
+        "last_error_reason",
+        "last_error_message",
+        "last_error_reset_at",
+    }
+)
+
+_SECRET_VALUE_KEYS = frozenset(
+    {
+        "access_token",
+        "refresh_token",
+        "agent_key",
+        "api_key",
+        "apikey",
+        "api_token",
+        "auth_token",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "id_token",
+        "oauth_token",
+        "private_key",
+        "secret_key",
+        "session_token",
+        "password",
+        "secret",
+        "token",
+        "tokens",
+    }
+)
+
+_SECRET_VALUE_SUFFIXES = (
+    "_api_key",
+    "_api_token",
+    "_access_token",
+    "_auth_token",
+    "_refresh_token",
+    "_bearer_token",
+    "_client_secret",
+    "_id_token",
+    "_oauth_token",
+    "_private_key",
+    "_session_token",
+    "_secret_key",
+    "_password",
+    "_secret",
+    "_token",
+    "_key",
+)
+
+_CAMEL_CASE_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _normalize_key(key: Any) -> str:
+    raw = _CAMEL_CASE_BOUNDARY.sub("_", str(key or "").strip())
+    return raw.lower().replace("-", "_").replace(".", "_")
+
+
+def is_borrowed_credential_source(source: Any, provider_id: Any = None) -> bool:
+    """Whether a source is a borrowed runtime reference, not Hermes-owned state."""
+    normalized_source = str(source or "").strip().lower()
+    if not normalized_source:
+        return False
+    if normalized_source == "manual" or normalized_source.startswith("manual:"):
+        return False
+    normalized_provider = str(provider_id or "").strip().lower()
+    return (normalized_provider, normalized_source) not in _PERSISTABLE_PROVIDER_SOURCES
+
+
+def _is_secret_payload_key(key: Any) -> bool:
+    normalized = _normalize_key(key)
+    if not normalized or normalized in _SAFE_SECRETISH_METADATA_KEYS:
+        return False
+    return normalized in _SECRET_VALUE_KEYS or normalized.endswith(_SECRET_VALUE_SUFFIXES)
+
+
+def _fingerprint_value(value: Any) -> str | None:
+    if value is None or str(value) == "":
+        return None
+    digest = hashlib.sha256(
+        str(value).encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+    return f"sha256:{digest[:16]}"
+
+
+def _credential_secret_fingerprint(payload: Mapping[str, Any]) -> str | None:
+    for key in ("agent_key", "access_token", "refresh_token", "api_key", "token", "secret"):
+        if fingerprint := _fingerprint_value(payload.get(key)):
+            return fingerprint
+    for key, value in payload.items():
+        if _is_secret_payload_key(key):
+            if fingerprint := _fingerprint_value(value):
+                return fingerprint
+    existing = payload.get("secret_fingerprint")
+    if isinstance(existing, str) and existing.startswith("sha256:"):
+        return existing
+    return None
+
+
+def sanitize_borrowed_credential_payload(
+    payload: Mapping[str, Any],
+    provider_id: Any = None,
+) -> Dict[str, Any]:
+    """Strip borrowed secret values while retaining safe identity/status metadata."""
+    result = dict(payload)
+    if not is_borrowed_credential_source(result.get("source"), provider_id):
+        return result
+    fingerprint = _credential_secret_fingerprint(result)
+    sanitized = {
+        key: value
+        for key, value in result.items()
+        if not _is_secret_payload_key(key)
+    }
+    if fingerprint:
+        sanitized["secret_fingerprint"] = fingerprint
+    return sanitized

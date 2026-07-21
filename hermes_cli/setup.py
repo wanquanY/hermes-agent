@@ -86,6 +86,7 @@ _DEFAULT_PROVIDER_MODELS = {
         "gpt-4o",
         "gpt-4o-mini",
         "claude-opus-4.6",
+        "claude-sonnet-5",
         "claude-sonnet-4.6",
         "claude-sonnet-4.5",
         "claude-haiku-4.5",
@@ -102,9 +103,9 @@ _DEFAULT_PROVIDER_MODELS = {
     "arcee": ["trinity-large-thinking", "trinity-large-preview", "trinity-mini"],
     "minimax": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
     "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"],
-    "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
-    "kilocode": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
-    "opencode-zen": ["gpt-5.4", "gpt-5.3-codex", "claude-sonnet-4-6", "gemini-3-flash", "glm-5", "kimi-k2.5", "minimax-m2.7"],
+    "ai-gateway": ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4.8", "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
+    "kilocode": ["anthropic/claude-sonnet-5", "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
+    "opencode-zen": ["gpt-5.4", "gpt-5.3-codex", "claude-sonnet-5", "claude-sonnet-4-6", "gemini-3-flash", "glm-5", "kimi-k2.5", "minimax-m2.7"],
     "opencode-go": ["kimi-k2.6", "kimi-k2.5", "glm-5.1", "glm-5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.7", "minimax-m2.5", "qwen3.6-plus", "qwen3.5-plus"],
     "huggingface": [
         "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Thinking-2507",
@@ -2043,7 +2044,12 @@ def _setup_discord():
         print_info("Discord: already configured")
         if not prompt_yes_no("Reconfigure Discord?", False):
             if not get_env_value("DISCORD_ALLOWED_USERS"):
-                print_info("⚠️  Discord has no user allowlist - anyone can use your bot!")
+                print_info(
+                    "⚠️  Discord has no user allowlist. With the fail-closed "
+                    "default, messages are denied unless you configure allowed "
+                    "users, roles, or channels, or set "
+                    "DISCORD_ALLOW_ALL_USERS=true."
+                )
                 if prompt_yes_no("Add allowed users now?", True):
                     print_info("   To find Discord ID: Enable Developer Mode, right-click name → Copy ID")
                     allowed_users = prompt("Allowed user IDs (comma-separated)")
@@ -2069,14 +2075,19 @@ def _setup_discord():
     print_info("   You can also use Discord usernames (resolved on gateway start).")
     print()
     allowed_users = prompt(
-        "Allowed user IDs or usernames (comma-separated, leave empty for open access)"
+        "Allowed user IDs or usernames (comma-separated)"
     )
     if allowed_users:
         cleaned_ids = _clean_discord_user_ids(allowed_users)
         save_env_value("DISCORD_ALLOWED_USERS", ",".join(cleaned_ids))
         print_success("Discord allowlist configured")
     else:
-        print_info("⚠️  No allowlist set - anyone in servers with your bot can use it!")
+        print_info(
+            "⚠️  No allowlist set. Discord will deny messages until you set "
+            "DISCORD_ALLOWED_USERS, DISCORD_ALLOWED_ROLES, "
+            "DISCORD_ALLOWED_CHANNELS, or DISCORD_ALLOW_ALL_USERS=true for "
+            "open access."
+        )
 
     print()
     print_info("📬 Home Channel: where Hermes delivers cron job results,")

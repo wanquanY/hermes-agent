@@ -176,6 +176,24 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     return get_hermes_home() / "optional-skills"
 
 
+def get_optional_mcps_dir(default: Path | None = None) -> Path:
+    """Return the shipped MCP catalog directory.
+
+    Resolution mirrors :func:`get_optional_skills_dir` so source checkouts,
+    wheels, Nix/package-manager wrappers, and explicit deployments all see the
+    same catalog instead of silently falling back to an empty directory.
+    """
+    override = os.getenv("HERMES_OPTIONAL_MCPS", "").strip()
+    if override:
+        return Path(override)
+    packaged = _get_packaged_data_dir("optional-mcps")
+    if packaged is not None:
+        return packaged
+    if default is not None:
+        return default
+    return get_hermes_home() / "optional-mcps"
+
+
 def get_bundled_skills_dir(default: Path | None = None) -> Path:
     """Return the bundled skills directory for source and packaged installs.
 
@@ -294,7 +312,7 @@ VALID_REASONING_EFFORTS = (
 )
 
 
-def parse_reasoning_effort(effort: str) -> dict | None:
+def parse_reasoning_effort(effort) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
     Valid levels: "none", "enabled", "minimal", "low", "medium", "high",
@@ -303,7 +321,12 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
     """
-    if not effort or not effort.strip():
+    if effort is False:
+        return {"enabled": False}
+    if effort is None or effort is True:
+        return None
+    effort = str(effort)
+    if not effort.strip():
         return None
     effort = effort.strip().lower()
     if effort == "none":
@@ -313,6 +336,110 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     if effort in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": effort}
     return None
+
+
+def _canonical_model_variants(model: str) -> list[str]:
+    """Generate a bounded set of spelling variants for model overrides."""
+    import re
+
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            variants.append(value)
+
+    def add_derivatives(value: str) -> None:
+        all_dashed = value.replace(".", "-")
+        all_dotted = value.replace("-", ".")
+        for candidate in (
+            value,
+            all_dashed,
+            all_dotted,
+            re.sub(r"(\d)-(\d)", r"\1.\2", value),
+            re.sub(r"(\d)\.(\d)", r"\1-\2", value),
+            re.sub(r"(\d)-(\d)", r"\1.\2", all_dashed),
+            re.sub(r"(\d)\.(\d)", r"\1-\2", all_dotted),
+        ):
+            add(candidate)
+
+    add_derivatives(model)
+    parts = model.split("/")
+    if len(parts) >= 2:
+        add_derivatives(parts[-1])
+    if len(parts) >= 3:
+        add_derivatives("/".join(parts[1:]))
+
+    providers = (
+        "anthropic",
+        "openai",
+        "google",
+        "openrouter",
+        "groq",
+        "mistral",
+        "xai",
+        "cohere",
+        "perplexity",
+        "together",
+        "fireworks",
+        "deepseek",
+    )
+    for variant in tuple(value for value in variants if "/" not in value):
+        for provider in providers:
+            add(f"{provider}/{variant}")
+    aggregators = ("openrouter", "opencode", "fireworks", "groq", "together")
+    for variant in tuple(value for value in variants if value.count("/") == 1):
+        for aggregator in aggregators:
+            add(f"{aggregator}/{variant}")
+    return variants
+
+
+def resolve_per_model_reasoning_effort(
+    model: str,
+    overrides: dict | None,
+) -> dict | None:
+    """Resolve a spelling-tolerant per-model reasoning override."""
+    if not model or not isinstance(overrides, dict) or not overrides:
+        return None
+    for variant in _canonical_model_variants(model):
+        if variant in overrides:
+            parsed = parse_reasoning_effort(overrides[variant])
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
+    """Resolve per-model override first, then the raw global setting."""
+    config = cfg if isinstance(cfg, dict) else {}
+    agent_config = config.get("agent")
+    if not isinstance(agent_config, dict):
+        agent_config = {}
+    if not model:
+        model_config = config.get("model")
+        if isinstance(model_config, str):
+            model = model_config.strip()
+        elif isinstance(model_config, dict):
+            model = str(
+                model_config.get("default") or model_config.get("model") or ""
+            ).strip()
+    per_model = resolve_per_model_reasoning_effort(
+        model,
+        agent_config.get("reasoning_overrides"),
+    )
+    if per_model is not None:
+        return per_model
+    effort = agent_config.get("reasoning_effort", "")
+    result = parse_reasoning_effort(effort)
+    if effort and str(effort).strip() and result is None:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Unknown reasoning_effort '%s', using provider default",
+            effort,
+        )
+    return result
 
 
 def is_termux() -> bool:

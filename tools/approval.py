@@ -1061,7 +1061,8 @@ def save_permanent_allowlist(patterns: set):
 def prompt_dangerous_approval(command: str, description: str,
                               timeout_seconds: int | None = None,
                               allow_permanent: bool = True,
-                              approval_callback=None) -> str:
+                              approval_callback=None,
+                              *, smart_denied: bool = False) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
     Args:
@@ -1079,8 +1080,10 @@ def prompt_dangerous_approval(command: str, description: str,
 
     if approval_callback is not None:
         try:
-            return approval_callback(command, description,
-                                     allow_permanent=allow_permanent)
+            callback_kwargs = {"allow_permanent": allow_permanent}
+            if smart_denied:
+                callback_kwargs["smart_denied"] = True
+            return approval_callback(command, description, **callback_kwargs)
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
@@ -1122,7 +1125,9 @@ def prompt_dangerous_approval(command: str, description: str,
             print(f"  {t('approval.dangerous_header', description=description)}")
             print(f"      {command}")
             print()
-            if allow_permanent:
+            if smart_denied:
+                print("Choose: [o]nce / [d]eny")
+            elif allow_permanent:
                 print(t("approval.choose_long"))
             else:
                 print(t("approval.choose_short"))
@@ -1150,6 +1155,9 @@ def prompt_dangerous_approval(command: str, description: str,
             if choice in {'o', 'once'}:
                 print(t("approval.allowed_once"))
                 return "once"
+            elif smart_denied:
+                print(t("approval.denied"))
+                return "deny"
             elif choice in {'s', 'session'}:
                 print(t("approval.allowed_session"))
                 return "session"
@@ -1459,11 +1467,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # slices so we can fire activity heartbeats every ~10s to the agent's
     # inactivity tracker — otherwise the gateway watchdog kills the agent
     # while the user is still responding. Mirrors _wait_for_process() cadence.
-    timeout = (
-        timeout_seconds
-        if timeout_seconds is not None
-        else _get_approval_config().get("gateway_timeout", 300)
-    )
+    timeout = timeout_seconds if timeout_seconds is not None else _get_approval_timeout()
     try:
         timeout = int(timeout)
     except (ValueError, TypeError):
@@ -1562,8 +1566,18 @@ def persist_approval_choice(
         save_permanent_allowlist(_permanent_approved)
 
 
+def _should_skip_container_guards(
+    env_type: str,
+    has_host_access: bool = False,
+) -> bool:
+    if env_type == "docker":
+        return not has_host_access
+    return env_type in {"singularity", "modal", "daytona", "vercel_sandbox"}
+
+
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None,
+                             has_host_access: bool = False) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -1580,7 +1594,7 @@ def check_all_command_guards(command: str, env_type: str,
         return _user_deny_block_result(deny_pattern)
 
     # Skip heuristic checks for isolated backends.
-    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+    if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
 
     # Hardline floor: unconditional block for catastrophic commands
@@ -1682,26 +1696,25 @@ def check_all_command_guards(command: str, env_type: str,
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
+    smart_denied_for_owner = False
     if approval_mode == "smart":
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         verdict = _smart_approve(command, combined_desc_for_llm)
         if verdict == "approve":
-            # Auto-approve and grant session-level approval for these patterns
-            for key, _, _ in warnings:
-                approve_session(session_key, key)
             logger.debug("Smart approval: auto-approved '%s' (%s)",
                          command[:60], combined_desc_for_llm)
             return {"approved": True, "message": None,
                     "smart_approved": True,
                     "description": combined_desc_for_llm}
-        elif verdict == "deny":
-            combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
+        elif verdict == "deny" and not (is_cli or is_gateway or is_ask):
             return {
                 "approved": False,
                 "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
                 "smart_denied": True,
             }
+        elif verdict == "deny":
+            smart_denied_for_owner = True
         # verdict == "escalate" → fall through to manual prompt
 
     # --- Phase 3: Approval ---
@@ -1719,10 +1732,15 @@ def check_all_command_guards(command: str, env_type: str,
         display_target=command,
         subject="command",
         approval_callback=approval_callback,
+        one_operation_only=smart_denied_for_owner,
     )
 
 
-def check_execute_code_guard(code: str, env_type: str) -> dict:
+def check_execute_code_guard(
+    code: str,
+    env_type: str,
+    has_host_access: bool = False,
+) -> dict:
     """Approve an execute_code script before its child process is spawned.
 
     execute_code runs arbitrary local Python — the script can call
@@ -1754,7 +1772,7 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
 
     # Isolated backends already sandbox the child and can bypass heuristic
     # approval prompts, but the explicit user deny floor above still applies.
-    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+    if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
 
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
@@ -1811,19 +1829,10 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
                          session_key)
             return {"approved": True, "message": None,
                     "smart_approved": True, "description": description}
-        if verdict == "deny":
-            return {
-                "approved": False,
-                "message": ("BLOCKED by smart approval: execute_code script "
-                            "execution was assessed as genuinely dangerous. "
-                            "Do NOT retry."),
-                "smart_denied": True,
-                "pattern_key": pattern_key,
-                "description": description,
-                "outcome": "denied",
-                "user_consent": False,
-            }
+        smart_denied_for_owner = verdict == "deny"
         # verdict == "escalate" → fall through to manual approval
+    else:
+        smart_denied_for_owner = False
 
     from tools.approval_gate import run_approval_gate
 
@@ -1833,6 +1842,7 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
         description=description,
         display_target=command,
         subject="execute_code script",
+        one_operation_only=smart_denied_for_owner,
     )
 
 

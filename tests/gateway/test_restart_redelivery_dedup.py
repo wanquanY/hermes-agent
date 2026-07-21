@@ -152,6 +152,62 @@ async def test_stale_marker_older_than_5min_does_not_block(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_slow_service_restart_still_ignores_same_update(tmp_path, monkeypatch):
+    """A slow drain must not outlive dedup when this boot came from /restart."""
+    monkeypatch.setattr(lifecycle_home, "GATEWAY_HOME", tmp_path)
+    monkeypatch.setenv("INVOCATION_ID", "systemd-test")
+
+    marker = tmp_path / ".restart_last_processed.json"
+    marker.write_text(json.dumps({
+        "platform": "telegram",
+        "update_id": 12345,
+        "requested_at": time.time() - 1200,
+    }))
+
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock()
+    lifecycle = restart_lifecycle_for(runner)
+    lifecycle.mark_booted_from_chat_restart(True)
+
+    result = await lifecycle.handle_restart_command(
+        _make_restart_event(update_id=12345)
+    )
+
+    assert result == ""
+    runner.request_restart.assert_not_called()
+    assert lifecycle._booted_from_chat_restart is False
+
+
+@pytest.mark.asyncio
+async def test_slow_restart_boot_signal_does_not_hide_newer_command(
+    tmp_path, monkeypatch
+):
+    """A higher Telegram update remains a genuine new command."""
+    monkeypatch.setattr(lifecycle_home, "GATEWAY_HOME", tmp_path)
+    monkeypatch.setenv("INVOCATION_ID", "systemd-test")
+
+    marker = tmp_path / ".restart_last_processed.json"
+    marker.write_text(json.dumps({
+        "platform": "telegram",
+        "update_id": 12345,
+        "requested_at": time.time() - 1200,
+    }))
+
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock(return_value=True)
+    lifecycle = restart_lifecycle_for(runner)
+    lifecycle.mark_booted_from_chat_restart(True)
+
+    result = await lifecycle.handle_restart_command(
+        _make_restart_event(update_id=12346)
+    )
+
+    assert result
+    runner.request_restart.assert_called_once()
+    assert lifecycle._booted_from_chat_restart is True
+
+
+@pytest.mark.asyncio
 async def test_no_marker_file_allows_restart(tmp_path, monkeypatch):
     """Clean gateway start (no prior marker) processes /restart normally."""
     monkeypatch.setattr(lifecycle_home, "GATEWAY_HOME", tmp_path)

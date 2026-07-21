@@ -29,9 +29,25 @@ class SessionSource:
     user_id_alt: Optional[str] = None
     chat_id_alt: Optional[str] = None
     is_bot: bool = False
+    # Platform-neutral server/workspace discriminator. ``guild_id`` remains a
+    # temporary wire alias while older adapters and persisted events migrate.
+    scope_id: Optional[str] = None
     guild_id: Optional[str] = None
     parent_chat_id: Optional[str] = None
     message_id: Optional[str] = None
+    role_authorized: bool = False
+    # Named gateway profile that owns this source.  This namespaces sessions
+    # and later selects the isolated runtime/config/credential scope.
+    profile: Optional[str] = None
+    auto_thread_created: bool = False
+    auto_thread_initial_name: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Keep the canonical scope field and its legacy alias coherent."""
+        if self.scope_id is None and self.guild_id is not None:
+            self.scope_id = self.guild_id
+        elif self.scope_id is not None:
+            self.guild_id = self.scope_id
 
     @property
     def description(self) -> str:
@@ -69,12 +85,22 @@ class SessionSource:
             d["user_id_alt"] = self.user_id_alt
         if self.chat_id_alt:
             d["chat_id_alt"] = self.chat_id_alt
-        if self.guild_id:
-            d["guild_id"] = self.guild_id
+        scope = self.scope_id if self.scope_id is not None else self.guild_id
+        if scope:
+            d["scope_id"] = scope
+            d["guild_id"] = scope
         if self.parent_chat_id:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.role_authorized:
+            d["role_authorized"] = True
+        if self.profile:
+            d["profile"] = self.profile
+        if self.auto_thread_created:
+            d["auto_thread_created"] = True
+        if self.auto_thread_initial_name:
+            d["auto_thread_initial_name"] = self.auto_thread_initial_name
         return d
 
     @classmethod
@@ -90,9 +116,13 @@ class SessionSource:
             chat_topic=data.get("chat_topic"),
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
-            guild_id=data.get("guild_id"),
+            scope_id=data.get("scope_id", data.get("guild_id")),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            role_authorized=bool(data.get("role_authorized", False)),
+            profile=data.get("profile"),
+            auto_thread_created=bool(data.get("auto_thread_created", False)),
+            auto_thread_initial_name=data.get("auto_thread_initial_name"),
         )
 
 
@@ -142,8 +172,17 @@ def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    profile: Optional[str] = None,
 ) -> str:
     """Build a deterministic session key from a message source."""
+    effective_profile = (
+        profile if profile is not None else getattr(source, "profile", None)
+    )
+    namespace = (
+        "agent:main"
+        if not effective_profile or effective_profile == "default"
+        else f"agent:{effective_profile}"
+    )
     platform = source.platform.value
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
@@ -152,16 +191,29 @@ def build_session_key(
 
         if dm_chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
+                return f"{namespace}:{platform}:dm:{dm_chat_id}:{source.thread_id}"
+            return f"{namespace}:{platform}:dm:{dm_chat_id}"
+        dm_participant_id = getattr(source, "user_id_alt", None) or source.user_id
+        if dm_participant_id and source.platform == Platform.WHATSAPP:
+            dm_participant_id = (
+                canonical_whatsapp_identifier(str(dm_participant_id))
+                or dm_participant_id
+            )
+        if dm_participant_id:
+            if source.thread_id:
+                return (
+                    f"{namespace}:{platform}:dm:"
+                    f"{dm_participant_id}:{source.thread_id}"
+                )
+            return f"{namespace}:{platform}:dm:{dm_participant_id}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"{namespace}:{platform}:dm:{source.thread_id}"
+        return f"{namespace}:{platform}:dm"
 
-    participant_id = source.user_id_alt or source.user_id
+    participant_id = getattr(source, "user_id_alt", None) or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
         participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
-    key_parts = ["agent:main", platform, source.chat_type]
+    key_parts = [namespace, platform, source.chat_type]
 
     if source.chat_id:
         key_parts.append(source.chat_id)

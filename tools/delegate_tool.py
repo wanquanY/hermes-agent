@@ -53,6 +53,11 @@ from tools.delegation_runner import (
     dump_subagent_timeout_diagnostic as _dump_subagent_timeout_diagnostic,
     run_single_child as _run_single_child,
 )
+from tools.delegation_live_log import (
+    attach_live_transcript_callbacks,
+    create_live_transcripts,
+    update_manifest_statuses,
+)
 from tools.delegation_result_utils import (
     _extract_output_tail,
     _looks_like_error_output,
@@ -63,6 +68,10 @@ from tools.delegation_summary import (
     MIN_SUMMARY_CHARS as _MIN_SUMMARY_CHARS,
     apply_summary_budget as _apply_delegation_summary_budget,
     parent_summary_char_budget as _parent_delegation_summary_char_budget,
+)
+from tools.delegation_tracing import (
+    trace_subagent_event_producer as _trace_subagent_event_producer,
+    trace_subagent_stream_producer as _trace_subagent_stream_producer,
 )
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import is_truthy_value
@@ -78,99 +87,6 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "execute_code",  # children should reason step-by-step, not write scripts
     ]
 )
-
-
-def _trace_subagent_stream_producer(
-    parent_agent: Any,
-    *,
-    event_type: str,
-    subagent_id: str | None,
-    delegate_call_id: str,
-    task_index: int,
-    offset: int,
-    text: str,
-    origin: Dict[str, str] | None = None,
-) -> None:
-    if not is_truthy_value(os.environ.get("DOVIE_STREAM_TRACE")):
-        return
-    logger.info(
-        "[dovie-subagent-stream-source] stage=producer event_type=%s "
-        "session_id=%s run_id=%s turn_id=%s subagent_id=%s delegate_call_id=%s "
-        "task_index=%s offset=%s text_len=%s utf16_len=%s",
-        event_type,
-        str(getattr(parent_agent, "session_id", "") or ""),
-        str(
-            (origin or {}).get("run_id")
-            or getattr(parent_agent, "_hermes_active_run_id", "")
-            or ""
-        ),
-        str(
-            (origin or {}).get("turn_id")
-            or getattr(parent_agent, "_hermes_active_turn_id", "")
-            or ""
-        ),
-        str(subagent_id or ""),
-        delegate_call_id,
-        task_index,
-        offset,
-        len(text),
-        len(text.encode("utf-16-le")) // 2,
-    )
-
-
-def _trace_subagent_event_producer(
-    parent_agent: Any,
-    *,
-    event_type: str,
-    subagent_id: str | None,
-    delegate_call_id: str,
-    task_index: int,
-    source_index: int,
-    payload: Dict[str, Any],
-) -> None:
-    if not is_truthy_value(os.environ.get("DOVIE_STREAM_TRACE")):
-        return
-
-    def _json_bytes(value: Any) -> int:
-        try:
-            return len(
-                json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
-            )
-        except Exception:
-            return -1
-
-    logger.info(
-        "[dovie-subagent-event-source] stage=producer event_type=%s "
-        "session_id=%s run_id=%s turn_id=%s subagent_id=%s delegate_call_id=%s "
-        "task_index=%s source_index=%s tool_id=%s status=%s tool_count=%s "
-        "preview_bytes=%s args_bytes=%s result_bytes=%s context_bytes=%s "
-        "dispatch_message_bytes=%s payload_bytes=%s",
-        event_type,
-        str(getattr(parent_agent, "session_id", "") or ""),
-        str(
-            payload.get("run_id")
-            or getattr(parent_agent, "_hermes_active_run_id", "")
-            or ""
-        ),
-        str(
-            payload.get("turn_id")
-            or getattr(parent_agent, "_hermes_active_turn_id", "")
-            or ""
-        ),
-        str(subagent_id or ""),
-        delegate_call_id,
-        task_index,
-        source_index,
-        str(payload.get("tool_id") or ""),
-        str(payload.get("status") or ""),
-        payload.get("tool_count"),
-        _json_bytes(payload.get("preview")),
-        _json_bytes(payload.get("args")),
-        _json_bytes(payload.get("result")),
-        _json_bytes(payload.get("context")),
-        _json_bytes(payload.get("dispatch_message")),
-        _json_bytes(payload),
-    )
 
 
 def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
@@ -1342,6 +1258,8 @@ def _execute_prebuilt_children(
     max_children: int,
     async_mode: bool,
     on_child_result: Optional[Callable[[Dict[str, Any]], None]] = None,
+    live_delegation_id: Optional[str] = None,
+    live_writers: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Run already-built children through one sync/async-neutral kernel."""
     from concurrent.futures import FIRST_COMPLETED
@@ -1353,6 +1271,24 @@ def _execute_prebuilt_children(
     spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
 
     def accept(entry: Dict[str, Any]) -> None:
+        try:
+            task_index = int(entry.get("task_index", 0))
+        except (TypeError, ValueError):
+            task_index = -1
+        writer = (
+            live_writers[task_index]
+            if live_writers is not None and 0 <= task_index < len(live_writers)
+            else None
+        )
+        if writer is not None:
+            writer.finalize(entry)
+            if writer.path is not None:
+                entry["live_transcript"] = str(writer.path)
+        update_manifest_statuses(
+            live_delegation_id,
+            [entry],
+            completed=False,
+        )
         _apply_summary_budget(
             [entry],
             parent_agent,
@@ -1484,6 +1420,8 @@ def _finalize_delegation_results(
     children: list[tuple],
     parent_agent: Any,
     overall_start: float,
+    live_delegation_id: Optional[str] = None,
+    live_transcript_paths: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Apply parent-side accounting exactly once for either execution mode."""
     lock = getattr(parent_agent, "_delegation_result_lock", None)
@@ -1547,10 +1485,16 @@ def _finalize_delegation_results(
                     parent_agent.session_cost_status = "estimated"
             except Exception:
                 logger.debug("subagent cost rollup failed", exc_info=True)
-    return {
+    update_manifest_statuses(live_delegation_id, results)
+    combined = {
         "results": results,
         "total_duration_seconds": round(time.monotonic() - overall_start, 2),
     }
+    if live_delegation_id:
+        combined["live_delegation_id"] = live_delegation_id
+    if live_transcript_paths:
+        combined["live_transcripts"] = list(live_transcript_paths)
+    return combined
 
 
 def delegate_task(
@@ -1711,6 +1655,24 @@ def delegate_task(
 
     overall_start = time.monotonic()
 
+    live_delegation_id, live_writers, live_transcript_paths = create_live_transcripts(
+        task_list,
+        context=context,
+    )
+
+    def finalize_unstarted_transcripts(status: str, reason: str) -> None:
+        terminal_entries = []
+        for task_index, writer in enumerate(live_writers):
+            entry = {
+                "task_index": task_index,
+                "status": status,
+                "error": reason,
+            }
+            terminal_entries.append(entry)
+            if writer is not None:
+                writer.finalize(entry)
+        update_manifest_statuses(live_delegation_id, terminal_entries)
+
     n_tasks = len(task_list)
     # Save parent tool names BEFORE any child construction mutates the legacy
     # model_tools global.  The agent's exact loaded surface is authoritative;
@@ -1768,10 +1730,27 @@ def delegate_task(
                 role=effective_role,
                 delegate_call_id=normalized_delegate_call_id,
                 agent_name=task_agent_name,
+                live_transcript_writer=(
+                    live_writers[i] if i < len(live_writers) else None
+                ),
+            )
+            attach_live_transcript_callbacks(
+                child,
+                live_writers[i] if i < len(live_writers) else None,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
+    except Exception as exc:
+        logger.exception("delegated child construction failed")
+        _interrupt_prebuilt_children(children, "Subagent construction failed")
+        for _index, _task, child in children:
+            try:
+                child.close()
+            except Exception:
+                logger.debug("partially built subagent close failed", exc_info=True)
+        finalize_unstarted_transcripts("error", "Subagent construction failed")
+        return tool_error(f"Subagent construction failed: {exc}")
     finally:
         # Authoritative restore for legacy consumers after all children build.
         # A real child construction imports model_tools through AIAgent; mocked
@@ -1838,6 +1817,7 @@ def delegate_task(
                 child.close()
             except Exception:
                 logger.debug("rejected subagent close failed", exc_info=True)
+        finalize_unstarted_transcripts("rejected", str(exc))
         return tool_error(str(exc))
 
     if parent_context is not None:
@@ -1859,6 +1839,10 @@ def delegate_task(
             logger.exception("subagent RunContext propagation failed")
             service.cancel(plan, reason="subagent RunContext propagation failed")
             _interrupt_prebuilt_children(children, "RunContext propagation failed")
+            finalize_unstarted_transcripts(
+                "error",
+                "Subagent execution identity could not be established",
+            )
             return tool_error("Subagent execution identity could not be established.")
 
     def on_child_result(entry: Dict[str, Any]) -> None:
@@ -1876,6 +1860,8 @@ def delegate_task(
             max_children=max_children,
             async_mode=async_mode,
             on_child_result=on_child_result,
+            live_delegation_id=live_delegation_id,
+            live_writers=live_writers,
         )
         return _finalize_delegation_results(
             results=results,
@@ -1883,6 +1869,8 @@ def delegate_task(
             children=children,
             parent_agent=parent_agent,
             overall_start=overall_start,
+            live_delegation_id=live_delegation_id,
+            live_transcript_paths=live_transcript_paths,
         )
 
     if resolved_mode is ExecutionMode.SYNC:
@@ -1919,10 +1907,18 @@ def delegate_task(
                 child.close()
             except Exception:
                 logger.debug("rejected async child close failed", exc_info=True)
+        finalize_unstarted_transcripts(
+            "rejected",
+            str(dispatch.get("error") or "Async delegation schedule rejected"),
+        )
         return tool_error(
             str(dispatch.get("error") or "Async delegation could not be scheduled.")
         )
     dispatch["goals"] = [task["goal"] for task in task_list]
+    if live_delegation_id:
+        dispatch["live_delegation_id"] = live_delegation_id
+    if live_transcript_paths:
+        dispatch["live_transcripts"] = list(live_transcript_paths)
     dispatch["note"] = (
         "Subagent execution continues independently. Observe or cancel it by "
         "Activity; completion is a typed internal event, not a conversation message."

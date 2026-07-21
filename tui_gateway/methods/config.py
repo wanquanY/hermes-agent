@@ -40,15 +40,10 @@ def _(rid, params: dict) -> dict:
                 # silently dropped on the next prompt. Skip the build when an
                 # explicit provider was given: that resolves a fresh runtime
                 # without needing the live agent.
-                from hermes_cli.model_switch import parse_model_flags
+                from hermes_cli.model_switch import parse_model_flags_detailed
 
-                (
-                    _model_input,
-                    explicit_provider,
-                    _persist_global,
-                    _force_refresh,
-                    _is_session,
-                ) = parse_model_flags(value)
+                parsed_flags = parse_model_flags_detailed(value)
+                explicit_provider = parsed_flags.explicit_provider
                 if session.get("agent") is None and not explicit_provider.strip():
                     session_id = params.get("session_id", "")
                     _start_agent_build(session_id, session)
@@ -87,16 +82,24 @@ def _(rid, params: dict) -> dict:
                     "warning": result["warning"],
                     "confirm_required": result.get("confirm_required", False),
                     "confirm_message": result.get("confirm_message", ""),
+                    "scope": result.get("scope", "session"),
                 },
             )
         except Exception as e:
             return _err(rid, 5001, str(e))
 
     if key == "fast":
-        raw = str(value or "").strip().lower()
+        from hermes_cli.session_scope import parse_session_scoped_args
+
+        scoped = parse_session_scoped_args(str(value or ""))
+        raw = scoped.value.lower()
+        scope = str(params.get("scope") or "").strip().lower()
+        global_scope = scope == "global" or scoped.persist_global or session is None
         agent = session.get("agent") if session else None
         if agent is not None:
             current_fast = getattr(agent, "service_tier", None) == "priority"
+        elif session is not None and session.get("create_service_tier_override") is not None:
+            current_fast = session["create_service_tier_override"] == "priority"
         else:
             current_fast = _load_service_tier() == "priority"
 
@@ -119,9 +122,15 @@ def _(rid, params: dict) -> dict:
         if nv == "fast":
             from hermes_cli.models import resolve_fast_mode_overrides
 
-            target_model = (
-                getattr(agent, "model", None) if agent is not None else _resolve_model()
-            )
+            if agent is not None:
+                target_model = getattr(agent, "model", None)
+            else:
+                session_override = (session or {}).get("model_override") or {}
+                target_model = (
+                    session_override.get("model")
+                    if isinstance(session_override, dict)
+                    else None
+                ) or _resolve_model()
             if not target_model:
                 return _err(
                     rid,
@@ -136,7 +145,16 @@ def _(rid, params: dict) -> dict:
                     "fast mode is not available for this model",
                 )
 
-        _write_config_key("agent.service_tier", nv)
+        if global_scope:
+            _write_config_key("agent.service_tier", nv)
+            if session is not None:
+                session.pop("create_service_tier_override", None)
+        else:
+            # Empty string is an explicit-normal sentinel. ``None`` means
+            # inherit the profile default during a lazy build or rebuild.
+            session["create_service_tier_override"] = (
+                "priority" if nv == "fast" else ""
+            )
         if agent is not None:
             agent.service_tier = "priority" if nv == "fast" else None
             current_overrides = dict(getattr(agent, "request_overrides", {}) or {})
@@ -145,12 +163,20 @@ def _(rid, params: dict) -> dict:
             if nv == "fast":
                 current_overrides.update(overrides)
             agent.request_overrides = current_overrides
+            _persist_live_session_runtime(session)
             _emit(
                 "session.info",
                 params.get("session_id", ""),
                 _session_info(agent, session),
             )
-        return _ok(rid, {"key": key, "value": nv})
+        return _ok(
+            rid,
+            {
+                "key": key,
+                "value": nv,
+                "scope": "global" if global_scope else "session",
+            },
+        )
 
     if key == "busy":
         raw = str(value or "").strip().lower()
@@ -217,8 +243,12 @@ def _(rid, params: dict) -> dict:
     if key == "reasoning":
         try:
             from hermes_constants import parse_reasoning_effort
+            from hermes_cli.session_scope import parse_session_scoped_args
 
-            arg = str(value or "").strip().lower()
+            scoped = parse_session_scoped_args(str(value or ""))
+            arg = scoped.value.lower()
+            scope = str(params.get("scope") or "").strip().lower()
+            global_scope = scope == "global" or scoped.persist_global or session is None
             if arg in {"show", "on"}:
                 cfg = _load_cfg()
                 display = (
@@ -259,10 +289,28 @@ def _(rid, params: dict) -> dict:
             parsed = parse_reasoning_effort(arg)
             if parsed is None:
                 return _err(rid, 4002, f"unknown reasoning value: {value}")
-            _write_config_key("agent.reasoning_effort", arg)
+            if global_scope:
+                _write_config_key("agent.reasoning_effort", arg)
+                if session is not None:
+                    session.pop("create_reasoning_override", None)
+            else:
+                session["create_reasoning_override"] = parsed
             if session and session.get("agent") is not None:
                 session["agent"].reasoning_config = parsed
-            return _ok(rid, {"key": key, "value": arg})
+                _persist_live_session_runtime(session)
+                _emit(
+                    "session.info",
+                    params.get("session_id", ""),
+                    _session_info(session["agent"], session),
+                )
+            return _ok(
+                rid,
+                {
+                    "key": key,
+                    "value": arg,
+                    "scope": "global" if global_scope else "session",
+                },
+            )
         except Exception as e:
             return _err(rid, 5001, str(e))
 
@@ -485,9 +533,25 @@ def _(rid, params: dict) -> dict:
         )
     if key == "reasoning":
         cfg = _load_cfg()
-        effort = str(
-            (cfg.get("agent") or {}).get("reasoning_effort", "medium") or "medium"
-        )
+        session = _sessions.get(params.get("session_id", ""))
+        reasoning_config = None
+        if session is not None:
+            if isinstance(session.get("create_reasoning_override"), dict):
+                reasoning_config = session.get("create_reasoning_override")
+            else:
+                agent = session.get("agent")
+                agent_reasoning = getattr(agent, "reasoning_config", None)
+                if isinstance(agent_reasoning, dict):
+                    reasoning_config = agent_reasoning
+        if isinstance(reasoning_config, dict):
+            effort = (
+                "none"
+                if reasoning_config.get("enabled") is False
+                else str(reasoning_config.get("effort") or "medium")
+            )
+        else:
+            raw_effort = (cfg.get("agent") or {}).get("reasoning_effort", "")
+            effort = "none" if raw_effort is False else str(raw_effort or "medium")
         display = (
             "show"
             if bool((cfg.get("display") or {}).get("show_reasoning", False))
@@ -495,16 +559,20 @@ def _(rid, params: dict) -> dict:
         )
         return _ok(rid, {"value": effort, "display": display})
     if key == "fast":
+        session = _sessions.get(params.get("session_id", ""))
+        tier = None
+        if session is not None:
+            agent = session.get("agent")
+            if session.get("create_service_tier_override") is not None:
+                tier = session["create_service_tier_override"]
+            elif agent is not None:
+                tier = getattr(agent, "service_tier", None)
+        if tier is None:
+            tier = _load_service_tier()
         return _ok(
             rid,
             {
-                "value": (
-                    "fast"
-                    if (session := _sessions.get(params.get("session_id", "")))
-                    and getattr(session.get("agent"), "service_tier", None)
-                    == "priority"
-                    else ("fast" if _load_service_tier() == "priority" else "normal")
-                ),
+                "value": "fast" if tier == "priority" else "normal",
             },
         )
     if key == "busy":

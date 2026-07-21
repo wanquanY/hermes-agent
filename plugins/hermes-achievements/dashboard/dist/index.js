@@ -48,22 +48,9 @@
     return tier ? "ha-tier-" + tier.toLowerCase() : "ha-tier-pending";
   };
 
-  async function api(path, options) {
+  function api(path, options) {
     const url = "/api/plugins/hermes-achievements" + path;
-    const token = window.__HERMES_SESSION_TOKEN__ || "";
-    const headers = { ...((options && options.headers) || {}) };
-    if (token) headers["X-Hermes-Session-Token"] = token;
-    const res = await fetch(url, { ...(options || {}), headers });
-    if (!res.ok) {
-      const text = await res.text().catch(function () { return res.statusText; });
-      throw new Error(res.status + ": " + text);
-    }
-    const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch (_) {
-      return null;
-    }
+    return SDK.fetchJSON(url, options);
   }
 
   function AchievementIcon({ icon }) {

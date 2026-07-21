@@ -13,6 +13,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from agent.credential_persistence import sanitize_borrowed_credential_payload
 from hermes_constants import OPENROUTER_BASE_URL
 from hermes_cli.config import get_env_value, load_env
 import hermes_cli.auth as auth_mod
@@ -161,7 +162,7 @@ class PooledCredential:
         for k, v in self.extra.items():
             if v is not None:
                 result[k] = v
-        return result
+        return sanitize_borrowed_credential_payload(result, self.provider)
 
     @property
     def runtime_api_key(self) -> str:
@@ -418,10 +419,11 @@ class CredentialPool:
                 self._entries[idx] = new
                 return
 
-    def _persist(self) -> None:
+    def _persist(self, *, removed_ids: Optional[List[str]] = None) -> None:
         write_credential_pool(
             self.provider,
             [entry.to_dict() for entry in self._entries],
+            removed_ids=removed_ids,
         )
 
     def _mark_exhausted(
@@ -1364,7 +1366,7 @@ class CredentialPool:
             replace(entry, priority=new_priority)
             for new_priority, entry in enumerate(self._entries)
         ]
-        self._persist()
+        self._persist(removed_ids=[removed.id])
         if self._current_id == removed.id:
             self._current_id = None
         return removed
@@ -1759,8 +1761,15 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
     # changes to the .env file.
     def _get_env_prefer_dotenv(key: str) -> str:
         env_file = load_env()
-        val = env_file.get(key) or os.environ.get(key) or ""
-        return val.strip()
+        raw = (env_file.get(key) or "").strip()
+        env_value = os.environ.get(key, "").strip()
+        # Secret-source resolution updates os.environ while intentionally
+        # leaving the user's declarative op:// reference intact on disk.
+        # Prefer that resolved runtime value only for this reference shape;
+        # ordinary .env values remain authoritative over inherited shell state.
+        if raw.startswith("op://") and env_value:
+            return env_value
+        return raw or env_value
 
     # Honour user suppression — `hermes auth remove <provider> <N>` for an
     # env-seeded credential marks the env:<VAR> source as suppressed so it
@@ -1933,17 +1942,22 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
     raw_entries = read_credential_pool(provider)
+    raw_needs_sanitization = any(
+        isinstance(payload, dict)
+        and sanitize_borrowed_credential_payload(payload, provider) != payload
+        for payload in raw_entries
+    )
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
 
     if provider.startswith(CUSTOM_POOL_PREFIX):
         # Custom endpoint pool — seed from custom_providers config and model config
         custom_changed, custom_sources = _seed_custom_pool(provider, entries)
-        changed = custom_changed
+        changed = custom_changed or raw_needs_sanitization
         changed |= _prune_stale_seeded_entries(entries, custom_sources)
     else:
         singleton_changed, singleton_sources = _seed_from_singletons(provider, entries)
         env_changed, env_sources = _seed_from_env(provider, entries)
-        changed = singleton_changed or env_changed
+        changed = singleton_changed or env_changed or raw_needs_sanitization
         changed |= _prune_stale_seeded_entries(entries, singleton_sources | env_sources)
         changed |= _normalize_pool_priorities(provider, entries)
 

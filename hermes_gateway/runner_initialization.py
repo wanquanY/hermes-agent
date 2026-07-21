@@ -6,6 +6,7 @@ import asyncio
 import itertools
 import logging
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from hermes_gateway.gateway_runtime_config import runtime_config_for
 from hermes_gateway.pairing import PairingStore
 from hermes_gateway.reasoning_command import reasoning_command_for
 from hermes_gateway.session import SessionSource, SessionStore
+from hermes_gateway.profile_storage import install_profile_storage
 from hermes_gateway.voice_runtime import voice_runtime_for
 from hermes_gateway.runner_ref import set_gateway_runner
 
@@ -32,6 +34,12 @@ def initialize_gateway_runner_state(
 ) -> None:
     runner.config = config or load_gateway_config()
     runner.adapters: Dict[Platform, BasePlatformAdapter] = {}
+    runner._profile_adapters: Dict[
+        str, Dict[Platform, BasePlatformAdapter]
+    ] = {}
+    runner._profile_failed_platforms: Dict[
+        str, Dict[Platform, asyncio.Task]
+    ] = {}
     runner._warn_if_docker_media_delivery_is_risky()
     set_gateway_runner(runner)
 
@@ -72,6 +80,9 @@ def initialize_gateway_runner_state(
     runner._restart_detached = False
     runner._restart_via_service = False
     runner._stop_task: Optional[asyncio.Task] = None
+    runner._loop_heartbeat_task: Optional[asyncio.Task] = None
+    runner._shutdown_watchdog_done: Optional[threading.Event] = None
+    runner._gateway_started_at = time.time()
 
     runner._running_agents: Dict[str, Any] = {}
     runner._running_agents_ts: Dict[str, float] = {}
@@ -87,7 +98,9 @@ def initialize_gateway_runner_state(
     runner._agent_cache_lock = threading.Lock()
 
     runner._session_model_overrides: Dict[str, Dict[str, str]] = {}
+    runner._pending_one_turn_model_restores: Dict[str, Dict[str, Any]] = {}
     runner._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    runner._session_service_tier_overrides: Dict[str, Optional[str]] = {}
     runner._kanban_notifier_profile = runner._active_profile_name()
     runner._teams_pipeline_runtime = None
     runner._teams_pipeline_runtime_error: Optional[str] = None
@@ -99,8 +112,12 @@ def initialize_gateway_runner_state(
     _ensure_tirith_available()
     _initialize_session_db(runner)
     _maybe_prune_checkpoints()
+    from hermes_constants import get_hermes_home
+
+    install_profile_storage(runner, get_hermes_home())
 
     runner.pairing_store = PairingStore()
+    runner.pairing_stores: Dict[str, PairingStore] = {}
 
     from hermes_gateway.hooks import HookRegistry
 
@@ -111,6 +128,13 @@ def initialize_gateway_runner_state(
         List[tuple[float, str]],
     ] = {}
     runner._background_tasks: set = set()
+
+    # Flip fail-closed credential resolution only after unscoped, process-level
+    # initialization is complete. Every profile-owned operation after this
+    # point must enter GatewayProfileRuntimeService's context-local scope.
+    from agent.secret_scope import set_multiplex_active
+
+    set_multiplex_active(bool(runner.config.multiplex_profiles))
 
 
 def _ensure_tirith_available() -> None:

@@ -123,6 +123,41 @@ class Platform(Enum):
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
 
 
+# Listener ownership is process-wide.  In multiplex mode the active profile
+# owns these sockets and secondary profiles are reached through that shared
+# ingress instead of binding competing ports.
+PORT_BINDING_PLATFORM_VALUES = frozenset(
+    {
+        "webhook",
+        "api_server",
+        "msgraph_webhook",
+        "feishu",
+        "wecom_callback",
+        "bluebubbles",
+        "sms",
+        "whatsapp_cloud",
+        "line",
+    }
+)
+PORT_BINDING_CONDITIONAL_MODES: dict[str, str] = {
+    "feishu": "webhook",
+}
+
+
+def platform_binds_port(
+    platform_value: str,
+    extra: Optional[dict] = None,
+) -> bool:
+    """Return whether a platform configuration owns a local listener."""
+    if platform_value not in PORT_BINDING_PLATFORM_VALUES:
+        return False
+    expected_mode = PORT_BINDING_CONDITIONAL_MODES.get(platform_value)
+    if expected_mode is None:
+        return True
+    actual_mode = str((extra or {}).get("connection_mode", "websocket"))
+    return actual_mode.strip().lower() == expected_mode
+
+
 @dataclass
 class HomeChannel:
     """Default destination for a platform."""

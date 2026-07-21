@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import os
-from typing import List
+from typing import List, Optional
+
+from channels.platforms.base import MessageType
 
 from hermes_gateway.media_context import probe_audio_duration
 
@@ -86,7 +88,7 @@ class GatewayInboundMediaMixin:
         self,
         user_text: str,
         audio_paths: List[str],
-    ) -> str:
+    ) -> tuple[str, List[str]]:
         """
         Auto-transcribe user voice/audio messages using the configured STT provider
         and prepend the transcript to the message text.
@@ -110,59 +112,34 @@ class GatewayInboundMediaMixin:
                 else:
                     notes.append(f"[The user sent a voice message: {abs_path}]")
             if not notes:
-                return user_text
+                return user_text, []
             prefix = "\n\n".join(notes)
             _placeholder = "(The user sent a message with no text content)"
             if user_text and user_text.strip() == _placeholder:
-                return prefix
+                return prefix, []
             if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
+                return f"{prefix}\n\n{user_text}", []
+            return prefix, []
 
         from tools.transcription_tools import transcribe_audio
 
         enriched_parts = []
+        successful_transcripts: List[str] = []
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
-                    enriched_parts.append(
-                        f'[The user sent a voice message~ '
-                        f'Here\'s what they said: "{transcript}"]'
-                    )
+                    successful_transcripts.append(transcript)
+                    enriched_parts.append(f'"{transcript}"')
                 else:
                     error = result.get("error", "unknown error")
-                    if (
-                        "No STT provider" in error
-                        or error.startswith("Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set")
-                    ):
-                        _no_stt_note = (
-                            "[The user sent a voice message but I can't listen "
-                            "to it right now — no STT provider is configured. "
-                            "A direct message has already been sent to the user "
-                            "with setup instructions."
-                        )
-                        if self._has_setup_skill():
-                            _no_stt_note += (
-                                " You have a skill called hermes-agent-setup "
-                                "that can help users configure Hermes features "
-                                "including voice, tools, and more."
-                            )
-                        _no_stt_note += "]"
-                        enriched_parts.append(_no_stt_note)
-                    else:
-                        enriched_parts.append(
-                            "[The user sent a voice message but I had trouble "
-                            f"transcribing it~ ({error})]"
-                        )
+                    logger.info("Voice transcription failed for %s: %s", path, error)
+                    enriched_parts.append("[voice message could not be transcribed]")
             except Exception as e:
                 logger.error("Transcription error: %s", e)
-                enriched_parts.append(
-                    "[The user sent a voice message but something went wrong "
-                    "when I tried to listen to it~ Let them know!]"
-                )
+                enriched_parts.append("[voice message could not be transcribed]")
 
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
@@ -170,8 +147,104 @@ class GatewayInboundMediaMixin:
             # when we successfully transcribed the audio — it's redundant.
             _placeholder = "(The user sent a message with no text content)"
             if user_text and user_text.strip() == _placeholder:
-                return prefix
+                return prefix, successful_transcripts
             if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
-        return user_text
+                return f"{prefix}\n\n{user_text}", successful_transcripts
+            return prefix, successful_transcripts
+        return user_text, successful_transcripts
+
+    @staticmethod
+    def _event_media_is_stt_input(event, index: int) -> bool:
+        message_type = getattr(event, "message_type", None)
+        if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
+            return False
+        media_types = getattr(event, "media_types", None) or []
+        media_type = media_types[index] if index < len(media_types) else ""
+        return message_type == MessageType.VOICE or str(media_type).startswith("audio/")
+
+    def _pending_event_audio_paths(self, event) -> List[str]:
+        return [
+            path
+            for index, path in enumerate(getattr(event, "media_urls", None) or [])
+            if self._event_media_is_stt_input(event, index)
+        ]
+
+    async def _transcribe_pending_audio_event_once(
+        self,
+        event,
+        user_text: Optional[str] = None,
+    ) -> tuple[str | None, List[str]]:
+        if hasattr(event, "_gateway_pending_stt_text"):
+            return (
+                getattr(event, "_gateway_pending_stt_text"),
+                list(getattr(event, "_gateway_pending_stt_transcripts", []) or []),
+            )
+        audio_paths = self._pending_event_audio_paths(event)
+        if not audio_paths:
+            text = user_text if user_text is not None else getattr(event, "text", None)
+            return text or "", []
+        text = user_text if user_text is not None else (getattr(event, "text", "") or "")
+        enriched, transcripts = await self._enrich_message_with_transcription(
+            text,
+            audio_paths,
+        )
+        setattr(event, "_gateway_pending_stt_text", enriched)
+        setattr(event, "_gateway_pending_stt_transcripts", list(transcripts))
+        return enriched, transcripts
+
+    def _should_echo_stt_transcripts(self) -> bool:
+        return bool(getattr(self.config, "stt_echo_transcripts", True))
+
+    async def _echo_pending_stt_transcripts_once(
+        self,
+        event,
+        adapter,
+        source,
+        transcripts: List[str],
+        *,
+        metadata=None,
+        log_context: str = "Transcript",
+    ) -> None:
+        if (
+            not transcripts
+            or not self._should_echo_stt_transcripts()
+            or adapter is None
+            or getattr(event, "_gateway_pending_stt_echo_sent", False)
+        ):
+            return
+        setattr(event, "_gateway_pending_stt_echo_sent", True)
+        for transcript in transcripts:
+            try:
+                await adapter.send(
+                    source.chat_id,
+                    f'🎙️ "{transcript}"',
+                    metadata=metadata,
+                )
+            except Exception as error:
+                logger.debug("%s echo failed (non-fatal): %s", log_context, error)
+
+    async def _transcribe_and_echo_pending_voice(
+        self,
+        event,
+        adapter,
+        source,
+        text: str,
+        *,
+        log_context: str,
+        metadata=None,
+    ) -> tuple[str, List[str]]:
+        if not self._pending_event_audio_paths(event):
+            return text, []
+        enriched, transcripts = await self._transcribe_pending_audio_event_once(
+            event,
+            text,
+        )
+        await self._echo_pending_stt_transcripts_once(
+            event,
+            adapter,
+            source,
+            transcripts,
+            metadata=metadata,
+            log_context=log_context,
+        )
+        return enriched or text, transcripts

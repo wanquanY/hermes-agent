@@ -6,7 +6,7 @@ description: "Spawn isolated child agents for parallel workstreams with delegate
 
 # Subagent Delegation
 
-The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
+The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context. Redacted, append-only live transcript paths are returned separately so operators can inspect work without polluting the model context.
 
 ## Single Task
 
@@ -199,6 +199,12 @@ The TUI ships a `/agents` overlay (alias `/tasks`) that turns recursive `delegat
 
 The classic CLI just prints `/agents` as a text summary; the TUI is where the overlay shines. See [TUI — Slash commands](/docs/user-guide/tui#slash-commands).
 
+### Tail-able Live Transcripts
+
+Every dispatch best-effort creates one log per child under the active profile's `cache/delegation/live/<delegation-id>/` directory. The sync result and async Activity dispatch both return `live_transcripts`, so a caller can open or `tail -f` a child immediately. `manifest.json` in the same directory tracks each task's running and terminal state.
+
+Tool arguments, tool results, provider reasoning, streamed assistant text, goals, and manifest goals all pass through the canonical credential redactor with forced protection before disk writes. If redaction is unavailable, the affected line is withheld. The files are retained for seven days and are mounted read-only when a remote terminal backend needs to inspect them.
+
 ## Depth Limit and Nested Orchestration
 
 By default, delegation is **flat**: a parent (depth 0) spawns children (depth 1), and those children cannot delegate further. This prevents runaway recursive delegation.
@@ -221,27 +227,22 @@ delegate_task(
 
 ## Lifetime and Durability
 
-:::warning delegate_task is synchronous — not durable
-`delegate_task` runs **inside the parent's current turn**. It blocks the parent until every child finishes (or is cancelled). It is **not** a background job queue:
+`delegate_task` has two explicit lifetime modes:
 
-- If the parent is interrupted (user sends a new message, `/stop`, `/new`), all active children are cancelled and return `status="interrupted"`. Their in-progress work is discarded.
-- Children do **not** continue running after the parent turn ends.
-- Cancelled children return a structured result (`status="interrupted"`, `exit_reason="interrupted"`), but because the parent was interrupted too, that result often never makes it into a user-visible reply.
+- `execution_mode="sync"` (default) runs inside the parent's current turn and blocks until every child finishes or is cancelled. Interrupting the parent interrupts active sync children.
+- `execution_mode="async"` (or the `background` compatibility flag) creates durable Activity/Run records, returns their handles immediately, and detaches child cancellation ownership from the parent turn. The Activity can be observed or cancelled independently.
 
-For **durable long-running work** that must survive interrupts or outlive the current turn, use:
+Async delegation requires a persistent Activity/Run state store and is not allowed from a nested subagent, preventing unowned daemon trees. Use `cronjob` for recurring or scheduled work, and `terminal(background=True, notify_on_complete=True)` for a shell process rather than an agent run.
 
-- `cronjob` (action=`create`) — schedules a separate agent run; immune to parent-turn interrupts.
-- `terminal(background=True, notify_on_complete=True)` — long-running shell commands that keep running while the agent does other things.
-:::
 
 ## Key Properties
 
 - Each subagent gets its **own terminal session** (separate from the parent)
 - **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
 - Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`. Orchestrator subagents retain `delegate_task` but still cannot use the other four.
-- **Interrupt propagation** — interrupting the parent interrupts all active children (including grandchildren under orchestrators)
+- **Explicit lifetime ownership** — sync children follow parent-turn interruption; async children are owned by their durable Activity
 - Only the final summary enters the parent's context, keeping token usage efficient
-- Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
+- Subagents inherit the selected model's **runtime credential, provider configuration, and credential pool** in memory (enabling key rotation on rate limits). Skill sandboxes may receive explicitly declared service-token files, but Hermes never mounts master stores such as `.env`, `auth.json`, OAuth stores, or MCP token stores into them.
 
 ## Delegation vs execute_code
 

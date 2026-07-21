@@ -16,7 +16,7 @@ from hermes_agent.gateway.runtime_config import (
     resolve_runtime_agent_kwargs,
 )
 from hermes_cli.config import cfg_get
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_override
 from hermes_gateway.model_command import model_command_for
 from hermes_gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
@@ -27,8 +27,13 @@ logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
 
 
+def _runtime_home() -> Path:
+    override = get_hermes_home_override()
+    return Path(override) if override else _hermes_home
+
+
 def _read_gateway_config() -> dict:
-    return load_gateway_runtime_config(_hermes_home)
+    return load_gateway_runtime_config(_runtime_home())
 
 
 class GatewayRuntimeConfigService:
@@ -79,7 +84,7 @@ class GatewayRuntimeConfigService:
                 list(self._runner._session_model_overrides.keys())[:5] if self._runner._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = resolve_runtime_agent_kwargs(_hermes_home)
+        runtime_kwargs = resolve_runtime_agent_kwargs(_runtime_home())
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -108,7 +113,14 @@ class GatewayRuntimeConfigService:
 
         return model, runtime_kwargs
 
-    def resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        *,
+        service_tier: Optional[str] = None,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn."""
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -134,7 +146,8 @@ class GatewayRuntimeConfigService:
             ),
         }
 
-        service_tier = getattr(self._runner, "_service_tier", None)
+        if service_tier is None:
+            service_tier = getattr(self._runner, "_service_tier", None)
         if not service_tier:
             route["request_overrides"] = {}
             return route
@@ -156,7 +169,7 @@ class GatewayRuntimeConfigService:
             return []
         path = Path(file_path).expanduser()
         if not path.is_absolute():
-            path = _hermes_home / path
+            path = _runtime_home() / path
         if not path.exists():
             logger.warning("Prefill messages file not found: %s", path)
             return []
@@ -180,14 +193,15 @@ class GatewayRuntimeConfigService:
         return (cfg_get(_read_gateway_config(), "agent", "system_prompt", default="") or "").strip()
 
     @staticmethod
-    def load_reasoning_config() -> dict | None:
-        return load_reasoning_config(_read_gateway_config())
+    def load_reasoning_config(model: str = "") -> dict | None:
+        return load_reasoning_config(_read_gateway_config(), model)
 
     def resolve_session_reasoning_config(
         self,
         *,
         source=None,
         session_key: Optional[str] = None,
+        model: str = "",
     ) -> dict | None:
         """Resolve reasoning effort for a session, honoring session overrides."""
         resolved_session_key = session_key
@@ -200,7 +214,7 @@ class GatewayRuntimeConfigService:
         overrides = getattr(self._runner, "_session_reasoning_overrides", {}) or {}
         if resolved_session_key and resolved_session_key in overrides:
             return overrides[resolved_session_key]
-        return self.load_reasoning_config()
+        return self.load_reasoning_config(model)
 
     def set_session_reasoning_override(
         self,

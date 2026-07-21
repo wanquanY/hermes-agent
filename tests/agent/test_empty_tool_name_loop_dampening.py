@@ -95,6 +95,21 @@ def _tc_resp(name: str, args: str = "{}") -> dict:
     }
 
 
+def _batch_tc_resp(calls: list[tuple[str, str]]) -> dict:
+    return {
+        "id": "m",
+        "choices": [{"index": 0, "message": {
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                {"id": f"call_{i}", "type": "function",
+                 "function": {"name": name, "arguments": args}}
+                for i, (name, args) in enumerate(calls)
+            ]},
+            "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+    }
+
+
 def _text_resp(text: str) -> dict:
     return {
         "id": "m",
@@ -181,3 +196,76 @@ def test_unknown_nonempty_name_keeps_catalog(agent_env):
     assert "frobnicate_xyz" in joined
     assert "Available tools:" in joined
     assert "tool name was empty" not in joined
+
+
+def test_mixed_batch_executes_valid_and_errors_blank(agent_env):
+    agent, handler = agent_env
+    agent.valid_tool_names = agent.valid_tool_names | {"todo"}
+    handler.response_queue.append(_batch_tc_resp([("todo", "{}"), ("", "{}")]))
+    handler.response_queue.append(_text_resp("done"))
+
+    result = agent.run_conversation("track work", conversation_history=[], task_id="t")
+
+    joined = " ".join(_tool_results(handler))
+    assert "tool name was empty" in joined
+    assert "Skipped: another tool call" not in joined
+    assert result.get("completed", False)
+
+
+def test_mixed_batch_preserves_tool_call_result_pairing(agent_env):
+    agent, handler = agent_env
+    agent.valid_tool_names = agent.valid_tool_names | {"todo"}
+    handler.response_queue.append(_batch_tc_resp([("todo", "{}"), ("", "{}")]))
+    handler.response_queue.append(_text_resp("done"))
+
+    result = agent.run_conversation("track work", conversation_history=[], task_id="t")
+
+    tool_call_ids = []
+    for message in result["messages"]:
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("tool_calls"):
+            tool_call_ids.extend(call["id"] for call in message["tool_calls"])
+    result_ids = [
+        message.get("tool_call_id") or ""
+        for message in result["messages"]
+        if isinstance(message, dict) and message.get("role") == "tool"
+    ]
+    assert set(tool_call_ids) == {"call_0", "call_1"}
+    assert sorted(result_ids) == sorted(tool_call_ids)
+
+
+def test_mixed_batches_do_not_strike_out_session(agent_env):
+    agent, handler = agent_env
+    agent.valid_tool_names = agent.valid_tool_names | {"todo"}
+    for _ in range(4):
+        handler.response_queue.append(_batch_tc_resp([("todo", "{}"), ("", "{}")]))
+    handler.response_queue.append(_text_resp("survived"))
+
+    result = agent.run_conversation("keep going", conversation_history=[], task_id="t")
+
+    assert result.get("completed", False)
+    assert not result.get("partial", False)
+    assert "survived" in (result.get("final_response") or "")
+
+
+def test_all_invalid_batch_still_strikes_out(agent_env):
+    agent, handler = agent_env
+    for _ in range(3):
+        handler.response_queue.append(_batch_tc_resp([("", "{}"), ("  ", "{}")]))
+
+    result = agent.run_conversation("degenerate", conversation_history=[], task_id="t")
+
+    assert result.get("partial", False)
+    assert "invalid tool call" in (result.get("error") or "")
+
+
+def test_mixed_batch_invalid_call_with_broken_json_does_not_retry_turn(agent_env):
+    agent, handler = agent_env
+    agent.valid_tool_names = agent.valid_tool_names | {"todo"}
+    handler.response_queue.append(_batch_tc_resp([("todo", "{}"), ("", '{"unclosed')]))
+    handler.response_queue.append(_text_resp("done"))
+
+    result = agent.run_conversation("track work", conversation_history=[], task_id="t")
+
+    assert result.get("completed", False)
+    chat_calls = [request for request in handler.captured_requests if "messages" in request]
+    assert len(chat_calls) == 2

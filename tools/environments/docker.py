@@ -232,6 +232,7 @@ def _ensure_docker_available() -> None:
             capture_output=True,
             text=True,
             timeout=5,
+            stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         logger.error(
@@ -522,6 +523,7 @@ class DockerEnvironment(BaseEnvironment):
             text=True,
             timeout=120,  # image pull may take a while
             check=True,
+            stdin=subprocess.DEVNULL,
         )
         self._container_id = result.stdout.strip()
         logger.info(f"Started container {container_name} ({self._container_id[:12]})")
@@ -609,6 +611,7 @@ class DockerEnvironment(BaseEnvironment):
             result = subprocess.run(
                 [docker, "info", "--format", "{{.Driver}}"],
                 capture_output=True, text=True, timeout=10,
+                stdin=subprocess.DEVNULL,
             )
             driver = result.stdout.strip().lower()
             if driver != "overlay2":
@@ -619,13 +622,15 @@ class DockerEnvironment(BaseEnvironment):
             probe = subprocess.run(
                 [docker, "create", "--storage-opt", "size=1m", "hello-world"],
                 capture_output=True, text=True, timeout=15,
+                stdin=subprocess.DEVNULL,
             )
             if probe.returncode == 0:
                 # Clean up the created container
                 container_id = probe.stdout.strip()
                 if container_id:
                     subprocess.run([docker, "rm", container_id],
-                                   capture_output=True, timeout=5)
+                                   capture_output=True, timeout=5,
+                                   stdin=subprocess.DEVNULL)
                 _storage_opt_ok = True
             else:
                 _storage_opt_ok = False
@@ -643,7 +648,11 @@ class DockerEnvironment(BaseEnvironment):
                     f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
                     f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
                 )
-                subprocess.Popen(stop_cmd, shell=True)
+                subprocess.Popen(
+                    stop_cmd,
+                    shell=True,
+                    stdin=subprocess.DEVNULL,
+                )
             except Exception as e:
                 logger.warning("Failed to stop container %s: %s", self._container_id, e)
 
@@ -653,6 +662,7 @@ class DockerEnvironment(BaseEnvironment):
                     subprocess.Popen(
                         f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
                         shell=True,
+                        stdin=subprocess.DEVNULL,
                     )
                 except Exception:
                     pass

@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_profile_env
 from channels.config import Platform, PlatformConfig
 from channels.platforms.helpers import MessageDeduplicator
 from channels.platforms.base import (
@@ -52,8 +53,8 @@ _RECONNECT_JITTER = 0.2
 
 def check_mattermost_requirements() -> bool:
     """Return True if the Mattermost adapter can be used."""
-    token = os.getenv("MATTERMOST_TOKEN", "")
-    url = os.getenv("MATTERMOST_URL", "")
+    token = get_profile_env("MATTERMOST_TOKEN", "")
+    url = get_profile_env("MATTERMOST_URL", "")
     if not token:
         logger.debug("Mattermost: MATTERMOST_TOKEN not set")
         return False
@@ -76,9 +77,9 @@ class MattermostAdapter(BasePlatformAdapter):
 
         self._base_url: str = (
             config.extra.get("url", "")
-            or os.getenv("MATTERMOST_URL", "")
+            or get_profile_env("MATTERMOST_URL", "")
         ).rstrip("/")
-        self._token: str = config.token or os.getenv("MATTERMOST_TOKEN", "")
+        self._token: str = config.token or get_profile_env("MATTERMOST_TOKEN", "")
 
         self._bot_user_id: str = ""
         self._bot_username: str = ""
@@ -93,7 +94,7 @@ class MattermostAdapter(BasePlatformAdapter):
         # Reply mode: "thread" to nest replies, "off" for flat messages.
         self._reply_mode: str = (
             config.extra.get("reply_mode", "")
-            or os.getenv("MATTERMOST_REPLY_MODE", "off")
+            or get_profile_env("MATTERMOST_REPLY_MODE", "off")
         ).lower()
 
         # Dedup cache (prevent reprocessing)
@@ -737,7 +738,7 @@ class MattermostAdapter(BasePlatformAdapter):
             # ignored, even if @mentioned.  DMs are already excluded above.
             allowed_raw = self.config.extra.get("allowed_channels") if self.config.extra else None
             if allowed_raw is None:
-                allowed_raw = os.getenv("MATTERMOST_ALLOWED_CHANNELS", "")
+                allowed_raw = get_profile_env("MATTERMOST_ALLOWED_CHANNELS", "")
             if isinstance(allowed_raw, list):
                 allowed_channels = {str(c).strip() for c in allowed_raw if str(c).strip()}
             else:
@@ -751,11 +752,11 @@ class MattermostAdapter(BasePlatformAdapter):
                 )
                 return
 
-            require_mention = os.getenv(
+            require_mention = get_profile_env(
                 "MATTERMOST_REQUIRE_MENTION", "true"
             ).lower() not in {"false", "0", "no"}
 
-            free_channels_raw = os.getenv("MATTERMOST_FREE_RESPONSE_CHANNELS", "")
+            free_channels_raw = get_profile_env("MATTERMOST_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
             is_free_channel = channel_id in free_channels
 
@@ -869,5 +870,4 @@ class MattermostAdapter(BasePlatformAdapter):
         )
 
         await self.handle_message(msg_event)
-
 

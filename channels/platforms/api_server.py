@@ -25,19 +25,19 @@ Requires:
 """
 
 import asyncio
-import hashlib
+import errno
 import hmac
 import json
 import logging
 import os
-import socket as _socket
 import re
-import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.secret_scope import get_profile_env
 try:
     from aiohttp import web
     AIOHTTP_AVAILABLE = True
@@ -52,9 +52,15 @@ from channels.platforms.base import (
     is_network_accessible,
 )
 from channels.platforms.api_server_jobs import APIServerJobsMixin
+from channels.platforms.api_server_model_routes import (
+    APIModelRoute,
+    APIServerModelRoutesMixin,
+)
+from channels.platforms.api_server_routing import APIServerRoutingMixin
 from channels.platforms.api_server_responses import APIServerResponsesMixin
 from channels.platforms.api_server_runs import APIServerRunsMixin
 from channels.platforms.api_server_sessions import APIServerSessionsMixin
+from channels.platforms.api_server_session_store import APIServerSessionStoreMixin
 from channels.platforms.api_server_support import (
     AIOHTTP_AVAILABLE,
     CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS,
@@ -78,19 +84,21 @@ from channels.platforms.api_server_support import (
     _coerce_request_bool,
     _content_has_visible_payload,
     _derive_chat_session_id,
+    _hermes_version,
     _idem_cache,
     _make_request_fingerprint,
     _multimodal_validation_error,
     _normalize_chat_content,
     _normalize_multimodal_content,
     _openai_error,
+    _redact_api_error_text,
+    _resolve_media_to_data_urls,
     _session_chat_user_message,
     body_limit_middleware,
     check_api_server_requirements,
     cors_middleware,
     security_headers_middleware,
 )
-from hermes_agent.composition.cli_session_store import open_cli_session_store
 from hermes_agent.application.active_work_registry import (
     ActiveWorkState,
     WorkRejected,
@@ -105,7 +113,16 @@ def check_api_server_requirements() -> bool:
     return AIOHTTP_AVAILABLE
 
 
-class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJobsMixin, APIServerSessionsMixin, BasePlatformAdapter):
+class APIServerAdapter(
+    APIServerRoutingMixin,
+    APIServerModelRoutesMixin,
+    APIServerResponsesMixin,
+    APIServerRunsMixin,
+    APIServerJobsMixin,
+    APIServerSessionsMixin,
+    APIServerSessionStoreMixin,
+    BasePlatformAdapter,
+):
     """
     OpenAI-compatible HTTP API server adapter.
 
@@ -127,18 +144,27 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         super().__init__(config, Platform.API_SERVER)
         self._active_work_registry = get_process_active_work_registry()
         extra = config.extra or {}
-        self._host: str = extra.get("host", os.getenv("API_SERVER_HOST", DEFAULT_HOST))
+        self._host: str = extra.get(
+            "host", get_profile_env("API_SERVER_HOST", DEFAULT_HOST)
+        )
         raw_port = extra.get("port")
         if raw_port is None:
-            raw_port = os.getenv("API_SERVER_PORT", str(DEFAULT_PORT))
+            raw_port = get_profile_env("API_SERVER_PORT", str(DEFAULT_PORT))
         self._port: int = _coerce_port(raw_port, DEFAULT_PORT)
-        self._api_key: str = extra.get("key", os.getenv("API_SERVER_KEY", ""))
+        self._api_key: str = extra.get(
+            "key", get_profile_env("API_SERVER_KEY", "")
+        )
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
-            extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
+            extra.get(
+                "cors_origins", get_profile_env("API_SERVER_CORS_ORIGINS", "")
+            ),
         )
         self._model_name: str = self._resolve_model_name(
-            extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
+            extra.get(
+                "model_name", get_profile_env("API_SERVER_MODEL_NAME", "")
+            ),
         )
+        self._initialize_model_routes(extra.get("model_routes"))
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -147,16 +173,25 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # Runs with a connected SSE consumer. Transport expiry must never
+        # reap a queue that is actively being drained.
+        self._run_stream_subscribers: set[str] = set()
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+        # Stop is cooperative because executor threads cannot be cancelled.
+        self._stopping_run_ids: set[str] = set()
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         # Active approval session key for each run_id.  The approval core
         # resolves requests by session key, while API clients address the
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
-        self._session_db: Optional[Any] = None  # Lazy-init session store for session continuity
+        # Exact choices advertised by the currently pending approval.  This
+        # is enforced on resolve so API clients cannot submit a broader
+        # persistence scope than the approval policy offered.
+        self._run_approval_choices: Dict[str, tuple[str, ...]] = {}
+        self._initialize_session_store_runtime()
         # Concurrency cap shared across all agent-serving endpoints
         # (/v1/chat/completions, /v1/responses, /v1/runs). Read from
         # config.yaml gateway.api_server.max_concurrent_runs; 0 disables
@@ -276,9 +311,13 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-            if hmac.compare_digest(token, self._api_key):
+            if hmac.compare_digest(token.encode(), self._api_key.encode()):
                 return None  # Auth OK
 
+        logger.warning(
+            "API server rejected invalid API key: %s",
+            self._request_audit_log_suffix(request),
+        )
         return web.json_response(
             {"error": {"message": "Invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}},
             status=401,
@@ -350,23 +389,6 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         return raw, None
 
     # ------------------------------------------------------------------
-    # Session DB helper
-    # ------------------------------------------------------------------
-
-    def _ensure_session_db(self):
-        """Lazily initialise and return the shared session store.
-
-        Sessions are persisted to ``state.db`` so that ``hermes sessions list``
-        shows API-server conversations alongside CLI and gateway ones.
-        """
-        if self._session_db is None:
-            try:
-                self._session_db = open_cli_session_store()
-            except Exception as e:
-                logger.debug("Session store unavailable for API server: %s", e)
-        return self._session_db
-
-    # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
 
@@ -379,6 +401,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        route: Optional[APIModelRoute] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -407,12 +430,31 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
 
         runtime_kwargs = resolve_runtime_agent_kwargs()
         user_config = load_gateway_runtime_config()
-        reasoning_config = load_reasoning_config(user_config)
         model = resolve_gateway_model(user_config)
+        runtime_model = runtime_kwargs.pop("model", None)
+        if runtime_model:
+            model = runtime_model
+
+        session_override = self._session_model_override_for(
+            gateway_session_key or session_id
+        )
+        if session_override:
+            model, runtime_kwargs = self._apply_session_override(
+                model,
+                runtime_kwargs,
+                session_override,
+            )
+        elif route is not None:
+            model, runtime_kwargs = self._apply_model_route(
+                model,
+                runtime_kwargs,
+                route,
+            )
+        reasoning_config = load_reasoning_config(user_config, model)
 
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
-        max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+        max_iterations = int(get_profile_env("HERMES_MAX_ITERATIONS", "90"))
 
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
@@ -445,49 +487,99 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "hermes-agent"})
+        return web.json_response({
+            "status": "ok",
+            "platform": "hermes-agent",
+            "version": _hermes_version(),
+        })
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — rich status for cross-container dashboard probing.
 
         Returns gateway state, connected platforms, PID, and uptime so the
         dashboard can display full status without needing a shared PID file or
-        /proc access.  No authentication required.
+        /proc access. Requires the same Bearer auth as other detailed routes.
         """
-        from channels.runtime_status import read_runtime_status
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        from channels.runtime_status import (
+            derive_gateway_busy,
+            derive_gateway_drainable,
+            parse_active_agents,
+            read_runtime_status,
+        )
+        from hermes_agent.gateway.runtime_config import resolve_gateway_model
+        from hermes_gateway.readiness import collect_runtime_readiness
 
         runtime = read_runtime_status() or {}
+        gateway_state = runtime.get("gateway_state")
+        active_agents = parse_active_agents(runtime.get("active_agents", 0))
+        api_work, process_depth, delegations = self._readiness_work_counts()
+        readiness = collect_runtime_readiness(
+            configured_model=resolve_gateway_model(),
+            runtime_status=runtime,
+            active_api_runs=api_work,
+            process_completion_queue_depth=process_depth,
+            active_delegations=delegations,
+        )
         return web.json_response({
-            "status": "ok",
+            "status": readiness["status"],
+            "readiness": readiness,
             "platform": "hermes-agent",
-            "gateway_state": runtime.get("gateway_state"),
+            "version": _hermes_version(),
+            "gateway_state": gateway_state,
             "platforms": runtime.get("platforms", {}),
-            "active_agents": runtime.get("active_agents", 0),
+            "active_agents": active_agents,
+            "gateway_busy": derive_gateway_busy(
+                gateway_running=True,
+                gateway_state=gateway_state,
+                active_agents=active_agents,
+            ),
+            "gateway_drainable": derive_gateway_drainable(
+                gateway_running=True,
+                gateway_state=gateway_state,
+            ),
             "exit_reason": runtime.get("exit_reason"),
             "updated_at": runtime.get("updated_at"),
             "pid": os.getpid(),
         })
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — return hermes-agent as an available model."""
+        """GET /v1/models — list the profile model and route aliases."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
-        return web.json_response({
-            "object": "list",
-            "data": [
-                {
-                    "id": self._model_name,
+        now = int(time.time())
+        model_name = self._advertised_model_name()
+        models = [
+            {
+                    "id": model_name,
                     "object": "model",
-                    "created": int(time.time()),
+                    "created": now,
                     "owned_by": "hermes",
                     "permission": [],
-                    "root": self._model_name,
+                    "root": model_name,
                     "parent": None,
+            }
+        ]
+        for alias, route in self._current_model_routes().items():
+            if alias == model_name:
+                continue
+            models.append(
+                {
+                    "id": alias,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "hermes",
+                    "permission": [],
+                    "root": route.model,
+                    "parent": model_name,
                 }
-            ],
-        })
+            )
+        return web.json_response({"object": "list", "data": models})
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
@@ -760,9 +852,12 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                 )
             session_id = provided_session_id
             try:
-                db = self._ensure_session_db()
+                db = await self._ensure_session_db_async()
                 if db is not None:
-                    history = db.messages.all_as_conversation(session_id)
+                    history = await asyncio.to_thread(
+                        db.messages.all_as_conversation,
+                        session_id,
+                    )
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
@@ -782,6 +877,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
+        route = self._resolve_route(model_name)
 
         if stream:
             import queue as _q
@@ -865,6 +961,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                route=route,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -884,6 +981,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                route=route,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -919,11 +1017,18 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                     status=500,
                 )
 
-        final_response = result.get("final_response") or ""
+        final_response = _resolve_media_to_data_urls(
+            result.get("final_response") or ""
+        )
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
         completed = bool(result.get("completed", True))
-        err_msg = result.get("error")
+        raw_err_msg = result.get("error")
+        err_msg = (
+            _redact_api_error_text(raw_err_msg)
+            if raw_err_msg
+            else raw_err_msg
+        )
 
         # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
         # for normal completion, and downstream SDKs accept "error" / custom
@@ -994,7 +1099,10 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             if err_msg:
-                response_headers["X-Hermes-Error"] = err_msg[:200]
+                response_headers["X-Hermes-Error"] = _redact_api_error_text(
+                    err_msg,
+                    limit=200,
+                )
 
         return web.json_response(response_data, headers=response_headers)
 
@@ -1240,7 +1348,9 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         # Final assistant message
         final = result.get("final_response", "")
         if not final:
-            final = result.get("error", "(No response generated)")
+            final = _redact_api_error_text(
+                result.get("error", "(No response generated)")
+            )
 
         items.append({
             "type": "message",
@@ -1339,6 +1449,7 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        route: Optional[APIModelRoute] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -1346,12 +1457,17 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         Returns ``(result_dict, usage_dict)`` where *usage_dict* contains
         ``input_tokens``, ``output_tokens`` and ``total_tokens``.
 
+        ``route`` is the immutable alias resolved from the request model. It
+        overrides the profile default unless a session ``/model`` override
+        exists.
+
         If *agent_ref* is a one-element list, the AIAgent instance is stored
         at ``agent_ref[0]`` before ``run_conversation`` begins.  This allows
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        request_profile = self._request_profile()
         task = asyncio.current_task()
         runtime_agent_ref = agent_ref if agent_ref is not None else [None]
 
@@ -1376,42 +1492,44 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
         def _run():
             from channels.session_context import clear_session_vars
 
-            tokens = self._bind_api_server_session(
-                chat_id=session_id or "",
-                session_key=gateway_session_key or session_id or "",
-                session_id=session_id or "",
-            )
-            try:
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=stream_delta_callback,
-                    tool_progress_callback=tool_progress_callback,
-                    tool_start_callback=tool_start_callback,
-                    tool_complete_callback=tool_complete_callback,
-                    gateway_session_key=gateway_session_key,
+            with self._profile_scope(request_profile):
+                tokens = self._bind_api_server_session(
+                    chat_id=session_id or "",
+                    session_key=gateway_session_key or session_id or "",
+                    session_id=session_id or "",
                 )
-                runtime_agent_ref[0] = agent
-                effective_task_id = session_id or str(uuid.uuid4())
-                result = agent.run_conversation(
-                    user_message=user_message,
-                    conversation_history=conversation_history,
-                    task_id=effective_task_id,
-                )
-                usage = {
-                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                }
-                # Include the effective session ID in the result so callers
-                # (e.g. X-Hermes-Session-Id header) can track compression-
-                # triggered session rotations. (#16938)
-                _eff_sid = getattr(agent, "session_id", session_id)
-                if isinstance(_eff_sid, str) and _eff_sid:
-                    result["session_id"] = _eff_sid
-                return result, usage
-            finally:
-                clear_session_vars(tokens)
+                try:
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=stream_delta_callback,
+                        tool_progress_callback=tool_progress_callback,
+                        tool_start_callback=tool_start_callback,
+                        tool_complete_callback=tool_complete_callback,
+                        gateway_session_key=gateway_session_key,
+                        route=route,
+                    )
+                    runtime_agent_ref[0] = agent
+                    effective_task_id = session_id or str(uuid.uuid4())
+                    result = agent.run_conversation(
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        task_id=effective_task_id,
+                    )
+                    usage = {
+                        "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                        "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                    }
+                    # Include the effective session ID in the result so callers
+                    # (e.g. X-Hermes-Session-Id header) can track compression-
+                    # triggered session rotations. (#16938)
+                    _eff_sid = getattr(agent, "session_id", session_id)
+                    if isinstance(_eff_sid, str) and _eff_sid:
+                        result["session_id"] = _eff_sid
+                    return result, usage
+                finally:
+                    clear_session_vars(tokens)
 
         self._inflight_agent_runs += 1
         try:
@@ -1424,82 +1542,70 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    def _api_key_passes_startup_guard(self) -> bool:
+        """Require a strong auth boundary before opening an agent endpoint."""
+        if not self._api_key:
+            logger.error(
+                "[%s] Refusing to start: API_SERVER_KEY is required, "
+                "including loopback-only binds on %s.",
+                self.name,
+                self._host,
+            )
+            return False
+        try:
+            from hermes_cli.auth import has_usable_secret
+
+            if not has_usable_secret(self._api_key, min_length=16):
+                logger.error(
+                    "[%s] Refusing to start: API_SERVER_KEY is a placeholder "
+                    "or shorter than 16 characters. Generate a strong secret "
+                    "before exposing terminal-capable agent work on %s.",
+                    self.name,
+                    self._host,
+                )
+                return False
+        except ImportError:
+            pass
+        return True
+
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Start the aiohttp web server."""
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
             return False
+        if not self._api_key_passes_startup_guard():
+            return False
 
         try:
-            mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
+            mws = [self._make_profile_prefix_middleware()]
+            mws.extend(
+                mw
+                for mw in (
+                    cors_middleware,
+                    body_limit_middleware,
+                    security_headers_middleware,
+                )
+                if mw is not None
+            )
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             self._app["api_server_adapter"] = self
-            self._app.router.add_get("/health", self._handle_health)
-            self._app.router.add_get("/health/detailed", self._handle_health_detailed)
-            self._app.router.add_get("/v1/health", self._handle_health)
-            self._app.router.add_get("/v1/models", self._handle_models)
-            self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
-            self._app.router.add_get("/v1/skills", self._handle_skills)
-            self._app.router.add_get("/v1/toolsets", self._handle_toolsets)
-            self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
-            self._app.router.add_post("/v1/responses", self._handle_responses)
-            self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
-            self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
-            # Cron jobs management API
-            self._app.router.add_get("/api/jobs", self._handle_list_jobs)
-            self._app.router.add_post("/api/jobs", self._handle_create_job)
-            self._app.router.add_get("/api/jobs/{job_id}", self._handle_get_job)
-            self._app.router.add_patch("/api/jobs/{job_id}", self._handle_update_job)
-            self._app.router.add_delete("/api/jobs/{job_id}", self._handle_delete_job)
-            self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
-            self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
-            self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
-            # Structured event streaming
-            self._app.router.add_post("/v1/runs", self._handle_runs)
-            self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
-            self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
-            self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
-            self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
-            # Start background sweep to clean up orphaned (unconsumed) run streams
-            sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
-            try:
-                self._background_tasks.add(sweep_task)
-            except TypeError:
-                pass
-            if hasattr(sweep_task, "add_done_callback"):
-                sweep_task.add_done_callback(self._background_tasks.discard)
-
-            # Refuse to start network-accessible without authentication
-            if is_network_accessible(self._host) and not self._api_key:
-                logger.error(
-                    "[%s] Refusing to start: binding to %s requires API_SERVER_KEY. "
-                    "Set API_SERVER_KEY or use the default 127.0.0.1.",
-                    self.name, self._host,
-                )
-                return False
-
-            # Refuse to start network-accessible with a placeholder or weak key.
-            # Ported from openclaw/openclaw#64586; entropy floor raised to 16 in
-            # the June 2026 hermes-0day hardening (an 8-char key dispatching
-            # terminal-capable agent work on a public bind is brute-forceable).
-            if is_network_accessible(self._host) and self._api_key:
-                try:
-                    from hermes_cli.auth import has_usable_secret
-                    if not has_usable_secret(self._api_key, min_length=16):
-                        logger.error(
-                            "[%s] Refusing to start: API_SERVER_KEY is a "
-                            "placeholder or too short (<16 chars) for a "
-                            "network-accessible bind. This endpoint dispatches "
-                            "terminal-capable agent work — a guessable key is "
-                            "remote code execution. Generate a strong secret "
-                            "(e.g. `openssl rand -hex 32`) and set "
-                            "API_SERVER_KEY before exposing it on %s.",
-                            self.name, self._host,
-                        )
-                        return False
-                except ImportError:
-                    pass
-
+            if getattr(self, "gateway_runner", None) is not None:
+                self._app["gateway_runner"] = self.gateway_runner
+            route_table = self._http_route_table()
+            for method, path, handler in route_table:
+                self._app.router.add_route(method, path, handler)
+            runner_config = getattr(
+                getattr(self, "gateway_runner", None),
+                "config",
+                None,
+            )
+            if getattr(runner_config, "multiplex_profiles", False):
+                for method, path, handler in route_table:
+                    self._app.router.add_route(
+                        method,
+                        f"/p/{{profile}}{path}",
+                        handler,
+                    )
             # Loud warning when a network-accessible API server runs against an
             # unsandboxed local terminal backend. The API server can drive the
             # agent's terminal/file tools as the host user; on a public bind
@@ -1528,30 +1634,43 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
                         self.name, self._host,
                     )
 
-            # Port conflict detection — fail fast if port is already in use
-            try:
-                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
-                    _s.settimeout(1)
-                    _s.connect(('127.0.0.1', self._port))
-                logger.error('[%s] Port %d already in use. Set a different port in config.yaml: platforms.api_server.port', self.name, self._port)
-                return False
-            except (ConnectionRefusedError, OSError):
-                pass  # port is free
-
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
-            self._site = web.TCPSite(self._runner, self._host, self._port)
-            await self._site.start()
+            self._site = web.TCPSite(
+                self._runner,
+                self._host,
+                self._port,
+                reuse_address=False if sys.platform == "darwin" else None,
+            )
+            try:
+                await self._site.start()
+            except OSError as exc:
+                await self._runner.cleanup()
+                self._runner = None
+                self._site = None
+                self._app = None
+                if getattr(exc, "errno", None) == errno.EADDRINUSE:
+                    self._set_fatal_error(
+                        "api_server_port_in_use",
+                        f"Port {self._port} is already in use. Configure a "
+                        "different platforms.api_server.port, then resume the "
+                        "platform.",
+                        retryable=False,
+                    )
+                logger.error(
+                    "[%s] Could not bind %s:%d: %s",
+                    self.name,
+                    self._host,
+                    self._port,
+                    exc,
+                )
+                return False
+
+            sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
+            self._background_tasks.add(sweep_task)
+            sweep_task.add_done_callback(self._background_tasks.discard)
 
             self._mark_connected()
-            if not self._api_key:
-                logger.warning(
-                    "[%s] ⚠️  No API key configured (API_SERVER_KEY / platforms.api_server.key). "
-                    "All requests will be accepted without authentication. "
-                    "Set an API key for production deployments to prevent "
-                    "unauthorized access to sessions, responses, and cron jobs.",
-                    self.name,
-                )
             logger.info(
                 "[%s] API server listening on http://%s:%d (model: %s)",
                 self.name, self._host, self._port, self._model_name,
@@ -1565,6 +1684,12 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
     async def disconnect(self) -> None:
         """Stop the aiohttp web server."""
         self._mark_disconnected()
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
         if self._site:
             await self._site.stop()
             self._site = None
@@ -1572,6 +1697,16 @@ class APIServerAdapter(APIServerResponsesMixin, APIServerRunsMixin, APIServerJob
             await self._runner.cleanup()
             self._runner = None
         self._app = None
+        await self._close_session_stores()
+        if self._response_store is not None:
+            try:
+                await asyncio.to_thread(self._response_store.close)
+            except Exception:
+                logger.debug(
+                    "Failed to close response store for %s",
+                    self.name,
+                    exc_info=True,
+                )
         logger.info("[%s] API server stopped", self.name)
 
     async def send(

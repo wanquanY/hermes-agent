@@ -163,7 +163,11 @@ class InteractionRegistry:
         db = self._db
         if db is None:
             return []
-        events = db.runs.list_events(
+        runs = getattr(db, "runs", None)
+        list_events = getattr(runs, "list_events", None)
+        if not callable(list_events):
+            return []
+        events = list_events(
             session_id,
             include_internal=True,
             limit=5000,

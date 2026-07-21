@@ -1,39 +1,48 @@
-"""Minimal dashboard auth provider registry.
+"""Dashboard authentication provider framework.
 
-This selective sync keeps the dashboard auth gate decision and fail-closed
-behavior without importing the full upstream OAuth route stack. Providers can
-register here so `web_server.start_server()` knows whether a gated public bind
-has a real authentication backend available.
+The dashboard auth gate engages only when the dashboard binds to a
+non-loopback host without ``--insecure``. In that mode, every request must
+carry a verified session from one of the registered ``DashboardAuthProvider``
+plugins.
+
+The Nous provider lives in ``plugins/dashboard-auth-nous/`` and is the
+default. Third parties register their own providers via the plugin hook
+``ctx.register_dashboard_auth_provider``.
 """
+from hermes_cli.dashboard_auth.base import (
+    DashboardAuthProvider,
+    Session,
+    TokenPrincipal,
+    LoginStart,
+    InvalidCodeError,
+    InvalidCredentialsError,
+    ProviderError,
+    RefreshExpiredError,
+    assert_protocol_compliance,
+)
+from hermes_cli.dashboard_auth.registry import (
+    register_provider,
+    get_provider,
+    list_providers,
+    list_token_providers,
+    list_session_providers,
+    clear_providers,
+)
 
-from __future__ import annotations
-
-from threading import RLock
-from typing import Any, List
-
-_providers: list[Any] = []
-_lock = RLock()
-
-
-def register_provider(provider: Any) -> None:
-    """Register a dashboard auth provider object."""
-    with _lock:
-        name = getattr(provider, "name", None)
-        if name is not None:
-            for idx, existing in enumerate(_providers):
-                if getattr(existing, "name", None) == name:
-                    _providers[idx] = provider
-                    return
-        _providers.append(provider)
-
-
-def list_providers() -> List[Any]:
-    """Return registered dashboard auth providers."""
-    with _lock:
-        return list(_providers)
-
-
-def clear_providers() -> None:
-    """Clear provider registry; intended for tests."""
-    with _lock:
-        _providers.clear()
+__all__ = [
+    "DashboardAuthProvider",
+    "Session",
+    "TokenPrincipal",
+    "LoginStart",
+    "InvalidCodeError",
+    "InvalidCredentialsError",
+    "ProviderError",
+    "RefreshExpiredError",
+    "assert_protocol_compliance",
+    "register_provider",
+    "get_provider",
+    "list_providers",
+    "list_token_providers",
+    "list_session_providers",
+    "clear_providers",
+]

@@ -17,6 +17,8 @@ import socket
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -48,10 +50,73 @@ JOBS_FILE = CRON_DIR / "jobs.json"
 _jobs_file_lock = threading.RLock()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+_IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+
+
+@dataclass(frozen=True)
+class CronStorePaths:
+    """Filesystem paths owned by one profile's cron store."""
+
+    cron_dir: Path
+    jobs_file: Path
+    output_dir: Path
+
+
+_IMPORT_STORE = CronStorePaths(CRON_DIR, JOBS_FILE, OUTPUT_DIR)
+_cron_store_override: ContextVar[Optional[CronStorePaths]] = ContextVar(
+    "cron_store_override",
+    default=None,
+)
+
+
+def current_cron_store() -> CronStorePaths:
+    """Resolve cron storage from the current profile execution context.
+
+    Explicit context overrides take precedence. Deliberately monkeypatched
+    compatibility constants remain supported for embedders and tests. In all
+    other cases paths follow the context-local Hermes home dynamically, which
+    keeps multiplexed profiles isolated without process-global mutation.
+    """
+    override = _cron_store_override.get()
+    if override is not None:
+        return override
+    live_constants = CronStorePaths(CRON_DIR, JOBS_FILE, OUTPUT_DIR)
+    if live_constants != _IMPORT_STORE:
+        return live_constants
+    home = get_hermes_home().resolve()
+    if home == HERMES_DIR:
+        return live_constants
+    cron_dir = home / "cron"
+    return CronStorePaths(
+        cron_dir=cron_dir,
+        jobs_file=cron_dir / "jobs.json",
+        output_dir=cron_dir / "output",
+    )
+
+
+@contextmanager
+def use_cron_store(home: Union[str, Path]):
+    """Route cron persistence to one profile without mutating globals."""
+    cron_dir = Path(home).expanduser().resolve() / "cron"
+    token = _cron_store_override.set(
+        CronStorePaths(
+            cron_dir=cron_dir,
+            jobs_file=cron_dir / "jobs.json",
+            output_dir=cron_dir / "output",
+        )
+    )
+    try:
+        yield
+    finally:
+        _cron_store_override.reset(token)
+
+
+def get_cron_output_dir() -> Path:
+    return current_cron_store().output_dir
 
 
 def _jobs_lock_file() -> Path:
-    return JOBS_FILE.with_name(".jobs.lock")
+    return current_cron_store().jobs_file.with_name(".jobs.lock")
 
 
 @contextmanager
@@ -216,10 +281,11 @@ def _secure_file(path: Path):
 
 def ensure_dirs():
     """Ensure cron directories exist with secure permissions."""
-    CRON_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _secure_dir(CRON_DIR)
-    _secure_dir(OUTPUT_DIR)
+    store = current_cron_store()
+    store.cron_dir.mkdir(parents=True, exist_ok=True)
+    store.output_dir.mkdir(parents=True, exist_ok=True)
+    _secure_dir(store.cron_dir)
+    _secure_dir(store.output_dir)
 
 
 # =============================================================================
@@ -467,17 +533,18 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
-    if not JOBS_FILE.exists():
+    jobs_file = current_cron_store().jobs_file
+    if not jobs_file.exists():
         return []
     
     try:
-        with open(JOBS_FILE, 'r', encoding='utf-8') as f:
+        with open(jobs_file, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
             return data.get("jobs", [])
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         try:
-            with open(JOBS_FILE, 'r', encoding='utf-8') as f:
+            with open(jobs_file, 'r', encoding='utf-8-sig') as f:
                 data = json.loads(f.read(), strict=False)
                 jobs = data.get("jobs", [])
                 if jobs:
@@ -496,14 +563,15 @@ def load_jobs() -> List[Dict[str, Any]]:
 def save_jobs(jobs: List[Dict[str, Any]]):
     """Save all jobs to storage."""
     ensure_dirs()
-    fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
+    jobs_file = current_cron_store().jobs_file
+    fd, tmp_path = tempfile.mkstemp(dir=str(jobs_file.parent), suffix='.tmp', prefix='.jobs_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        atomic_replace(tmp_path, JOBS_FILE)
-        _secure_file(JOBS_FILE)
+        atomic_replace(tmp_path, jobs_file)
+        _secure_file(jobs_file)
     except BaseException:
         try:
             os.unlink(tmp_path)
@@ -672,6 +740,15 @@ def create_job(
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
 
+    from cron.inference_snapshot import compute_provider_model_snapshots
+
+    provider_snapshot, model_snapshot = compute_provider_model_snapshots(
+        provider=normalized_provider,
+        model=normalized_model,
+        base_url=normalized_base_url,
+        no_agent=normalized_no_agent,
+    )
+
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
     # reach the scheduler.
@@ -699,7 +776,9 @@ def create_job(
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
         "provider": normalized_provider,
+        "provider_snapshot": provider_snapshot,
         "base_url": normalized_base_url,
+        "model_snapshot": model_snapshot,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
         "context_from": context_from,
@@ -791,8 +870,14 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
 
 
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    bad_fields = _IMMUTABLE_JOB_FIELDS.intersection(updates or {})
+    if bad_fields:
+        raise ValueError(
+            "Cron job field(s) cannot be updated: "
+            + ", ".join(sorted(bad_fields))
+        )
     with _jobs_lock():
-        return _update_job_locked(job_id, updates)
+        return _update_job_locked(job_id, dict(updates))
 
 
 def _update_job_locked(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -820,8 +905,17 @@ def _update_job_locked(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[st
             else:
                 updates["profile"] = _normalize_profile(_profile)
 
+        from cron.inference_snapshot import (
+            compute_provider_model_snapshots,
+            normalized_inference_axes,
+        )
+
+        previous_inference_axes = normalized_inference_axes(job)
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates
+        inference_fields_changed = bool(
+            {"provider", "model", "base_url", "no_agent"}.intersection(updates)
+        ) and normalized_inference_axes(updated) != previous_inference_axes
 
         if "skills" in updates or "skill" in updates:
             normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
@@ -842,6 +936,16 @@ def _update_job_locked(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[st
             )
             if updated.get("state") != "paused":
                 updated["next_run_at"] = compute_next_run(updated_schedule)
+
+        if inference_fields_changed:
+            provider_snapshot, model_snapshot = compute_provider_model_snapshots(
+                provider=updated.get("provider"),
+                model=updated.get("model"),
+                base_url=updated.get("base_url"),
+                no_agent=updated.get("no_agent"),
+            )
+            updated["provider_snapshot"] = provider_snapshot
+            updated["model_snapshot"] = model_snapshot
 
         if updated.get("enabled", True) and updated.get("state") != "paused" and not updated.get("next_run_at"):
             updated["next_run_at"] = compute_next_run(updated["schedule"])
@@ -920,7 +1024,7 @@ def remove_job(job_id: str) -> bool:
             return False
     if len(jobs) < original_len:
         # Clean up output directory to prevent orphaned dirs accumulating
-        job_output_dir = OUTPUT_DIR / canonical_id
+        job_output_dir = get_cron_output_dir() / canonical_id
         if job_output_dir.exists():
             shutil.rmtree(job_output_dir)
         return True
@@ -1178,7 +1282,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
 def save_job_output(job_id: str, output: str):
     """Save job output to file."""
     ensure_dirs()
-    job_output_dir = OUTPUT_DIR / job_id
+    job_output_dir = get_cron_output_dir() / job_id
     job_output_dir.mkdir(parents=True, exist_ok=True)
     _secure_dir(job_output_dir)
     

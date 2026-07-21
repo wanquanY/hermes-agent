@@ -11,6 +11,7 @@ from typing import Any
 from hermes_agent.application.message_service import MessageService
 from hermes_agent.application.session_deletion import SessionDeletionResult, SessionDeletionService
 from hermes_agent.read_models.session_list import SessionListQuery, SessionListReadModel
+from hermes_agent.read_models.session_projects import SessionProjectReadModel
 from hermes_agent.read_models.session_recall import SessionRecallReadModel
 from hermes_agent.repositories.session_repo import SessionRepo, SessionSpec, sanitize_session_title
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
@@ -34,6 +35,7 @@ class SessionService:
         self._repo = repo
         self._recall = recall
         self._list = SessionListReadModel(conn)
+        self._projects = SessionProjectReadModel(conn)
         self._messages = messages
         self._unit_of_work = unit_of_work
         self._deletion = deletion or SessionDeletionService(
@@ -80,6 +82,58 @@ class SessionService:
 
         self._unit_of_work.execute(write)
         return stable
+
+    def create_if_absent(self, session_id: str, source: str, **fields: Any) -> bool:
+        """Atomically create a new session without enriching an existing row.
+
+        This is the correct boundary for external create APIs: the duplicate
+        check and insert share one write transaction, so concurrent requests
+        cannot both report that they created the same session.
+        """
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        normalized_source = str(source or "unknown").strip() or "unknown"
+        transient = bool(fields.get("transient", False))
+        session_kind, conversation_kind = _resolve_session_classification(
+            source=normalized_source,
+            transient=transient,
+            session_kind=fields.get("session_kind"),
+            conversation_kind=fields.get("conversation_kind"),
+        )
+
+        def write(_conn: sqlite3.Connection) -> bool:
+            if self._repo.get(stable) is not None:
+                return False
+            self._repo.create(
+                SessionSpec(
+                    session_id=stable,
+                    source=normalized_source,
+                    user_id=str(fields.get("user_id") or ""),
+                    model=str(fields.get("model") or ""),
+                    model_config=fields.get("model_config"),
+                    parent_session_id=str(fields.get("parent_session_id") or ""),
+                    transient=transient,
+                    session_kind=session_kind,
+                    conversation_kind=conversation_kind,
+                    owner_agent_profile_id=str(
+                        fields.get("owner_agent_profile_id") or ""
+                    ),
+                    owner_profile_version_id=str(
+                        fields.get("owner_profile_version_id") or ""
+                    ),
+                    runtime_scope_key=str(fields.get("runtime_scope_key") or ""),
+                )
+            )
+            if fields.get("system_prompt"):
+                self._repo.update_system_prompt(stable, str(fields["system_prompt"]))
+            if str(fields.get("cwd") or "").strip():
+                self._repo.update_cwd(stable, str(fields["cwd"]))
+            if fields.get("title") is not None:
+                self._repo.set_title(stable, str(fields.get("title") or ""))
+            return True
+
+        return self._unit_of_work.execute(write)
 
     @staticmethod
     def sanitize_title(title: str) -> str:
@@ -133,6 +187,34 @@ class SessionService:
 
     def update_cwd(self, session_id: str, cwd: str) -> None:
         self._unit_of_work.execute(lambda _conn: self._repo.update_cwd(session_id, str(cwd or "")))
+
+    def update_git_context(
+        self,
+        session_id: str,
+        *,
+        branch: str = "",
+        repo_root: str = "",
+    ) -> bool:
+        return self._unit_of_work.execute(
+            lambda _conn: self._repo.update_git_context(
+                session_id,
+                branch=str(branch or ""),
+                repo_root=str(repo_root or ""),
+            )
+        )
+
+    def distinct_cwds(self) -> list[dict[str, Any]]:
+        return self._unit_of_work.read(lambda _conn: self._projects.distinct_cwds())
+
+    def backfill_repo_roots(self, cwd_to_root: dict[str, str]) -> int:
+        normalized = {
+            str(cwd): str(root)
+            for cwd, root in cwd_to_root.items()
+            if str(cwd or "").strip()
+        }
+        return self._unit_of_work.execute(
+            lambda _conn: self._repo.backfill_repo_roots(normalized)
+        )
 
     def update_source(self, session_id: str, source: str) -> int:
         return self._unit_of_work.execute(

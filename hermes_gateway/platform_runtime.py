@@ -36,16 +36,61 @@ class GatewayPlatformRuntimeService:
             load_user_config=_load_gateway_config,
         )
 
-    async def connect_adapter_with_timeout(self, adapter, platform) -> bool:
+    def adapter_for_source(self, source):
+        """Resolve the currently connected adapter for a session source.
+
+        Secondary profile registries are authoritative when a source is
+        profile-stamped.  Falling back to the default registry in that case
+        could deliver a response through the wrong bot identity, so missing
+        secondary entries fail closed.
+        """
+        if source is None:
+            return None
+        platform = getattr(source, "platform", None)
+        if platform is None:
+            return None
+        profile = str(getattr(source, "profile", "") or "").strip()
+        if profile:
+            from hermes_gateway.profile_runtime import profile_runtime_for
+
+            active = profile_runtime_for(self._runner).active_profile_name()
+        else:
+            active = ""
+        if profile and profile != active:
+            profile_adapters = getattr(self._runner, "_profile_adapters", None) or {}
+            if profile not in profile_adapters:
+                return None
+            return profile_adapters[profile].get(platform)
+        adapters = getattr(self._runner, "adapters", None) or {}
+        return adapters.get(platform)
+
+    async def connect_adapter_with_timeout(
+        self,
+        adapter,
+        platform,
+        *,
+        is_reconnect: bool = False,
+    ) -> bool:
         timeout = self.platform_connect_timeout_secs()
+        connect = self._adapter_connect(adapter, is_reconnect=is_reconnect)
         if timeout <= 0:
-            return await adapter.connect()
+            return await connect
         try:
-            return await asyncio.wait_for(adapter.connect(), timeout=timeout)
+            return await asyncio.wait_for(connect, timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"{platform.value} connect timed out after {timeout:g}s"
             ) from exc
+
+    @staticmethod
+    def _adapter_connect(adapter, *, is_reconnect: bool):
+        """Call reconnect-aware adapters without widening every legacy API."""
+        import inspect
+
+        parameters = inspect.signature(adapter.connect).parameters
+        if "is_reconnect" in parameters:
+            return adapter.connect(is_reconnect=is_reconnect)
+        return adapter.connect()
 
     async def safe_adapter_disconnect(self, adapter, platform) -> None:
         timeout = self.adapter_disconnect_timeout_secs()

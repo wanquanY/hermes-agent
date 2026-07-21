@@ -26,8 +26,8 @@ from .constants import (
     ONBOARD_CREATE_PATH,
     ONBOARD_POLL_INTERVAL,
     ONBOARD_POLL_PATH,
-    PORTAL_HOST,
     QR_URL_TEMPLATE,
+    get_portal_host,
 )
 from .crypto import decrypt_secret, generate_bind_key
 from .utils import get_api_headers
@@ -89,7 +89,7 @@ def _create_bind_task(timeout: float = ONBOARD_API_TIMEOUT) -> Tuple[str, str]:
     """
     import httpx
 
-    url = f"https://{PORTAL_HOST}{ONBOARD_CREATE_PATH}"
+    url = f"https://{get_portal_host()}{ONBOARD_CREATE_PATH}"
     key = generate_bind_key()
 
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
@@ -122,7 +122,7 @@ def _poll_bind_result(
     """
     import httpx
 
-    url = f"https://{PORTAL_HOST}{ONBOARD_POLL_PATH}"
+    url = f"https://{get_portal_host()}{ONBOARD_POLL_PATH}"
 
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         resp = client.post(url, json={"task_id": task_id}, headers=get_api_headers())

@@ -588,52 +588,52 @@
       wsClosedRef.current = false;
       function openWs() {
         if (wsClosedRef.current) return;
-        const token = window.__HERMES_SESSION_TOKEN__ || "";
-        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const qsParams = {
-          since: String(cursorRef.current || 0),
-          token: token,
-        };
+        const wsParams = { since: String(cursorRef.current || 0) };
         // Pin the WS stream to the currently-selected board so events
         // from other boards don't bleed in. Includes "default" so the
         // dashboard's own board pin always wins over the server-side
         // ``current`` file — same rationale as ``withBoard()`` above.
         // Regression: #20879.
-        if (board) qsParams.board = board;
-        const qs = new URLSearchParams(qsParams);
-        const url = `${proto}//${window.location.host}${API}/events?${qs}`;
-        let ws;
-        try { ws = new WebSocket(url); } catch (_e) { return; }
-        wsRef.current = ws;
-        ws.onopen = function () { wsBackoffRef.current = 1000; };
-        ws.onmessage = function (ev) {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg && Array.isArray(msg.events) && msg.events.length > 0) {
-              cursorRef.current = msg.cursor || cursorRef.current;
-              // Stamp per-task signal so the TaskDrawer can reload itself.
-              setTaskEventTick(function (prev) {
-                const next = Object.assign({}, prev);
-                for (const e of msg.events) {
-                  if (e && e.task_id) next[e.task_id] = (next[e.task_id] || 0) + 1;
-                }
-                return next;
-              });
-              scheduleReload();
-            }
-          } catch (_e) { /* ignore */ }
-        };
-        ws.onclose = function (ev) {
+        if (board) wsParams.board = board;
+        SDK.buildWsUrl(`${API}/events`, wsParams).then(function (url) {
           if (wsClosedRef.current) return;
-          if (ev && ev.code === 1008) {
-            setError(tx(t, "wsAuthFailed",
-              "WebSocket auth failed — reload the page to refresh the session token."));
-            return;
-          }
+          let ws;
+          try { ws = new WebSocket(url); } catch (_e) { return; }
+          wsRef.current = ws;
+          ws.onopen = function () { wsBackoffRef.current = 1000; };
+          ws.onmessage = function (ev) {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg && Array.isArray(msg.events) && msg.events.length > 0) {
+                cursorRef.current = msg.cursor || cursorRef.current;
+                setTaskEventTick(function (prev) {
+                  const next = Object.assign({}, prev);
+                  for (const e of msg.events) {
+                    if (e && e.task_id) next[e.task_id] = (next[e.task_id] || 0) + 1;
+                  }
+                  return next;
+                });
+                scheduleReload();
+              }
+            } catch (_e) { /* ignore */ }
+          };
+          ws.onclose = function (ev) {
+            if (wsClosedRef.current) return;
+            if (ev && ev.code === 1008) {
+              setError(tx(t, "wsAuthFailed",
+                "WebSocket auth failed — reload the page to refresh the session token."));
+              return;
+            }
+            const delay = Math.min(wsBackoffRef.current, 30000);
+            wsBackoffRef.current = Math.min(wsBackoffRef.current * 2, 30000);
+            setTimeout(openWs, delay);
+          };
+        }).catch(function () {
+          if (wsClosedRef.current) return;
           const delay = Math.min(wsBackoffRef.current, 30000);
           wsBackoffRef.current = Math.min(wsBackoffRef.current * 2, 30000);
           setTimeout(openWs, delay);
-        };
+        });
       }
       openWs();
       return function () {

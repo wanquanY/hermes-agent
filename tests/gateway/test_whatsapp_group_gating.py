@@ -125,8 +125,8 @@ def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
     assert config is not None
     assert config.platforms[Platform.WHATSAPP].extra["require_mention"] is True
     assert config.platforms[Platform.WHATSAPP].extra["mention_patterns"] == [r"^\s*chompy\b"]
-    assert __import__("os").environ["WHATSAPP_REQUIRE_MENTION"] == "true"
-    assert json.loads(__import__("os").environ["WHATSAPP_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
+    assert "WHATSAPP_REQUIRE_MENTION" not in __import__("os").environ
+    assert "WHATSAPP_MENTION_PATTERNS" not in __import__("os").environ
 
 
 def test_free_response_chats_bypass_mention_gating():
@@ -269,9 +269,9 @@ def test_config_bridges_whatsapp_dm_and_group_policy(monkeypatch, tmp_path):
     assert config.platforms[Platform.WHATSAPP].extra["dm_policy"] == "disabled"
     assert config.platforms[Platform.WHATSAPP].extra["group_policy"] == "allowlist"
     assert config.platforms[Platform.WHATSAPP].extra["group_allow_from"] == ["120363001234567890@g.us"]
-    assert __import__("os").environ["WHATSAPP_DM_POLICY"] == "disabled"
-    assert __import__("os").environ["WHATSAPP_GROUP_POLICY"] == "allowlist"
-    assert __import__("os").environ["WHATSAPP_GROUP_ALLOWED_USERS"] == "120363001234567890@g.us"
+    assert "WHATSAPP_DM_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_GROUP_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_GROUP_ALLOWED_USERS" not in __import__("os").environ
 
 
 def test_config_bridges_whatsapp_allow_from(monkeypatch, tmp_path):
@@ -294,8 +294,8 @@ def test_config_bridges_whatsapp_allow_from(monkeypatch, tmp_path):
     assert config is not None
     assert config.platforms[Platform.WHATSAPP].extra["dm_policy"] == "allowlist"
     assert config.platforms[Platform.WHATSAPP].extra["allow_from"] == ["6281234567890@s.whatsapp.net"]
-    assert __import__("os").environ["WHATSAPP_DM_POLICY"] == "allowlist"
-    assert __import__("os").environ["WHATSAPP_ALLOWED_USERS"] == "6281234567890@s.whatsapp.net"
+    assert "WHATSAPP_DM_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_ALLOWED_USERS" not in __import__("os").environ
 
 
 # --- Broadcast / status / newsletter pseudo-chats are always dropped ---

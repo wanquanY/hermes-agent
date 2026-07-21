@@ -70,7 +70,7 @@ def test_x_search_posts_responses_request(monkeypatch):
     tool_def = captured["json"]["tools"][0]
     assert captured["url"] == "https://api.x.ai/v1/responses"
     assert captured["headers"]["User-Agent"] == f"Hermes-Agent/{__version__}"
-    assert captured["json"]["model"] == "grok-4.20-reasoning"
+    assert captured["json"]["model"] == "grok-4.5"
     assert captured["json"]["store"] is False
     assert tool_def["type"] == "x_search"
     assert tool_def["allowed_x_handles"] == ["xai", "grok"]
@@ -424,6 +424,46 @@ def test_x_search_honors_config_model_and_timeout(monkeypatch, tmp_path):
     assert captured["timeout"] == 45
 
 
+def test_x_search_honors_config_reasoning_effort(monkeypatch):
+    from tools.x_search_tool import x_search_tool
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr(
+        "tools.x_search_tool._load_x_search_config",
+        lambda: {"reasoning_effort": "low", "retries": 0},
+    )
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["reasoning"] = json.get("reasoning")
+        return _FakeResponse({"output_text": "Reasoning configured."})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(x_search_tool(query="anything"))
+
+    assert result["success"] is True
+    assert captured["reasoning"] == {"effort": "low"}
+
+
+def test_x_search_rejects_invalid_reasoning_effort(monkeypatch):
+    from tools.x_search_tool import x_search_tool
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr(
+        "tools.x_search_tool._load_x_search_config",
+        lambda: {"reasoning_effort": "minimal"},
+    )
+    _no_post_allowed(monkeypatch)
+
+    result = json.loads(x_search_tool(query="anything"))
+
+    assert result["error"] == (
+        "x_search.reasoning_effort must be one of: low, medium, high, xhigh "
+        "(got 'minimal')"
+    )
+
+
 def test_x_search_registered_in_registry_with_check_fn():
     """The tool is registered under the x_search toolset with the gating check_fn."""
     import tools.x_search_tool  # noqa: F401 — ensures registration runs
@@ -722,4 +762,3 @@ def test_x_search_not_degraded_when_no_filters_active(monkeypatch):
     assert result["success"] is True
     assert result["degraded"] is False
     assert result["degraded_reason"] is None
-

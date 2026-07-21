@@ -1,0 +1,7 @@
+name: deepinfra-voice
+version: 1.0.0
+description: DeepInfra text-to-speech and speech-to-text via its OpenAI-compatible audio APIs.
+author: Hermes Agent
+kind: backend
+requires_env:
+  - DEEPINFRA_API_KEY

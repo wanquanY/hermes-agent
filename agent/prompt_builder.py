@@ -409,6 +409,17 @@ COMPUTER_USE_GUIDANCE = (
     "4. After any state-changing action, re-capture to verify. You can "
     "pass `capture_after=true` to get the follow-up screenshot in one "
     "round-trip.\n\n"
+    "## Verify → escalate ladder (background-first, not background-only)\n"
+    "`ok=true` only means the input call ran. Read the structured verdict: "
+    "`effect='confirmed'` is done; `effect='unverifiable'` requires a "
+    "re-capture; `effect='suspected_noop'`, "
+    "`code='background_unavailable'`, or `escalation.recommended` means "
+    "the action did not land. Follow the returned rung: use screenshot "
+    "coordinates for `'px'`, or re-issue the same action with "
+    "`delivery_mode='foreground'` for `'foreground'`. Foreground briefly "
+    "changes focus and has its own approval. Escalate only in reaction to "
+    "the returned signal—never merely because an app uses Electron or "
+    "Chromium, and never report an unverified no-op as success.\n\n"
     "## Background mode rules\n"
     "- `focus_app` selects a background target; it does not necessarily bring "
     "the app to the foreground. Treat 'Targeted ... without raising window' "
@@ -535,8 +546,16 @@ PLATFORM_HINTS = {
     ),
     "matrix": (
         "You are in a Matrix room communicating with your user. "
-        "Matrix renders Markdown — bold, italic, code blocks, and links work; "
-        "the adapter converts your Markdown to HTML for rich display. "
+        "The adapter converts your Markdown to HTML for rich display — bold, "
+        "italic, inline code, fenced code blocks, headings, bullet and "
+        "numbered lists, blockquotes, and links all render.\n\n"
+        "Do NOT use Markdown tables: many popular Matrix clients do not render "
+        "HTML tables, so cells collapse into one continuous run of text. Present "
+        "tabular data as labeled '**Label:** value' lines or bullet lists.\n\n"
+        "Avoid ||spoiler|| tags, ~~strikethrough~~, and checkboxes (- [ ] / "
+        "- [x]) because they appear as literal characters.\n\n"
+        "LINKS: prefer [descriptive link text](url) over bare URLs. When "
+        "something has an associated URL, make its name clickable.\n\n"
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
         "in your response. Images (.jpg, .png, .webp) are sent as inline photos, "
         "audio (.ogg, .mp3) as voice/audio messages, video (.mp4) inline, "
@@ -1109,7 +1128,16 @@ def build_skills_system_prompt(
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
-    if not skills_dir.exists() and not external_dirs:
+    plugin_skill_entries = []
+    try:
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        discover_plugins()
+        plugin_skill_entries = get_plugin_manager().list_plugin_skill_entries()
+    except Exception:
+        logger.debug("Could not discover plugin skills for prompt", exc_info=True)
+
+    if not skills_dir.exists() and not external_dirs and not plugin_skill_entries:
         return ""
 
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
@@ -1130,6 +1158,10 @@ def build_skills_system_prompt(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(hidden_categories or ())),
+        tuple(
+            (entry.qualified_name, entry.description, str(entry.path))
+            for entry in plugin_skill_entries
+        ),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1262,6 +1294,37 @@ def build_skills_system_prompt(
                 category_descriptions.setdefault(cat, str(cat_desc).strip().strip("'\""))
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
+
+    # Plugin-owned Skills are immutable package assets and use qualified names
+    # to avoid colliding with local or external Skills. They intentionally do
+    # not participate in the profile snapshot because plugin enablement has
+    # its own lifecycle and cache signature above.
+    for plugin_entry in plugin_skill_entries:
+        try:
+            is_compatible, frontmatter, parsed_description = _parse_skill_file(
+                plugin_entry.path
+            )
+            if not is_compatible:
+                continue
+            qualified_name = plugin_entry.qualified_name
+            if qualified_name in disabled:
+                continue
+            if not _skill_should_show(
+                extract_skill_conditions(frontmatter),
+                available_tools,
+                available_toolsets,
+            ):
+                continue
+            description = plugin_entry.description or parsed_description
+            skills_by_category.setdefault(
+                f"plugins/{plugin_entry.plugin_name}", []
+            ).append((qualified_name, description))
+        except Exception as exc:
+            logger.debug(
+                "Could not index plugin skill %s: %s",
+                plugin_entry.qualified_name,
+                exc,
+            )
 
     # Posture-driven category pruning (e.g. non-coding skills while pairing on
     # code). Match on the top-level category segment so nested categories

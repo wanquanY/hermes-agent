@@ -1,3 +1,4 @@
+import { usageBarsText } from '../../../components/overlayPrimitives.js'
 import { attachedImageNotice, introMsg, toTranscriptMessages } from '../../../domain/messages.js'
 import { TUI_SESSION_MODEL_FLAG } from '../../../domain/slash.js'
 import type {
@@ -7,7 +8,9 @@ import type {
   ImageAttachResponse,
   SessionBranchResponse,
   SessionCompressResponse,
+  SessionContextBreakdownResponse,
   SessionUsageResponse,
+  SlashExecResponse,
   VoiceToggleResponse
 } from '../../../gatewayTypes.js'
 import { formatVoiceRecordKey, parseVoiceRecordKey } from '../../../lib/platform.js'
@@ -18,8 +21,28 @@ import { patchOverlayState } from '../../overlayStore.js'
 import { patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
 
+const USAGE_CTA = 'Run /subscription to change plan · /topup to add to your balance'
+
+const contextBreakdownSection = (payload: null | SessionContextBreakdownResponse): null | PanelSection => {
+  const categories = payload?.categories?.filter(category => category.tokens > 0) ?? []
+
+  if (!categories.length) {
+    return null
+  }
+
+  const total = payload?.estimated_total ?? categories.reduce((sum, category) => sum + category.tokens, 0)
+  return {
+    rows: categories.map(category => [
+      category.label,
+      `${category.tokens.toLocaleString()} (${total ? Math.round((category.tokens / total) * 100) : 0}%)`
+    ])
+  }
+}
+
 const TUI_SESSION_MODEL_RE = new RegExp(`(?:^|\\s)${TUI_SESSION_MODEL_FLAG}(?:\\s|$)`)
 const TUI_SESSION_STRIP_RE = new RegExp(`\\s*${TUI_SESSION_MODEL_FLAG}\\b\\s*`, 'g')
+const SESSION_SCOPE_FLAGS = new Set(['--session', '—session', '–session', '−session'])
+const GLOBAL_SCOPE_FLAGS = new Set(['--global', '—global', '–global', '−global'])
 
 const stripTuiSessionFlag = (trimmed: string) => trimmed.replace(TUI_SESSION_STRIP_RE, ' ').replace(/\s+/g, ' ').trim()
 
@@ -35,6 +58,31 @@ const modelValueForConfigSet = (arg: string) => {
   }
 
   return trimmed
+}
+
+const sessionScopedConfigPayload = (key: 'fast' | 'reasoning', arg: string, sid: null | string) => {
+  const parts = arg.trim().split(/\s+/).filter(Boolean)
+  let scope: 'global' | 'session' | undefined
+  const valueParts: string[] = []
+
+  for (const part of parts) {
+    const flag = part.toLowerCase()
+
+    if (GLOBAL_SCOPE_FLAGS.has(flag)) {
+      scope = 'global'
+    } else if (SESSION_SCOPE_FLAGS.has(flag)) {
+      scope ??= 'session'
+    } else {
+      valueParts.push(part)
+    }
+  }
+
+  return {
+    key,
+    session_id: sid ?? '',
+    value: valueParts.join(' '),
+    ...(scope ? { scope } : {})
+  }
 }
 
 export const sessionCommands: SlashCommand[] = [
@@ -72,38 +120,44 @@ export const sessionCommands: SlashCommand[] = [
         return patchOverlayState({ modelPicker: true })
       }
 
-      const switchModel = (confirmExpensiveModel = false) => ctx.gateway
-        .rpc<ConfigSetResponse>('config.set', { confirm_expensive_model: confirmExpensiveModel, key: 'model', session_id: ctx.sid, value: modelValueForConfigSet(arg) })
-        .then(
-          ctx.guarded<ConfigSetResponse>(r => {
-            if (r.confirm_required) {
-              patchOverlayState({
-                confirm: {
-                  cancelLabel: 'Cancel',
-                  confirmLabel: 'Switch anyway',
-                  danger: true,
-                  detail: r.confirm_message || r.warning || 'This model has unusually high known pricing.',
-                  onConfirm: () => switchModel(true),
-                  title: 'Expensive model selection'
-                }
-              })
-
-              return
-            }
-
-            if (!r.value) {
-              return ctx.transcript.sys('error: invalid response: model switch')
-            }
-
-            ctx.transcript.sys(`model → ${r.value}`)
-            ctx.local.maybeWarn(r)
-
-            patchUiState(state => ({
-              ...state,
-              info: state.info ? { ...state.info, model: r.value! } : { model: r.value!, skills: {}, tools: {} }
-            }))
+      const switchModel = (confirmExpensiveModel = false) =>
+        ctx.gateway
+          .rpc<ConfigSetResponse>('config.set', {
+            confirm_expensive_model: confirmExpensiveModel,
+            key: 'model',
+            session_id: ctx.sid,
+            value: modelValueForConfigSet(arg)
           })
-        )
+          .then(
+            ctx.guarded<ConfigSetResponse>(r => {
+              if (r.confirm_required) {
+                patchOverlayState({
+                  confirm: {
+                    cancelLabel: 'Cancel',
+                    confirmLabel: 'Switch anyway',
+                    danger: true,
+                    detail: r.confirm_message || r.warning || 'This model has unusually high known pricing.',
+                    onConfirm: () => switchModel(true),
+                    title: 'Expensive model selection'
+                  }
+                })
+
+                return
+              }
+
+              if (!r.value) {
+                return ctx.transcript.sys('error: invalid response: model switch')
+              }
+
+              ctx.transcript.sys(`model → ${r.value}`)
+              ctx.local.maybeWarn(r)
+
+              patchUiState(state => ({
+                ...state,
+                info: state.info ? { ...state.info, model: r.value! } : { model: r.value!, skills: {}, tools: {} }
+              }))
+            })
+          )
 
       switchModel()
     }
@@ -116,6 +170,7 @@ export const sessionCommands: SlashCommand[] = [
       if (ctx.session.guardBusySessionSwitch('switch sessions')) {
         return
       }
+
       if (!arg.trim()) {
         return patchOverlayState({ picker: true })
       }
@@ -324,6 +379,29 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
+    help: 'toggle / adopt / resize an animated pet',
+    name: 'pet',
+    usage: '/pet [toggle | list | scale <n> | <slug>]',
+    run: (arg, ctx, cmd) => {
+      if (arg.trim().toLowerCase() === 'list') {
+        return patchOverlayState({ petPicker: true })
+      }
+      ctx.gateway.gw
+        .request<SlashExecResponse>('slash.exec', {
+          command: cmd.slice(1),
+          session_id: ctx.sid
+        })
+        .then(
+          ctx.guarded<SlashExecResponse>(result => {
+            const body = result.output || '/pet: no output'
+            ctx.transcript.sys(result.warning ? `warning: ${result.warning}\n${body}` : body)
+          })
+        )
+        .catch(ctx.guardedErr)
+    }
+  },
+
+  {
     help: 'switch theme skin (fires skin.changed)',
     name: 'skin',
     run: (arg, ctx) => {
@@ -392,7 +470,7 @@ export const sessionCommands: SlashCommand[] = [
     run: (arg, ctx) => {
       if (!arg) {
         return ctx.gateway
-          .rpc<ConfigGetValueResponse>('config.get', { key: 'reasoning' })
+          .rpc<ConfigGetValueResponse>('config.get', { key: 'reasoning', session_id: ctx.sid })
           .then(
             ctx.guarded<ConfigGetValueResponse>(
               r => r.value && ctx.transcript.sys(`reasoning: ${r.value} · display ${r.display || 'hide'}`)
@@ -400,31 +478,29 @@ export const sessionCommands: SlashCommand[] = [
           )
       }
 
-      ctx.gateway
-        .rpc<ConfigSetResponse>('config.set', { key: 'reasoning', session_id: ctx.sid, value: arg })
-        .then(
-          ctx.guarded<ConfigSetResponse>(r => {
-            if (!r.value) {
-              return
-            }
+      ctx.gateway.rpc<ConfigSetResponse>('config.set', sessionScopedConfigPayload('reasoning', arg, ctx.sid)).then(
+        ctx.guarded<ConfigSetResponse>(r => {
+          if (!r.value) {
+            return
+          }
 
-            if (r.value === 'hide') {
-              patchUiState(state => ({
-                ...state,
-                sections: { ...state.sections, thinking: 'hidden' },
-                showReasoning: false
-              }))
-            } else if (r.value === 'show') {
-              patchUiState(state => ({
-                ...state,
-                sections: { ...state.sections, thinking: 'expanded' },
-                showReasoning: true
-              }))
-            }
+          if (r.value === 'hide') {
+            patchUiState(state => ({
+              ...state,
+              sections: { ...state.sections, thinking: 'hidden' },
+              showReasoning: false
+            }))
+          } else if (r.value === 'show') {
+            patchUiState(state => ({
+              ...state,
+              sections: { ...state.sections, thinking: 'expanded' },
+              showReasoning: true
+            }))
+          }
 
-            ctx.transcript.sys(`reasoning: ${r.value}`)
-          })
-        )
+          ctx.transcript.sys(`reasoning: ${r.value}`)
+        })
+      )
     }
   },
 
@@ -432,11 +508,12 @@ export const sessionCommands: SlashCommand[] = [
     help: 'toggle fast mode [normal|fast|status|on|off|toggle]',
     name: 'fast',
     run: (arg, ctx) => {
-      const mode = arg.trim().toLowerCase()
+      const payload = sessionScopedConfigPayload('fast', arg, ctx.sid)
+      const mode = payload.value.toLowerCase()
       const valid = new Set(['', 'status', 'normal', 'fast', 'on', 'off', 'toggle'])
 
       if (!valid.has(mode)) {
-        return ctx.transcript.sys('usage: /fast [normal|fast|status|on|off|toggle]')
+        return ctx.transcript.sys('usage: /fast [normal|fast|status|on|off|toggle] [--global]')
       }
 
       if (!mode || mode === 'status') {
@@ -451,7 +528,7 @@ export const sessionCommands: SlashCommand[] = [
       }
 
       ctx.gateway
-        .rpc<ConfigSetResponse>('config.set', { key: 'fast', session_id: ctx.sid, value: mode })
+        .rpc<ConfigSetResponse>('config.set', payload)
         .then(
           ctx.guarded<ConfigSetResponse>(r => {
             const next = r.value === 'fast' ? 'fast' : 'normal'
@@ -518,10 +595,13 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
-    help: 'session usage (live counts — worker sees zeros)',
+    help: 'session usage + Nous balance',
     name: 'usage',
     run: (_arg, ctx) => {
-      ctx.gateway.rpc<SessionUsageResponse>('session.usage', { session_id: ctx.sid }).then(r => {
+      Promise.all([
+        ctx.gateway.rpc<SessionUsageResponse>('session.usage', { session_id: ctx.sid }),
+        ctx.gateway.rpc<SessionContextBreakdownResponse>('session.context_breakdown', { session_id: ctx.sid })
+      ]).then(([r, breakdown]) => {
         if (ctx.stale()) {
           return
         }
@@ -532,8 +612,51 @@ export const sessionCommands: SlashCommand[] = [
           })
         }
 
+        const sys = ctx.transcript.sys
+        const usageModel = r?.usage
+        const barLines = usageBarsText(usageModel)
+        const breakdownSection = contextBreakdownSection(breakdown)
+        let showedBalance = false
+
+        if (usageModel?.available && (barLines.length || usageModel.status === 'free')) {
+          const balanceSections: PanelSection[] = []
+          const plan = usageModel.plan_name ?? (usageModel.status === 'free' ? 'Free' : null)
+
+          if (plan) {
+            balanceSections.push({
+              text: `Plan: ${plan}${usageModel.renews_display ? ` · renews ${usageModel.renews_display}` : ''}`
+            })
+          }
+
+          if (barLines.length) {
+            balanceSections.push({ text: barLines.join('\n') })
+          }
+
+          if (usageModel.status === 'free') {
+            balanceSections.push({ text: '> Free · free models only. Run /subscription to reach paid models.' })
+          } else if (usageModel.status === 'low') {
+            balanceSections.push({
+              text: `! Low balance · ${usageModel.total_spendable_display ?? 'under $5'} left. Run /topup or /subscription.`
+            })
+          }
+
+          ctx.transcript.panel('Balance', balanceSections)
+          showedBalance = true
+        } else if (r?.credits_lines?.length) {
+          ctx.transcript.panel('Nous balance', [{ text: r.credits_lines.join('\n') }])
+          showedBalance = true
+        }
+
         if (!r?.calls) {
-          return ctx.transcript.sys('no API calls yet')
+          if (breakdownSection) {
+            ctx.transcript.panel('Context breakdown', [breakdownSection])
+          }
+          if (!showedBalance) {
+            sys('no API calls yet')
+          }
+          sys(USAGE_CTA)
+
+          return
         }
 
         const f = (v: number | undefined) => (v ?? 0).toLocaleString()
@@ -563,7 +686,12 @@ export const sessionCommands: SlashCommand[] = [
           sections.push({ text: `Compressions: ${r.compressions}` })
         }
 
+        if (breakdownSection) {
+          sections.push(breakdownSection)
+        }
+
         ctx.transcript.panel('Usage', sections)
+        sys(USAGE_CTA)
       })
     }
   }

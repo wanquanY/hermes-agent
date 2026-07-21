@@ -154,11 +154,18 @@ On OpenRouter (or any aggregator), bare model names resolve *within* the aggrega
 Inside any `hermes chat` session:
 
 ```
-/model gpt-5.4 --provider openrouter             # session-only
-/model gpt-5.4 --provider openrouter --global    # also persists to config.yaml
+/model gpt-5.4 --provider openrouter --session   # this session only
+/model gpt-5.4 --provider openrouter --global    # persists to config.yaml
+/model claude-opus-4.6 --once                    # next turn only, then restores
 ```
 
 `--global` does the same thing the dashboard's **Change** button does, plus it switches the running session in-place.
+
+`--once` leases a model for exactly the next agent turn and restores the previous model afterward on success, error, or interrupt. It does not modify the session's durable model choice or `config.yaml`, so a restart cannot promote the temporary model into a persistent setting. This is useful for escalating one hard question to a stronger model or using a cheaper model for a throwaway query.
+
+:::note Prompt-cache cost
+A one-turn switch breaks the provider's prompt-cache prefix when switching out and again when restoring. In a long cached conversation, the following turn may repay the full input cost. `--once` is most economical for short sessions or cheap-to-expensive escalation; a brief side question inside a long expensive session can cost more than it saves.
+:::
 
 ### Custom aliases
 

@@ -120,12 +120,9 @@ def _display_mouse_tracking(display: dict) -> str:
 
 
 def _load_reasoning_config() -> dict | None:
-    from hermes_constants import parse_reasoning_effort
+    from hermes_constants import resolve_reasoning_config
 
-    effort = str(
-        (_server._load_cfg().get("agent") or {}).get("reasoning_effort", "") or ""
-    ).strip()
-    return parse_reasoning_effort(effort)
+    return resolve_reasoning_config(_server._load_cfg())
 
 
 def _load_service_tier() -> str | None:
@@ -143,6 +140,14 @@ def _load_service_tier() -> str | None:
 
 def _load_show_reasoning() -> bool:
     return bool((_server._load_cfg().get("display") or {}).get("show_reasoning", False))
+
+
+def _load_interim_assistant_messages() -> bool:
+    """Whether tool-turn assistant commentary should be surfaced to clients."""
+    display = _server._load_cfg().get("display")
+    if not isinstance(display, dict):
+        return True
+    return _server.is_truthy_value(display.get("interim_assistant_messages", True))
 
 
 def _load_tool_progress_mode() -> str:
@@ -179,7 +184,7 @@ def _load_enabled_toolsets() -> list[str] | None:
 
             selection = coding_selection(platform="tui")
             if selection is not None:
-                return selection
+                return sorted(set(selection) | {"project"})
         except Exception:
             pass
 
@@ -290,7 +295,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         )
         if fallback_notice is not None:
             print(fallback_notice, file=sys.stderr, flush=True)
-        return enabled or None
+        return sorted(set(enabled) | {"project"}) if enabled else ["project"]
     except Exception:
         if fallback_notice is not None:
             print(
@@ -397,6 +402,97 @@ def _persist_model_switch(result) -> None:
     save_config(cfg)
 
 
+_ONE_TURN_MODEL_RESTORE_KEY = "one_turn_model_restore"
+
+
+def _snapshot_agent_model_runtime(agent) -> dict:
+    """Capture all model-routing state mutated by an in-place switch."""
+    primary_runtime = getattr(agent, "_primary_runtime", None)
+    try:
+        primary_runtime = copy.deepcopy(primary_runtime)
+    except Exception:
+        logger.debug("Could not deepcopy TUI primary runtime snapshot", exc_info=True)
+    return {
+        "model": getattr(agent, "model", ""),
+        "provider": getattr(agent, "provider", ""),
+        "api_key": getattr(agent, "api_key", ""),
+        "base_url": getattr(agent, "base_url", ""),
+        "api_mode": getattr(agent, "api_mode", ""),
+        "codex_account_mode": getattr(agent, "codex_account_mode", None),
+        "codex_explicit_model": getattr(agent, "codex_explicit_model", None),
+        "primary_runtime": primary_runtime,
+    }
+
+
+def _snapshot_session_model_runtime(session: dict) -> dict:
+    """Return the original baseline across repeated one-turn switches."""
+    pending = session.get(_ONE_TURN_MODEL_RESTORE_KEY)
+    if isinstance(pending, dict):
+        return pending
+    had_override = "model_override" in session
+    try:
+        model_override = copy.deepcopy(session.get("model_override"))
+    except Exception:
+        model_override = session.get("model_override")
+    return {
+        "agent_runtime": _snapshot_agent_model_runtime(session.get("agent")),
+        "had_model_override": had_override,
+        "model_override": model_override,
+    }
+
+
+def _stage_one_turn_model_restore(session: dict, snapshot: dict) -> None:
+    session.setdefault(_ONE_TURN_MODEL_RESTORE_KEY, snapshot)
+
+
+def _cancel_one_turn_model_restore(session: dict) -> None:
+    session.pop(_ONE_TURN_MODEL_RESTORE_KEY, None)
+
+
+def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
+    """Restore a live agent after a one-turn switch."""
+    if not snapshot or agent is None:
+        return
+    primary = snapshot.get("primary_runtime")
+    if primary is not None and hasattr(agent, "_restore_primary_runtime"):
+        try:
+            agent._primary_runtime = copy.deepcopy(primary)
+            agent._fallback_activated = True
+            agent._rate_limited_until = 0
+            if agent._restore_primary_runtime():
+                return
+        except Exception:
+            logger.debug(
+                "TUI one-turn model restore via primary runtime failed",
+                exc_info=True,
+            )
+    if hasattr(agent, "switch_model"):
+        agent.switch_model(
+            new_model=snapshot.get("model", ""),
+            new_provider=snapshot.get("provider", ""),
+            api_key=snapshot.get("api_key", ""),
+            base_url=snapshot.get("base_url", ""),
+            api_mode=snapshot.get("api_mode", ""),
+        )
+    for key in ("codex_account_mode", "codex_explicit_model"):
+        if key in snapshot:
+            setattr(agent, key, snapshot.get(key))
+
+
+def _restore_session_model_runtime(session: dict, snapshot: dict | None) -> None:
+    """Restore both live-agent and session routing state."""
+    if not snapshot:
+        return
+    _restore_agent_model_runtime(session.get("agent"), snapshot.get("agent_runtime"))
+    if snapshot.get("had_model_override"):
+        try:
+            session["model_override"] = copy.deepcopy(snapshot.get("model_override"))
+        except Exception:
+            session["model_override"] = snapshot.get("model_override")
+    else:
+        session.pop("model_override", None)
+
+
 def _apply_model_switch(
     sid: str,
     session: dict,
@@ -404,30 +500,48 @@ def _apply_model_switch(
     *,
     confirm_expensive_model: bool = False,
     pin_session_override: bool = True,
-    parsed_flags: tuple[str, str, bool, bool, bool] | None = None,
+    parsed_flags: Any | None = None,
     catalog_model_id: str = "",
 ) -> dict:
     from hermes_cli.model_switch import (
-        parse_model_flags,
+        parse_model_flags_detailed,
         resolve_persist_behavior,
         switch_model,
     )
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     if parsed_flags is None:
-        parsed_flags = parse_model_flags(raw_input)
-    (
-        model_input,
-        explicit_provider,
+        parsed_flags = parse_model_flags_detailed(raw_input)
+    if hasattr(parsed_flags, "model_input"):
+        model_input = parsed_flags.model_input
+        explicit_provider = parsed_flags.explicit_provider
+        is_global_flag = parsed_flags.is_global
+        is_session = parsed_flags.is_session
+        one_turn = parsed_flags.is_once
+    else:
+        (
+            model_input,
+            explicit_provider,
+            is_global_flag,
+            _force_refresh,
+            is_session,
+        ) = parsed_flags
+        one_turn = False
+    if is_global_flag and one_turn:
+        raise ValueError("/model --once cannot be combined with --global")
+    persist_global = resolve_persist_behavior(
         is_global_flag,
-        _force_refresh,
         is_session,
-    ) = parsed_flags
-    persist_global = resolve_persist_behavior(is_global_flag, is_session)
+        is_once=one_turn,
+        explicit_provider=explicit_provider,
+    )
     if not model_input:
         raise ValueError("model value required")
 
     agent = session.get("agent")
+    if one_turn and agent is None:
+        raise ValueError("/model --once requires a live session")
+    restore_snapshot = _snapshot_session_model_runtime(session) if one_turn else None
     _agent_api_mode = str(getattr(agent, "api_mode", "") or "").strip() if agent else ""
     _override_for_runtime = session.get("model_override") if isinstance(session, dict) else None
     _override_for_runtime = _override_for_runtime if isinstance(_override_for_runtime, dict) else {}
@@ -472,7 +586,8 @@ def _apply_model_switch(
                     "codex_extra_env",
                     {str(k): str(v) for k, v in extra_env.items() if v is not None},
                 )
-            session["model_override"] = next_override
+            if not one_turn:
+                session["model_override"] = next_override
             if agent is not None:
                 try:
                     agent.codex_account_mode = "platform"
@@ -480,11 +595,16 @@ def _apply_model_switch(
                     agent.model = model_input
                 except Exception:
                     pass
+            if one_turn:
+                _stage_one_turn_model_restore(session, restore_snapshot or {})
+            else:
+                _cancel_one_turn_model_restore(session)
             return {
                 "success": True,
                 "value": model_input,
                 "warning": "",
                 "confirm_required": False,
+                "scope": "once" if one_turn else "session",
             }
         return {
             "success": True,
@@ -541,6 +661,7 @@ def _apply_model_switch(
     # endpoints (e.g. "ollama-launch") and validate against saved model lists.
     user_provs = None
     custom_provs = None
+    cfg = None
     try:
         from hermes_cli.config import get_compatible_custom_providers, load_config
 
@@ -564,27 +685,6 @@ def _apply_model_switch(
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
-
-    if not confirm_expensive_model:
-        try:
-            from hermes_cli.model_cost_guard import expensive_model_warning
-
-            warning = expensive_model_warning(
-                result.new_model,
-                provider=result.target_provider,
-                base_url=result.base_url or current_base_url,
-                api_key=result.api_key or current_api_key,
-                model_info=result.model_info,
-            )
-        except Exception:
-            warning = None
-        if warning is not None:
-            return {
-                "value": result.new_model,
-                "warning": warning.message,
-                "confirm_required": True,
-                "confirm_message": warning.message,
-            }
 
     if agent:
         try:
@@ -679,6 +779,10 @@ def _apply_model_switch(
                 session, model=result.new_model, provider=result.target_provider
             )
             _emit("session.info", sid, _session_info(agent, session))
+        if one_turn:
+            _stage_one_turn_model_restore(session, restore_snapshot or {})
+        else:
+            _cancel_one_turn_model_restore(session)
 
     # Record the choice as a PER-SESSION override — never as process-global env.
     # The single-process desktop backend shares os.environ across every live
@@ -690,7 +794,7 @@ def _apply_model_switch(
     # api_key is intentionally NOT recorded: the dovie-cloud runtime token
     # rotates, so the rebuild must re-resolve a fresh credential rather than
     # reuse a stale one captured here.
-    if session is not None:
+    if session is not None and pin_session_override and not one_turn:
         session["model_override"] = {
             "model": result.new_model,
             "provider": (result.target_provider or None),
@@ -703,6 +807,7 @@ def _apply_model_switch(
         "value": result.new_model,
         "warning": result.warning_message or "",
         "confirm_required": False,
+        "scope": "once" if one_turn else ("global" if persist_global else "session"),
     }
 
 

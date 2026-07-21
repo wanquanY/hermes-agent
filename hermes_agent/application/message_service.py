@@ -260,12 +260,30 @@ class MessageService:
             "reasoning_details": fields.get("reasoning_details"),
             "codex_reasoning_items": fields.get("codex_reasoning_items"),
             "codex_message_items": fields.get("codex_message_items"),
+            "api_content": fields.get("api_content")
+            if isinstance(fields.get("api_content"), str)
+            else None,
             "platform_message_id": fields.get("platform_message_id"),
             "conversation_message_id": fields.get("conversation_message_id"),
             "metadata": fields.get("metadata"),
             "timestamp": fields.get("timestamp"),
         }
         return self._writer.append_conversation_message(stable, message)
+
+    def set_current_user_api_content(
+        self,
+        session_id: str,
+        *,
+        content: Any,
+        api_content: str,
+        conversation_message_id: str = "",
+    ) -> int:
+        return self._writer.set_current_user_api_content(
+            session_id,
+            content=content,
+            api_content=api_content,
+            conversation_message_id=conversation_message_id,
+        )
 
     def _history_for(
         self,
@@ -282,6 +300,23 @@ class MessageService:
         if not stable:
             raise ValueError("session_id is required")
         self._writer.replace_conversation(stable, messages)
+
+    def compact_active(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str,
+    ) -> None:
+        """Persist one non-destructive in-place compaction boundary."""
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required")
+        self._writer.compact_active_conversation(
+            stable,
+            messages,
+            system_prompt=system_prompt,
+        )
 
     def merge_metadata(
         self,
@@ -302,6 +337,32 @@ class MessageService:
             run_id=run_id,
             turn_id=turn_id,
             client_message_id=client_message_id,
+        )
+
+    def rewrite_content(
+        self,
+        session_id: str,
+        content: Any,
+        *,
+        message_id: str | int | None = None,
+        conversation_message_id: str | None = None,
+        role: str | None = None,
+        persist_message_key: str | None = None,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        turn_message_index: str | int | None = None,
+    ) -> dict[str, Any] | None:
+        """Rewrite one existing canonical row through exact storage identity."""
+        return self._writer.rewrite_content(
+            session_id,
+            content,
+            message_id=message_id,
+            conversation_message_id=conversation_message_id,
+            role=role,
+            persist_message_key=persist_message_key,
+            run_id=run_id,
+            turn_id=turn_id,
+            turn_message_index=turn_message_index,
         )
 
     def upsert_team_message(

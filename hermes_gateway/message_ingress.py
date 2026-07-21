@@ -147,12 +147,15 @@ class GatewayMessageIngressService:
             and runner._get_unauthorized_dm_behavior(source.platform) == "pair"
         ):
             platform_name = source.platform.value if source.platform else "unknown"
-            if runner.pairing_store._is_rate_limited(platform_name, source.user_id):
+            pairing_store = runner._pairing_store_for(source)
+            if pairing_store is None:
                 return MessageIngressResult("respond", event, source, "", None)
-            code = runner.pairing_store.generate_code(
+            if pairing_store._is_rate_limited(platform_name, source.user_id):
+                return MessageIngressResult("respond", event, source, "", None)
+            code = pairing_store.generate_code(
                 platform_name, source.user_id, source.user_name or ""
             )
-            adapter = runner.adapters.get(source.platform)
+            adapter = runner._adapter_for_source(source)
             if code:
                 if adapter:
                     await adapter.send(
@@ -168,7 +171,7 @@ class GatewayMessageIngressService:
                         source.chat_id,
                         "Too many pairing requests right now~ Please try again later!",
                     )
-                runner.pairing_store._record_rate_limit(platform_name, source.user_id)
+                pairing_store._record_rate_limit(platform_name, source.user_id)
         return MessageIngressResult("respond", event, source, "", None)
 
     def _consume_update_prompt_response(

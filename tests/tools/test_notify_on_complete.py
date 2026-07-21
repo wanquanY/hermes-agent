@@ -101,6 +101,7 @@ class TestCompletionQueue:
         assert completion["session_id"] == s.id
         assert completion["command"] == "echo hello"
         assert completion["exit_code"] == 0
+        assert completion["started_at"] == s.started_at
         assert "build succeeded" in completion["output"]
 
     def test_move_to_finished_nonzero_exit(self, registry):

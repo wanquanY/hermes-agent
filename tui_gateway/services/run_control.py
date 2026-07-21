@@ -215,7 +215,8 @@ def _db_method(db: Any, name: str):
 def _run_method(db: Any, name: str):
     if db is None or db.__class__.__module__.startswith("unittest.mock"):
         return None
-    method = getattr(db.runs, name, None)
+    runs = getattr(db, "runs", None)
+    method = getattr(runs, name, None)
     return method if callable(method) else None
 
 

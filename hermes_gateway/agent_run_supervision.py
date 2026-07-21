@@ -111,6 +111,18 @@ class AgentRunSupervisor:
                         else None
                     )
                     pending_text = pending_event.text if pending_event else None
+                    if (
+                        pending_event is not None
+                        and self._runner._pending_event_audio_paths(pending_event)
+                    ):
+                        pending_text, _ = await self._runner._transcribe_and_echo_pending_voice(
+                            pending_event,
+                            adapter,
+                            self._source,
+                            pending_text or "",
+                            log_context="Voice-interrupt",
+                            metadata=self._status_thread_metadata,
+                        )
                     logger.debug("Interrupt detected from adapter, signaling agent...")
                     agent.interrupt(pending_text)
                     interrupt_detected.set()

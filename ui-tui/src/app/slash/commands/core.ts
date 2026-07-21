@@ -368,9 +368,7 @@ export const coreCommands: SlashCommand[] = [
         if (text) {
           return sys(`copied ${text.length} characters`)
         } else {
-          return sys(
-            'clipboard copy failed — try HERMES_TUI_FORCE_OSC52=1 to force the escape sequence'
-          )
+          return sys('clipboard copy failed — try HERMES_TUI_FORCE_OSC52=1 to force the escape sequence')
         }
       }
 
@@ -621,6 +619,25 @@ export const coreCommands: SlashCommand[] = [
           ctx.transcript.send(last)
         })
       )
+    }
+  },
+
+  {
+    aliases: ['rewind'],
+    help: 'remove the last user/assistant exchange',
+    name: 'undo',
+    run: (_arg, ctx) => {
+      if (!ctx.sid) return ctx.transcript.sys('nothing to undo')
+      ctx.gateway
+        .rpc<SessionUndoResponse>('session.undo', { session_id: ctx.sid })
+        .then(
+          ctx.guarded<SessionUndoResponse>(result => {
+            if ((result.removed ?? 0) <= 0) return ctx.transcript.sys('nothing to undo')
+            ctx.transcript.setHistoryItems((previous: Msg[]) => ctx.transcript.trimLastExchange(previous))
+            ctx.transcript.sys(`undid ${result.removed} message${result.removed === 1 ? '' : 's'}`)
+          })
+        )
+        .catch(ctx.guardedErr)
     }
   }
 ]

@@ -22,6 +22,7 @@ import time
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
+from agent.secret_scope import get_profile_env
 logger = logging.getLogger(__name__)
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
@@ -57,6 +58,13 @@ from channels.platforms.discord_voice import DiscordVoiceMixin
 from channels.platforms.discord_slash import DiscordSlashCommandMixin
 from channels.platforms.discord_context import DiscordContextMixin
 from channels.platforms.discord_inbound import DiscordInboundMixin
+from channels.platforms.discord_ingress import DiscordIngressMixin
+from channels.platforms.discord_liveness import (
+    DiscordLivenessMixin,
+    discord_ready_timeout_seconds,
+    wait_for_ready_or_bot_exit,
+)
+from channels.platforms.discord_recovery import DiscordRecoveryMixin
 from utils import atomic_json_write
 from channels.platforms.base import (
     BasePlatformAdapter,
@@ -122,7 +130,7 @@ def check_discord_requirements() -> bool:
     return True
 
 
-def _build_allowed_mentions():
+def _build_allowed_mentions(config: Optional[dict] = None):
     """Build Discord ``AllowedMentions`` with safe defaults, overridable via env.
 
     Discord bots default to parsing ``@everyone``, ``@here``, role pings, and
@@ -143,17 +151,23 @@ def _build_allowed_mentions():
     if not DISCORD_AVAILABLE:
         return None
 
-    def _b(name: str, default: bool) -> bool:
-        raw = os.getenv(name, "").strip().lower()
+    yaml_values = config or {}
+
+    def _b(name: str, key: str, default: bool) -> bool:
+        raw = get_profile_env(name, "").strip().lower()
+        if not raw and key in yaml_values:
+            raw = str(yaml_values[key]).strip().lower()
         if not raw:
             return default
         return raw in {"true", "1", "yes", "on"}
 
     return discord.AllowedMentions(
-        everyone=_b("DISCORD_ALLOW_MENTION_EVERYONE", False),
-        roles=_b("DISCORD_ALLOW_MENTION_ROLES", False),
-        users=_b("DISCORD_ALLOW_MENTION_USERS", True),
-        replied_user=_b("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
+        everyone=_b("DISCORD_ALLOW_MENTION_EVERYONE", "everyone", False),
+        roles=_b("DISCORD_ALLOW_MENTION_ROLES", "roles", False),
+        users=_b("DISCORD_ALLOW_MENTION_USERS", "users", True),
+        replied_user=_b(
+            "DISCORD_ALLOW_MENTION_REPLIED_USER", "replied_user", True
+        ),
     )
 
 
@@ -537,7 +551,18 @@ def _read_dm_role_auth_guild() -> Optional[int]:
     return guild_id if guild_id > 0 else None
 
 
-class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashCommandMixin, DiscordVoiceMixin, DiscordDeliveryMixin, DiscordCommandSyncMixin, BasePlatformAdapter):
+class DiscordAdapter(
+    DiscordRecoveryMixin,
+    DiscordIngressMixin,
+    DiscordLivenessMixin,
+    DiscordInboundMixin,
+    DiscordContextMixin,
+    DiscordSlashCommandMixin,
+    DiscordVoiceMixin,
+    DiscordDeliveryMixin,
+    DiscordCommandSyncMixin,
+    BasePlatformAdapter,
+):
     """
     Discord bot adapter.
 
@@ -569,8 +594,14 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
         # Text batching: merge rapid successive messages (Telegram-style)
-        self._text_batch_delay_seconds = float(os.getenv("HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS", "0.6"))
-        self._text_batch_split_delay_seconds = float(os.getenv("HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0"))
+        self._text_batch_delay_seconds = float(
+            get_profile_env("HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS", "0.6")
+        )
+        self._text_batch_split_delay_seconds = float(
+            get_profile_env(
+                "HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0"
+            )
+        )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
@@ -581,6 +612,11 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
+        # Continuous outgoing mixer: one Discord AudioSource per guild with
+        # ambient and speech children mixed upstream of discord.py.
+        self._voice_mixers: Dict[int, Any] = {}
+        self._ambient_pcm_cache: Optional[bytes] = None
+        self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -601,6 +637,12 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        # Streaming edits saturate at Discord's 2,000-character limit.  Keep
+        # the last rendered preview per message so identical over-limit frames
+        # do not burn edit rate-limit budget while the final response grows.
+        self._last_overflow_preview: Dict[tuple[str, str], str] = {}
+        self._init_discord_liveness()
+        self._init_discord_recovery()
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -641,20 +683,38 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
                 return False
 
             # Parse allowed user entries (may contain usernames or IDs)
-            allowed_env = os.getenv("DISCORD_ALLOWED_USERS", "")
-            if allowed_env:
+            allowed_config = get_profile_env("DISCORD_ALLOWED_USERS", "")
+            if not allowed_config:
+                allowed_config = self.config.extra.get("allow_from", "")
+            if isinstance(allowed_config, str):
+                allowed_entries = allowed_config.split(",")
+            elif isinstance(allowed_config, (list, tuple, set, frozenset)):
+                allowed_entries = allowed_config
+            else:
+                allowed_entries = ()
+            if allowed_entries:
                 self._allowed_user_ids = {
-                    _clean_discord_id(uid) for uid in allowed_env.split(",")
-                    if uid.strip()
+                    _clean_discord_id(str(uid))
+                    for uid in allowed_entries
+                    if str(uid).strip()
                 }
 
             # Parse DISCORD_ALLOWED_ROLES — comma-separated role IDs.
             # Users with ANY of these roles can interact with the bot.
-            roles_env = os.getenv("DISCORD_ALLOWED_ROLES", "")
-            if roles_env:
+            roles_config = get_profile_env("DISCORD_ALLOWED_ROLES", "")
+            if not roles_config:
+                roles_config = self.config.extra.get("allowed_roles", "")
+            if isinstance(roles_config, str):
+                role_entries = roles_config.split(",")
+            elif isinstance(roles_config, (list, tuple, set, frozenset)):
+                role_entries = roles_config
+            else:
+                role_entries = ()
+            if role_entries:
                 self._allowed_role_ids = {
-                    int(rid.strip()) for rid in roles_env.split(",")
-                    if rid.strip().isdigit()
+                    int(str(rid).strip())
+                    for rid in role_entries
+                    if str(rid).strip().isdigit()
                 }
 
             # Set up intents.
@@ -703,7 +763,9 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
             self._client = commands.Bot(
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
-                allowed_mentions=_build_allowed_mentions(),
+                allowed_mentions=_build_allowed_mentions(
+                    self.config.extra.get("allow_mentions")
+                ),
                 **proxy_kwargs_for_bot(proxy_url),
             )
             adapter_self = self  # capture for closure
@@ -722,104 +784,12 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
                 )
+                if adapter_self._missed_message_backfill_enabled():
+                    adapter_self._ensure_missed_message_backfill_task()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
-                # Block until _resolve_allowed_usernames has swapped
-                # any raw usernames in DISCORD_ALLOWED_USERS for numeric
-                # IDs (otherwise on_message's author.id lookup can miss).
-                if not adapter_self._ready_event.is_set():
-                    try:
-                        await asyncio.wait_for(adapter_self._ready_event.wait(), timeout=30.0)
-                    except asyncio.TimeoutError:
-                        pass
-
-                # Dedup: Discord RESUME replays events after reconnects (#4777)
-                if adapter_self._dedup.is_duplicate(str(message.id)):
-                    return
-
-                # Always ignore our own messages
-                if message.author == self._client.user:
-                    return
-
-                # Ignore Discord system messages (thread renames, pins, member joins, etc.)
-                # Allow both default and reply types — replies have a distinct MessageType.
-                if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
-                    return
-
-                # Bot message filtering (DISCORD_ALLOW_BOTS):
-                #   "none"     — ignore all other bots (default)
-                #   "mentions" — accept bot messages only when they @mention us
-                #   "all"      — accept all bot messages
-                # Must run BEFORE the user allowlist check so that bots
-                # permitted by DISCORD_ALLOW_BOTS are not rejected for
-                # not being in DISCORD_ALLOWED_USERS (fixes #4466).
-                if getattr(message.author, "bot", False):
-                    allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
-                    if allow_bots == "none":
-                        return
-                    elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
-                            return
-                    # "all" falls through; bot is permitted — skip the
-                    # human-user allowlist below (bots aren't in it).
-                else:
-                    # Non-bot: enforce the configured user/role allowlists.
-                    # Pass guild + is_dm so role checks are scoped to the
-                    # originating guild (prevents cross-guild DM bypass, see
-                    # _is_allowed_user docstring).
-                    _msg_guild = getattr(message, "guild", None)
-                    _is_dm = isinstance(message.channel, discord.DMChannel) or _msg_guild is None
-                    if not self._is_allowed_user(
-                        str(message.author.id),
-                        message.author,
-                        guild=_msg_guild,
-                        is_dm=_is_dm,
-                    ):
-                        return
-                
-                # Multi-agent filtering: if the message mentions specific bots
-                # but NOT this bot, the sender is talking to another agent —
-                # stay silent.  Messages with no bot mentions (general chat)
-                # still fall through to _handle_message for the existing
-                # DISCORD_REQUIRE_MENTION check.
-                #
-                # This replaces the older DISCORD_IGNORE_NO_MENTION logic
-                # with bot-aware filtering that works correctly when multiple
-                # agents share a channel.
-                if not isinstance(message.channel, discord.DMChannel) and message.mentions:
-                    _self_mentioned = (
-                        self._client.user is not None
-                        and self._client.user in message.mentions
-                    )
-                    _other_bots_mentioned = any(
-                        m.bot and m != self._client.user
-                        for m in message.mentions
-                    )
-                    # If other bots are mentioned but we're not → not for us
-                    if _other_bots_mentioned and not _self_mentioned:
-                        return
-                    # If humans are mentioned but we're not → not for us
-                    # (preserves old DISCORD_IGNORE_NO_MENTION=true behavior)
-                    # EXCEPT in free-response channels where the bot should
-                    # answer regardless of who is mentioned.
-                    _ignore_no_mention = os.getenv(
-                        "DISCORD_IGNORE_NO_MENTION", "true"
-                    ).lower() in {"true", "1", "yes"}
-                    if _ignore_no_mention and not _self_mentioned and not _other_bots_mentioned:
-                        _channel_id = str(message.channel.id)
-                        _parent_id = None
-                        if hasattr(message.channel, "parent_id") and message.channel.parent_id:
-                            _parent_id = str(message.channel.parent_id)
-                        _free_channels = adapter_self._discord_free_response_channels()
-                        _channel_ids = {_channel_id}
-                        if _parent_id:
-                            _channel_ids.add(_parent_id)
-                        if "*" not in _free_channels and not (_channel_ids & _free_channels):
-                            return
-
-                await self._handle_message(message)
-
+                await adapter_self._dispatch_discord_message(message)
             @self._client.event
             async def on_voice_state_update(member, before, after):
                 """Track voice channel join/leave events."""
@@ -858,25 +828,37 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
                 self._register_slash_commands()
 
             # Start the bot in background
+            self._disconnecting = False
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
+            self._bot_task.add_done_callback(self._handle_bot_task_done)
 
-            # Wait for ready
-            await asyncio.wait_for(self._ready_event.wait(), timeout=30)
+            ready_timeout = discord_ready_timeout_seconds()
+            await wait_for_ready_or_bot_exit(
+                self._ready_event,
+                self._bot_task,
+                timeout=None if ready_timeout <= 0 else ready_timeout,
+            )
 
             self._running = True
+            self._start_liveness_probe()
             return True
 
         except asyncio.TimeoutError:
             logger.error("[%s] Timeout waiting for connection to Discord", self.name, exc_info=True)
+            await self._cancel_bot_task()
             self._release_platform_lock()
             return False
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to connect to Discord: %s", self.name, e, exc_info=True)
+            await self._cancel_bot_task()
             self._release_platform_lock()
             return False
 
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
+        self._disconnecting = True
+        await self._cancel_liveness_task()
+        await self._cancel_bot_task()
         # Clean up all active voice connections before closing the client
         for guild_id in list(self._voice_clients.keys()):
             try:
@@ -896,6 +878,7 @@ class DiscordAdapter(DiscordInboundMixin, DiscordContextMixin, DiscordSlashComma
                 await self._post_connect_task
             except asyncio.CancelledError:
                 pass
+        await self._cancel_missed_message_backfill_task()
 
         self._running = False
         self._client = None
@@ -1143,7 +1126,16 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ChoicePickerView, ClarifyChoiceView
+
+    from channels.platforms.discord_choice_picker import (
+        create_choice_picker_view_class,
+    )
+
+    ChoicePickerView = create_choice_picker_view_class(
+        discord,
+        _component_check_auth,
+    )
 
     class ExecApprovalView(discord.ui.View):
         """

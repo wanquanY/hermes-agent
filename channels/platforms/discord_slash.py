@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Dict, Optional, Tuple
 
+from agent.secret_scope import get_profile_env
 try:
     import discord
 except ImportError:  # pragma: no cover - optional platform dependency
@@ -26,6 +26,64 @@ def _discord_public_attr(name: str, fallback: Any = None) -> Any:
 
 
 class DiscordSlashCommandMixin:
+    @staticmethod
+    def _discord_policy_entries(value: Any) -> set[str]:
+        if isinstance(value, str):
+            values = value.split(",")
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = value
+        else:
+            values = ()
+        return {str(entry).strip() for entry in values if str(entry).strip()}
+
+    def _discord_allowed_channel_entries(self) -> set[str]:
+        configured = get_profile_env("DISCORD_ALLOWED_CHANNELS", "").strip()
+        if configured:
+            return self._discord_policy_entries(configured)
+        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        return self._discord_policy_entries(extra.get("allowed_channels"))
+
+    def _discord_ignored_channel_entries(self) -> set[str]:
+        configured = get_profile_env("DISCORD_IGNORED_CHANNELS", "").strip()
+        if configured:
+            return self._discord_policy_entries(configured)
+        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        return self._discord_policy_entries(extra.get("ignored_channels"))
+
+    def _discord_allow_all_users(self) -> bool:
+        for variable in ("DISCORD_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS"):
+            if get_profile_env(variable, "").strip().lower() in {
+                "true",
+                "1",
+                "yes",
+            }:
+                return True
+        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        configured = extra.get("allow_all_users")
+        if isinstance(configured, str):
+            return configured.strip().lower() in {"true", "1", "yes", "on"}
+        return bool(configured)
+
+    def _discord_channel_ids_allowed(self, channel_ids: set[str]) -> bool:
+        """Return whether a resolved guild channel intersects its allowlist."""
+        if not channel_ids:
+            return False
+        configured = self._discord_allowed_channel_entries()
+        return "*" in configured or bool(channel_ids & configured)
+
+    @staticmethod
+    def _is_pairing_approved_user(user_id: str) -> bool:
+        """Treat an explicit pairing grant as a first-class authorization."""
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return False
+        try:
+            from hermes_gateway.pairing import PairingStore
+
+            return bool(PairingStore().is_approved("discord", user_id))
+        except Exception:
+            return False
+
     def _is_allowed_user(
         self,
         user_id: str,
@@ -33,11 +91,14 @@ class DiscordSlashCommandMixin:
         *,
         guild=None,
         is_dm: bool = False,
+        channel_ids: Optional[set[str]] = None,
     ) -> bool:
         """Check if user is allowed via DISCORD_ALLOWED_USERS or DISCORD_ALLOWED_ROLES.
     
         Uses OR semantics: if the user matches EITHER allowlist, they're allowed.
-        If both allowlists are empty, everyone is allowed (backwards compatible).
+        Empty user/role allowlists fail closed unless the deployment explicitly
+        opts into open access, the user is paired, or validated guild-channel
+        context matches ``DISCORD_ALLOWED_CHANNELS``.
     
         Role checks are **scoped to the guild the message originated from**.
         For DMs (no guild context), role-based auth is disabled by default and
@@ -52,6 +113,7 @@ class DiscordSlashCommandMixin:
             author: Optional Member/User object for in-guild role lookup.
             guild: The guild the message arrived in (None for DMs).
             is_dm: True if the message came from a DM channel.
+            channel_ids: Validated channel identifiers for guild traffic.
         """
         # ``getattr`` fallbacks here guard against test fixtures that build
         # an adapter via ``object.__new__(DiscordAdapter)`` and skip __init__
@@ -60,10 +122,20 @@ class DiscordSlashCommandMixin:
         allowed_roles = getattr(self, "_allowed_role_ids", set())
         has_users = bool(allowed_users)
         has_roles = bool(allowed_roles)
-        if not has_users and not has_roles:
+        if self._is_pairing_approved_user(user_id):
             return True
+        if not has_users and not has_roles:
+            if self._discord_allow_all_users():
+                return True
+            if (
+                not is_dm
+                and channel_ids is not None
+                and self._discord_channel_ids_allowed(channel_ids)
+            ):
+                return True
+            return False
         # Check user ID allowlist (works for both DMs and guild messages)
-        if has_users and user_id in allowed_users:
+        if has_users and ("*" in allowed_users or user_id in allowed_users):
             return True
         # Role allowlist is only consulted when configured.
         if not has_roles:
@@ -110,6 +182,27 @@ class DiscordSlashCommandMixin:
             return False
         m_roles = getattr(m, "roles", None) or []
         return any(getattr(r, "id", None) in allowed_roles for r in m_roles)
+
+    def _warn_if_fail_closed_default(self) -> None:
+        """Log one actionable warning for an unconfigured Discord boundary."""
+        if getattr(self, "_warned_fail_closed_default", False):
+            return
+        if getattr(self, "_allowed_user_ids", set()):
+            return
+        if getattr(self, "_allowed_role_ids", set()):
+            return
+        if self._discord_allowed_channel_entries():
+            return
+        if self._discord_allow_all_users():
+            return
+        self._warned_fail_closed_default = True
+        logger.warning(
+            "[%s] Discord messages are being denied because no allowlist is "
+            "configured. Set DISCORD_ALLOWED_USERS, DISCORD_ALLOWED_ROLES, "
+            "or DISCORD_ALLOWED_CHANNELS, or set "
+            "DISCORD_ALLOW_ALL_USERS=true for open access.",
+            self.name,
+        )
     
     def _evaluate_slash_authorization(
         self, interaction: "discord.Interaction",
@@ -135,6 +228,8 @@ class DiscordSlashCommandMixin:
         """
         chan_obj = getattr(interaction, "channel", None)
         in_dm = isinstance(chan_obj, discord.DMChannel) if chan_obj is not None else False
+        channel_ids: set[str] = set()
+        channel_keys: set[str] = set()
     
         # ── Channel scope (mirrors on_message lines 3374-3388) ──
         # DMs aren't channel-gated — DMs follow on_message's DM lockdown
@@ -143,7 +238,6 @@ class DiscordSlashCommandMixin:
             chan_id_raw = getattr(interaction, "channel_id", None) or getattr(
                 chan_obj, "id", None,
             )
-            channel_ids: set = set()
             if chan_id_raw is not None:
                 channel_ids.add(str(chan_id_raw))
                 # Mirror on_message: also test the parent channel for threads
@@ -152,10 +246,16 @@ class DiscordSlashCommandMixin:
                     parent_id = self._get_parent_channel_id(chan_obj)
                     if parent_id:
                         channel_ids.add(str(parent_id))
+
+            channel_keys = self._discord_channel_keys_from_channel(
+                chan_obj,
+                self._get_parent_channel_id(chan_obj)
+                if isinstance(chan_obj, discord.Thread)
+                else None,
+            )
     
-            allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
-            if allowed_raw:
-                allowed = {c.strip() for c in allowed_raw.split(",") if c.strip()}
+            allowed = self._discord_allowed_channel_entries()
+            if allowed:
                 if "*" not in allowed:
                     if not channel_ids:
                         # Channel policy is configured but the interaction
@@ -164,16 +264,15 @@ class DiscordSlashCommandMixin:
                             False,
                             "channel id missing with DISCORD_ALLOWED_CHANNELS configured",
                         )
-                    if not (channel_ids & allowed):
+                    if not (channel_keys & allowed):
                         return (False, "channel not in DISCORD_ALLOWED_CHANNELS")
     
             # Ignored beats allowed: even when a thread's parent channel
             # is on the allowlist, an explicit DISCORD_IGNORED_CHANNELS
             # entry on the thread or its parent rejects the interaction.
-            ignored_raw = os.getenv("DISCORD_IGNORED_CHANNELS", "")
-            if ignored_raw and channel_ids:
-                ignored = {c.strip() for c in ignored_raw.split(",") if c.strip()}
-                if "*" in ignored or (channel_ids & ignored):
+            ignored = self._discord_ignored_channel_entries()
+            if ignored and channel_ids:
+                if "*" in ignored or (channel_keys & ignored):
                     return (False, "channel in DISCORD_IGNORED_CHANNELS")
     
         # ── User / role allowlist (mirrors on_message line 681) ──
@@ -181,13 +280,9 @@ class DiscordSlashCommandMixin:
         allowed_users = getattr(self, "_allowed_user_ids", set()) or set()
         allowed_roles = getattr(self, "_allowed_role_ids", set()) or set()
         if user is None or getattr(user, "id", None) is None:
-            # No identifiable user. With any user/role allowlist
-            # configured, fail closed rather than raise AttributeError
-            # on ``interaction.user.id`` below. With no allowlist this
-            # is the existing "no allowlist = everyone" backwards-compat.
             if allowed_users or allowed_roles:
                 return (False, "missing interaction.user with allowlist configured")
-            return (True, None)
+            return (False, "missing interaction.user")
     
         user_id = str(user.id)
         # Pass guild + is_dm so role check is scoped to the originating
@@ -199,6 +294,7 @@ class DiscordSlashCommandMixin:
             author=user,
             guild=interaction_guild,
             is_dm=in_dm,
+            channel_ids=channel_keys if not in_dm else None,
         ):
             return (
                 False,
@@ -636,7 +732,9 @@ class DiscordSlashCommandMixin:
         # UX so users don't see commands they can't invoke. Off by default
         # to preserve the slash UX for deployments that intentionally allow
         # everyone in the guild.
-        if os.getenv("DISCORD_HIDE_SLASH_COMMANDS", "false").strip().lower() in {
+        if get_profile_env(
+            "DISCORD_HIDE_SLASH_COMMANDS", "false"
+        ).strip().lower() in {
             "true", "1", "yes", "on",
         }:
             self._apply_owner_only_visibility(tree)

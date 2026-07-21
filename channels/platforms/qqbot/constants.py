@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from agent.secret_scope import get_profile_env
 
 # ---------------------------------------------------------------------------
 # QQBot adapter version — bump on functional changes to the adapter package.
@@ -14,9 +14,11 @@ QQBOT_VERSION = "1.1.0"
 # API endpoints
 # ---------------------------------------------------------------------------
 
-# The portal domain is configurable via QQ_API_HOST for corporate proxies
-# or test environments.  Default: q.qq.com (production).
-PORTAL_HOST = os.getenv("QQ_PORTAL_HOST", "q.qq.com")
+# The portal domain is profile-scoped for corporate proxies and test
+# environments.  Resolve it at request time rather than freezing the active
+# profile's value at module import.
+def get_portal_host() -> str:
+    return get_profile_env("QQ_PORTAL_HOST", "q.qq.com") or "q.qq.com"
 
 API_BASE = "https://api.sgroup.qq.com"
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"

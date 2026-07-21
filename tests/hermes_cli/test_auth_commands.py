@@ -635,8 +635,8 @@ def test_logout_clears_stale_active_codex_without_provider_credentials(tmp_path,
     assert "provider: auto" in config_text
 
 
-def test_reset_config_provider_uses_atomic_yaml_write(tmp_path, monkeypatch):
-    """Logout config reset should delegate the YAML write atomically."""
+def test_reset_config_provider_uses_atomic_config_write(tmp_path, monkeypatch):
+    """Logout config reset should use the fail-closed persistence boundary."""
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -660,7 +660,7 @@ def test_reset_config_provider_uses_atomic_yaml_write(tmp_path, monkeypatch):
         assert kwargs["sort_keys"] is False
         raise OSError("simulated atomic write failure")
 
-    with patch("hermes_cli.auth.atomic_yaml_write", side_effect=_boom) as mock_write:
+    with patch("hermes_cli.auth.atomic_config_write", side_effect=_boom) as mock_write:
         with pytest.raises(OSError, match="simulated atomic write failure"):
             _reset_config_provider()
 

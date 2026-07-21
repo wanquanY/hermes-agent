@@ -610,6 +610,28 @@ class GatewayToolEventBridge:
             "tool_gen_callback": lambda name: self.on_tool_generating(sid, name),
             "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self.on_reasoning_delta(sid, text),
+            "reaction_callback": lambda kind: self._emit(
+                "reaction",
+                sid,
+                {"kind": str(kind)},
+            ),
+            "notice_callback": lambda notice: self._emit(
+                "notification.show",
+                sid,
+                {
+                    "text": str(getattr(notice, "text", "") or ""),
+                    "level": str(getattr(notice, "level", "info") or "info"),
+                    "kind": str(getattr(notice, "kind", "sticky") or "sticky"),
+                    "ttl_ms": getattr(notice, "ttl_ms", None),
+                    "key": getattr(notice, "key", None),
+                    "id": getattr(notice, "id", None),
+                },
+            ),
+            "notice_clear_callback": lambda key: self._emit(
+                "notification.clear",
+                sid,
+                {"key": str(key)},
+            ),
             "status_callback": lambda kind, text=None: status_update(
                 sid, str(kind), None if text is None else str(text)
             ),

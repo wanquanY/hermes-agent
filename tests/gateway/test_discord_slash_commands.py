@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from hermes_gateway.config import PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 def _ensure_discord_mock():
@@ -773,10 +773,9 @@ def test_discord_auto_thread_config_bridge(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     from hermes_gateway.config import load_gateway_config
-    load_gateway_config()
+    config = load_gateway_config()
 
-    import os
-    assert os.getenv("DISCORD_AUTO_THREAD") == "true"
+    assert config.platforms[Platform.DISCORD].extra["auto_thread"] is True
 
 
 # ------------------------------------------------------------------
@@ -980,4 +979,3 @@ def test_register_skill_command_autocomplete_filters_by_name_and_description(ada
     # (covered in other tests). The autocomplete filter itself is exercised
     # via direct function call in the real-discord integration path.
     assert skill_cmd.callback is not None
-

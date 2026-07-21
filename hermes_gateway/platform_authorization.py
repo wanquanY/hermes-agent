@@ -16,7 +16,72 @@ from hermes_gateway.session import SessionSource
 logger = logging.getLogger(__name__)
 
 
+def _auth_env(name: str, default: str = "") -> str:
+    """Read authorization state from the active profile secret scope."""
+    if not name:
+        return default
+    from agent.secret_scope import (
+        current_secret_scope,
+        get_secret,
+        is_multiplex_active,
+    )
+
+    if current_secret_scope() is not None or is_multiplex_active():
+        value = get_secret(name, default)
+        return str(value or default).strip()
+    return (os.getenv(name) or default).strip()
+
+
 class GatewayPlatformAuthorizationMixin:
+    @staticmethod
+    def _authorization_values(value) -> str:
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return ",".join(str(item).strip() for item in value if str(item).strip())
+        return str(value or "").strip()
+
+    def _adapter_authorization_config(
+        self,
+        source: SessionSource,
+        key: str,
+    ) -> str:
+        adapter = self._adapter_for_source(source)
+        config = getattr(adapter, "config", None)
+        extra = getattr(config, "extra", None)
+        if not isinstance(extra, dict):
+            return ""
+        return self._authorization_values(extra.get(key))
+
+    def _pairing_store_for(self, source: SessionSource):
+        profile = str(getattr(source, "profile", "") or "").strip()
+        stores = getattr(self, "pairing_stores", None) or {}
+        if profile and profile in stores:
+            return stores[profile]
+        return getattr(self, "pairing_store", None)
+
+    def _authorization_adapter(
+        self,
+        platform: Optional[Platform],
+        profile: Optional[str] = None,
+    ):
+        """Resolve the live adapter whose intake policy gates authorization."""
+        if platform is None:
+            return None
+        source = SessionSource(
+            platform=platform,
+            chat_id="",
+            chat_type="dm",
+            profile=profile,
+        )
+        from hermes_gateway.platform_runtime import platform_runtime_for
+
+        return platform_runtime_for(self).adapter_for_source(source)
+
+    def _adapter_for_source(self, source: Optional[SessionSource]):
+        """Resolve the live adapter for an inbound session source."""
+        from hermes_gateway.platform_runtime import platform_runtime_for
+
+        return platform_runtime_for(self).adapter_for_source(source)
+
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
         Check if a user is authorized to use the bot.
@@ -54,7 +119,12 @@ class GatewayPlatformAuthorizationMixin:
                 Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
             }.get(source.platform, "")
             if chat_allowlist_env:
-                raw_chat_allowlist = os.getenv(chat_allowlist_env, "").strip()
+                raw_chat_allowlist = _auth_env(chat_allowlist_env)
+                if not raw_chat_allowlist:
+                    raw_chat_allowlist = self._adapter_authorization_config(
+                        source,
+                        "group_allowed_chats",
+                    )
                 if raw_chat_allowlist:
                     allowed_group_ids = {
                         cid.strip()
@@ -66,6 +136,20 @@ class GatewayPlatformAuthorizationMixin:
 
         if not user_id:
             return False
+
+        # Discord resolves configured usernames and guild roles inside the
+        # owning adapter. Those derived identities must remain adapter-local:
+        # publishing them through os.environ would merge authorization state
+        # across profiles. Admission already validated role membership and
+        # stamps that fact on the immutable source; numeric IDs are checked
+        # against the profile-specific live adapter here.
+        if source.platform == Platform.DISCORD:
+            adapter = self._adapter_for_source(source)
+            if bool(getattr(source, "role_authorized", False)):
+                return True
+            allowed_user_ids = getattr(adapter, "_allowed_user_ids", set()) or set()
+            if "*" in allowed_user_ids or user_id in allowed_user_ids:
+                return True
 
         platform_env_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOWED_USERS",
@@ -134,12 +218,12 @@ class GatewayPlatformAuthorizationMixin:
 
         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
         platform_allow_all_var = platform_allow_all_map.get(source.platform, "")
-        if platform_allow_all_var and os.getenv(platform_allow_all_var, "").lower() in {"true", "1", "yes"}:
+        if platform_allow_all_var and _auth_env(platform_allow_all_var).lower() in {"true", "1", "yes"}:
             return True
 
         if getattr(source, "is_bot", False):
             allow_bots_var = platform_allow_bots_map.get(source.platform)
-            if allow_bots_var and os.getenv(allow_bots_var, "none").lower().strip() in {"mentions", "all"}:
+            if allow_bots_var and _auth_env(allow_bots_var, "none").lower() in {"mentions", "all"}:
                 return True
 
         # Discord role-based access (DISCORD_ALLOWED_ROLES): the adapter's
@@ -150,27 +234,43 @@ class GatewayPlatformAuthorizationMixin:
         # (issue #7871).
         if (
             source.platform == Platform.DISCORD
-            and os.getenv("DISCORD_ALLOWED_ROLES", "").strip()
+            and _auth_env("DISCORD_ALLOWED_ROLES")
         ):
             return True
 
         # Check pairing store (always checked, regardless of allowlists)
         platform_name = source.platform.value if source.platform else ""
-        if self.pairing_store.is_approved(platform_name, user_id):
+        pairing_store = self._pairing_store_for(source)
+        if pairing_store is not None and pairing_store.is_approved(platform_name, user_id):
             return True
 
         # Check platform-specific and global allowlists
-        platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
+        platform_allowlist = _auth_env(platform_env_map.get(source.platform, ""))
+        if not platform_allowlist:
+            platform_allowlist = self._adapter_authorization_config(
+                source,
+                "allow_from",
+            )
         group_user_allowlist = ""
         group_chat_allowlist = ""
         if source.chat_type in {"group", "forum"}:
-            group_user_allowlist = os.getenv(platform_group_user_env_map.get(source.platform, ""), "").strip()
-            group_chat_allowlist = os.getenv(platform_group_chat_env_map.get(source.platform, ""), "").strip()
-        global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+            group_user_allowlist = _auth_env(platform_group_user_env_map.get(source.platform, ""))
+            group_chat_allowlist = _auth_env(platform_group_chat_env_map.get(source.platform, ""))
+            if not group_user_allowlist:
+                group_user_allowlist = self._adapter_authorization_config(
+                    source,
+                    "group_allow_from",
+                )
+            if not group_chat_allowlist:
+                group_chat_allowlist = self._adapter_authorization_config(
+                    source,
+                    "group_allowed_chats",
+                )
+        global_allowlist = _auth_env("GATEWAY_ALLOWED_USERS")
 
         if not platform_allowlist and not group_user_allowlist and not group_chat_allowlist and not global_allowlist:
             # No allowlists configured -- check global allow-all flag
-            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
+            return _auth_env("GATEWAY_ALLOW_ALL_USERS").lower() in {"true", "1", "yes"}
 
         # Telegram can optionally authorize group traffic by chat ID.
         # Keep this separate from TELEGRAM_GROUP_ALLOWED_USERS, which gates
@@ -305,13 +405,13 @@ class GatewayPlatformAuthorizationMixin:
                 ),
                 Platform.QQBOT: ("QQ_GROUP_ALLOWED_USERS",),
             }
-            if os.getenv(platform_env_map.get(platform, ""), "").strip():
+            if _auth_env(platform_env_map.get(platform, "")):
                 return "ignore"
             for env_key in platform_group_env_map.get(platform, ()):
-                if os.getenv(env_key, "").strip():
+                if _auth_env(env_key):
                     return "ignore"
 
-        if os.getenv("GATEWAY_ALLOWED_USERS", "").strip():
+        if _auth_env("GATEWAY_ALLOWED_USERS"):
             return "ignore"
 
         return "pair"

@@ -17,6 +17,29 @@ CREATE TABLE IF NOT EXISTS applied_migrations (
     applied_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS delivery_obligations (
+    obligation_id TEXT PRIMARY KEY,
+    session_key TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    thread_id TEXT,
+    reply_to TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    content TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'attempting', 'delivered', 'failed', 'abandoned')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_obligations_recovery
+    ON delivery_obligations(state, updated_at);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -50,6 +73,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     display_title TEXT DEFAULT '',
     display_title_source TEXT DEFAULT '',
     cwd TEXT,
+    git_branch TEXT NOT NULL DEFAULT '',
+    git_repo_root TEXT NOT NULL DEFAULT '',
     archived INTEGER NOT NULL DEFAULT 0,
     session_kind TEXT NOT NULL DEFAULT 'hermes_session',
     conversation_kind TEXT NOT NULL DEFAULT 'direct',
@@ -119,6 +144,41 @@ CREATE TABLE IF NOT EXISTS verification_evidence (
 
 CREATE INDEX IF NOT EXISTS idx_verification_evidence_scope_root
     ON verification_evidence(scope_id, workspace_root, id DESC);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT,
+    icon TEXT,
+    color TEXT,
+    board_slug TEXT,
+    primary_path TEXT,
+    created_at REAL NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS project_folders (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    label TEXT,
+    is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+    added_at REAL NOT NULL,
+    PRIMARY KEY (project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_folders_path ON project_folders(path);
+
+CREATE TABLE IF NOT EXISTS project_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS discovered_repos (
+    root TEXT PRIMARY KEY,
+    label TEXT,
+    last_seen REAL NOT NULL
+);
 
 -- Control-plane denormalized session index. One row per user-visible session.
 -- Status fields are a WRITE-TIME projection so the sidebar read path is a single
@@ -255,6 +315,7 @@ CREATE TABLE IF NOT EXISTS messages (
     platform_message_id TEXT,
     conversation_message_id TEXT NOT NULL DEFAULT '',
     metadata_json TEXT,
+    api_content TEXT,
     active INTEGER NOT NULL DEFAULT 1
 );
 
@@ -552,10 +613,18 @@ CREATE TABLE IF NOT EXISTS team_capability_snapshot_bindings (
 
 """
 
+# Cron history is queried by one source/id prefix. Keep this reusable because
+# both the full schema bootstrap and the repository-only bootstrap own a path
+# into the same canonical sessions table.
+CRON_RUN_HISTORY_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_sessions_source_id
+    ON sessions(source, id);
+"""
+
 # Indexes must be created after _reconcile_columns() runs. SQLite parses index
 # definitions immediately; if an existing table is missing an indexed column,
 # CREATE INDEX fails before the reconciler can add that column.
-DEFERRED_INDEX_SQL = """
+DEFERRED_INDEX_SQL = CRON_RUN_HISTORY_INDEX_SQL + """
 CREATE INDEX IF NOT EXISTS idx_sessions_source
     ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent

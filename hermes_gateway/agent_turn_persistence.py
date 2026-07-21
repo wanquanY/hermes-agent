@@ -9,7 +9,7 @@ from typing import Any
 from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_agent.gateway.runtime_config import resolve_gateway_model
 from hermes_gateway.agent_cache import agent_cache_for
-from hermes_gateway.gateway_runtime_config import runtime_config_for
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 logger = logging.getLogger(__name__)
@@ -113,10 +113,10 @@ class GatewayAgentTurnPersistenceService:
 
         if compression_exhausted and session_entry and session_key:
             agent_cache_for(runner).evict_cached_agent(session_key)
-            runner._session_model_overrides.pop(session_key, None)
-            runtime_config_for(runner).set_session_reasoning_override(session_key, None)
-            if hasattr(runner, "_pending_model_notes"):
-                runner._pending_model_notes.pop(session_key, None)
+            session_runtime_state_for(runner).clear_conversation_scope(
+                session_key,
+                reason="compression_exhausted_reset",
+            )
             response = (response or "") + (
                 "\n\n🔄 Session auto-reset — the conversation exceeded the "
                 "maximum context size and could not be compressed further. "

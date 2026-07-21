@@ -13,7 +13,6 @@ extracted functions reach back through the ``run_agent`` module via
 from __future__ import annotations
 
 import concurrent.futures
-import contextvars
 import json
 import logging
 import os
@@ -39,13 +38,9 @@ from agent.tool_dispatch_helpers import (
     make_tool_result_message,
     _plan_tool_batch_segments,
 )
-from tools.terminal_tool import (
-    _get_approval_callback,
-    _get_sudo_password_callback,
-    set_approval_callback as _set_approval_callback,
-    set_sudo_password_callback as _set_sudo_password_callback,
-    get_active_env,
-)
+from tools.daemon_pool import DaemonThreadPoolExecutor
+from tools.terminal_tool import get_active_env
+from tools.thread_context import propagate_context_to_thread
 from tools.tool_result_storage import (
     maybe_persist_tool_result,
     enforce_turn_budget,
@@ -53,6 +48,27 @@ from tools.tool_result_storage import (
 from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context_window
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_file_checkpoint(
+    agent,
+    function_name: str,
+    function_args: dict,
+    effective_task_id: str,
+) -> None:
+    """Checkpoint the same workspace path that the file tool will mutate."""
+    file_path = function_args.get("path", "")
+    if not file_path:
+        return
+
+    # File tools resolve relative paths against the task's live/session cwd.
+    # That can differ from the Hermes process cwd, especially for workers and
+    # containers, so checkpoint discovery must use the identical resolver.
+    from tools.file_tools import _resolve_path_for_task
+
+    resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
+    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path))
+    agent._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
 
 
 def _emit_tool_output_risk(agent, tool_message: dict, name: str, tool_call_id: str) -> None:
@@ -137,6 +153,72 @@ def _resolve_concurrent_tool_timeout() -> float | None:
     return value
 
 
+def _tool_search_scoped_names(agent) -> frozenset[str]:
+    """Return deferred tools reachable in the current Dovie runtime scope."""
+    try:
+        import model_tools
+        from tools import tool_search
+        from tools.registry import registry
+    except Exception:
+        return frozenset()
+
+    enabled = getattr(agent, "enabled_toolsets", None)
+    disabled = getattr(agent, "disabled_toolsets", None)
+    exact = getattr(agent, "_enabled_tool_names_filter", None)
+    runtime_scope_key = str(
+        getattr(agent, "_hermes_active_runtime_scope_key", "")
+        or getattr(agent, "runtime_scope_key", "")
+        or ""
+    )
+    cache_key = (
+        getattr(registry, "_generation", 0),
+        runtime_scope_key,
+        frozenset(enabled) if enabled is not None else None,
+        frozenset(disabled) if disabled is not None else None,
+        frozenset(exact) if exact is not None else None,
+    )
+    cached = getattr(agent, "_tool_search_scope_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    try:
+        scoped_defs = model_tools.get_tool_definitions(
+            enabled_toolsets=enabled,
+            disabled_toolsets=disabled,
+            enabled_tools=list(exact) if exact is not None else None,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        ) or []
+        names = tool_search.scoped_deferrable_names(scoped_defs)
+    except Exception:
+        names = frozenset()
+    try:
+        agent._tool_search_scope_cache = (cache_key, names)
+    except Exception:
+        pass
+    return names
+
+
+def _unwrap_tool_search_call(agent, function_name: str, function_args: dict) -> tuple[str, dict, str | None]:
+    """Resolve tool_call while enforcing profile and runtime-scope authority."""
+    try:
+        from tools import tool_search
+    except Exception:
+        return function_name, function_args, None
+    if function_name != tool_search.TOOL_CALL_NAME:
+        return function_name, function_args, None
+
+    underlying, underlying_args, error = tool_search.resolve_underlying_call(function_args)
+    if error or not underlying:
+        return function_name, function_args, error or "tool_call could not be resolved"
+    if underlying not in _tool_search_scoped_names(agent):
+        return function_name, function_args, (
+            f"'{underlying}' is not available in this session's runtime scope. "
+            "Use tool_search to find tools you can call."
+        )
+    return underlying, underlying_args, None
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
@@ -170,6 +252,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
     # ── Parse args + pre-execution bookkeeping ───────────────────────
     parsed_calls = []  # list of (tool_call, function_name, function_args)
+    middleware_traces: dict[str, list[dict[str, Any]]] = {}
     for tool_call in tool_calls:
         function_name = tool_call.function.name
 
@@ -188,6 +271,23 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             )
             continue
 
+        function_name, function_args, _tool_search_block = _unwrap_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
+
+        from agent.tool_middleware_runtime import apply_agent_tool_request
+
+        function_args, middleware_trace = apply_agent_tool_request(
+            agent,
+            function_name=function_name,
+            function_args=function_args,
+            task_id=effective_task_id,
+            tool_call_id=getattr(tool_call, "id", "") or "",
+        )
+        middleware_traces[getattr(tool_call, "id", "") or ""] = middleware_trace
+
         # Reset nudge counters only for a structurally valid invocation.
         if function_name == "memory":
             agent._turns_since_memory = 0
@@ -197,10 +297,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # Checkpoint for file-mutating tools
         if function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
             try:
-                file_path = function_args.get("path", "")
-                if file_path:
-                    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(file_path)
-                    agent._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
+                _ensure_file_checkpoint(
+                    agent,
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                )
             except Exception:
                 pass
 
@@ -223,23 +325,35 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception:
                 pass
 
-        block_result = None
+        block_result = (
+            json.dumps({"error": _tool_search_block}, ensure_ascii=False)
+            if _tool_search_block is not None
+            else None
+        )
         blocked_by_guardrail = False
-        try:
-            from hermes_cli.plugins import resolve_pre_tool_block
-            block_message = resolve_pre_tool_block(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            block_message = None
+        if block_result is None:
+            try:
+                from hermes_cli.plugins import resolve_pre_tool_block
+                block_message = resolve_pre_tool_block(
+                    function_name,
+                    function_args,
+                    task_id=effective_task_id or "",
+                    session_id=getattr(agent, "session_id", "") or "",
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                    turn_id=getattr(agent, "_current_turn_id", "") or "",
+                    api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                    middleware_trace=middleware_trace,
+                )
+            except Exception:
+                block_message = None
 
-        if block_message is not None:
-            block_result = json.dumps({"error": block_message}, ensure_ascii=False)
-        else:
-            guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-            if not guardrail_decision.allows_execution:
-                block_result = agent._guardrail_block_result(guardrail_decision)
-                blocked_by_guardrail = True
+            if block_message is not None:
+                block_result = json.dumps({"error": block_message}, ensure_ascii=False)
+            else:
+                guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                if not guardrail_decision.allows_execution:
+                    block_result = agent._guardrail_block_result(guardrail_decision)
+                    blocked_by_guardrail = True
 
         parsed_calls.append((tool_call, function_name, function_args, block_result, blocked_by_guardrail))
 
@@ -287,14 +401,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     agent._current_tool = tool_names_str
     agent._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
 
-    # Capture CLI callbacks from the agent thread so worker threads can
-    # register them locally.  Without this, _get_approval_callback() in
-    # terminal_tool returns None in ThreadPoolExecutor workers, causing
-    # the dangerous-command prompt to fall back to input() — which
-    # deadlocks against prompt_toolkit's raw terminal mode (#13617).
-    _parent_approval_cb = _get_approval_callback()
-    _parent_sudo_cb = _get_sudo_password_callback()
-
     def _run_tool(index, tool_call, function_name, function_args):
         """Worker function executed in a thread."""
         # Register this worker tid so the agent can fan out an interrupt
@@ -321,27 +427,26 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             set_activity_callback(agent._touch_activity)
         except Exception:
             pass
-        # Propagate approval/sudo callbacks to this worker thread.
-        # Mirrors cli.py run_agent() pattern (GHSA-qg5c-hvr5-hjgr).
-        if _parent_approval_cb is not None:
-            try:
-                _set_approval_callback(_parent_approval_cb)
-            except Exception:
-                pass
-        if _parent_sudo_cb is not None:
-            try:
-                _set_sudo_password_callback(_parent_sudo_cb)
-            except Exception:
-                pass
         start = time.time()
         try:
-            result = agent._invoke_tool(
-                function_name,
-                function_args,
-                effective_task_id,
-                tool_call.id,
-                messages=messages,
-                pre_tool_block_checked=True,
+            from agent.tool_middleware_runtime import run_agent_tool_execution
+
+            result, function_args = run_agent_tool_execution(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                task_id=effective_task_id,
+                tool_call_id=tool_call.id,
+                execute=lambda next_args: agent._invoke_tool(
+                    function_name,
+                    next_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    pre_tool_block_checked=True,
+                    middleware_applied=True,
+                    middleware_trace=middleware_traces.get(tool_call.id, []),
+                ),
             )
         except Exception as tool_error:
             result = f"Error executing tool '{function_name}': {tool_error}"
@@ -360,13 +465,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             agent._tool_worker_threads.discard(_worker_tid)
         try:
             _ra()._set_interrupt(False, _worker_tid)
-        except Exception:
-            pass
-        # Clear thread-local callbacks so a recycled worker thread
-        # doesn't hold stale references to a disposed CLI instance.
-        try:
-            _set_approval_callback(None)
-            _set_sudo_password_callback(None)
         except Exception:
             pass
 
@@ -391,13 +489,17 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         deadline = time.monotonic() + timeout_s if timeout_s is not None else None
         if runnable_calls:
             max_workers = min(len(runnable_calls), _MAX_TOOL_WORKERS)
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            executor = DaemonThreadPoolExecutor(max_workers=max_workers)
             abandon_executor = False
             try:
                 for i, tc, name, args in runnable_calls:
-                    # Propagate ContextVars (e.g. _approval_session_key); mirrors asyncio.to_thread.
-                    ctx = contextvars.copy_context()
-                    f = executor.submit(ctx.run, _run_tool, i, tc, name, args)
+                    f = executor.submit(
+                        propagate_context_to_thread(_run_tool),
+                        i,
+                        tc,
+                        name,
+                        args,
+                    )
                     futures.append(f)
                     future_to_index[f] = i
 
@@ -711,15 +813,39 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._apply_pending_steer_to_tool_results(messages, 1)
             continue
 
+        function_name, function_args, _tool_search_block = _unwrap_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
+
+        from agent.tool_middleware_runtime import apply_agent_tool_request
+
+        function_args, middleware_trace = apply_agent_tool_request(
+            agent,
+            function_name=function_name,
+            function_args=function_args,
+            task_id=effective_task_id,
+            tool_call_id=getattr(tool_call, "id", "") or "",
+        )
+
         # Check plugin hooks for a block directive before executing.
-        _block_msg: Optional[str] = None
-        try:
-            from hermes_cli.plugins import resolve_pre_tool_block
-            _block_msg = resolve_pre_tool_block(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            pass
+        _block_msg: Optional[str] = _tool_search_block
+        if _block_msg is None:
+            try:
+                from hermes_cli.plugins import resolve_pre_tool_block
+                _block_msg = resolve_pre_tool_block(
+                    function_name,
+                    function_args,
+                    task_id=effective_task_id or "",
+                    session_id=getattr(agent, "session_id", "") or "",
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                    turn_id=getattr(agent, "_current_turn_id", "") or "",
+                    api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                    middleware_trace=middleware_trace,
+                )
+            except Exception:
+                pass
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
@@ -779,12 +905,12 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Checkpoint: snapshot working dir before file-mutating tools
         if not _execution_blocked and function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
             try:
-                file_path = function_args.get("path", "")
-                if file_path:
-                    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(file_path)
-                    agent._checkpoint_mgr.ensure_checkpoint(
-                        work_dir, f"before {function_name}"
-                    )
+                _ensure_file_checkpoint(
+                    agent,
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                )
             except Exception:
                 pass  # never block tool execution
 
@@ -818,199 +944,49 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             # tool result for the original tool_call_id without executing.
             function_result = agent._guardrail_block_result(_guardrail_block_decision)
             tool_duration = 0.0
-        elif function_name == "todo":
-            from tools.todo_tool import todo_tool as _todo_tool
-            function_result = _todo_tool(
-                todos=function_args.get("todos"),
-                merge=function_args.get("merge", False),
-                store=agent._todo_store,
-            )
-            tool_duration = time.time() - tool_start_time
-            if agent._should_emit_quiet_tool_messages():
-                agent._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
-        elif function_name == "session_search":
-            session_db = agent._get_session_db_for_recall()
-            if not session_db:
-                from hermes_agent.read_models.session_recall import unavailable_message
-                function_result = json.dumps({"success": False, "error": unavailable_message()})
-            else:
-                from tools.session_search_tool import session_search as _session_search
-                function_result = _session_search(
-                    query=function_args.get("query", ""),
-                    role_filter=function_args.get("role_filter"),
-                    limit=function_args.get("limit", 3),
-                    session_id=function_args.get("session_id"),
-                    around_message_id=function_args.get("around_message_id"),
-                    window=function_args.get("window", 5),
-                    sort=function_args.get("sort"),
-                    db=session_db,
-                    current_session_id=agent.session_id,
-                )
-            tool_duration = time.time() - tool_start_time
-            if agent._should_emit_quiet_tool_messages():
-                agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
-        elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            function_result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=agent._memory_store,
-            )
-            # Bridge: notify external memory provider of built-in memory writes
-            if agent._memory_manager and function_args.get("action") in {"add", "replace"}:
-                try:
-                    agent._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=agent._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=getattr(tool_call, "id", None),
-                        ),
-                    )
-                except Exception:
-                    pass
-            tool_duration = time.time() - tool_start_time
-            if agent._should_emit_quiet_tool_messages():
-                agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
-        elif function_name == "clarify":
-            from tools.clarify_tool import clarify_tool as _clarify_tool
-            function_result = _clarify_tool(
-                question=function_args.get("question", ""),
-                choices=function_args.get("choices"),
-                callback=agent.clarify_callback,
-            )
-            tool_duration = time.time() - tool_start_time
-            if agent._should_emit_quiet_tool_messages():
-                agent._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
-        elif function_name == "read_terminal":
-            from tools.read_terminal_tool import read_terminal_tool as _read_terminal_tool
-            function_result = _read_terminal_tool(
-                start_line=function_args.get("start_line"),
-                count=function_args.get("count"),
-                callback=getattr(agent, "read_terminal_callback", None),
-            )
-            tool_duration = time.time() - tool_start_time
-            if agent._should_emit_quiet_tool_messages():
-                agent._vprint(f"  {_get_cute_tool_message_impl('read_terminal', function_args, tool_duration, result=function_result)}")
-        elif function_name == "delegate_task":
-            tasks_arg = function_args.get("tasks")
-            if tasks_arg and isinstance(tasks_arg, list):
-                spinner_label = f"🔀 delegating {len(tasks_arg)} tasks"
-            else:
-                goal_preview = (function_args.get("goal") or "")[:30]
-                spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 delegating"
-            spinner = None
-            if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
-                face = random.choice(KawaiiSpinner.get_waiting_faces())
-                spinner = KawaiiSpinner(f"{face} {spinner_label}", spinner_type='dots', print_fn=agent._print_fn)
-                spinner.start()
-            agent._delegate_spinner = spinner
-            _delegate_result = None
-            try:
-                function_result = agent._dispatch_delegate_task(function_args, tool_call_id=tool_call.id)
-                _delegate_result = function_result
-            finally:
-                agent._delegate_spinner = None
-                tool_duration = time.time() - tool_start_time
-                cute_msg = _get_cute_tool_message_impl('delegate_task', function_args, tool_duration, result=_delegate_result)
-                if spinner:
-                    spinner.stop(cute_msg)
-                elif agent._should_emit_quiet_tool_messages():
-                    agent._vprint(f"  {cute_msg}")
-        elif agent._context_engine_tool_names and function_name in agent._context_engine_tool_names:
-            # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
-            spinner = None
-            if agent._should_emit_quiet_tool_messages():
-                face = random.choice(KawaiiSpinner.get_waiting_faces())
-                emoji = _get_tool_emoji(function_name)
-                preview = _build_tool_preview(function_name, function_args) or function_name
-                spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=agent._print_fn)
-                spinner.start()
-            _ce_result = None
-            try:
-                function_result = agent.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
-                _ce_result = function_result
-            except Exception as tool_error:
-                function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
-                logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
-            finally:
-                tool_duration = time.time() - tool_start_time
-                cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_ce_result)
-                if spinner:
-                    spinner.stop(cute_msg)
-                elif agent._should_emit_quiet_tool_messages():
-                    agent._vprint(f"  {cute_msg}")
-        elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
-            # Memory provider tools (hindsight_retain, honcho_search, etc.)
-            # These are not in the tool registry — route through MemoryManager.
-            spinner = None
-            if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
-                face = random.choice(KawaiiSpinner.get_waiting_faces())
-                emoji = _get_tool_emoji(function_name)
-                preview = _build_tool_preview(function_name, function_args) or function_name
-                spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=agent._print_fn)
-                spinner.start()
-            _mem_result = None
-            try:
-                function_result = agent._memory_manager.handle_tool_call(function_name, function_args)
-                _mem_result = function_result
-            except Exception as tool_error:
-                function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
-                logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
-            finally:
-                tool_duration = time.time() - tool_start_time
-                cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
-                if spinner:
-                    spinner.stop(cute_msg)
-                elif agent._should_emit_quiet_tool_messages():
-                    agent._vprint(f"  {cute_msg}")
-        elif agent.quiet_mode:
-            spinner = None
-            if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
-                face = random.choice(KawaiiSpinner.get_waiting_faces())
-                emoji = _get_tool_emoji(function_name)
-                preview = _build_tool_preview(function_name, function_args) or function_name
-                spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=agent._print_fn)
-                spinner.start()
-            _spinner_result = None
-            try:
-                function_result = agent._invoke_tool(
-                    function_name,
-                    function_args,
-                    effective_task_id,
-                    tool_call.id,
-                    messages=messages,
-                    pre_tool_block_checked=True,
-                )
-                _spinner_result = function_result
-            except Exception as tool_error:
-                function_result = f"Error executing tool '{function_name}': {tool_error}"
-                logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
-            finally:
-                tool_duration = time.time() - tool_start_time
-                cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
-                if spinner:
-                    spinner.stop(cute_msg)
-                elif agent._should_emit_quiet_tool_messages():
-                    agent._vprint(f"  {cute_msg}")
         else:
+            spinner = None
+            if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
+                face = random.choice(KawaiiSpinner.get_waiting_faces())
+                emoji = _get_tool_emoji(function_name)
+                preview = _build_tool_preview(function_name, function_args) or function_name
+                spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=agent._print_fn)
+                spinner.start()
             try:
-                function_result = agent._invoke_tool(
-                    function_name,
-                    function_args,
-                    effective_task_id,
-                    tool_call.id,
-                    messages=messages,
-                    pre_tool_block_checked=True,
+                from agent.tool_middleware_runtime import run_agent_tool_execution
+
+                function_result, function_args = run_agent_tool_execution(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    task_id=effective_task_id,
+                    tool_call_id=tool_call.id,
+                    execute=lambda next_args: agent._invoke_tool(
+                        function_name,
+                        next_args,
+                        effective_task_id,
+                        tool_call.id,
+                        messages=messages,
+                        pre_tool_block_checked=True,
+                        middleware_applied=True,
+                        middleware_trace=middleware_trace,
+                    ),
                 )
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
-            tool_duration = time.time() - tool_start_time
+            finally:
+                tool_duration = time.time() - tool_start_time
+                cute_msg = _get_cute_tool_message_impl(
+                    function_name,
+                    function_args,
+                    tool_duration,
+                    result=function_result,
+                )
+                if spinner:
+                    spinner.stop(cute_msg)
+                elif agent._should_emit_quiet_tool_messages():
+                    agent._vprint(f"  {cute_msg}")
 
         if isinstance(function_result, str):
             result_preview = function_result if agent.verbose_logging else (
@@ -1208,6 +1184,7 @@ def execute_tool_calls_segmented(
 
 
 __all__ = [
+    "_ensure_file_checkpoint",
     "_parse_tool_arguments",
     "_resolve_concurrent_tool_timeout",
     "execute_tool_calls_concurrent",

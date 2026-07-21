@@ -16,7 +16,6 @@ Credit: jobless0x (#774, #1312), OutThisLife (#798), clicksingh (#697).
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import queue
 import re
@@ -38,6 +37,7 @@ from hermes_gateway.response_filters import (
 )
 from hermes_gateway.stream_consumer_delivery import StreamConsumerDeliveryMixin
 from hermes_gateway.stream_consumer_final import StreamConsumerFinalMixin
+from hermes_gateway.stream_consumer_lifecycle import StreamConsumerLifecycleMixin
 
 logger = logging.getLogger("hermes_gateway.stream_consumer")
 
@@ -82,7 +82,11 @@ class StreamConsumerConfig:
     chat_type: str = ""
 
 
-class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixin):
+class GatewayStreamConsumer(
+    StreamConsumerLifecycleMixin,
+    StreamConsumerFinalMixin,
+    StreamConsumerDeliveryMixin,
+):
     """Async consumer that progressively edits a platform message with streamed tokens.
 
     Usage::
@@ -181,6 +185,7 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
         # streaming, even if the final edit (cursor removal etc.)
         # subsequently failed.
         self._final_content_delivered = False
+        self._delivered_commentary_texts: list[str] = []
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -209,30 +214,6 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
         self._draft_failures = 0
         self._before_finalize_notified = False
 
-    def _metadata_for_send(
-        self,
-        *,
-        final: bool = False,
-        expect_edits: bool = False,
-    ) -> dict | None:
-        """Return per-send metadata for stream-created messages.
-
-        Mattermost treats notify-worthy sends as user-visible final content
-        when deciding whether a broken thread root may fall back flat.  Preview
-        and progress sends keep their original metadata and remain thread-strict.
-
-        ``expect_edits`` preserves the upstream Telegram streaming contract:
-        preview messages that may be edited later must stay on the editable
-        legacy send path, while fresh/fallback final sends can still use richer
-        final-message delivery.
-        """
-        meta = dict(self.metadata) if self.metadata else {}
-        if expect_edits:
-            meta["expect_edits"] = True
-        if final:
-            meta["notify"] = True
-        return meta or None
-
     @property
     def already_sent(self) -> bool:
         """True if at least one message was sent or edited during the run."""
@@ -254,48 +235,15 @@ class GatewayStreamConsumer(StreamConsumerFinalMixin, StreamConsumerDeliveryMixi
         the subsequent cosmetic edit (cursor removal) failed."""
         return self._final_content_delivered
 
-    async def _notify_before_finalize(self) -> None:
-        """Run the pre-finalize hook exactly once, swallowing hook errors."""
-        if self._before_finalize_notified:
-            return
-        self._before_finalize_notified = True
-        if self._on_before_finalize is None:
-            return
-        try:
-            result = self._on_before_finalize()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.debug("Suppressed recoverable gateway exception", exc_info=True)
-
-    async def _edit_message(
-        self,
-        *,
-        message_id: str,
-        content: str,
-        finalize: bool = False,
-    ):
-        """Edit via the adapter, passing routing metadata when supported."""
-        kwargs = {
-            "chat_id": self.chat_id,
-            "message_id": message_id,
-            "content": content,
-        }
-        # Keep the long-standing stream-consumer contract: concrete adapters
-        # must accept finalize= even when it is False (guarded by tests).
-        kwargs["finalize"] = finalize
-
-        if self.metadata:
-            try:
-                params = inspect.signature(self.adapter.edit_message).parameters
-                if "metadata" in params or any(
-                    param.kind is inspect.Parameter.VAR_KEYWORD
-                    for param in params.values()
-                ):
-                    kwargs["metadata"] = self.metadata
-            except (TypeError, ValueError):
-                logger.debug("Suppressed recoverable gateway exception", exc_info=True)
-        return await self.adapter.edit_message(**kwargs)
+    def has_delivered_text(self, text: str) -> bool:
+        """Return True when the exact visible text was already delivered."""
+        target = self._clean_for_display(text or "").strip()
+        if not target:
+            return False
+        visible_prefix = self._visible_prefix().strip()
+        if visible_prefix == target:
+            return True
+        return any(sent.strip() == target for sent in self._delivered_commentary_texts)
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""

@@ -19,6 +19,7 @@ import uuid
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
 
+from agent.secret_scope import get_profile_env
 from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -33,9 +34,7 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
 
-MEDIA_TAG_CLEANUP_RE = re.compile(
-    r'''[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|csv|apk|ipa)(?=[\s`"',;:)\]}]|$))[`"']?'''
-)
+from channels.platforms.media_tags import MEDIA_TAG_CLEANUP_RE
 
 
 from channels.platforms.base_text import (
@@ -232,52 +231,6 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
         Python ``len`` (e.g. Telegram counts UTF-16 code units).
         """
         return len
-
-    def supports_draft_streaming(
-        self,
-        chat_type: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Whether this adapter supports native streaming-draft updates.
-
-        Telegram Bot API 9.5 introduced ``sendMessageDraft``, which renders an
-        animated streaming preview as the bot calls it repeatedly with the
-        same ``draft_id`` and growing text.  Adapters that implement
-        ``send_draft`` should return True here for the chat types where the
-        platform supports it (Telegram restricts drafts to private DMs).
-
-        Default implementation returns False.  Stream consumers fall back to
-        the edit-based path (``send`` + ``edit_message``) when this returns
-        False or when ``send_draft`` raises.
-        """
-        return False
-
-    async def send_draft(
-        self,
-        chat_id: str,
-        draft_id: int,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send or update an animated streaming-draft preview.
-
-        Reuse the same ``draft_id`` (any non-zero int) across consecutive
-        calls within a single response so the platform animates the preview
-        rather than re-creating it.  Different responses must use different
-        ``draft_id`` values within the same chat to avoid animating over a
-        prior bubble.
-
-        Drafts have no message_id and cannot be edited, replied to, or
-        deleted via normal message APIs.  When the response finishes, the
-        caller delivers the final answer as a regular ``send`` and the
-        draft preview clears naturally on the client.
-
-        Default implementation raises NotImplementedError; adapters that
-        also return True from :meth:`supports_draft_streaming` must override.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement send_draft"
-        )
 
     @property
     def has_fatal_error(self) -> bool:
@@ -701,6 +654,37 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             return response.text, int(ttl or 0)
         return response, 0
 
+    def _final_delivery_adapter(
+        self,
+        source: Optional[SessionSource],
+    ) -> "BasePlatformAdapter":
+        """Use a reconnect replacement for a new final-response message.
+
+        Existing edits, typing indicators, and cleanup remain owned by this
+        adapter because their platform message IDs belong to its transport.
+        Only a not-yet-sent final response is routed to the runner's current
+        same-platform adapter.
+        """
+        runner = getattr(self, "gateway_runner", None)
+        resolve = getattr(runner, "_adapter_for_source", None)
+        if not callable(resolve):
+            return self
+        try:
+            live_adapter = resolve(source)
+        except Exception:
+            logger.debug(
+                "[%s] Failed to resolve live adapter for final delivery",
+                self.name,
+                exc_info=True,
+            )
+            return self
+        if (
+            not isinstance(live_adapter, BasePlatformAdapter)
+            or live_adapter.platform != self.platform
+        ):
+            return self
+        return live_adapter
+
     async def _send_with_retry(
         self,
         chat_id: str,
@@ -738,9 +722,16 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             return result
 
         if is_network:
-            # Retry with exponential backoff for transient errors
+            # Retry with exponential backoff for transient errors. An
+            # adapter-provided server delay is authoritative for the next
+            # attempt (for example Telegram FloodWait).
+            server_retry_after = result.retry_after
             for attempt in range(1, max_retries + 1):
-                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                if server_retry_after is not None:
+                    delay = max(0.0, float(server_retry_after)) + random.uniform(0, 1)
+                    server_retry_after = None
+                else:
+                    delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
                 logger.warning(
                     "[%s] Send failed (attempt %d/%d, retrying in %.1fs): %s",
                     self.name, attempt, max_retries, delay, error_str,
@@ -756,6 +747,8 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
                     logger.info("[%s] Send succeeded on retry %d", self.name, attempt)
                     return result
                 error_str = result.error or ""
+                if result.retry_after is not None:
+                    server_retry_after = result.retry_after
                 if not (result.retryable or self._is_retryable_error(error_str)):
                     break  # error switched to non-transient — fall through to plain-text fallback
             else:
@@ -1240,7 +1233,7 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
           HERMES_HUMAN_DELAY_MIN_MS: minimum delay in ms (default 800, custom mode)
           HERMES_HUMAN_DELAY_MAX_MS: maximum delay in ms (default 2500, custom mode)
         """
-        mode = os.getenv("HERMES_HUMAN_DELAY_MODE", "off").lower()
+        mode = get_profile_env("HERMES_HUMAN_DELAY_MODE", "off").lower()
         if mode == "off":
             return 0.0
         if mode == "natural":
@@ -1248,11 +1241,11 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
         # custom mode — tolerate malformed env vars instead of crashing.
         try:
-            min_ms = int(os.getenv("HERMES_HUMAN_DELAY_MIN_MS", "800"))
+            min_ms = int(get_profile_env("HERMES_HUMAN_DELAY_MIN_MS", "800"))
         except (TypeError, ValueError):
             min_ms = 800
         try:
-            max_ms = int(os.getenv("HERMES_HUMAN_DELAY_MAX_MS", "2500"))
+            max_ms = int(get_profile_env("HERMES_HUMAN_DELAY_MAX_MS", "2500"))
         except (TypeError, ValueError):
             max_ms = 2500
         return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
@@ -1316,6 +1309,7 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             # downstream extract_media / text-processing logic sees a plain
             # string, and remember the TTL + platform capability so the
             # post-send block can schedule the deletion.
+            _is_ephemeral_response = isinstance(response, EphemeralReply)
             response, _ephemeral_ttl = self._unwrap_ephemeral(response)
 
             # Send response if any.  A None/empty response is normal when
@@ -1419,7 +1413,13 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
 
                 # Send the text portion
                 if text_content and not _tts_caption_delivered:
-                    logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                    delivery_adapter = self._final_delivery_adapter(event.source)
+                    logger.info(
+                        "[%s] Sending response (%d chars) to %s",
+                        delivery_adapter.name,
+                        len(text_content),
+                        event.source.chat_id,
+                    )
                     _reply_anchor = _reply_anchor_for_event(event)
                     # Mark final response messages for notification delivery.
                     # Platform adapters that support per-message notification
@@ -1433,13 +1433,46 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
                         _thread_metadata["notify"] = True
                     else:
                         _thread_metadata = {"notify": True}
-                    result = await self._send_with_retry(
+                    _obligation_id = None
+                    try:
+                        from hermes_gateway.delivery_obligation_runtime import (
+                            delivery_obligations_for,
+                        )
+
+                        _obligation_id = await delivery_obligations_for(
+                            self
+                        ).record_before_send(
+                            event=event,
+                            session_key=session_key,
+                            platform=delivery_adapter.platform.value,
+                            content=text_content,
+                            reply_to=_reply_anchor,
+                            metadata=_thread_metadata,
+                            typed_command_prefix=self.typed_command_prefix,
+                            ephemeral=_is_ephemeral_response,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "delivery obligation record failed",
+                            exc_info=True,
+                        )
+                    result = await delivery_adapter._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
                         reply_to=_reply_anchor,
                         metadata=_thread_metadata,
                     )
                     _record_delivery(result)
+                    try:
+                        await delivery_obligations_for(self).settle(
+                            _obligation_id,
+                            result,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "delivery obligation update failed",
+                            exc_info=True,
+                        )
 
                     # Schedule auto-deletion of system-notice replies.
                     # Detached so the handler returns immediately; errors
@@ -1450,7 +1483,7 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
                         and result.success
                         and result.message_id
                     ):
-                        self._schedule_ephemeral_delete(
+                        delivery_adapter._schedule_ephemeral_delete(
                             chat_id=event.source.chat_id,
                             message_id=result.message_id,
                             ttl_seconds=_ephemeral_ttl,
@@ -1835,9 +1868,14 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
         user_id_alt: Optional[str] = None,
         chat_id_alt: Optional[str] = None,
         is_bot: bool = False,
+        scope_id: Optional[str] = None,
         guild_id: Optional[str] = None,
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        role_authorized: bool = False,
+        profile: Optional[str] = None,
+        auto_thread_created: bool = False,
+        auto_thread_initial_name: Optional[str] = None,
     ) -> SessionSource:
         """Helper to build a SessionSource for this platform."""
         # Normalize empty topic to None
@@ -1855,9 +1893,14 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             user_id_alt=user_id_alt,
             chat_id_alt=chat_id_alt,
             is_bot=is_bot,
+            scope_id=str(scope_id) if scope_id else None,
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
+            role_authorized=role_authorized,
+            profile=profile,
+            auto_thread_created=auto_thread_created,
+            auto_thread_initial_name=auto_thread_initial_name,
         )
     
     @abstractmethod
@@ -1929,7 +1972,7 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             # a potential closing fence, and the chunk indicator.
             headroom = max_length - INDICATOR_RESERVE - _len(prefix) - _len(FENCE_CLOSE)
             if headroom < 1:
-                headroom = max_length // 2
+                headroom = max(1, max_length // 2)
 
             # Everything remaining fits in one final chunk
             if _len(prefix) + _len(remaining) <= max_length - INDICATOR_RESERVE:
@@ -1953,7 +1996,11 @@ class BasePlatformAdapter(BaseDeliveryMixin, ABC):
             if split_at < _cp_limit // 2:
                 split_at = region.rfind(" ")
             if split_at < 1:
-                split_at = _cp_limit
+                # Degenerate limits (0/1 or a UTF-16 budget narrower than one
+                # surrogate pair) must still consume one codepoint.  A single
+                # indivisible codepoint may exceed that invalid budget, but
+                # preserving content is preferable to an infinite loop/OOM.
+                split_at = max(1, _cp_limit)
 
             # Avoid splitting inside an inline code span (`...`).
             # If the text before split_at has an odd number of unescaped

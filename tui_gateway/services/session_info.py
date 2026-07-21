@@ -119,6 +119,8 @@ def session_info(agent: Any, session: dict | None = None) -> dict:
         "tools": {},
         "skills": {},
         "cwd": cwd,
+        "branch": str((session or {}).get("git_branch") or ""),
+        "project": (session or {}).get("project"),
         "workspace": dict(session.get("workspace") or {}) if session else {},
         "model_descriptor": dict(session.get("model_descriptor") or {}) if session else {},
         "version": "",

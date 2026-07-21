@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
+from agent.secret_scope import get_profile_env
 from urllib.parse import urlsplit
 
 from hermes_constants import get_hermes_dir, get_hermes_home
@@ -498,7 +500,27 @@ def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
     safe_roots = _base_public_attr("MEDIA_DELIVERY_SAFE_ROOTS", MEDIA_DELIVERY_SAFE_ROOTS)
     roots = [Path(root) for root in safe_roots]
-    extra_roots = os.environ.get(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "")
+    # Import-time compatibility constants describe the process default, while
+    # multiplexed requests carry a context-local profile home. Always add the
+    # active profile's managed caches so secondary profiles can deliver their
+    # own media without inheriting another profile's path permissions.
+    active_home = Path(get_hermes_home())
+    roots.extend(
+        active_home / relative
+        for relative in (
+            "cache/images",
+            "cache/audio",
+            "cache/videos",
+            "cache/documents",
+            "cache/screenshots",
+            "image_cache",
+            "audio_cache",
+            "video_cache",
+            "document_cache",
+            "browser_screenshots",
+        )
+    )
+    extra_roots = get_profile_env(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "")
     for chunk in extra_roots.split(os.pathsep):
         for raw_root in chunk.split(","):
             raw_root = raw_root.strip()

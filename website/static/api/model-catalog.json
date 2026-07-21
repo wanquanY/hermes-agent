@@ -17,6 +17,14 @@
           "description": ""
         },
         {
+          "id": "anthropic/claude-opus-4.8",
+          "description": ""
+        },
+        {
+          "id": "anthropic/claude-opus-4.8-fast",
+          "description": "2x price, higher output speed"
+        },
+        {
           "id": "anthropic/claude-opus-4.7",
           "description": ""
         },
@@ -182,6 +190,9 @@
       "models": [
         {
           "id": "anthropic/claude-fable-5"
+        },
+        {
+          "id": "anthropic/claude-opus-4.8"
         },
         {
           "id": "anthropic/claude-opus-4.7"

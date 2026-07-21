@@ -371,10 +371,11 @@ class TestBuildSkillsSystemPrompt:
         yield
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
-    def test_empty_when_no_skills_dir(self, monkeypatch, tmp_path):
+    def test_builtin_skills_remain_available_without_user_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         result = build_skills_system_prompt()
-        assert result == ""
+        assert "## Skills" in result
+        assert "<available_skills>" in result
 
     def test_builds_index_with_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -996,6 +997,7 @@ class TestPromptBuilderConstants:
         assert "Matrix" in hint
         assert "MEDIA:" in hint
         assert "Markdown" in hint
+        assert "Do NOT use Markdown tables" in hint
 
     def test_platform_hints_feishu(self):
         hint = PLATFORM_HINTS["feishu"]
@@ -1368,4 +1370,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-

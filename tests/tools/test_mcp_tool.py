@@ -1729,7 +1729,7 @@ class TestReconnection:
             assert run_count == _MAX_INITIAL_CONNECT_RETRIES + 1
             assert server.state == MCPServerState.PARKED
             assert "cannot connect" in (server.last_error or "")
-            assert server._error is None
+            assert server._error is not None
             await server.shutdown()
 
         asyncio.run(_test())

@@ -42,6 +42,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+from agent.secret_scope import get_profile_env
 from urllib.parse import urlparse
 
 try:
@@ -203,9 +205,9 @@ class QQAdapter(QQMediaMixin, BasePlatformAdapter):
         super().__init__(config, Platform.QQBOT)
 
         extra = config.extra or {}
-        self._app_id = str(extra.get("app_id") or os.getenv("QQ_APP_ID", "")).strip()
+        self._app_id = str(extra.get("app_id") or get_profile_env("QQ_APP_ID", "")).strip()
         self._client_secret = str(
-            extra.get("client_secret") or os.getenv("QQ_CLIENT_SECRET", "")
+            extra.get("client_secret") or get_profile_env("QQ_CLIENT_SECRET", "")
         ).strip()
         self._markdown_support = bool(extra.get("markdown_support", True))
 
@@ -456,12 +458,12 @@ class QQAdapter(QQMediaMixin, BasePlatformAdapter):
         # local patch, so QQ can regress to direct-connect timeouts after update.
         self._session = aiohttp.ClientSession(trust_env=True)
         ws_proxy = (
-            os.getenv("WSS_PROXY")
-            or os.getenv("wss_proxy")
-            or os.getenv("HTTPS_PROXY")
-            or os.getenv("https_proxy")
-            or os.getenv("ALL_PROXY")
-            or os.getenv("all_proxy")
+            get_profile_env("WSS_PROXY")
+            or get_profile_env("wss_proxy")
+            or get_profile_env("HTTPS_PROXY")
+            or get_profile_env("https_proxy")
+            or get_profile_env("ALL_PROXY")
+            or get_profile_env("all_proxy")
         )
         self._ws = await self._session.ws_connect(
             gateway_url,

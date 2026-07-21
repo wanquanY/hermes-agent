@@ -189,6 +189,9 @@ def init_agent(
     interim_assistant_callback: callable = None,
     tool_gen_callback: callable = None,
     status_callback: callable = None,
+    reaction_callback: callable = None,
+    notice_callback: callable = None,
+    notice_clear_callback: callable = None,
     max_tokens: int = None,
     reasoning_config: Dict[str, Any] = None,
     service_tier: str = None,
@@ -412,6 +415,9 @@ def init_agent(
     agent.interim_assistant_callback = interim_assistant_callback
     agent.status_callback = status_callback
     agent.tool_gen_callback = tool_gen_callback
+    agent.reaction_callback = reaction_callback
+    agent.notice_callback = notice_callback
+    agent.notice_clear_callback = notice_clear_callback
 
     
     # Tool execution state — allows _vprint during tool execution
@@ -535,6 +541,13 @@ def init_agent(
     # Rate limit tracking — updated from x-ratelimit-* response headers
     # after each API call.  Accessed by /usage slash command.
     agent._rate_limit_state: Optional["RateLimitState"] = None
+    agent._credits_state = None
+    agent._credits_session_start_micros = None
+    agent._credits_latch = {
+        "active": set(),
+        "seen_below_90": False,
+        "usage_band": None,
+    }
 
     # OpenRouter response cache hit counter — incremented when
     # X-OpenRouter-Cache-Status: HIT is seen in streaming response headers.
@@ -674,6 +687,46 @@ def init_agent(
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(effective_key, str) and len(effective_key) > 12:
                     print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+    elif agent.provider == "moa":
+        from agent.moa_loop import MoAClient
+
+        agent.api_mode = "chat_completions"
+
+        def _moa_reference_relay(event: str, **kwargs: Any) -> None:
+            """Relay advisory progress without mutating conversation history."""
+            callback = getattr(agent, "tool_progress_callback", None)
+            if callback is None:
+                return
+            try:
+                if event == "moa.reference":
+                    callback(
+                        "moa.reference",
+                        str(kwargs.get("label") or ""),
+                        str(kwargs.get("text") or ""),
+                        None,
+                        moa_index=kwargs.get("index"),
+                        moa_count=kwargs.get("count"),
+                    )
+                elif event == "moa.aggregating":
+                    callback(
+                        "moa.aggregating",
+                        str(kwargs.get("aggregator") or ""),
+                        None,
+                        None,
+                        moa_ref_count=kwargs.get("ref_count"),
+                    )
+            except Exception:
+                logger.debug("MoA progress relay failed", exc_info=True)
+
+        agent.client = MoAClient(
+            agent.model or "default",
+            reference_callback=_moa_reference_relay,
+        )
+        agent._client_kwargs = {}
+        agent.api_key = api_key or "moa-virtual-provider"
+        agent.base_url = "moa://local"
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.
@@ -815,11 +868,9 @@ def init_agent(
                         _fb_entries = [fallback_model]
                     _fb_resolved = False
                     for _fb in _fb_entries:
-                        _fb_explicit_key = (_fb.get("api_key") or "").strip() or None
-                        if not _fb_explicit_key:
-                            _fb_key_env = (_fb.get("key_env") or _fb.get("api_key_env") or "").strip()
-                            if _fb_key_env:
-                                _fb_explicit_key = os.getenv(_fb_key_env, "").strip() or None
+                        from hermes_cli.fallback_config import resolve_entry_api_key
+
+                        _fb_explicit_key = resolve_entry_api_key(_fb)
                         _fb_client, _fb_model = resolve_provider_client(
                             _fb["provider"], model=_fb["model"], raw_codex=True,
                             explicit_base_url=_fb.get("base_url"),
@@ -857,6 +908,16 @@ def init_agent(
                     )
         
         agent._client_kwargs = client_kwargs  # stored for rebuilding after interrupt
+
+        try:
+            from hermes_cli.config import apply_custom_provider_tls_to_client_kwargs
+
+            apply_custom_provider_tls_to_client_kwargs(
+                agent._client_kwargs,
+                str(client_kwargs.get("base_url") or ""),
+            )
+        except Exception:
+            logger.debug("custom-provider TLS settings skipped during init", exc_info=True)
 
         # Enable fine-grained tool streaming for Claude on OpenRouter.
         # Without this, Anthropic buffers the entire tool call and goes
@@ -929,6 +990,10 @@ def init_agent(
         agent._fallback_chain = []
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    if agent._fallback_activated:
+        from agent.agent_runtime_helpers import refresh_reasoning_config
+
+        refresh_reasoning_config(agent, agent.model)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:
@@ -945,6 +1010,7 @@ def init_agent(
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
         enabled_tools=enabled_tools,
+        tool_search_context_length=model_context_window,
     )
     
     # Show tool configuration and store valid tool names for validation
@@ -1294,6 +1360,13 @@ def init_agent(
     # line).  Useful for users on exotic setups where the probe heuristics
     # are noisy.
     agent._environment_probe = bool(_agent_section.get("environment_probe", True))
+    if agent._environment_probe:
+        try:
+            from tools.env_probe import warm_environment_probe_async
+
+            warm_environment_probe_async()
+        except Exception:
+            logger.debug("Environment probe warm-up skipped", exc_info=True)
 
     # Per-platform prompt-hint overrides (config.yaml → platform_hints).
     # Lets an enterprise admin append to or replace Hermes' built-in

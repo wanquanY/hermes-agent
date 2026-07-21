@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.async_utils import safe_schedule_threadsafe
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_override
 from hermes_gateway.agent_cache import agent_cache_for
 from hermes_gateway.agent_execution_monitor import agent_execution_monitor_for
 from hermes_gateway.agent_input_preparation import agent_input_preparation_for
@@ -32,6 +33,7 @@ from hermes_gateway.bootstrap import (
     reload_runtime_env_preserving_config_authority,
 )
 from hermes_gateway.config import Platform
+from hermes_gateway.checkpoint_config import checkpoint_agent_kwargs
 from hermes_gateway.display_config import resolve_display_setting
 from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.freshness import (
@@ -88,6 +90,9 @@ def _gateway_runner_module():
 
 
 def _active_hermes_home():
+    override = get_hermes_home_override()
+    if override:
+        return Path(override)
     runner_module = _gateway_runner_module()
     return getattr(runner_module, "_hermes_home", _hermes_home) if runner_module else _hermes_home
 
@@ -98,6 +103,44 @@ def _runtime_config_for(runner):
     if callable(patched_factory) and patched_factory is not runtime_config_for:
         return patched_factory(runner)
     return runtime_config_for(runner)
+
+
+def _runtime_config_value(runtime_config, method_name: str, fallback):
+    """Read an optional runtime-config capability with a legacy fallback.
+
+    GatewayRuntimeConfigService owns these values in the production runtime,
+    but integrations and tests may provide the older, smaller service
+    protocol.  Keeping capability negotiation here preserves that public
+    seam without reintroducing process-global configuration as an authority.
+    """
+    loader = getattr(runtime_config, method_name, None)
+    return loader() if callable(loader) else fallback
+
+
+def _resolve_turn_route(
+    runtime_config,
+    message: str,
+    model: str,
+    runtime_kwargs: dict,
+    *,
+    service_tier: str | None,
+) -> dict:
+    """Call old and new runtime-config implementations through one seam."""
+    resolver = runtime_config.resolve_turn_agent_config
+    try:
+        supports_service_tier = "service_tier" in inspect.signature(
+            resolver
+        ).parameters
+    except (TypeError, ValueError):
+        supports_service_tier = False
+    if supports_service_tier:
+        return resolver(
+            message,
+            model,
+            runtime_kwargs,
+            service_tier=service_tier,
+        )
+    return resolver(message, model, runtime_kwargs)
 
 
 class AgentRunRuntime:
@@ -116,6 +159,7 @@ class AgentRunRuntime:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        turn_context_notes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -133,8 +177,11 @@ class AgentRunRuntime:
         # ---- Proxy mode: delegate to remote API server ----
         proxy_mode = proxy_mode_for(runner)
         if proxy_mode.get_proxy_url():
+            proxy_message = "\n\n".join(
+                [*(turn_context_notes or []), message]
+            )
             return await proxy_mode.run_agent_via_proxy(
-                message=message,
+                message=proxy_message,
                 context_prompt=context_prompt,
                 history=history,
                 source=source,
@@ -259,7 +306,7 @@ class AgentRunRuntime:
             )
 
         # Bridge sync status_callback → async adapter.send for context pressure
-        _status_adapter = runner.adapters.get(source.platform)
+        _status_adapter = runner._adapter_for_source(source)
         _status_chat_id = source.chat_id
         _status_thread_metadata = tool_progress.status_thread_metadata
 
@@ -310,9 +357,12 @@ class AgentRunRuntime:
             # `_resolve_turn_agent_config(message, …)`.
             nonlocal message
 
-            # session_key is now set via contextvars in _set_session_env()
-            # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
-            os.environ["HERMES_SESSION_KEY"] = session_key or ""
+            from agent.secret_scope import is_multiplex_active
+
+            # The task-local session context is authoritative. Preserve the
+            # historical env fallback only when one profile owns the process.
+            if not is_multiplex_active():
+                os.environ["HERMES_SESSION_KEY"] = session_key or ""
 
             # Read from env var or use default (same as CLI)
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -327,19 +377,33 @@ class AgentRunRuntime:
             event_channel_prompt = (channel_prompt or "").strip()
             if event_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
-            if runner._ephemeral_system_prompt:
-                combined_ephemeral = (combined_ephemeral + "\n\n" + runner._ephemeral_system_prompt).strip()
+            runtime_config = _runtime_config_for(runner)
+            runner_ephemeral_prompt = getattr(
+                runner,
+                "_ephemeral_system_prompt",
+                "",
+            )
+            profile_ephemeral_prompt = runner_ephemeral_prompt or _runtime_config_value(
+                runtime_config,
+                "load_ephemeral_system_prompt",
+                "",
+            )
+            if profile_ephemeral_prompt:
+                combined_ephemeral = (
+                    combined_ephemeral + "\n\n" + profile_ephemeral_prompt
+                ).strip()
 
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart). Keep config.yaml authoritative for
             # runtime budget settings bridged into env vars.
-            reload_runtime_env_preserving_config_authority(
-                _active_hermes_home(),
-                project_env=Path(__file__).resolve().parents[1] / ".env",
-            )
+            if not is_multiplex_active():
+                reload_runtime_env_preserving_config_authority(
+                    _active_hermes_home(),
+                    project_env=Path(__file__).resolve().parents[1] / ".env",
+                )
 
             try:
-                model, runtime_kwargs = _runtime_config_for(runner).resolve_session_agent_runtime(
+                model, runtime_kwargs = runtime_config.resolve_session_agent_runtime(
                     source=source,
                     session_key=session_key,
                     user_config=user_config,
@@ -356,13 +420,30 @@ class AgentRunRuntime:
                     "tools": [],
                 }
 
-            pr = runner._provider_routing
-            reasoning_config = _runtime_config_for(runner).resolve_session_reasoning_config(
+            provider_routing = _runtime_config_value(
+                runtime_config,
+                "load_provider_routing",
+                getattr(runner, "_provider_routing", {}),
+            )
+            prefill_messages = _runtime_config_value(
+                runtime_config,
+                "load_prefill_messages",
+                getattr(runner, "_prefill_messages", []),
+            )
+            fallback_model = _runtime_config_value(
+                runtime_config,
+                "load_fallback_model",
+                getattr(runner, "_fallback_model", None),
+            )
+            reasoning_config = runtime_config.resolve_session_reasoning_config(
+                source=source,
+                session_key=session_key,
+                model=model,
+            )
+            service_tier = fast_command_for(runner).resolve_session_service_tier(
                 source=source,
                 session_key=session_key,
             )
-            runner._reasoning_config = reasoning_config
-            runner._service_tier = fast_command_for(runner).load_service_tier()
             stream_runtime = agent_streaming_for(
                 runner,
                 source=source,
@@ -384,7 +465,13 @@ class AgentRunRuntime:
             )
             stream_runtime.configure()
 
-            turn_route = _runtime_config_for(runner).resolve_turn_agent_config(message, model, runtime_kwargs)
+            turn_route = _resolve_turn_route(
+                runtime_config,
+                message,
+                model,
+                runtime_kwargs,
+                service_tier=service_tier,
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -429,16 +516,19 @@ class AgentRunRuntime:
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
                     ephemeral_system_prompt=combined_ephemeral or None,
-                    prefill_messages=runner._prefill_messages or None,
+                    prefill_messages=prefill_messages or None,
                     reasoning_config=reasoning_config,
-                    service_tier=runner._service_tier,
+                    service_tier=service_tier,
                     request_overrides=turn_route.get("request_overrides"),
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
+                    providers_allowed=provider_routing.get("only"),
+                    providers_ignored=provider_routing.get("ignore"),
+                    providers_order=provider_routing.get("order"),
+                    provider_sort=provider_routing.get("sort"),
+                    provider_require_parameters=provider_routing.get(
+                        "require_parameters",
+                        False,
+                    ),
+                    provider_data_collection=provider_routing.get("data_collection"),
                     session_id=session_id,
                     platform=platform_key,
                     user_id=source.user_id,
@@ -449,7 +539,8 @@ class AgentRunRuntime:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     session_db=runner._session_db,
-                    fallback_model=runner._fallback_model,
+                    fallback_model=fallback_model,
+                    **checkpoint_agent_kwargs(user_config),
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -459,7 +550,9 @@ class AgentRunRuntime:
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
-            agent.tool_progress_callback = tool_progress.callback if tool_progress_enabled else None
+            agent.tool_progress_callback = (
+                tool_progress.callback if tool_progress.callback_enabled else None
+            )
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = stream_runtime.stream_delta_callback
             agent.interim_assistant_callback = (
@@ -469,7 +562,7 @@ class AgentRunRuntime:
             )
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
-            agent.service_tier = runner._service_tier
+            agent.service_tier = service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
             interaction_callbacks = agent_interaction_callbacks_for(
                 status_adapter=_status_adapter,
@@ -497,17 +590,22 @@ class AgentRunRuntime:
                 is_fresh_gateway_interruption=_is_fresh_gateway_interruption,
                 auto_continue_freshness_window=_auto_continue_freshness_window,
                 consume_native_image_paths=runner._consume_pending_native_image_paths,
+                turn_context_notes=turn_context_notes,
             ).prepare(message)
             agent_history = prepared_input.agent_history
             _history_media_paths = prepared_input.history_media_paths
 
             _approval_session_token = interaction_callbacks.activate_approval()
             try:
-                result = agent.run_conversation(
-                    prepared_input.message,
-                    conversation_history=agent_history,
-                    task_id=session_id,
-                )
+                run_kwargs = {
+                    "conversation_history": agent_history,
+                    "task_id": session_id,
+                }
+                if prepared_input.persist_user_message is not None:
+                    run_kwargs["persist_user_message"] = (
+                        prepared_input.persist_user_message
+                    )
+                result = agent.run_conversation(prepared_input.message, **run_kwargs)
             finally:
                 interaction_callbacks.deactivate_approval(_approval_session_token)
             result_holder[0] = result
@@ -625,6 +723,7 @@ class AgentRunRuntime:
             if followup_result is not None:
                 return followup_result
         finally:
+            tool_progress.clear_live_status()
             await agent_turn_cleanup_for(runner).cleanup(
                 AgentTurnCleanupContext(
                     progress_task=progress_task,

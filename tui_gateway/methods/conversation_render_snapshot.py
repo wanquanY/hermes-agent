@@ -46,19 +46,6 @@ def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
 # Keep the serialized result safely under it (headroom for the JSON-RPC
 # envelope + WS framing).
 _RENDER_MAX_BYTES = 3_500_000
-_RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES = {
-    "message.delta",
-    "reasoning.delta",
-    "thinking.delta",
-    "tool.progress",
-    "tool.generating",
-    "subagent.output_delta",
-    "subagent.reasoning_delta",
-    "subagent.thinking",
-    "subagent.progress",
-    "agent_profile_test.output_delta",
-    "agent_profile_test.thinking",
-}
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 
 
@@ -69,35 +56,24 @@ def _payload_byte_size(obj: Any) -> int:
         return 0
 
 
-def _is_structural_run_event(event: Any) -> bool:
-    if not isinstance(event, dict):
-        return False
-    return _text(event.get("type")) not in _RENDER_NON_STRUCTURAL_RUN_EVENT_TYPES
-
-
-def _structural_run_events(events: list[Any]) -> list[dict[str, Any]]:
-    return [dict(event) for event in events if _is_structural_run_event(event)]
-
-
 def _ordinary_render_run_events(
     session_id: str,
     events: list[Any],
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     db = _get_db()
-    if db is None or not session_id:
-        return []
+    active_run_id = ""
     try:
-        status = db.runs.session_status(session_id)
+        status = db.runs.session_status(session_id) if db is not None and session_id else {}
     except Exception:
-        return []
-    active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
-    if not active_run_id:
-        return []
-    return _filter_team_render_run_events(
+        status = {}
+    if isinstance(status, dict):
+        active_run_id = _text(status.get("active_run_id"))
+    return _filter_render_run_events(
         events,
-        conversation={"active_run_id": active_run_id},
+        active_run_ids={active_run_id} if active_run_id else set(),
         messages=messages,
+        include_completed_artifacts=True,
     )
 
 
@@ -704,7 +680,13 @@ def _event_run_id(event: Any) -> str:
     if not isinstance(event, dict):
         return ""
     payload = _record(event.get("payload"))
-    return _text(event.get("run_id") or payload.get("run_id") or payload.get("runId"))
+    return _text(
+        event.get("run_id")
+        or payload.get("run_id")
+        or payload.get("runId")
+        or payload.get("produced_by_run_id")
+        or payload.get("producedByRunId")
+    )
 
 
 def _run_turn_segment_key(
@@ -818,26 +800,32 @@ def _team_snapshot_active_chat_run_ids(conversation: dict[str, Any]) -> set[str]
     return {active_run_id} if active_run_id else set()
 
 
-def _filter_team_render_run_events(
+def _filter_render_run_events(
     run_events: list[Any],
     *,
-    conversation: dict[str, Any],
+    active_run_ids: set[str],
     messages: list[dict[str, Any]],
+    include_completed_artifacts: bool,
 ) -> list[dict[str, Any]]:
     normalized_events = [dict(event) for event in run_events if isinstance(event, dict)]
-    active_run_ids = _team_snapshot_active_chat_run_ids(conversation)
-    if not active_run_ids:
-        return []
+    active_run_ids = {_text(run_id) for run_id in active_run_ids if _text(run_id)}
     covered_run_ids = _covered_render_run_ids(messages)
+    if not active_run_ids and not (include_completed_artifacts and covered_run_ids):
+        return []
     covered_facts = _covered_render_facts(messages)
     segment_by_turn: dict[str, int] = {}
     observed_tools_by_turn: dict[str, set[str]] = {}
     filtered: list[dict[str, Any]] = []
     for event in normalized_events:
         run_id = _event_run_id(event)
-        if active_run_ids and run_id not in active_run_ids:
-            continue
-        if run_id and run_id in covered_run_ids and run_id not in active_run_ids:
+        is_active_run = bool(run_id and run_id in active_run_ids)
+        is_visible_completed_artifact = bool(
+            include_completed_artifacts
+            and run_id
+            and run_id in covered_run_ids
+            and _text(event.get("type")).startswith("artifact.")
+        )
+        if not is_active_run and not is_visible_completed_artifact:
             continue
         payload = _record(event.get("payload"))
         turn_id = _text(event.get("turn_id") or payload.get("turn_id") or payload.get("turnId"))
@@ -863,6 +851,20 @@ def _filter_team_render_run_events(
                 seen.add(tool_id)
                 segment_by_turn[turn_key] = inferred_segment + 1
     return filtered
+
+
+def _filter_team_render_run_events(
+    run_events: list[Any],
+    *,
+    conversation: dict[str, Any],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _filter_render_run_events(
+        run_events,
+        active_run_ids=_team_snapshot_active_chat_run_ids(conversation),
+        messages=messages,
+        include_completed_artifacts=False,
+    )
 
 
 def _team_conversation_status_projection(conversation_session_id: str) -> dict[str, Any]:

@@ -145,3 +145,27 @@ def test_inprocess_interaction_timeout_publishes_expired_lifecycle(monkeypatch):
     assert session_config._block("sudo.request", "runtime-1", {}, timeout=0) == ""
     assert emitted[0][0:2] == ("sudo.request", "runtime-1")
     assert expired == [emitted[0][2]["request_id"]]
+
+
+def test_terminal_read_block_does_not_project_human_approval_state(monkeypatch):
+    projected: list[bool] = []
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        session_config,
+        "_register_pending_interaction",
+        lambda _event, _sid, _payload, _request_id: None,
+    )
+    monkeypatch.setattr(
+        session_config,
+        "_emit",
+        lambda event, sid, payload: emitted.append((event, sid, dict(payload))),
+    )
+    monkeypatch.setattr(
+        session_config,
+        "_project_block_state",
+        lambda _sid, *, present: projected.append(present),
+    )
+
+    assert session_config._block("terminal.read.request", "runtime-1", {}, timeout=0) == ""
+    assert emitted[0][0:2] == ("terminal.read.request", "runtime-1")
+    assert projected == []

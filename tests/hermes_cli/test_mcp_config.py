@@ -88,7 +88,7 @@ def test_probe_single_server_shutdowns_when_tool_iteration_fails(monkeypatch):
         return server
 
     monkeypatch.setattr("tools.mcp_tool._ensure_mcp_loop", lambda: None)
-    monkeypatch.setattr("tools.mcp_tool._stop_mcp_loop", lambda: None)
+    monkeypatch.setattr("tools.mcp_tool._stop_mcp_loop", lambda **_kwargs: None)
     monkeypatch.setattr("tools.mcp_tool._connect_server", fake_connect)
     monkeypatch.setattr(
         "tools.mcp_tool._run_on_mcp_loop",
@@ -592,15 +592,17 @@ class TestMcpRemoveEvictsManager:
         reset_manager_for_tests()
 
         mgr = get_manager()
-        mgr.get_or_build_provider(
-            "oauth-srv", "https://example.com/mcp", None,
-        )
-        assert "oauth-srv" in mgr._entries
+        with patch("tools.mcp_oauth._is_interactive", return_value=True):
+            mgr.get_or_build_provider(
+                "oauth-srv", "https://example.com/mcp", None,
+            )
+        cache_key = mgr._key("oauth-srv")
+        assert cache_key in mgr._entries
 
         from hermes_cli.mcp_config import cmd_mcp_remove
         cmd_mcp_remove(_make_args(name="oauth-srv"))
 
-        assert "oauth-srv" not in mgr._entries
+        assert cache_key not in mgr._entries
 
 
 class TestMcpLogin:

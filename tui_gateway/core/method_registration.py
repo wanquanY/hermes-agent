@@ -25,6 +25,9 @@ MODULES = (
     "run",
     "team_registry",
     "profile_registry",
+    "projects",
+    "learning",
+    "pet",
     "hermes_team_mission.gateway.common",
     "hermes_team_mission.gateway.conversation_methods",
     "hermes_team_mission.gateway.runtime_methods",
@@ -38,10 +41,12 @@ MODULES = (
     "process",
     "handoff",
     "billing",
+    "oneshot",
     "paste",
     "complete",
     "codex",
     "model",
+    "write_approval",
     "slash",
     "voice",
     "insights_rollback",
@@ -59,7 +64,7 @@ def register_method_modules(target: dict[str, Any]) -> None:
         else:
             importlib.import_module(name)
 
-    from tui_gateway.methods import prompt, slash, system
+    from tui_gateway.methods import billing, prompt, slash, system
 
     for key, value in {
         "_PENDING_INPUT_COMMANDS": system._PENDING_INPUT_COMMANDS,
@@ -67,5 +72,6 @@ def register_method_modules(target: dict[str, Any]) -> None:
         "_cli_exec_blocked": system._cli_exec_blocked,
         "_mirror_slash_side_effects": slash._mirror_slash_side_effects,
         "_run_prompt_submit": prompt._run_prompt_submit,
+        "_serialize_billing_error": billing._serialize_billing_error,
     }.items():
         target.setdefault(key, value)

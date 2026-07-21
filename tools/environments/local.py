@@ -39,11 +39,17 @@ def _msys_to_windows_path(cwd: str) -> str:
     return f"{drive}:{tail or chr(92)}"  # chr(92) = backslash, avoid raw-string escape
 
 
+def _cwd_usable(cwd: str) -> bool:
+    """Return whether the process can use ``cwd`` as a subprocess directory."""
+    return os.path.isdir(cwd) and os.access(cwd, os.X_OK)
+
+
 def _resolve_safe_cwd(cwd: str) -> str:
-    """Return ``cwd`` if it exists as a directory, else the nearest existing
-    ancestor.  Falls back to ``tempfile.gettempdir()`` only if walking up the
-    path can't find any existing directory (effectively never on a healthy
-    filesystem, but cheap belt-and-braces).
+    """Return the nearest directory this process can actually enter.
+
+    Existence alone is insufficient: a non-root process can stat ``/root``
+    while ``subprocess.Popen(cwd='/root')`` still raises PermissionError.
+    Falls back to ``tempfile.gettempdir()`` when no usable ancestor exists.
 
     On Windows, also normalizes Git Bash / MSYS-style POSIX paths
     (``/c/Users/x``) to native Windows form before the isdir check so a
@@ -57,11 +63,17 @@ def _resolve_safe_cwd(cwd: str) -> str:
     terminal call until the gateway restarts.
     """
     cwd = _msys_to_windows_path(cwd) if _IS_WINDOWS else cwd
-    if cwd and os.path.isdir(cwd):
+    if cwd and _cwd_usable(cwd):
         return cwd
+    if cwd and os.path.isdir(cwd):
+        logger.warning(
+            "Configured terminal cwd %r exists but is not accessible to "
+            "this process; falling back to the nearest usable ancestor",
+            cwd,
+        )
     parent = os.path.dirname(cwd) if cwd else ""
     while parent:
-        if os.path.isdir(parent):
+        if _cwd_usable(parent):
             return parent
         next_parent = os.path.dirname(parent)
         if next_parent == parent:

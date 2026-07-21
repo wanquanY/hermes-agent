@@ -81,6 +81,8 @@ from agent.process_bootstrap import (
     _get_proxy_for_base_url,
 )
 from agent.iteration_budget import IterationBudget
+from agent.credits_runtime import CreditsRuntimeMixin
+from agent.stream_writer_fence import StreamWriterAgentMixin
 from agent.turn_message_buffer import message_persist_boundary
 
 
@@ -120,6 +122,7 @@ from tools.browser_tool import cleanup_browser
 
 
 # Agent internals extracted to agent/ package for modularity
+from agent.api_content import api_content_for_storage
 from agent.memory_manager import StreamingContextScrubber, build_memory_context_block, sanitize_context
 from agent.think_scrubber import StreamingThinkScrubber
 from agent.retry_utils import jittered_backoff
@@ -321,7 +324,7 @@ class _StreamErrorEvent(Exception):
         }
 
 
-class AIAgent:
+class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
     """
     AI Agent with tool calling capabilities.
 
@@ -381,11 +384,15 @@ class AIAgent:
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
         clarify_callback: callable = None,
+        read_terminal_callback: callable = None,
         step_callback: callable = None,
         stream_delta_callback: callable = None,
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        reaction_callback: callable = None,
+        notice_callback: callable = None,
+        notice_clear_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -457,11 +464,15 @@ class AIAgent:
             thinking_callback=thinking_callback,
             reasoning_callback=reasoning_callback,
             clarify_callback=clarify_callback,
+            read_terminal_callback=read_terminal_callback,
             step_callback=step_callback,
             stream_delta_callback=stream_delta_callback,
             interim_assistant_callback=interim_assistant_callback,
             tool_gen_callback=tool_gen_callback,
             status_callback=status_callback,
+            reaction_callback=reaction_callback,
+            notice_callback=notice_callback,
+            notice_clear_callback=notice_clear_callback,
             max_tokens=max_tokens,
             reasoning_config=reasoning_config,
             service_tier=service_tier,
@@ -973,6 +984,12 @@ class AIAgent:
         if env_timeout is not None:
             return float(env_timeout), False
 
+        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+
+        reasoning_floor = get_reasoning_stale_timeout_floor(self.model)
+        if reasoning_floor is not None:
+            return reasoning_floor, False
+
         return 90.0, True
 
     def _compute_non_stream_stale_timeout(self, api_payload: Any) -> float:
@@ -1405,6 +1422,61 @@ class AIAgent:
             getattr(context, "conversation_session_id", "") if context is not None else ""
         ).strip()
         return conversation_session_id or str(getattr(self, "session_id", "") or "").strip()
+
+    def _rewrite_persisted_message_content(self, message: Dict[str, Any]) -> bool | None:
+        """Complete an already-flushed transcript row without rewinding cursors.
+
+        The runtime owns mapping an in-memory row to the canonical visible or
+        execution transcript. The message repository owns the exact, atomic
+        SQLite mutation. ``None`` means no durable store is configured;
+        ``False`` means a configured store could not resolve the stable row.
+        """
+        if not self._session_db or not isinstance(message, dict):
+            return None
+        role = str(message.get("role") or "").strip()
+        if role != "assistant":
+            return False
+
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        visible_session_id = self._visible_transcript_session_id()
+        target_session_id = visible_session_id
+        runtime_scope_key = str(
+            getattr(self, "_hermes_active_runtime_scope_key", "") or ""
+        ).strip()
+        context = self._active_run_context()
+        participant_id = str(
+            getattr(context, "participant_id", "") if context is not None else ""
+        ).strip()
+        if self._is_team_visible_transcript_context(
+            visible_session_id,
+            runtime_scope_key,
+            participant_id,
+        ):
+            projected_id = self._team_projected_transcript_message_id(message)
+            if not projected_id and not self._is_main_team_transcript_message(message):
+                target_session_id = str(getattr(self, "session_id", "") or "").strip()
+        if not target_session_id:
+            return False
+
+        rewritten = self._session_db.messages.rewrite_content(
+            target_session_id,
+            message.get("content"),
+            message_id=message.get("message_id"),
+            conversation_message_id=self._team_projected_transcript_message_id(message),
+            role=role,
+            persist_message_key=metadata.get("persist_message_key")
+            or metadata.get("persistMessageKey"),
+            run_id=metadata.get("run_id")
+            or metadata.get("runId")
+            or getattr(self, "_hermes_active_run_id", ""),
+            turn_id=metadata.get("turn_id")
+            or metadata.get("turnId")
+            or getattr(self, "_hermes_active_turn_id", ""),
+            turn_message_index=metadata.get("turn_message_index")
+            if "turn_message_index" in metadata
+            else metadata.get("turnMessageIndex"),
+        )
+        return rewritten is not None
 
     def _run_context_message_metadata(self, role: str) -> Dict[str, Any]:
         context = self._active_run_context()
@@ -2076,6 +2148,11 @@ class AIAgent:
                         elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
                             _txt.append("[screenshot]")
                     content = "\n".join(_txt) if _txt else None
+                row_api_content = api_content_for_storage(
+                    role=role,
+                    content=content,
+                    explicit_sidecar=msg.get("api_content"),
+                )
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
@@ -2100,6 +2177,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    api_content=row_api_content,
                     metadata=msg_metadata,
                 )
                 append_counts[role] = append_counts.get(role, 0) + 1
@@ -3356,10 +3434,10 @@ class AIAgent:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client(base_url: str = "") -> Any:
+    def _build_keepalive_http_client(base_url: str = "", *, verify=None) -> Any:
         from agent.process_bootstrap import build_provider_http_client
 
-        return build_provider_http_client(base_url)
+        return build_provider_http_client(base_url, verify=verify)
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
@@ -3470,6 +3548,8 @@ class AIAgent:
         from unittest.mock import Mock
 
         primary_client = self._ensure_primary_openai_client(reason=reason)
+        if self.provider == "moa":
+            return primary_client
         if isinstance(primary_client, Mock):
             return primary_client
         with self._openai_client_lock():
@@ -3494,6 +3574,114 @@ class AIAgent:
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
+
+    def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:
+        """Abort a worker-owned request from a different thread.
+
+        The polling thread must not call the SDK's ``close()`` while the
+        worker still owns a live TLS connection.  Releasing that descriptor
+        from a stranger thread can race the worker's SSL state if the kernel
+        reuses the descriptor.  Socket shutdown is sufficient to unblock the
+        worker; the worker performs the full SDK close in its ``finally``.
+        """
+        if client is None:
+            return
+        try:
+            shutdown_count = self._force_close_tcp_sockets(client)
+            logger.info(
+                "OpenAI client aborted (%s, shared=False, tcp_force_closed=%d, "
+                "deferred_close=stranger_thread) %s",
+                reason,
+                shutdown_count,
+                self._client_log_context(),
+            )
+        except Exception as exc:
+            logger.debug(
+                "OpenAI client abort failed (%s, shared=False) %s error=%s",
+                reason,
+                self._client_log_context(),
+                exc,
+            )
+
+    def _create_request_anthropic_client(self, *, reason: str) -> Any:
+        """Build an Anthropic client owned by one in-flight request."""
+        if self.api_mode == "anthropic_messages":
+            self._try_refresh_anthropic_client_credentials()
+
+        drop_context_1m_beta = bool(
+            getattr(self, "_oauth_1m_beta_disabled", False)
+        )
+        if getattr(self, "provider", None) == "bedrock":
+            from agent.anthropic_adapter import build_anthropic_bedrock_client
+
+            region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
+            client = build_anthropic_bedrock_client(region)
+        else:
+            from agent.anthropic_adapter import build_anthropic_client
+
+            client = build_anthropic_client(
+                self._anthropic_api_key,
+                getattr(self, "_anthropic_base_url", None),
+                timeout=get_provider_request_timeout(self.provider, self.model),
+                drop_context_1m_beta=drop_context_1m_beta,
+            )
+
+        logger.debug(
+            "Anthropic request client created (%s, shared=False) provider=%s model=%s",
+            reason,
+            getattr(self, "provider", None),
+            getattr(self, "model", None),
+        )
+        return client
+
+    def _close_request_anthropic_client(self, client: Any, *, reason: str) -> None:
+        """Fully close a request-local Anthropic client from its owner thread."""
+        if client is None:
+            return
+        try:
+            shutdown_count = self._force_close_tcp_sockets(client)
+            client.close()
+            logger.info(
+                "Anthropic client closed (%s, shared=False, tcp_force_closed=%d) "
+                "provider=%s model=%s",
+                reason,
+                shutdown_count,
+                getattr(self, "provider", None),
+                getattr(self, "model", None),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Anthropic client close failed (%s, shared=False) "
+                "provider=%s model=%s error=%s",
+                reason,
+                getattr(self, "provider", None),
+                getattr(self, "model", None),
+                exc,
+            )
+
+    def _abort_request_anthropic_client(self, client: Any, *, reason: str) -> None:
+        """Socket-abort Anthropic I/O without stealing SDK close ownership."""
+        if client is None:
+            return
+        try:
+            shutdown_count = self._force_close_tcp_sockets(client)
+            logger.info(
+                "Anthropic client aborted (%s, shared=False, tcp_force_closed=%d, "
+                "deferred_close=stranger_thread) provider=%s model=%s",
+                reason,
+                shutdown_count,
+                getattr(self, "provider", None),
+                getattr(self, "model", None),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Anthropic client abort failed (%s, shared=False) "
+                "provider=%s model=%s error=%s",
+                reason,
+                getattr(self, "provider", None),
+                getattr(self, "model", None),
+                exc,
+            )
 
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Forwarder — see ``agent.codex_runtime.run_codex_stream``."""
@@ -3776,19 +3964,14 @@ class AIAgent:
         if self.api_mode in ("anthropic_messages", "bedrock_converse"):
             return
         try:
-            from hermes_cli.config import cfg_get, load_config
-            user_headers = cfg_get(load_config(), "model", "default_headers")
+            from hermes_cli.config import apply_configured_request_headers
+
+            apply_configured_request_headers(
+                self._client_kwargs,
+                str(self._client_kwargs.get("base_url") or self.base_url or ""),
+            )
         except Exception:
-            return
-        if not isinstance(user_headers, dict) or not user_headers:
-            return
-        merged = dict(self._client_kwargs.get("default_headers") or {})
-        for key, value in user_headers.items():
-            if value is None:
-                continue
-            merged[str(key)] = str(value)
-        if merged:
-            self._client_kwargs["default_headers"] = merged
+            logger.debug("configured request headers skipped", exc_info=True)
 
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
@@ -3847,10 +4030,10 @@ class AIAgent:
             return False
         return pool.has_available()
 
-    def _anthropic_messages_create(self, api_kwargs: dict):
-        if self.api_mode == "anthropic_messages":
+    def _anthropic_messages_create(self, api_kwargs: dict, *, client: Any = None):
+        if client is None and self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
-        return self._anthropic_client.messages.create(**api_kwargs)
+        return (client or self._anthropic_client).messages.create(**api_kwargs)
 
     def _rebuild_anthropic_client(self) -> None:
         """Rebuild the Anthropic client after an interrupt or stale call.
@@ -3929,6 +4112,8 @@ class AIAgent:
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
+        if self._stream_writer_superseded():
+            return
         if isinstance(text, str) and text:
             self._current_streamed_assistant_text = (
                 getattr(self, "_current_streamed_assistant_text", "") + text
@@ -3982,6 +4167,9 @@ class AIAgent:
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
+        if self._stream_writer_superseded():
+            self._note_dropped_stream_writer("_fire_stream_delta")
+            return
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
@@ -4047,6 +4235,9 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire one provider reasoning delta without content-based guessing."""
+        if self._stream_writer_superseded():
+            self._note_dropped_stream_writer("_fire_reasoning_delta")
+            return
         text = str(text or "")
         if not text:
             return
@@ -4227,6 +4418,22 @@ class AIAgent:
         except Exception:
             return False
 
+    def _provider_supports_vision_tool_messages(self) -> bool:
+        """Whether this provider accepts multipart content on tool messages."""
+        try:
+            from providers import get_provider_profile
+
+            provider = (getattr(self, "provider", "") or "").strip()
+            profile = get_provider_profile(provider)
+            if profile is not None:
+                return bool(
+                    getattr(profile, "supports_vision_tool_messages", True)
+                )
+        except Exception:
+            pass
+        # Compatibility default for unknown and third-party providers.
+        return True
+
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
         if not self._content_has_image_parts(content):
             return content
@@ -4366,6 +4573,22 @@ class AIAgent:
             return content
 
         if self._model_supports_vision():
+            if not self._provider_supports_vision_tool_messages():
+                logger.debug(
+                    "Tool %s: provider %s rejects multipart tool content; "
+                    "using the text summary",
+                    tool_name,
+                    self.provider,
+                )
+                return _multimodal_text_summary(result)
+
+            key = (
+                (getattr(self, "provider", "") or "").strip().lower(),
+                (getattr(self, "model", "") or "").strip(),
+            )
+            incompatible = getattr(self, "_no_list_tool_content_models", None)
+            if incompatible and key in incompatible:
+                return _multimodal_text_summary(result)
             return content
 
         summary = _multimodal_text_summary(result)
@@ -4896,10 +5119,22 @@ class AIAgent:
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
-                     pre_tool_block_checked: bool = False) -> str:
+                     pre_tool_block_checked: bool = False,
+                     middleware_applied: bool = False,
+                     middleware_trace: Optional[list[dict]] = None) -> str:
         """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
         from agent.agent_runtime_helpers import invoke_tool
-        return invoke_tool(self, function_name, function_args, effective_task_id, tool_call_id, messages, pre_tool_block_checked)
+        return invoke_tool(
+            self,
+            function_name,
+            function_args,
+            effective_task_id,
+            tool_call_id,
+            messages,
+            pre_tool_block_checked,
+            middleware_applied,
+            middleware_trace,
+        )
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
@@ -4954,17 +5189,37 @@ class AIAgent:
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        result = run_conversation(
-            self,
-            user_message,
-            system_message,
-            conversation_history,
-            task_id,
-            stream_callback,
-            persist_user_message,
-            turn_metadata,
-            current_input_conversation_message_id,
+        from agent.aux_accounting import (
+            reset_accounting_context,
+            set_accounting_context,
         )
+        from agent.portal_tags import (
+            reset_conversation_context,
+            set_conversation_context,
+        )
+
+        conversation_id = (
+            self._visible_transcript_session_id()
+            or str(getattr(self, "memory_session_id", "") or "").strip()
+            or str(getattr(self, "session_id", "") or "").strip()
+        )
+        portal_token = set_conversation_context(conversation_id)
+        accounting_token = set_accounting_context(agent=self)
+        try:
+            result = run_conversation(
+                self,
+                user_message,
+                system_message,
+                conversation_history,
+                task_id,
+                stream_callback,
+                persist_user_message,
+                turn_metadata,
+                current_input_conversation_message_id,
+            )
+        finally:
+            reset_accounting_context(accounting_token)
+            reset_conversation_context(portal_token)
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
             persisted_messages = self._messages_for_persistence(result["messages"])
             result = {**result, "messages": persisted_messages}

@@ -21,6 +21,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from agent.secret_scope import get_profile_env
+
 from agent.file_safety import get_read_block_error, is_write_denied
 from agent.redact import redact_sensitive_text
 from tools.environments.local import hermes_subprocess_env
@@ -56,14 +58,14 @@ def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
 
 def _resolve_command() -> str:
     return (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
+        get_profile_env("HERMES_COPILOT_ACP_COMMAND", "").strip()
+        or get_profile_env("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
 
 
 def _resolve_args() -> list[str]:
-    raw = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+    raw = get_profile_env("HERMES_COPILOT_ACP_ARGS", "").strip()
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)

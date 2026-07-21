@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -27,6 +28,143 @@ def _discord_public_attr(name: str, fallback: Any = None) -> Any:
 
 
 class DiscordVoiceMixin:
+    def _load_voice_fx_config(self) -> Dict[str, Any]:
+        """Load non-secret voice-mixer behavior from ``discord.voice_fx``."""
+        defaults: Dict[str, Any] = {
+            "enabled": False,
+            "ambient_enabled": True,
+            "ambient_path": "",
+            "ambient_gain": 0.18,
+            "duck_gain": 0.06,
+            "speech_gain": 1.0,
+            "ack_enabled": True,
+            "ack_phrases": [
+                "Let me look into that.",
+                "One moment.",
+                "Checking on that now.",
+                "Give me a sec.",
+                "On it.",
+            ],
+        }
+        try:
+            from hermes_cli.config import read_raw_config
+
+            config = read_raw_config() or {}
+            voice_fx = ((config.get("discord") or {}).get("voice_fx") or {})
+            if isinstance(voice_fx, dict):
+                for key, value in voice_fx.items():
+                    if key in defaults and value is not None:
+                        defaults[key] = value
+        except Exception:
+            logger.debug("Could not load discord.voice_fx config", exc_info=True)
+        return defaults
+
+    def _get_ambient_pcm(self) -> Optional[bytes]:
+        if self._ambient_pcm_cache is not None:
+            return self._ambient_pcm_cache
+        if not self._voice_fx_cfg.get("ambient_enabled"):
+            return None
+        from channels.platforms.discord_voice_mixer import (
+            decode_to_pcm,
+            synth_ambient_pcm,
+        )
+
+        pcm: Optional[bytes] = None
+        path = str(self._voice_fx_cfg.get("ambient_path") or "").strip()
+        if path and os.path.isfile(path):
+            pcm = decode_to_pcm(path)
+            if not pcm:
+                logger.warning("Ambient file %s failed to decode; using synth bed", path)
+        if not pcm:
+            pcm = synth_ambient_pcm()
+        self._ambient_pcm_cache = pcm
+        return pcm
+
+    async def _install_voice_mixer(self, guild_id: int, voice_client: Any) -> None:
+        from channels.platforms.discord_voice_mixer import VoiceMixer
+
+        mixer = VoiceMixer(
+            ambient_gain=float(self._voice_fx_cfg.get("ambient_gain", 0.18)),
+            duck_gain=float(self._voice_fx_cfg.get("duck_gain", 0.06)),
+            speech_gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
+        )
+        ambient = await asyncio.to_thread(self._get_ambient_pcm)
+        if ambient:
+            mixer.set_ambient(ambient)
+
+        def after(error: Optional[Exception]) -> None:
+            if error:
+                logger.error("Voice mixer stream error (guild=%d): %s", guild_id, error)
+
+        if voice_client.is_playing():
+            voice_client.stop()
+        voice_client.play(mixer, after=after)
+        self._voice_mixers[guild_id] = mixer
+
+    async def play_ack_in_voice(
+        self,
+        guild_id: int,
+        phrase: Optional[str] = None,
+    ) -> bool:
+        """Layer a short acknowledgement over the continuous ambient bed."""
+        if not self._voice_fx_cfg.get("ack_enabled"):
+            return False
+        mixer = self._voice_mixers.get(guild_id)
+        if mixer is None:
+            return False
+        if phrase is None:
+            import random
+
+            phrase = random.choice(
+                self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
+            )
+        import uuid
+
+        audio_path = os.path.join(
+            tempfile.gettempdir(),
+            "hermes_voice",
+            f"ack_{uuid.uuid4().hex[:12]}.mp3",
+        )
+        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+        actual_path = audio_path
+        try:
+            from channels.platforms.discord_voice_mixer import decode_to_pcm
+            from tools.tts_tool import text_to_speech_tool
+
+            result = json.loads(
+                await asyncio.to_thread(
+                    text_to_speech_tool,
+                    text=phrase,
+                    output_path=audio_path,
+                )
+            )
+            actual_path = str(result.get("file_path") or audio_path)
+            if not result.get("success") or not os.path.isfile(actual_path):
+                return False
+            pcm = await asyncio.to_thread(decode_to_pcm, actual_path)
+            if not pcm:
+                return False
+            mixer.play_speech(
+                pcm,
+                gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
+            )
+            self._reset_voice_timeout(guild_id)
+            return True
+        except Exception:
+            logger.debug("play_ack_in_voice failed", exc_info=True)
+            return False
+        finally:
+            for path in {audio_path, actual_path}:
+                if path and os.path.isfile(path):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+    def voice_mixer_active(self, guild_id: int) -> bool:
+        mixers = getattr(self, "_voice_mixers", None)
+        return bool(mixers) and mixers.get(guild_id) is not None
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not _discord_public_attr("DISCORD_AVAILABLE", DISCORD_AVAILABLE):
@@ -59,6 +197,12 @@ class DiscordVoiceMixin:
                 )
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
+
+            if self._voice_fx_cfg.get("enabled"):
+                try:
+                    await self._install_voice_mixer(guild_id, vc)
+                except Exception:
+                    logger.warning("Voice mixer failed to start", exc_info=True)
     
             return True
     
@@ -72,9 +216,13 @@ class DiscordVoiceMixin:
             listen_task = self._voice_listen_tasks.pop(guild_id, None)
             if listen_task:
                 listen_task.cancel()
-    
+
+            self._voice_mixers.pop(guild_id, None)
+
             vc = self._voice_clients.pop(guild_id, None)
             if vc and vc.is_connected():
+                if vc.is_playing():
+                    vc.stop()
                 await vc.disconnect()
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
@@ -89,7 +237,34 @@ class DiscordVoiceMixin:
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
-    
+
+        mixer = self._voice_mixers.get(guild_id)
+        if mixer is not None:
+            from channels.platforms.discord_voice_mixer import decode_to_pcm
+
+            pcm = await asyncio.to_thread(decode_to_pcm, audio_path)
+            if pcm:
+                mixer.play_speech(
+                    pcm,
+                    gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
+                )
+                started = time.monotonic()
+                while mixer.speech_active:
+                    if time.monotonic() - started > self.PLAYBACK_TIMEOUT:
+                        logger.warning(
+                            "Mixer speech playback timed out after %ds",
+                            self.PLAYBACK_TIMEOUT,
+                        )
+                        mixer.stop_speech()
+                        break
+                    await asyncio.sleep(0.05)
+                self._reset_voice_timeout(guild_id)
+                return True
+            logger.warning(
+                "Mixer decode failed for %s; falling back to one-shot playback",
+                audio_path,
+            )
+
         # Pause voice receiver while playing (echo prevention)
         receiver = self._voice_receivers.get(guild_id)
         if receiver:

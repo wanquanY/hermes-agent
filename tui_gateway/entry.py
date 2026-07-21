@@ -12,13 +12,22 @@ if _src_root and _src_root not in sys.path:
 sys.path = [p for p in sys.path if p not in {"", "."}]
 
 import json
+import logging
 import signal
 import time
 import traceback
 
 from tui_gateway import server
+from tui_gateway._stdin_recovery import iter_stdin_lines
 from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
 from tui_gateway.transport import TeeTransport
+
+logger = logging.getLogger(__name__)
+
+# Compatibility observation slot for older embedders. Production startup is
+# process-wide and owned by hermes_cli.mcp_startup; new code must not assign a
+# second lifecycle thread here.
+_mcp_discovery_thread = None
 
 
 def _install_sidecar_publisher() -> None:
@@ -213,7 +222,7 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
 
 
 def mcp_discovery_in_flight() -> bool:
-    """Return True if the background MCP discovery thread is still running.
+    """Return True if legacy or process-wide MCP discovery is still running.
 
     Used by the agent-build path to decide whether to schedule a late tool
     snapshot refresh: if discovery didn't land within the bounded
@@ -221,7 +230,14 @@ def mcp_discovery_in_flight() -> bool:
     and the banner/tool count will be stale until they arrive.
     """
     thread = _mcp_discovery_thread
-    return thread is not None and thread.is_alive()
+    if thread is not None and thread.is_alive():
+        return True
+    try:
+        from hermes_cli.mcp_startup import mcp_discovery_in_flight as shared_in_flight
+
+        return shared_in_flight()
+    except Exception:
+        return False
 
 
 def join_mcp_discovery(timeout: float | None = None) -> bool:
@@ -232,44 +248,35 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
     ``wait_for_mcp_discovery`` this accepts an unbounded/long wait and reports
     the outcome, for the off-critical-path late-refresh waiter.
     """
+    legacy_done = True
     thread = _mcp_discovery_thread
-    if thread is None:
-        return True
-    thread.join(timeout=timeout)
-    return not thread.is_alive()
+    if thread is not None:
+        thread.join(timeout=timeout)
+        legacy_done = not thread.is_alive()
+    try:
+        from hermes_cli.mcp_startup import join_mcp_discovery as join_shared
+
+        shared_done = join_shared(timeout=timeout)
+    except Exception:
+        shared_done = True
+    return legacy_done and shared_done
 
 
 def main():
     _install_sidecar_publisher()
 
-    # MCP tool discovery — inline is safe here: TUI entry is a plain
-    # sync loop with no asyncio event loop to block.  Previously ran as
-    # a model_tools.py module-level side effect; moved to explicit
-    # startup calls to avoid freezing the gateway's loop on lazy import
-    # (#16856).
-    #
-    # Cold-start guard: importing ``tools.mcp_tool`` transitively pulls the
-    # full MCP SDK (mcp, pydantic, httpx, jsonschema, starlette parsers —
-    # ~200ms on macOS), which runs on the TUI's critical path before
-    # ``gateway.ready`` can be emitted.  The overwhelming majority of users
-    # have no ``mcp_servers`` configured, in which case every byte of that
-    # import is wasted.  Check the config first (cheap — it's already been
-    # loaded once by ``_config_mtime`` elsewhere) and only pay the import
-    # cost when there's actually MCP work to do.
+    # Discovery is process-wide, non-blocking, and OAuth-noninteractive. The
+    # first agent build performs a bounded rendezvous; slower servers are
+    # incorporated by the late-refresh path without delaying gateway.ready.
     try:
-        from hermes_cli.config import read_raw_config
-        _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
-        _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
+        from hermes_cli.mcp_startup import start_background_mcp_discovery
+
+        start_background_mcp_discovery(
+            logger=logger,
+            thread_name="tui-mcp-discovery",
+        )
     except Exception:
-        # Be conservative: if we can't decide, fall back to the old
-        # behaviour and let the discovery path handle its own errors.
-        _has_mcp_servers = True
-    if _has_mcp_servers:
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
-        except Exception:
-            pass
+        logger.debug("Background MCP tool discovery failed", exc_info=True)
 
     if not write_json({
         "jsonrpc": "2.0",
@@ -279,7 +286,7 @@ def main():
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)
 
-    for raw in sys.stdin:
+    for raw in iter_stdin_lines(sys.stdin, log=_log_exit):
         line = raw.strip()
         if not line:
             continue
@@ -298,8 +305,6 @@ def main():
             if not write_json(resp):
                 _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
                 sys.exit(0)
-
-    _log_exit("stdin EOF (TUI closed the command pipe)")
 
 
 if __name__ == "__main__":

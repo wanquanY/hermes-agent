@@ -5,6 +5,9 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Sentence-case themed copy used inside dashboard cards and dialogs. */
+export const themedBody = "font-mondwest normal-case";
+
 /** Relative time from a Unix epoch timestamp (seconds). */
 export function timeAgo(ts: number): string {
   const delta = Date.now() / 1000 - ts;

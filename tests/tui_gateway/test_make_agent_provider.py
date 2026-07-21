@@ -931,7 +931,7 @@ def test_apply_model_switch_does_not_leak_process_env():
     sess_a = {"agent": _FakeAgent(), "session_key": "k-A", "model_override": None}
 
     with (
-        patch("hermes_cli.model_switch.parse_model_flags",
+        patch("hermes_cli.model_switch.parse_model_flags_detailed",
               return_value=("glm-5.1", None, False, False, True)),
         patch("hermes_cli.model_switch.resolve_persist_behavior",
               return_value=False),
@@ -986,7 +986,7 @@ def test_apply_model_switch_records_platform_codex_explicit_model():
     }
 
     with (
-        patch("hermes_cli.model_switch.parse_model_flags",
+        patch("hermes_cli.model_switch.parse_model_flags_detailed",
               return_value=("glm-5.2", None, False, False, True)),
         patch("hermes_cli.model_switch.resolve_persist_behavior",
               return_value=False),
@@ -1027,7 +1027,7 @@ def test_apply_model_switch_byo_codex_remains_noop():
     }
 
     with (
-        patch("hermes_cli.model_switch.parse_model_flags",
+        patch("hermes_cli.model_switch.parse_model_flags_detailed",
               return_value=("glm-5.2", None, False, False, True)),
         patch("hermes_cli.model_switch.resolve_persist_behavior",
               return_value=False),

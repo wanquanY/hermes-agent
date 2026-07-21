@@ -347,9 +347,10 @@ class TestTopLevelGuarantees:
     """The returned top-level schema is always a well-formed object."""
 
     def test_non_dict_input_returns_empty_object(self):
-        assert sanitize_moonshot_tool_parameters(None) == {"type": "object", "properties": {}}
-        assert sanitize_moonshot_tool_parameters("garbage") == {"type": "object", "properties": {}}
-        assert sanitize_moonshot_tool_parameters([]) == {"type": "object", "properties": {}}
+        expected = {"type": "object", "properties": {}, "required": []}
+        assert sanitize_moonshot_tool_parameters(None) == expected
+        assert sanitize_moonshot_tool_parameters("garbage") == expected
+        assert sanitize_moonshot_tool_parameters([]) == expected
 
     def test_non_object_top_level_coerced(self):
         params = {"type": "string"}
@@ -399,7 +400,11 @@ class TestToolListSanitizer:
         out = sanitize_moonshot_tools(tools)
         assert out[0]["function"]["parameters"]["properties"]["q"]["type"] == "string"
         # Second tool already clean — should be structurally equivalent
-        assert out[1]["function"]["parameters"] == {"type": "object", "properties": {}}
+        assert out[1]["function"]["parameters"] == {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
 
     def test_empty_list_is_passthrough(self):
         assert sanitize_moonshot_tools([]) == []

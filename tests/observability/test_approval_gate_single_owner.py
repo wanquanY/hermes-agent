@@ -28,12 +28,12 @@ def test_execution_paths_only_import_unified_pre_tool_seam():
                 legacy_importers.append(path.relative_to(ROOT).as_posix())
             if "resolve_pre_tool_block" in names:
                 unified_importers.append(path.relative_to(ROOT).as_posix())
-    assert legacy_importers == []
-    assert set(unified_importers) == {
-        "agent/agent_runtime_helpers.py",
-        "agent/tool_executor.py",
-        "model_tools.py",
-    }
+        assert legacy_importers == []
+        assert set(unified_importers) == {
+            "agent/tool_middleware_runtime.py",
+            "agent/tool_executor.py",
+            "model_tools.py",
+        }
 
 
 def test_blocking_wait_and_prompt_orchestration_have_one_owner():

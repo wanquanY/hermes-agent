@@ -374,7 +374,8 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
             )
             if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
                 snapshot_text = _truncate_snapshot(snapshot_text)
-            result["snapshot"] = snapshot_text
+            from tools.browser_tool import _redact_browser_output
+            result["snapshot"] = _redact_browser_output(snapshot_text)
             result["element_count"] = snap_data.get("refsCount", 0)
         except Exception:
             pass  # Navigation succeeded; snapshot is a bonus
@@ -393,6 +394,38 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
+def _camofox_private_page_block(
+    session: Dict[str, Any],
+    task_id: Optional[str],
+    action: str,
+) -> Optional[str]:
+    """Apply the shared cloud/private-page boundary to Camofox state."""
+    from tools.browser_tool import (
+        _camofox_current_page_private_url,
+        _eval_ssrf_guard_active,
+    )
+
+    if not _eval_ssrf_guard_active(task_id or "default"):
+        return None
+    blocked_url = _camofox_current_page_private_url(
+        session["tab_id"],
+        session["user_id"],
+    )
+    if not blocked_url:
+        return None
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                "Blocked: page URL targets a private or internal address "
+                f"({blocked_url}). Refusing to {action} on this page in this "
+                "browser mode."
+            ),
+        },
+        ensure_ascii=False,
+    )
+
+
 def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
                      user_task: Optional[str] = None) -> str:
     """Get accessibility tree snapshot from Camofox."""
@@ -400,6 +433,9 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "read a page snapshot")
+        if blocked:
+            return blocked
 
         data = _get(
             f"/tabs/{session['tab_id']}/snapshot",
@@ -422,9 +458,10 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
             else:
                 snapshot = _truncate_snapshot(snapshot)
 
+        from tools.browser_tool import _redact_browser_output
         return json.dumps({
             "success": True,
-            "snapshot": snapshot,
+            "snapshot": _redact_browser_output(snapshot),
             "element_count": refs_count,
         })
     except Exception as e:
@@ -437,6 +474,9 @@ def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "click")
+        if blocked:
+            return blocked
 
         # Strip @ prefix if present (our tool convention)
         clean_ref = ref.lstrip("@")
@@ -460,6 +500,9 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "type")
+        if blocked:
+            return blocked
 
         clean_ref = ref.lstrip("@")
 
@@ -482,6 +525,9 @@ def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "scroll")
+        if blocked:
+            return blocked
 
         _post(
             f"/tabs/{session['tab_id']}/scroll",
@@ -503,6 +549,13 @@ def camofox_back(task_id: Optional[str] = None) -> str:
             f"/tabs/{session['tab_id']}/back",
             {"userId": session["user_id"]},
         )
+        blocked = _camofox_private_page_block(
+            session,
+            task_id,
+            "return content after browser history navigation",
+        )
+        if blocked:
+            return blocked
         return json.dumps({"success": True, "url": data.get("url", "")})
     except Exception as e:
         return tool_error(str(e), success=False)
@@ -514,6 +567,9 @@ def camofox_press(key: str, task_id: Optional[str] = None) -> str:
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "press a key")
+        if blocked:
+            return blocked
 
         _post(
             f"/tabs/{session['tab_id']}/press",
@@ -549,6 +605,9 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "extract page images")
+        if blocked:
+            return blocked
 
         import re
 
@@ -577,9 +636,10 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
                 if alt or src:
                     images.append({"src": src, "alt": alt})
 
+        from tools.browser_tool import _redact_browser_output
         return json.dumps({
             "success": True,
-            "images": images,
+            "images": _redact_browser_output(images),
             "count": len(images),
         })
     except Exception as e:
@@ -593,6 +653,9 @@ def camofox_vision(question: str, annotate: bool = False,
         session = _get_session(task_id)
         if not session["tab_id"]:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
+        blocked = _camofox_private_page_block(session, task_id, "capture a screenshot")
+        if blocked:
+            return blocked
 
         # Get screenshot as binary PNG
         resp = _get_raw(
@@ -603,11 +666,15 @@ def camofox_vision(question: str, annotate: bool = False,
         # Save screenshot to cache
         from hermes_constants import get_hermes_home
         screenshots_dir = get_hermes_home() / "browser_screenshots"
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        screenshots_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         screenshot_path = str(screenshots_dir / f"browser_screenshot_{uuid.uuid4().hex[:8]}.png")
 
         with open(screenshot_path, "wb") as f:
             f.write(resp.content)
+        try:
+            os.chmod(screenshot_path, 0o600)
+        except (OSError, NotImplementedError):
+            pass
 
         # Encode for vision LLM
         img_b64 = base64.b64encode(resp.content).decode("utf-8")
@@ -694,6 +761,4 @@ def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
         "note": "Console log capture is not available with the Camofox backend. "
                 "Use browser_snapshot or browser_vision to inspect page state.",
     })
-
-
 

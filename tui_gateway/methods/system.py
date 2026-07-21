@@ -436,6 +436,10 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "learn",
+        "blueprint",
+        "bp",
+        "moa",
         "undo",
         "rewind",
     }
@@ -578,6 +582,7 @@ def _(rid, params: dict) -> dict:
             timeout=min(int(params.get("timeout", 240)), 600),
             cwd=os.getcwd(),
             env=hermes_subprocess_env(inherit_credentials=True),
+            stdin=subprocess.DEVNULL,
         )
         parts = [r.stdout or "", r.stderr or ""]
         out = "\n".join(p for p in parts if p).strip() or "(no output)"
@@ -897,6 +902,7 @@ def _(rid, params: dict) -> dict:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                stdin=subprocess.DEVNULL,
             )
             output = (
                 (r.stdout or "")
@@ -953,6 +959,22 @@ def _(rid, params: dict) -> dict:
     # ── Commands that queue messages onto _pending_input in the CLI ───
     # In the TUI the slash worker subprocess has no reader for that queue,
     # so we handle them here and return a structured payload.
+
+    try:
+        from tui_gateway.capability_commands import dispatch_capability_command
+
+        capability_result = dispatch_capability_command(
+            name,
+            arg,
+            session_id=params.get("session_id", ""),
+            session=session,
+        )
+        if capability_result is not None:
+            return _ok(rid, capability_result)
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
+    except Exception as exc:
+        return _err(rid, 5018, f"/{name} failed: {exc}")
 
     if name in {"queue", "q"}:
         if not arg:

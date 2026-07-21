@@ -29,6 +29,8 @@ def _load_gateway_config() -> dict:
 def _persist_model_switch(config_path: Path, result: object) -> None:
     import yaml
 
+    from hermes_cli.config import atomic_config_write, clear_model_endpoint_credentials
+
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -44,33 +46,99 @@ def _persist_model_switch(config_path: Path, result: object) -> None:
         cfg["model"] = model_cfg
     model_cfg["default"] = result.new_model
     model_cfg["provider"] = result.target_provider
+    is_custom_target = str(result.target_provider or "").strip().lower() == "custom"
     if result.base_url:
         model_cfg["base_url"] = result.base_url
-    else:
+    elif is_custom_target:
         model_cfg.pop("base_url", None)
-    model_cfg.pop("api_key", None)
-    model_cfg.pop("api_mode", None)
-    from hermes_cli.config import save_config
+    if is_custom_target:
+        if result.api_mode:
+            model_cfg["api_mode"] = result.api_mode
+        else:
+            model_cfg.pop("api_mode", None)
+        model_cfg.pop("api_key", None)
+    else:
+        clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
 
-    save_config(cfg)
+    atomic_config_write(config_path, cfg)
 
 
 class GatewayModelCommandService:
     def __init__(self, runner):
         self._runner = runner
 
+    def snapshot_session_model_override(self, session_key: str) -> dict:
+        """Capture the original session override for a one-turn lease.
+
+        Repeated ``/model --once`` commands before the next agent turn reuse
+        the first snapshot, so the eventual restore cannot strand the session
+        on an intermediate temporary model.
+        """
+        pending = getattr(
+            self._runner,
+            "_pending_one_turn_model_restores",
+            {},
+        ).get(session_key)
+        if pending is not None:
+            return {
+                "had_override": bool(pending.get("had_override")),
+                "override": (
+                    dict(pending.get("override") or {})
+                    if pending.get("had_override")
+                    else None
+                ),
+            }
+        override = self._runner._session_model_overrides.get(session_key)
+        return {
+            "had_override": override is not None,
+            "override": dict(override) if override is not None else None,
+        }
+
+    def stage_one_turn_restore(self, session_key: str, snapshot: dict) -> None:
+        store = getattr(self._runner, "_pending_one_turn_model_restores", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._runner._pending_one_turn_model_restores = store
+        store.setdefault(session_key, snapshot)
+
+    def cancel_pending_one_turn_restore(self, session_key: str) -> None:
+        store = getattr(self._runner, "_pending_one_turn_model_restores", None)
+        if isinstance(store, dict):
+            store.pop(session_key, None)
+
+    def restore_pending_one_turn_model_override(self, session_key: str) -> bool:
+        """Consume and restore a one-turn lease exactly once."""
+        if not session_key:
+            return False
+        store = getattr(self._runner, "_pending_one_turn_model_restores", None)
+        if not isinstance(store, dict):
+            return False
+        snapshot = store.pop(session_key, None)
+        if snapshot is None:
+            return False
+        if snapshot.get("had_override"):
+            self._runner._session_model_overrides[session_key] = dict(
+                snapshot.get("override") or {}
+            )
+        else:
+            self._runner._session_model_overrides.pop(session_key, None)
+        agent_cache_for(self._runner).evict_cached_agent(session_key)
+        return True
+
     async def handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model for this session.
 
         Supports:
           /model                              — interactive picker (Telegram/Discord) or text list
-          /model <name>                       — switch for this session only
+          /model <name>                       — switch model (this session only)
+          /model <name> --once                — switch for the next turn only
+          /model <name> --session             — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
         from hermes_cli.model_switch import (
-            switch_model as _switch_model, parse_model_flags,
+            switch_model as _switch_model, parse_model_flags_detailed,
             resolve_persist_behavior,
             list_authenticated_providers,
             list_picker_providers,
@@ -79,9 +147,23 @@ class GatewayModelCommandService:
 
         raw_args = event.get_command_args().strip()
 
-        # Parse --provider, --global, and --refresh flags
-        model_input, explicit_provider, is_global, force_refresh, is_session = parse_model_flags(raw_args)
-        persist_global = resolve_persist_behavior(is_global, is_session)
+        parsed_flags = parse_model_flags_detailed(raw_args)
+        model_input = parsed_flags.model_input
+        explicit_provider = parsed_flags.explicit_provider
+        is_global = parsed_flags.is_global
+        force_refresh = parsed_flags.force_refresh
+        is_session = parsed_flags.is_session
+        one_turn = parsed_flags.is_once
+        if is_global and one_turn:
+            return "❌ /model --once cannot be combined with --global"
+        if one_turn and not model_input and not explicit_provider:
+            return "❌ /model --once requires a model or provider."
+        persist_global = resolve_persist_behavior(
+            is_global,
+            is_session,
+            is_once=one_turn,
+            explicit_provider=explicit_provider,
+        )
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
@@ -98,6 +180,7 @@ class GatewayModelCommandService:
         current_api_key = ""
         user_provs = None
         custom_provs = None
+        excluded_provs: list[str] = []
         config_path = _gateway_home() / "config.yaml"
         try:
             cfg = _load_gateway_config()
@@ -114,6 +197,14 @@ class GatewayModelCommandService:
                 except Exception as exc:
                     logger.debug("Could not resolve compatible custom providers: %s", exc)
                     custom_provs = cfg.get("custom_providers")
+                model_catalog = cfg.get("model_catalog")
+                raw_excluded = (
+                    model_catalog.get("excluded_providers", [])
+                    if isinstance(model_catalog, dict)
+                    else []
+                )
+                if isinstance(raw_excluded, list):
+                    excluded_provs = raw_excluded
         except Exception as exc:
             logger.debug("Could not load gateway model config for /model: %s", exc)
 
@@ -145,6 +236,7 @@ class GatewayModelCommandService:
                         user_providers=user_provs,
                         custom_providers=custom_provs,
                         max_models=50,
+                        excluded_providers=excluded_provs,
                     )
                 except Exception as exc:
                     logger.debug("Could not build model picker providers: %s", exc)
@@ -200,8 +292,12 @@ class GatewayModelCommandService:
                         # Store model note + session override
                         if not hasattr(_self, "_pending_model_notes"):
                             _self._pending_model_notes = {}
+                        from hermes_cli.model_display import format_model_for_display
+
+                        display_old = format_model_for_display(_cur_model)
+                        display_new = format_model_for_display(result.new_model)
                         _self._pending_model_notes[_session_key] = (
-                            f"[Note: model was just switched from {_cur_model} to {result.new_model} "
+                            f"[Note: model was just switched from {display_old} to {display_new} "
                             f"via {result.provider_label or result.target_provider}. "
                             f"Adjust your self-identification accordingly.]"
                         )
@@ -291,6 +387,7 @@ class GatewayModelCommandService:
                     user_providers=user_provs,
                     custom_providers=custom_provs,
                     max_models=5,
+                    excluded_providers=excluded_provs,
                 )
                 for p in providers:
                     tag = t("gateway.model.current_tag") if p["is_current"] else ""
@@ -307,10 +404,16 @@ class GatewayModelCommandService:
 
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
+            lines.append(t("gateway.model.usage_once"))
             lines.append(t("gateway.model.usage_persist"))
             return "\n".join(lines)
 
         def _apply_resolved_switch(result: object, *, persist_global: bool) -> str:
+            restore_snapshot = (
+                self.snapshot_session_model_override(session_key)
+                if one_turn
+                else None
+            )
             # If there's a cached agent, update it in-place
             cached_entry = None
             _cache_lock = getattr(self._runner, "_agent_cache_lock", None)
@@ -330,14 +433,26 @@ class GatewayModelCommandService:
                     )
                 except Exception as exc:
                     logger.warning("In-place model switch failed for cached agent: %s", exc)
+                    return t(
+                        "gateway.model.error_prefix",
+                        error=(
+                            f"Model switch to {result.new_model} failed ({exc}); "
+                            f"staying on {current_model}."
+                        ),
+                    )
 
             # Store a note to prepend to the next user message so the model
             # knows about the switch (avoids system messages mid-history).
             if not hasattr(self._runner, "_pending_model_notes"):
                 self._runner._pending_model_notes = {}
+            from hermes_cli.model_display import format_model_for_display
+
+            display_old = format_model_for_display(current_model)
+            display_new = format_model_for_display(result.new_model)
             self._runner._pending_model_notes[session_key] = (
-                f"[Note: model was just switched from {current_model} to {result.new_model} "
+                f"[Note: model was just switched from {display_old} to {display_new} "
                 f"via {result.provider_label or result.target_provider}. "
+                f"{'This override applies to the next turn only. ' if one_turn else ''}"
                 f"Adjust your self-identification accordingly.]"
             )
 
@@ -349,6 +464,13 @@ class GatewayModelCommandService:
                 "base_url": result.base_url,
                 "api_mode": result.api_mode,
             }
+            if one_turn:
+                self.stage_one_turn_restore(
+                    session_key,
+                    restore_snapshot or {"had_override": False, "override": None},
+                )
+            else:
+                self.cancel_pending_one_turn_restore(session_key)
 
             # Evict cached agent so the next turn creates a fresh agent from the
             # override rather than relying on cache signature mismatch detection.
@@ -411,6 +533,8 @@ class GatewayModelCommandService:
 
             if persist_global:
                 lines.append(t("gateway.model.saved_global"))
+            elif one_turn:
+                lines.append(t("gateway.model.once_hint"))
             else:
                 lines.append(t("gateway.model.session_only_hint"))
 

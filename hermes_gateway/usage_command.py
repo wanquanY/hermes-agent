@@ -131,6 +131,38 @@ class GatewayUsageCommandService:
             if ctx.compression_count:
                 lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
 
+            try:
+                entry = await run_sqlite_io(
+                    self._runner.session_store.get_or_create_session,
+                    source,
+                )
+                history = await run_sqlite_io(
+                    self._runner.session_store.load_transcript,
+                    entry.session_id,
+                )
+                from agent.context_breakdown import compute_session_context_breakdown
+
+                breakdown = await asyncio.to_thread(
+                    compute_session_context_breakdown,
+                    agent,
+                    history or [],
+                )
+                categories = breakdown.get("categories") or []
+                estimated_total = int(breakdown.get("estimated_total") or 0)
+                if categories:
+                    lines.extend(["", "Context breakdown (estimated)"])
+                    for category in categories:
+                        tokens = int(category.get("tokens") or 0)
+                        if tokens <= 0:
+                            continue
+                        percent = round(tokens / estimated_total * 100) if estimated_total else 0
+                        lines.append(
+                            f"- {category.get('label') or category.get('id')}: "
+                            f"{tokens:,} ({percent}%)"
+                        )
+            except Exception:
+                logger.debug("Could not compute context breakdown", exc_info=True)
+
             if account_lines:
                 lines.append("")
                 lines.extend(account_lines)

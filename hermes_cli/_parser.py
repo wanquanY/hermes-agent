@@ -55,6 +55,7 @@ Examples:
     hermes fallback add           Add a fallback provider (same picker as `hermes model`)
     hermes fallback remove        Remove a fallback provider from the chain
     hermes config                 View configuration
+    hermes console                Open the safe Hermes command console
     hermes config edit            Edit config in $EDITOR
     hermes config set model gpt-4 Set a config value
     hermes gateway                Run messaging gateway
@@ -107,6 +108,15 @@ def build_top_level_parser():
             "previews, no session_id line. Tools, memory, rules, and "
             "AGENTS.md in the CWD are loaded as normal; approvals are "
             "auto-bypassed. Intended for scripts / pipes."
+        ),
+    )
+    parser.add_argument(
+        "--usage-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "One-shot mode only: write a JSON usage and cost report to PATH, "
+            "including failed runs."
         ),
     )
     # --model / --provider are accepted at the top level so they can pair

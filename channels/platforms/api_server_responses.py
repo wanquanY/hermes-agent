@@ -24,6 +24,8 @@ from channels.platforms.api_server_support import (
     _multimodal_validation_error,
     _normalize_multimodal_content,
     _openai_error,
+    _redact_api_error_text,
+    _resolve_media_to_data_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -448,10 +450,10 @@ class APIServerResponsesMixin:
                 if agent_final and not final_response_text:
                     final_response_text = agent_final
                 if isinstance(result, dict) and result.get("error") and not final_response_text:
-                    agent_error = result["error"]
+                    agent_error = _redact_api_error_text(result["error"])
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running agent for streaming responses: %s", e, exc_info=True)
-                agent_error = str(e)
+                agent_error = _redact_api_error_text(e)
 
             # Close the message item if it was opened
             final_response_text = "".join(final_text_parts) or final_response_text
@@ -513,14 +515,25 @@ class APIServerResponsesMixin:
                 "type": "message",
                 "role": "assistant",
                 "content": [
-                    {"type": "output_text", "text": final_response_text or (agent_error or "")}
+                    {
+                        "type": "output_text",
+                        "text": final_response_text
+                        or (
+                            _redact_api_error_text(agent_error)
+                            if agent_error
+                            else ""
+                        ),
+                    }
                 ],
             })
 
             if agent_error:
                 failed_env = _envelope("failed")
                 failed_env["output"] = final_items
-                failed_env["error"] = {"message": agent_error, "type": "server_error"}
+                failed_env["error"] = {
+                    "message": _redact_api_error_text(agent_error),
+                    "type": "server_error",
+                }
                 failed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
@@ -531,7 +544,8 @@ class APIServerResponsesMixin:
                 if final_response_text or agent_error:
                     _failed_history.append({
                         "role": "assistant",
-                        "content": final_response_text or agent_error,
+                        "content": final_response_text
+                        or _redact_api_error_text(agent_error),
                     })
                 _persist_response_snapshot(
                     failed_env,
@@ -606,11 +620,14 @@ class APIServerResponsesMixin:
             # get a TransferEncodingError from incomplete chunked encoding.
             import traceback as _tb
             _persist_incomplete_if_needed()
-            agent_error = _tb.format_exc()
+            agent_error = _redact_api_error_text(_tb.format_exc())
             try:
                 failed_env = _envelope("failed")
                 failed_env["output"] = list(emitted_items)
-                failed_env["error"] = {"message": str(_exc)[:500], "type": "server_error"}
+                failed_env["error"] = {
+                    "message": _redact_api_error_text(_exc, limit=500),
+                    "type": "server_error",
+                }
                 failed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
@@ -740,6 +757,7 @@ class APIServerResponsesMixin:
         # Reuse session from previous_response_id chain so the dashboard
         # groups the entire conversation under one session entry.
         session_id = conversation_session_id or str(uuid.uuid4())
+        route = self._resolve_route(body.get("model"))
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
@@ -794,6 +812,7 @@ class APIServerResponsesMixin:
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                route=route,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -827,6 +846,7 @@ class APIServerResponsesMixin:
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                route=route,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -865,9 +885,13 @@ class APIServerResponsesMixin:
                     status=500,
                 )
 
-        final_response = result.get("final_response", "")
+        final_response = _resolve_media_to_data_urls(
+            result.get("final_response", "")
+        )
         if not final_response:
-            final_response = result.get("error", "(No response generated)")
+            final_response = _redact_api_error_text(
+                result.get("error", "(No response generated)")
+            )
 
         response_id = f"resp_{uuid.uuid4().hex[:28]}"
         created_at = int(time.time())

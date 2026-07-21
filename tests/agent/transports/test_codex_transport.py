@@ -194,6 +194,23 @@ class TestCodexBuildKwargs:
         assert headers.get("session_id") == "conv-codex-1"
         assert headers.get("x-client-request-id") == "conv-codex-1"
 
+    def test_codex_backend_hashes_overlong_cache_scope_headers(self, transport):
+        long_session_id = "conversation:" + "x" * 200
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            session_id=long_session_id,
+            is_codex_backend=True,
+        )
+
+        headers = kw["extra_headers"]
+        assert headers["session_id"] == headers["x-client-request-id"]
+        assert headers["session_id"].startswith("pck_")
+        assert len(headers["session_id"]) <= 64
+        assert kw["prompt_cache_key"] == long_session_id
+
     def test_codex_backend_no_headers_without_session_id(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
 

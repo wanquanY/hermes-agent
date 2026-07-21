@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import Optional
@@ -16,8 +17,11 @@ from hermes_gateway.busy_message_runtime import busy_message_for
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.message_command_runtime import message_command_for
 from hermes_gateway.message_ingress import message_ingress_for
+from hermes_gateway.model_command import model_command_for
+from hermes_gateway.profile_runtime import UnknownProfileError, profile_runtime_for
 from hermes_gateway.runtime_status_writer import runtime_status_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
+from hermes_gateway.session_turn_lease import session_turn_lease_for
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,18 @@ class GatewayMessageRuntime:
         self._runner = runner
 
     async def handle_message(self, event: MessageEvent) -> Optional[str]:
+        profile_runtime = profile_runtime_for(self._runner)
+        try:
+            source = profile_runtime.route_source(event.source)
+        except UnknownProfileError:
+            logger.error("Rejected inbound source with an unavailable profile", exc_info=True)
+            return None
+        if source is not event.source:
+            event = dataclasses.replace(event, source=source)
+        with profile_runtime.scope_for_source(source):
+            return await self._handle_scoped_message(event)
+
+    async def _handle_scoped_message(self, event: MessageEvent) -> Optional[str]:
         runner = self._runner
         ingress = await message_ingress_for(runner).preprocess(
             event,
@@ -91,7 +107,18 @@ class GatewayMessageRuntime:
             await self._continue_goal_if_needed(agent_result, source)
             return agent_result
         finally:
+            try:
+                model_command_for(runner).restore_pending_one_turn_model_override(
+                    session_key
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to restore one-turn model override for %s",
+                    session_key,
+                    exc_info=True,
+                )
             session_runtime_state_for(runner).release_running_agent_state(session_key)
+            session_turn_lease_for(runner).release(session_key, run_generation)
             work_lease.release()
 
     async def _continue_goal_if_needed(self, agent_result, source) -> None:

@@ -23,6 +23,13 @@ _hermes_home = get_hermes_home()
 
 
 async def start_gateway_runner(runner) -> bool:
+    from hermes_gateway.profile_runtime import profile_runtime_for
+
+    with profile_runtime_for(runner).scope_for_profile():
+        return await _start_gateway_runner_scoped(runner)
+
+
+async def _start_gateway_runner_scoped(runner) -> bool:
     self = runner
     """
     Start the gateway and all configured platform adapters.
@@ -400,6 +407,13 @@ async def start_gateway_runner(runner) -> bool:
                 "next_retry": time.monotonic() + 30,
             }
 
+    from hermes_gateway.profile_runtime import profile_runtime_for
+
+    secondary_connected = await profile_runtime_for(
+        self
+    ).start_secondary_adapters()
+    connected_count += secondary_connected
+
     if connected_count == 0:
         if startup_nonretryable_errors:
             reason = "; ".join(startup_nonretryable_errors)
@@ -460,6 +474,30 @@ async def start_gateway_runner(runner) -> bool:
     self._running = True
     runtime_status_for(self).update_runtime_status("running")
 
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            from hermes_gateway.shutdown_watchdog import (
+                DEFAULT_HEARTBEAT_INTERVAL_S,
+                loop_heartbeat_forever,
+            )
+
+            existing_heartbeat = getattr(self, "_loop_heartbeat_task", None)
+            if existing_heartbeat is None or existing_heartbeat.done():
+                self._loop_heartbeat_task = asyncio.create_task(
+                    loop_heartbeat_forever(
+                        interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
+                        start_time=getattr(self, "_gateway_started_at", None),
+                        should_continue=lambda: bool(self._running),
+                    ),
+                    name="gateway-loop-heartbeat",
+                )
+                self._background_tasks.add(self._loop_heartbeat_task)
+                self._loop_heartbeat_task.add_done_callback(
+                    self._background_tasks.discard
+                )
+        except Exception:
+            logger.debug("Failed to start gateway loop heartbeat", exc_info=True)
+
     # Emit gateway:startup hook
     hook_count = len(self.hooks.loaded_hooks)
     if hook_count:
@@ -506,6 +544,7 @@ async def start_gateway_runner(runner) -> bool:
     from hermes_gateway.restart_lifecycle import restart_lifecycle_for
 
     restart_lifecycle = restart_lifecycle_for(self)
+    restart_lifecycle.mark_booted_from_chat_restart(restart_notification_pending)
     delivered_restart_target = await restart_lifecycle.send_restart_notification()
 
     # Broadcast a lightweight "gateway is back" message to configured
@@ -525,6 +564,11 @@ async def start_gateway_runner(runner) -> bool:
     # previous gateway restart/shutdown.  The resume_pending flag is cleared
     # by the normal successful-turn path, so a failed auto-resume remains
     # visible for manual recovery on the next user message.
+    from hermes_gateway.delivery_obligation_runtime import (
+        delivery_obligations_for,
+    )
+
+    await delivery_obligations_for(self).recover_startup()
     await self._schedule_resume_pending_sessions_async()
 
     # Drain any recovered process watchers (from crash recovery checkpoint)

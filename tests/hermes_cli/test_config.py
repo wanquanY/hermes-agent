@@ -9,6 +9,7 @@ import yaml
 
 from hermes_cli.config import (
     DEFAULT_CONFIG,
+    atomic_config_write,
     get_hermes_home,
     ensure_hermes_home,
     get_compatible_custom_providers,
@@ -20,6 +21,7 @@ from hermes_cli.config import (
     save_env_value,
     save_env_value_secure,
     sanitize_env_file,
+    set_config_value,
     _sanitize_env_lines,
 )
 
@@ -158,6 +160,17 @@ class TestLoadConfigParseFailure:
 
 
 class TestSaveAndLoadRoundtrip:
+    @staticmethod
+    def _deny_config_reads(config_path):
+        real_open = open
+
+        def fake_open(file, mode="r", *args, **kwargs):
+            if Path(file) == config_path and "r" in mode:
+                raise PermissionError("denied")
+            return real_open(file, mode, *args, **kwargs)
+
+        return fake_open
+
     def test_roundtrip(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config = load_config()
@@ -189,6 +202,65 @@ class TestSaveAndLoadRoundtrip:
 
             reloaded = load_config()
             assert reloaded["terminal"]["timeout"] == 999
+
+    def test_save_refuses_unreadable_existing_config(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        original = "model: test/original\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with patch(
+                "builtins.open",
+                side_effect=self._deny_config_reads(config_path),
+            ):
+                with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+                    save_config({"model": "test/replacement"})
+
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_config_set_refuses_unreadable_existing_config(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        original = "model:\n  provider: openrouter\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with patch(
+                "builtins.open",
+                side_effect=self._deny_config_reads(config_path),
+            ):
+                with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+                    set_config_value("model.provider", "openai")
+
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_atomic_config_write_refuses_unreadable_existing_config(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "config.yaml"
+        original = "model:\n  provider: openrouter\n"
+        config_path.write_text(original, encoding="utf-8")
+
+        with patch(
+            "builtins.open",
+            side_effect=self._deny_config_reads(config_path),
+        ):
+            with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+                atomic_config_write(
+                    config_path,
+                    {"model": {"provider": "openai"}},
+                )
+
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_atomic_config_write_creates_absent_config(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+
+        atomic_config_write(config_path, {"model": {"provider": "openrouter"}})
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
+            "model": {"provider": "openrouter"}
+        }
 
 
 class TestSaveEnvValueSecure:
@@ -226,6 +298,47 @@ class TestSaveEnvValueSecure:
             save_env_value("TENOR_API_KEY", "sk-test-secret")
             env_mode = (tmp_path / ".env").stat().st_mode & 0o777
             assert env_mode == 0o600
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/Users/me/Library/Application Support/hermes/key",
+            "left\tright",
+        ],
+    )
+    def test_save_env_value_quotes_whitespace_and_round_trips(
+        self,
+        tmp_path,
+        value,
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            save_env_value("TERMINAL_SSH_KEY", value)
+
+            line = (tmp_path / ".env").read_text(encoding="utf-8").strip()
+            assert line == f'TERMINAL_SSH_KEY="{value}"'
+            assert load_env()["TERMINAL_SSH_KEY"] == value
+
+    def test_save_env_value_quoted_value_is_idempotent(self, tmp_path):
+        value = '"/Users/me/Application Support/key"'
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            save_env_value("TERMINAL_SSH_KEY", value)
+            first = (tmp_path / ".env").read_text(encoding="utf-8")
+            save_env_value("TERMINAL_SSH_KEY", value)
+            second = (tmp_path / ".env").read_text(encoding="utf-8")
+
+            assert first == second
+            assert load_env()["TERMINAL_SSH_KEY"] == value
+
+    def test_export_prefixed_env_value_loads_under_canonical_key(self, tmp_path):
+        (tmp_path / ".env").write_text(
+            "export GITHUB_TOKEN=runtime-fake-token\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            from hermes_cli.config import invalidate_env_cache
+
+            invalidate_env_cache()
+            assert load_env()["GITHUB_TOKEN"] == "runtime-fake-token"
 
 
 class TestRemoveEnvValue:
@@ -849,4 +962,3 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
-

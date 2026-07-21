@@ -10,6 +10,10 @@ import re
 import tempfile
 from typing import Any, Dict, List, Optional
 
+from channels.platforms.telegram_duration import probe_voice_duration_seconds
+from channels.platforms.telegram_security import redact_telegram_error
+from channels.platforms.telegram_ids import normalize_telegram_chat_id
+
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
     from telegram.constants import ParseMode
@@ -189,7 +193,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         if ParseMode is None:
                             plain_chunk = _strip_mdv2(chunk)
                             msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
+                                chat_id=normalize_telegram_chat_id(chat_id),
                                 text=plain_chunk,
                                 parse_mode=None,
                                 reply_to_message_id=reply_to_id,
@@ -200,7 +204,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         else:
                             try:
                                 msg = await self._bot.send_message(
-                                    chat_id=int(chat_id),
+                                    chat_id=normalize_telegram_chat_id(chat_id),
                                     text=chunk,
                                     parse_mode=ParseMode.MARKDOWN_V2,
                                     reply_to_message_id=reply_to_id,
@@ -211,10 +215,14 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                             except Exception as md_error:
                                 # Markdown parsing failed, try plain text
                                 if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
-                                    logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
+                                    logger.warning(
+                                        "[%s] MarkdownV2 parse failed, falling back to plain text: %s",
+                                        self.name,
+                                        redact_telegram_error(md_error),
+                                    )
                                     plain_chunk = _strip_mdv2(chunk)
                                     msg = await self._bot.send_message(
-                                        chat_id=int(chat_id),
+                                        chat_id=normalize_telegram_chat_id(chat_id),
                                         text=plain_chunk,
                                         parse_mode=None,
                                         reply_to_message_id=reply_to_id,
@@ -235,7 +243,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                                 if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
                                     return SendResult(
                                         success=False,
-                                        error=str(send_err),
+                                        error=redact_telegram_error(send_err),
                                         retryable=False,
                                     )
                                 # Telegram has been observed to return a
@@ -267,7 +275,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                                 if private_dm_topic_send:
                                     return SendResult(
                                         success=False,
-                                        error=str(send_err),
+                                        error=redact_telegram_error(send_err),
                                         retryable=False,
                                     )
                                 # Original message was deleted before we
@@ -276,7 +284,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                                 # the reply anchor, so drop both together.
                                 logger.warning(
                                     "[%s] Reply target deleted, retrying without reply_to: %s",
-                                    self.name, send_err,
+                                    self.name, redact_telegram_error(send_err),
                                 )
                                 reply_to_id = None
                                 if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
@@ -310,8 +318,13 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                             raise
                         if _send_attempt < 2:
                             wait = 2 ** _send_attempt
-                            logger.warning("[%s] Network error on send (attempt %d/3), retrying in %ds: %s",
-                                           self.name, _send_attempt + 1, wait, send_err)
+                            logger.warning(
+                                "[%s] Network error on send (attempt %d/3), retrying in %ds: %s",
+                                self.name,
+                                _send_attempt + 1,
+                                wait,
+                                redact_telegram_error(send_err),
+                            )
                             await asyncio.sleep(wait)
                         else:
                             raise
@@ -325,7 +338,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                                     self.name,
                                     _send_attempt + 1,
                                     wait,
-                                    send_err,
+                                    redact_telegram_error(send_err),
                                 )
                                 await asyncio.sleep(wait)
                                 continue
@@ -353,7 +366,8 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             )
             
         except Exception as e:
-            logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
+            safe_error = redact_telegram_error(e)
+            logger.error("[%s] Failed to send Telegram message: %s", self.name, safe_error)
             err_str = str(e).lower()
             error_kind = classify_send_error(e)
             # Message too long — content exceeded 4096 chars. Return failure so
@@ -375,7 +389,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             is_pool_timeout = self._looks_like_pool_timeout(e)
             return SendResult(
                 success=False,
-                error=str(e),
+                error=safe_error,
                 retryable=(is_connect_timeout or is_pool_timeout or not is_timeout),
                 error_kind=error_kind,
             )
@@ -461,7 +475,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
         try:
             if not finalize:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=content,
                 )
@@ -470,7 +484,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             formatted = self.format_message(content)
             try:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=formatted,
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -485,10 +499,10 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 logger.warning(
                     "[%s] MarkdownV2 edit failed, falling back to plain text: %s",
                     self.name,
-                    fmt_err,
+                    redact_telegram_error(fmt_err),
                 )
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=content,
                 )
@@ -520,11 +534,15 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     self.name, wait,
                 )
                 if wait > 5.0:
-                    return SendResult(success=False, error=f"flood_control:{wait}")
+                    return SendResult(
+                        success=False,
+                        error=f"flood_control:{wait}",
+                        retry_after=float(wait),
+                    )
                 await asyncio.sleep(wait)
                 try:
                     await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         message_id=int(message_id),
                         text=content,
                     )
@@ -532,9 +550,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 except Exception as retry_err:
                     logger.error(
                         "[%s] Edit retry failed after flood wait: %s",
-                        self.name, retry_err,
+                        self.name, redact_telegram_error(retry_err),
                     )
-                    return SendResult(success=False, error=str(retry_err))
+                    return SendResult(success=False, error=redact_telegram_error(retry_err))
             # Transient network errors (ConnectError, timeouts, server
             # disconnects) should not permanently disable progress-message
             # editing.  Mark the result retryable so the caller knows it
@@ -559,17 +577,16 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     "[%s] Transient network error editing message %s (will retry): %s",
                     self.name,
                     message_id,
-                    e,
+                    redact_telegram_error(e),
                 )
-                return SendResult(success=False, error=str(e), retryable=True)
+                return SendResult(success=False, error=redact_telegram_error(e), retryable=True)
             logger.error(
                 "[%s] Failed to edit Telegram message %s: %s",
                 self.name,
                 message_id,
-                e,
-                exc_info=True,
+                redact_telegram_error(e),
             )
-            return SendResult(success=False, error=str(e))
+            return SendResult(success=False, error=redact_telegram_error(e))
     
     async def _edit_overflow_split(
         self,
@@ -613,7 +630,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 )
                 try:
                     await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         message_id=int(message_id),
                         text=formatted,
                         parse_mode=ParseMode.MARKDOWN_V2,
@@ -623,16 +640,16 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         logger.warning(
                             "[%s] Overflow split: MarkdownV2 first-chunk edit "
                             "failed, falling back to plain text: %s",
-                            self.name, fmt_err,
+                            self.name, redact_telegram_error(fmt_err),
                         )
                         await self._bot.edit_message_text(
-                            chat_id=int(chat_id),
+                            chat_id=normalize_telegram_chat_id(chat_id),
                             message_id=int(message_id),
                             text=_strip_mdv2(first_chunk),
                         )
             else:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=first_chunk,
                 )
@@ -645,9 +662,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             else:
                 logger.error(
                     "[%s] Overflow split: first-chunk edit failed: %s",
-                    self.name, e, exc_info=True,
+                    self.name, redact_telegram_error(e),
                 )
-                return SendResult(success=False, error=str(e))
+                return SendResult(success=False, error=redact_telegram_error(e))
     
         # Step 2 — send each remaining chunk as a continuation message,
         # threaded as a reply to the previous so the user sees them as a
@@ -681,7 +698,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         # literally); streaming previews stay raw.
                         text = _strip_mdv2(chunk) if finalize else chunk
                     sent_msg = await self._bot.send_message(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         text=text,
                         parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
                         reply_to_message_id=reply_to_id,
@@ -704,7 +721,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         )
                         try:
                             sent_msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
+                                chat_id=normalize_telegram_chat_id(chat_id),
                                 text=_strip_mdv2(chunk) if finalize else chunk,
                                 **retry_thread_kwargs,
                                 **self._link_preview_kwargs(),
@@ -714,7 +731,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         except Exception as _retry_err:
                             logger.warning(
                                 "[%s] Overflow continuation no-reply retry failed: %s",
-                                self.name, _retry_err,
+                                self.name, redact_telegram_error(_retry_err),
                             )
                             sent_msg = None
                             break
@@ -723,7 +740,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                         continue
                     logger.warning(
                         "[%s] Overflow continuation send failed: %s",
-                        self.name, send_err,
+                        self.name, redact_telegram_error(send_err),
                     )
                     sent_msg = None
                     break
@@ -787,14 +804,15 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             return False
         try:
             await self._bot.delete_message(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 message_id=int(message_id),
             )
             return True
         except Exception as e:
+            safe_error = redact_telegram_error(e)
             logger.debug(
                 "[%s] Failed to delete Telegram message %s: %s",
-                self.name, message_id, e,
+                self.name, message_id, safe_error,
             )
             return False
     
@@ -869,7 +887,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
         # kills draft streaming for the whole response.
         for use_markdown in (True, False):
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "draft_id": int(draft_id),
                 "text": self.format_message(text) if use_markdown else text,
             }
@@ -895,14 +913,14 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     logger.debug(
                         "[%s] sendMessageDraft MarkdownV2 rejected, retrying "
                         "as plain text (chat=%s draft_id=%s): %s",
-                        self.name, chat_id, draft_id, e,
+                        self.name, chat_id, draft_id, redact_telegram_error(e),
                     )
                     continue
                 logger.debug(
                     "[%s] sendMessageDraft failed (chat=%s draft_id=%s): %s",
-                    self.name, chat_id, draft_id, e,
+                    self.name, chat_id, draft_id, redact_telegram_error(e),
                 )
-                return SendResult(success=False, error=str(e))
+                return SendResult(success=False, error=redact_telegram_error(e))
     
         return SendResult(success=False, error="draft_rejected")
     
@@ -962,7 +980,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             thread_id = self._metadata_thread_id(metadata)
             reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             msg = await self._send_message_with_thread_fallback(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 text=text,
                 parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=keyboard,
@@ -978,8 +996,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_update_prompt failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            safe_error = redact_telegram_error(e)
+            logger.warning("[%s] send_update_prompt failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
     
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
@@ -1025,7 +1044,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             ])
     
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": text,
                 "parse_mode": ParseMode.HTML,
                 "reply_markup": keyboard,
@@ -1050,8 +1069,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
     
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            safe_error = redact_telegram_error(e)
+            logger.warning("[%s] send_exec_approval failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
     
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
@@ -1076,7 +1096,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
     
             thread_id = self._metadata_thread_id(metadata)
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": preview,
                 "parse_mode": ParseMode.MARKDOWN_V2,
                 "reply_markup": keyboard,
@@ -1098,8 +1118,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             self._slash_confirm_state[confirm_id] = session_key
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_slash_confirm failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            safe_error = redact_telegram_error(e)
+            logger.warning("[%s] send_slash_confirm failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
     
     async def send_clarify(
         self,
@@ -1140,7 +1161,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 text += f"\n\n{option_lines}"
     
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": text,
                 "parse_mode": ParseMode.HTML,
                 **self._link_preview_kwargs(),
@@ -1180,8 +1201,9 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             self._clarify_state[clarify_id] = session_key
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_clarify failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            safe_error = redact_telegram_error(e)
+            logger.warning("[%s] send_clarify failed: %s", self.name, safe_error)
+            return SendResult(success=False, error=safe_error)
     
     
     
@@ -1250,7 +1272,13 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
         try:
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
-            
+
+            duration_probe = _telegram_public_attr(
+                "_probe_voice_duration_seconds",
+                probe_voice_duration_seconds,
+            )
+            duration = await asyncio.to_thread(duration_probe, audio_path)
+
             with open(audio_path, "rb") as audio_file:
                 ext = os.path.splitext(audio_path)[1].lower()
                 # .ogg / .opus files -> send as voice (round playable bubble)
@@ -1267,9 +1295,10 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     msg = await self._send_with_dm_topic_reply_anchor_retry(
                         self._bot.send_voice,
                         {
-                            "chat_id": int(chat_id),
+                            "chat_id": normalize_telegram_chat_id(chat_id),
                             "voice": audio_file,
                             "caption": caption[:1024] if caption else None,
+                            "duration": duration,
                             "reply_to_message_id": reply_to_id,
                             **voice_thread_kwargs,
                             **self._notification_kwargs(metadata),
@@ -1293,9 +1322,10 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     msg = await self._send_with_dm_topic_reply_anchor_retry(
                         self._bot.send_audio,
                         {
-                            "chat_id": int(chat_id),
+                            "chat_id": normalize_telegram_chat_id(chat_id),
                             "audio": audio_file,
                             "caption": caption[:1024] if caption else None,
+                            "duration": duration,
                             "reply_to_message_id": reply_to_id,
                             **audio_thread_kwargs,
                             **self._notification_kwargs(metadata),
@@ -1317,11 +1347,11 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
+            safe_error = redact_telegram_error(e)
             logger.error(
                 "[%s] Failed to send Telegram voice/audio, falling back to base adapter: %s",
                 self.name,
-                e,
-                exc_info=True,
+                safe_error,
             )
             return await super().send_voice(chat_id, audio_path, caption, reply_to, metadata=metadata)
     
@@ -1353,7 +1383,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
         except Exception as exc:  # pragma: no cover - missing SDK
             logger.warning(
                 "[%s] InputMediaPhoto unavailable, falling back to per-image send: %s",
-                self.name, exc,
+                self.name, redact_telegram_error(exc),
             )
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
             return
@@ -1432,7 +1462,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group,
                     {
-                        "chat_id": int(chat_id),
+                        "chat_id": normalize_telegram_chat_id(chat_id),
                         "media": media,
                         "reply_to_message_id": reply_to_id,
                         **thread_kwargs,
@@ -1446,8 +1476,10 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             except Exception as e:
                 logger.warning(
                     "[%s] send_media_group failed (chunk %d/%d), falling back to per-image: %s",
-                    self.name, chunk_idx + 1, len(chunks), e,
-                    exc_info=True,
+                    self.name,
+                    chunk_idx + 1,
+                    len(chunks),
+                    redact_telegram_error(e),
                 )
                 # Fallback: send each photo in this chunk individually
                 await super().send_multiple_images(
@@ -1490,7 +1522,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_photo,
                     {
-                        "chat_id": int(chat_id),
+                        "chat_id": normalize_telegram_chat_id(chat_id),
                         "photo": image_file,
                         "caption": caption[:1024] if caption else None,
                         "reply_to_message_id": reply_to_id,
@@ -1528,8 +1560,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     "[%s] Failed to send Telegram local image as photo, "
                     "trying document fallback: %s",
                     self.name,
-                    e,
-                    exc_info=True,
+                    redact_telegram_error(e),
                 )
             # Fallback to sending as document (file) — no dimension limit,
             # only 50MB size limit. If even that fails, fall back to the
@@ -1548,8 +1579,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                     "[%s] Failed to send Telegram local image as document, "
                     "falling back to base adapter: %s",
                     self.name,
-                    doc_err,
-                    exc_info=True,
+                    redact_telegram_error(doc_err),
                 )
                 return await super().send_image_file(chat_id, image_path, caption, reply_to, metadata=metadata)
     
@@ -1586,7 +1616,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_document,
                     {
-                        "chat_id": int(chat_id),
+                        "chat_id": normalize_telegram_chat_id(chat_id),
                         "document": f,
                         "filename": display_name,
                         "caption": caption[:1024] if caption else None,
@@ -1601,7 +1631,11 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] Failed to send document: %s", self.name, e, exc_info=True)
+            logger.warning(
+                "[%s] Failed to send document: %s",
+                self.name,
+                redact_telegram_error(e),
+            )
             return await super().send_document(chat_id, file_path, caption, file_name, reply_to, metadata=metadata)
     
     async def send_video(
@@ -1634,7 +1668,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_video,
                     {
-                        "chat_id": int(chat_id),
+                        "chat_id": normalize_telegram_chat_id(chat_id),
                         "video": f,
                         "caption": caption[:1024] if caption else None,
                         "reply_to_message_id": reply_to_id,
@@ -1648,7 +1682,11 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] Failed to send video: %s", self.name, e, exc_info=True)
+            logger.warning(
+                "[%s] Failed to send video: %s",
+                self.name,
+                redact_telegram_error(e),
+            )
             return await super().send_video(chat_id, video_path, caption, reply_to, metadata=metadata)
     
     async def send_image(
@@ -1686,7 +1724,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             msg = await self._send_with_dm_topic_reply_anchor_retry(
                 self._bot.send_photo,
                 {
-                    "chat_id": int(chat_id),
+                    "chat_id": normalize_telegram_chat_id(chat_id),
                     "photo": image_url,
                     "caption": caption[:1024] if caption else None,
                     "reply_to_message_id": reply_to_id,
@@ -1702,8 +1740,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             logger.warning(
                 "[%s] URL-based send_photo failed, trying file upload: %s",
                 self.name,
-                e,
-                exc_info=True,
+                redact_telegram_error(e),
             )
             # Fallback: download and upload as file (supports up to 10MB)
             try:
@@ -1723,7 +1760,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_photo,
                     {
-                        "chat_id": int(chat_id),
+                        "chat_id": normalize_telegram_chat_id(chat_id),
                         "photo": image_data,
                         "caption": caption[:1024] if caption else None,
                         "reply_to_message_id": reply_to_id,
@@ -1739,8 +1776,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 logger.error(
                     "[%s] File upload send_photo also failed: %s",
                     self.name,
-                    e2,
-                    exc_info=True,
+                    redact_telegram_error(e2),
                 )
                 # Final fallback: send URL as text
                 return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
@@ -1770,7 +1806,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             msg = await self._send_with_dm_topic_reply_anchor_retry(
                 self._bot.send_animation,
                 {
-                    "chat_id": int(chat_id),
+                    "chat_id": normalize_telegram_chat_id(chat_id),
                     "animation": animation_url,
                     "caption": caption[:1024] if caption else None,
                     "reply_to_message_id": reply_to_id,
@@ -1786,8 +1822,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             logger.error(
                 "[%s] Failed to send Telegram animation, falling back to photo: %s",
                 self.name,
-                e,
-                exc_info=True,
+                redact_telegram_error(e),
             )
             # Fallback: try as a regular photo
             return await self.send_image(chat_id, animation_url, caption, reply_to, metadata=metadata)
@@ -1802,7 +1837,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 _is_dm_topic = bool(metadata and metadata.get("telegram_dm_topic_reply_fallback"))
                 message_thread_id = self._message_thread_id_for_typing(_typing_thread)
                 await self._bot.send_chat_action(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     action="typing",
                     message_thread_id=message_thread_id,
                 )
@@ -1813,7 +1848,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 if _is_dm_topic and message_thread_id is not None:
                     try:
                         await self._bot.send_chat_action(
-                            chat_id=int(chat_id),
+                            chat_id=normalize_telegram_chat_id(chat_id),
                             action="typing",
                         )
                         return
@@ -1823,8 +1858,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 logger.debug(
                     "[%s] Failed to send Telegram typing indicator: %s",
                     self.name,
-                    e,
-                    exc_info=True,
+                    redact_telegram_error(e),
                 )
     
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -1833,7 +1867,7 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
             return {"name": "Unknown", "type": "dm"}
         
         try:
-            chat = await self._bot.get_chat(int(chat_id))
+            chat = await self._bot.get_chat(normalize_telegram_chat_id(chat_id))
             
             chat_type = "dm"
             if chat.type == ChatType.GROUP:
@@ -1856,7 +1890,10 @@ class TelegramDeliveryMixin(TelegramCallbacksMixin):
                 "[%s] Failed to get Telegram chat info for %s: %s",
                 self.name,
                 chat_id,
-                e,
-                exc_info=True,
+                redact_telegram_error(e),
             )
-            return {"name": str(chat_id), "type": "dm", "error": str(e)}
+            return {
+                "name": str(chat_id),
+                "type": "dm",
+                "error": redact_telegram_error(e),
+            }

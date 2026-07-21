@@ -1208,6 +1208,12 @@ def test_interactive_respond_methods_stay_on_control_plane(method):
         "skills.reload",
         "toolsets.list",
         "tools.configure",
+        "write_approval.approve",
+        "write_approval.configure",
+        "write_approval.detail",
+        "write_approval.list",
+        "write_approval.reject",
+        "write_approval.status",
     ],
 )
 def test_profile_scoped_runtime_tool_methods_are_proxied_to_runtime_worker(method):

@@ -251,6 +251,7 @@ def _install_npm(
             text=True,
             timeout=300,
             env=_lsp_installer_env(),
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             logger.warning(
@@ -303,6 +304,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
             text=True,
             timeout=600,
             env=env,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             logger.warning(
@@ -341,6 +343,7 @@ def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
             text=True,
             timeout=300,
             env=_lsp_installer_env(),
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
             logger.warning(

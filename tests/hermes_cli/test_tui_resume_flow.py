@@ -326,16 +326,11 @@ def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod)
     monkeypatch.setattr(
         main_mod, "_prepare_agent_startup", lambda args: prepared.append(args.command)
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.oneshot",
-        types.SimpleNamespace(
-            run_oneshot=lambda prompt, **kwargs: captured.update(
-                {"prompt": prompt, **kwargs}
-            )
-            or 17
-        ),
-    )
+    def fake_run_and_exit(prompt, **kwargs):
+        captured.update({"prompt": prompt, **kwargs})
+        raise SystemExit(17)
+
+    monkeypatch.setattr(main_mod, "_run_and_exit_oneshot", fake_run_and_exit)
 
     with pytest.raises(SystemExit) as exc:
         main_mod._try_termux_fast_cli_launch()
@@ -347,6 +342,7 @@ def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod)
         "model": "gpt-test",
         "provider": "openai",
         "toolsets": None,
+        "usage_file": None,
     }
 
 
@@ -537,16 +533,11 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
             register_from_config=lambda _cfg, accept_hooks=False: None
         ),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.oneshot",
-        types.SimpleNamespace(
-            run_oneshot=lambda prompt, **kwargs: captured.update(
-                {"prompt": prompt, **kwargs}
-            )
-            or 0
-        ),
-    )
+    def fake_run_and_exit(prompt, **kwargs):
+        captured.update({"prompt": prompt, **kwargs})
+        raise SystemExit(0)
+
+    monkeypatch.setattr(main_mod, "_run_and_exit_oneshot", fake_run_and_exit)
 
     with pytest.raises(SystemExit) as exc:
         main_mod.main()
@@ -557,6 +548,7 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
         "model": None,
         "provider": None,
         "toolsets": "web,terminal",
+        "usage_file": None,
     }
 
 
@@ -692,9 +684,15 @@ def test_oneshot_wires_session_store_for_recall(monkeypatch):
             self.stream_delta_callback = object()
             self.tool_gen_callback = object()
 
-        def chat(self, prompt):
+        def run_conversation(self, prompt):
             captured["prompt"] = prompt
-            return "ok"
+            return {"final_response": "ok", "completed": True}
+
+        def shutdown_memory_provider(self, *_args):
+            captured["memory_shutdown"] = True
+
+        def close(self):
+            captured["agent_closed"] = True
 
     def mod(name, **attrs):
         module = types.ModuleType(name)
@@ -741,10 +739,15 @@ def test_oneshot_wires_session_store_for_recall(monkeypatch):
         mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: {"session_search"}),
     )
 
-    assert _run_agent("recall this") == "ok"
+    response, result = _run_agent("recall this")
+
+    assert response == "ok"
+    assert result["completed"] is True
     assert captured["session_db"] is sentinel_store
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+    assert captured["memory_shutdown"] is True
+    assert captured["agent_closed"] is True
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):

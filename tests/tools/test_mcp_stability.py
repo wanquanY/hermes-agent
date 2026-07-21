@@ -282,7 +282,7 @@ class TestMCPInitialConnectionRetry:
                 await server._ready.wait()
 
                 assert server.state == MCPServerState.PARKED
-                assert server._error is None
+                assert server._error is not None
                 assert "DNS resolution failed" in (server.last_error or "")
                 # 1 initial + N retries = _MAX_INITIAL_CONNECT_RETRIES + 1 total attempts
                 assert call_count == _MAX_INITIAL_CONNECT_RETRIES + 1

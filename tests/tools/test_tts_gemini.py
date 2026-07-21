@@ -2,6 +2,7 @@
 
 import base64
 import struct
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -254,6 +255,97 @@ class TestGenerateGeminiTts:
             _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), {})
 
         assert mock_post.call_args[0][0].startswith("https://custom-gemini.example.com/v1beta/")
+
+    def test_persona_file_composes_direction_and_transcript(
+        self, tmp_path, monkeypatch, mock_gemini_response
+    ):
+        from tools.tts_tool import _generate_gemini_tts
+
+        persona = tmp_path / "voice.md"
+        persona.write_text("# AUDIO PROFILE\nWarm and understated.", encoding="utf-8")
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts(
+                "Hi there.",
+                str(tmp_path / "test.wav"),
+                {"gemini": {"persona_prompt_file": str(persona)}},
+            )
+
+        prompt = mock_post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        assert "Synthesize speech from the TRANSCRIPT only" in prompt
+        assert "# AUDIO PROFILE\nWarm and understated." in prompt
+        assert "#### TRANSCRIPT\nHi there." in prompt
+
+    def test_persona_file_supports_transcript_placeholder(
+        self, tmp_path, monkeypatch, mock_gemini_response
+    ):
+        from tools.tts_tool import _generate_gemini_tts
+
+        persona = tmp_path / "voice.md"
+        persona.write_text("#### TRANSCRIPT\n{{ transcript }}", encoding="utf-8")
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts(
+                "Read this.",
+                str(tmp_path / "test.wav"),
+                {"gemini": {"persona_prompt_file": str(persona)}},
+            )
+
+        prompt = mock_post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        assert "{{ transcript }}" not in prompt
+        assert "#### TRANSCRIPT\nRead this." in prompt
+
+    def test_audio_tags_use_hidden_auxiliary_rewrite(
+        self, tmp_path, monkeypatch, mock_gemini_response
+    ):
+        from tools.tts_tool import _generate_gemini_tts
+
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="[warmly] Hi there. [soft laugh]")
+                )
+            ]
+        )
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {
+            "gemini": {
+                "model": "gemini-3.1-flash-tts-preview",
+                "audio_tags": True,
+            }
+        }
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response) as rewrite, \
+             patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi there.", str(tmp_path / "test.wav"), config)
+
+        assert rewrite.call_args.kwargs["task"] == "tts_audio_tags"
+        prompt = mock_post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        assert prompt == "[warmly] Hi there. [soft laugh]"
+
+    def test_audio_tags_skip_unsupported_model(
+        self, tmp_path, monkeypatch, mock_gemini_response, caplog
+    ):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {
+            "gemini": {
+                "model": "gemini-2.5-flash-preview-tts",
+                "audio_tags": True,
+            }
+        }
+
+        with patch("agent.auxiliary_client.call_llm") as rewrite, \
+             patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi there.", str(tmp_path / "test.wav"), config)
+
+        rewrite.assert_not_called()
+        prompt = mock_post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        assert prompt == "Hi there."
+        assert "not known to support Gemini audio tags" in caplog.text
 
 
 class TestGeminiInCheckRequirements:

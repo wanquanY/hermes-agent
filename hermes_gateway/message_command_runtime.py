@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_gateway.conversation_editing_commands import conversation_editing_for
+from hermes_gateway.capability_commands import capability_commands_for
 from hermes_gateway.debug_command import debug_command_for
 from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.footer_command import footer_command_for
@@ -25,6 +26,7 @@ from hermes_gateway.rollback_command import rollback_command_for
 from hermes_gateway.runtime_status_command import runtime_status_command_for
 from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.title_command import title_command_for
+from hermes_gateway.topup_command import topup_command_for
 from hermes_gateway.update_lifecycle import update_lifecycle_for
 from hermes_gateway.usage_command import usage_command_for
 from hermes_gateway.verbose_command import verbose_command_for
@@ -180,6 +182,10 @@ class GatewayMessageCommandService:
         if canonical == "help":
             return await runner._handle_help_command(event)
 
+        if canonical == "start":
+            logger.info("Ignoring /start platform ping for session %s", session_key)
+            return ""
+
         if canonical == "commands":
             return await runner._handle_commands_command(event)
         
@@ -212,6 +218,14 @@ class GatewayMessageCommandService:
         if canonical == "fast":
             return await fast_command_for(runner).handle_fast_command(event)
 
+        if canonical == "learn":
+            error = await capability_commands_for(runner).prepare_learn(
+                event, source
+            )
+            if error:
+                return error
+            # Rewritten prompt falls through to the normal agent turn.
+
         if canonical == "verbose":
             return await verbose_command_for(runner).handle_verbose_command(event)
 
@@ -242,6 +256,14 @@ class GatewayMessageCommandService:
         if canonical == "suggestions":
             return await conversation_editing_for(runner).handle_suggestions_command(event)
 
+        if canonical == "blueprint":
+            response = await capability_commands_for(runner).prepare_blueprint(
+                event, source
+            )
+            if response:
+                return response
+            # A matched conversational blueprint falls through as an agent seed.
+
         if canonical == "retry":
             return await conversation_editing_for(runner).handle_retry_command(event)
         
@@ -268,6 +290,9 @@ class GatewayMessageCommandService:
         if canonical == "usage":
             return await usage_command_for(runner).handle_usage_command(event)
 
+        if canonical == "topup":
+            return await topup_command_for(runner).handle_topup_command(event)
+
         if canonical == "insights":
             return await runner._handle_insights_command(event)
 
@@ -288,6 +313,9 @@ class GatewayMessageCommandService:
 
         if canonical == "update":
             return await update_lifecycle_for(runner).handle_update_command(event)
+
+        if canonical == "version":
+            return capability_commands_for(runner).version_text()
 
         if canonical == "debug":
             return await debug_command_for(runner).handle_debug_command(event)
@@ -324,6 +352,14 @@ class GatewayMessageCommandService:
 
         if canonical == "goal":
             return await goal_command_for(runner).handle_goal_command(event)
+
+        if canonical == "moa":
+            response = capability_commands_for(runner).prepare_moa(
+                event, session_key
+            )
+            if response:
+                return response
+            # The model service owns the one-turn restore in message_runtime.
 
         if canonical == "subgoal":
             return await goal_command_for(runner).handle_subgoal_command(event)

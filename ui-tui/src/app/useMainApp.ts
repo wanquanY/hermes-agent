@@ -574,7 +574,12 @@ export function useMainApp(gw: GatewayClient) {
           setCatalog
         },
         submission: { submitRef },
-        system: { bellOnComplete, stdout, sys },
+        system: {
+          bellOnComplete,
+          onReaction: () => setGoodVibesTick(value => value + 1),
+          stdout,
+          sys
+        },
         transcript: { appendMessage, panel, setHistoryItems },
         voice: {
           setProcessing: setVoiceProcessing,

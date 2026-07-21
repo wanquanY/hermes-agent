@@ -49,11 +49,10 @@ def _load_cfg() -> dict:
 
 
 def _save_cfg(cfg: dict):
-    import yaml
+    from hermes_cli.config import atomic_config_write
 
     path = Path(getattr(_server, "_hermes_home", _hermes_home)) / "config.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f)
+    atomic_config_write(path, cfg)
     cfg_lock = getattr(_server, "_cfg_lock", _cfg_lock)
     with cfg_lock:
         _server._cfg_cache = copy.deepcopy(cfg)
@@ -549,6 +548,11 @@ def _persist_live_session_runtime(session: dict | None) -> None:
             if isinstance(parsed, dict):
                 existing_config = parsed
         model_config = _runtime_model_config(agent, existing_config)
+        create_service_tier_override = session.get("create_service_tier_override")
+        if create_service_tier_override is not None:
+            model_config["service_tier"] = (
+                create_service_tier_override or "normal"
+            )
         model = str(getattr(agent, "model", "") or "").strip()
         db.sessions.update_runtime_config(
             session_key,
@@ -781,16 +785,21 @@ def _ensure_session_db_row(session: dict) -> None:
             )
     if (reasoning := session.get("create_reasoning_override")) is not None:
         model_config["reasoning_config"] = reasoning
-    if tier := session.get("create_service_tier_override"):
-        model_config["service_tier"] = tier
+    create_service_tier_override = session.get("create_service_tier_override")
+    if create_service_tier_override is not None:
+        model_config["service_tier"] = create_service_tier_override or "normal"
     try:
+        explicit_cwd = _session_cwd(session) if session.get("explicit_cwd") else ""
         db.sessions.create(
             key,
             source=_server._session_source(session),
             model=row_model,
             model_config=model_config or None,
-            cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
+            cwd=explicit_cwd or None,
         )
+        if explicit_cwd:
+            _refresh_session_project_context(session, db, explicit_cwd)
+            _persist_session_git_meta(session, explicit_cwd)
     except Exception:
         logger.debug("failed to persist desktop session row", exc_info=True)
     finally:
@@ -826,30 +835,9 @@ def _session_db(session: dict):
                 db.close()
 
 def _git_branch_for_cwd(cwd: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-        if result.returncode == 0:
-            branch = result.stdout.strip()
-            if branch:
-                return branch
-        head = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-        return head.stdout.strip() if head.returncode == 0 else ""
-    except Exception:
-        return ""
+    from tui_gateway.git_probe import branch
+
+    return branch(cwd)
 
 def _child_run_active(child_key: str) -> bool:
     ts = _active_child_runs.get(child_key)
@@ -994,7 +982,9 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         overrides["provider_override"] = provider
     if isinstance(reasoning_config, dict):
         overrides["reasoning_config_override"] = reasoning_config
-    if service_tier:
+    if service_tier.lower() == "normal":
+        overrides["service_tier_override"] = ""
+    elif service_tier:
         overrides["service_tier_override"] = service_tier
 
     return overrides
@@ -1082,6 +1072,56 @@ def _register_session_cwd(session: dict | None) -> None:
     except Exception:
         pass
 
+
+def _refresh_session_project_context(session: dict, db, cwd: str) -> None:
+    try:
+        project = db.projects.project_for_path(cwd)
+        session["project"] = (
+            {
+                "id": project.id,
+                "slug": project.slug,
+                "name": project.name,
+                "primary_path": project.primary_path,
+            }
+            if project is not None
+            else None
+        )
+    except Exception:
+        logger.debug("failed to resolve session project", exc_info=True)
+
+
+def _persist_session_git_meta(session: dict, cwd: str) -> None:
+    """Probe Git outside the gateway loop and persist profile-scoped placement."""
+    session_key = str(session.get("session_key") or "").strip()
+    if not session_key or not cwd:
+        return
+    route = {
+        "session_key": session_key,
+        "profile_home": session.get("profile_home"),
+    }
+
+    def run() -> None:
+        try:
+            from tui_gateway.git_probe import branch, common_repo_root
+
+            git_branch = branch(cwd)
+            repo_root = common_repo_root(cwd)
+            session["git_branch"] = git_branch
+            session["git_repo_root"] = repo_root
+            if not (git_branch or repo_root):
+                return
+            with _session_db(route) as db:
+                if db is not None:
+                    db.sessions.update_git_context(
+                        session_key,
+                        branch=git_branch,
+                        repo_root=repo_root,
+                    )
+        except Exception:
+            logger.debug("failed to persist session git metadata", exc_info=True)
+
+    threading.Thread(target=run, name="git-meta", daemon=True).start()
+
 def _set_session_cwd(session: dict, cwd: str) -> str:
     resolved = os.path.abspath(os.path.expanduser(str(cwd)))
     if not os.path.isdir(resolved):
@@ -1095,8 +1135,10 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
         if db is not None:
             try:
                 db.sessions.update_cwd(session.get("session_key", ""), resolved)
+                _refresh_session_project_context(session, db, resolved)
             except Exception:
                 logger.debug("failed to persist session cwd", exc_info=True)
+    _persist_session_git_meta(session, resolved)
     try:
         from tools.terminal_tool import cleanup_vm
 

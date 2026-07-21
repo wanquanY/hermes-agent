@@ -1,6 +1,6 @@
 """Tests for the canonical history/current-input boundary."""
 
-from agent.turn_message_buffer import TurnMessageBuffer
+from agent.turn_message_buffer import TurnMessageBuffer, reanchor_current_input
 
 
 def test_bind_persisted_current_input_by_top_level_identity():
@@ -113,3 +113,64 @@ def test_bound_persisted_input_stays_before_new_message_persistence_boundary():
     assert list(messages[messages.persist_from_index :]) == [
         {"role": "assistant", "content": "reply"}
     ]
+
+
+def test_reanchor_current_input_prefers_conversation_identity_after_rewrite():
+    current = {
+        "role": "user",
+        "content": "rewritten by compression",
+        "metadata": {"conversation_message_id": "current-id"},
+    }
+    messages = [
+        {"role": "user", "content": "same clean content"},
+        current,
+    ]
+
+    index, anchored = reanchor_current_input(
+        messages,
+        conversation_message_id="current-id",
+        content_candidates=("same clean content",),
+    )
+
+    assert index == 1
+    assert anchored is current
+
+
+def test_reanchor_current_input_does_not_bind_unrelated_latest_user():
+    latest = {"role": "user", "content": "latest"}
+    index, anchored = reanchor_current_input(
+        [
+            {"role": "user", "content": "older"},
+            {"role": "assistant", "content": "reply"},
+            latest,
+        ]
+    )
+
+    assert index == -1
+    assert anchored is None
+
+
+def test_reanchor_current_input_restores_canonical_row_after_rewrite():
+    summary = {"role": "user", "content": "compressed summary"}
+    original = {
+        "role": "user",
+        "content": "current request",
+        "api_content": "runtime context\n\ncurrent request",
+        "_db_persisted": True,
+    }
+    messages = TurnMessageBuffer.full_snapshot([summary])
+
+    index, anchored = reanchor_current_input(
+        messages,
+        content_candidates=("current request",),
+        restore_message=original,
+    )
+
+    assert index == 1
+    assert anchored == {
+        "role": "user",
+        "content": "current request",
+        "api_content": "runtime context\n\ncurrent request",
+    }
+    assert anchored is not original
+    assert messages.current_input_message is anchored

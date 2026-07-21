@@ -143,7 +143,8 @@ class TestKeepaliveProbe:
         task.session.send_ping.assert_awaited_once()
         task.session.list_tools.assert_not_called()
 
-    async def test_keepalive_uses_list_tools_for_tool_capable_server(self):
+    async def test_keepalive_uses_ping_for_tool_capable_server(self):
+        """The liveness probe stays constant-size even for large tool sets."""
         task = MCPServerTask("test")
         task.initialize_result = _caps(tools=SimpleNamespace())
         task.session = SimpleNamespace(
@@ -154,5 +155,5 @@ class TestKeepaliveProbe:
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
-        task.session.list_tools.assert_awaited_once()
-        task.session.send_ping.assert_not_called()
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_not_called()

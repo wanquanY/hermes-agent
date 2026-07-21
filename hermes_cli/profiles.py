@@ -312,6 +312,25 @@ def profile_exists(name: str) -> bool:
     return get_profile_dir(canon).is_dir()
 
 
+def profiles_to_serve(multiplex: bool) -> List[tuple[str, Path]]:
+    """Return the profile homes owned by one gateway process."""
+    active = get_active_profile_name() or "default"
+    if not multiplex:
+        return [(active, get_profile_dir(active))]
+
+    served: List[tuple[str, Path]] = [("default", _get_default_hermes_home())]
+    profiles_root = _get_profiles_root()
+    if profiles_root.is_dir():
+        for entry in sorted(profiles_root.iterdir()):
+            if (
+                entry.is_dir()
+                and entry.name != "default"
+                and _PROFILE_ID_RE.match(entry.name)
+            ):
+                served.append((entry.name, entry))
+    return served
+
+
 # ---------------------------------------------------------------------------
 # Alias / wrapper script management
 # ---------------------------------------------------------------------------

@@ -301,6 +301,23 @@ class TestStripThinkBlocks:
     def test_none_returns_empty(self, agent):
         assert agent._strip_think_blocks(None) == ""
 
+    def test_list_content_flattens_visible_text(self, agent):
+        result = agent._strip_think_blocks(
+            [
+                {"type": "text", "text": "visible answer"},
+                {"type": "thinking", "thinking": "internal reasoning"},
+            ]
+        )
+        assert result == "visible answer"
+
+    def test_dict_content_flattens_visible_text(self, agent):
+        assert agent._strip_think_blocks({"type": "text", "text": "hello"}) == "hello"
+
+    def test_reasoning_only_list_returns_empty(self, agent):
+        assert agent._strip_think_blocks(
+            [{"type": "reasoning", "reasoning": "hidden"}]
+        ) == ""
+
     def test_no_blocks_unchanged(self, agent):
         assert agent._strip_think_blocks("hello world") == "hello world"
 
@@ -1391,8 +1408,7 @@ class TestBuildApiKwargs:
         assert "temperature" not in kwargs
 
     def test_kimi_coding_endpoint_sends_max_tokens_and_reasoning(self, agent):
-        """Kimi endpoint should send max_tokens=32000 and reasoning_effort as
-        top-level params, matching Kimi CLI's default behavior."""
+        """Kimi defaults to thinking without conflicting effort fields."""
         agent.provider = "kimi-coding"
         agent.base_url = "https://api.kimi.com/coding/v1"
         agent._base_url_lower = agent.base_url.lower()
@@ -1402,7 +1418,8 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
+        assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
     def test_kimi_coding_endpoint_respects_custom_effort(self, agent):
         """reasoning_effort should reflect reasoning_config.effort when set."""
@@ -1457,8 +1474,8 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
         assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
     def test_moonshot_cn_endpoint_sends_max_tokens_and_reasoning(self, agent):
         """api.moonshot.cn (China endpoint) should get the same params."""
@@ -1471,8 +1488,8 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
         assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
     def test_provider_preferences_injected(self, agent):
         agent.provider = "openrouter"
@@ -2291,15 +2308,16 @@ class TestConcurrentToolExecution:
         """_invoke_tool should route regular tools through handle_function_call."""
         with patch("run_agent.handle_function_call", return_value="result") as mock_hfc:
             result = agent._invoke_tool("web_search", {"q": "test"}, "task-1")
-            mock_hfc.assert_called_once_with(
-                "web_search", {"q": "test"}, "task-1",
-                tool_call_id=None,
-                session_id=agent.session_id,
-                enabled_tools=list(agent.valid_tool_names),
-                parent_agent=agent,
-                skip_pre_tool_call_hook=True,
-            )
-            assert result == "result"
+            mock_hfc.assert_called_once()
+            call_args, call_kwargs = mock_hfc.call_args
+            assert call_args == ("web_search", {"q": "test"}, "task-1")
+            assert call_kwargs["session_id"] == agent.session_id
+            assert call_kwargs["enabled_tools"] == list(agent.valid_tool_names)
+            assert call_kwargs["parent_agent"] is agent
+            assert call_kwargs["skip_pre_tool_call_hook"] is True
+            assert call_kwargs["skip_tool_request_middleware"] is True
+            assert call_kwargs["skip_tool_execution_middleware"] is True
+        assert result == "result"
 
     def test_invoke_tool_passes_parent_agent_to_registry_tools(self, agent):
         """Registry tools can depend on the active agent context."""
@@ -5304,13 +5322,51 @@ class TestAnthropicInterruptHandler:
         assert "anthropic_messages" in source, \
             "interruptible_api_call must handle Anthropic interrupt (api_mode check)"
 
-    def test_interruptible_rebuilds_anthropic_client(self):
-        """After interrupting, the Anthropic client should be rebuilt."""
-        import inspect
+    def test_interruptible_anthropic_interrupt_aborts_only_request_client(self):
+        """A poll-thread interrupt must never close the shared client."""
+        import time
+
         from agent.chat_completion_helpers import interruptible_api_call
-        source = inspect.getsource(interruptible_api_call)
-        assert "build_anthropic_client" in source, \
-            "interruptible_api_call must rebuild Anthropic client after interrupt"
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.anthropic.com",
+            provider="anthropic",
+            model="claude-test",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+        agent._anthropic_client = MagicMock()
+        agent._rebuild_anthropic_client = MagicMock()
+        request_client = MagicMock()
+        agent._create_request_anthropic_client = MagicMock(
+            return_value=request_client
+        )
+        agent._abort_request_anthropic_client = MagicMock()
+        agent._close_request_anthropic_client = MagicMock()
+
+        def create(_api_kwargs, *, client):
+            assert client is request_client
+            agent._interrupt_requested = True
+            time.sleep(1.0)
+            raise RuntimeError("request socket aborted")
+
+        agent._anthropic_messages_create = MagicMock(side_effect=create)
+
+        started_at = time.time()
+        with pytest.raises(InterruptedError):
+            interruptible_api_call(agent, {"model": "x", "messages": []})
+
+        assert time.time() - started_at < 3.0
+        agent._anthropic_client.close.assert_not_called()
+        agent._rebuild_anthropic_client.assert_not_called()
+        agent._abort_request_anthropic_client.assert_called_once_with(
+            request_client,
+            reason="interrupt_abort",
+        )
 
     def test_streaming_has_anthropic_branch(self):
         """_streaming_api_call must also handle Anthropic interrupt."""

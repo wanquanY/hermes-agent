@@ -25,6 +25,42 @@ _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 _WARNED_KEYS: set[str] = set()
 _SECURE_PLACEHOLDERS = frozenset({"<secure-store>", "<已隐藏>"})
 
+# Provenance for credentials injected by external secret sources. This is
+# metadata only; callers must never treat it as permission to persist values.
+_SECRET_SOURCES: dict[str, str] = {}
+
+# Loading the environment happens through several entrypoints in one process.
+# Pull each Hermes home once unless an explicit refresh is requested.
+_APPLIED_HOMES: set[str] = set()
+
+
+def get_secret_source(env_var: str) -> str | None:
+    """Return the external source that supplied ``env_var``, if tracked."""
+    return _SECRET_SOURCES.get(env_var)
+
+
+def reset_secret_source_cache() -> None:
+    """Force external secret sources to run on their next load pass."""
+    _APPLIED_HOMES.clear()
+
+
+def format_secret_source_suffix(env_var: str) -> str:
+    """Return a human-readable credential provenance suffix."""
+    source = get_secret_source(env_var)
+    if not source:
+        return ""
+    if source == "bitwarden":
+        return " (from Bitwarden)"
+    try:
+        from agent.secret_sources.registry import get_source
+
+        registered = get_source(source)
+        if registered is not None and registered.label:
+            return f" (from {registered.label})"
+    except Exception:
+        pass
+    return f" (from {source})"
+
 
 def _is_secure_placeholder(value: str | None) -> bool:
     return str(value or "").strip() in _SECURE_PLACEHOLDERS
@@ -206,6 +242,15 @@ def load_hermes_dotenv(
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
 
+    # A headless gateway or cron process may not inherit a shell session. Keep
+    # the 1Password service-account bootstrap token in a dedicated gitignored
+    # file and load it without overriding an explicitly injected environment
+    # value. This happens before source resolution so ``op://`` references can
+    # be resolved during the same startup pass.
+    op_env = home_path / ".op.env"
+    if op_env.exists() and not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
+        _load_dotenv_with_fallback(op_env, override=False)
+
     if project_env_path and project_env_path.exists():
         _load_dotenv_with_fallback(project_env_path, override=not loaded)
         loaded.append(project_env_path)
@@ -216,57 +261,61 @@ def load_hermes_dotenv(
 
 
 def _apply_external_secret_sources(home_path: Path) -> None:
-    """Pull secrets from external sources (currently Bitwarden) into env.
+    """Pull secrets from every enabled external source into the environment.
 
     Runs AFTER dotenv loads so .env values are visible (we use them to
     locate the access token) but BEFORE the rest of Hermes reads
     ``os.environ`` for credentials.  Any failure here is logged and
     swallowed — external secret sources must never block startup.
     """
+    home_key = str(Path(home_path).resolve())
+    if home_key in _APPLIED_HOMES:
+        return
+    _APPLIED_HOMES.add(home_key)
+
     try:
         cfg = _load_secrets_config(home_path)
     except Exception:  # noqa: BLE001 — config errors must not block startup
         return
-
-    bw_cfg = (cfg or {}).get("bitwarden") or {}
-    if not bw_cfg.get("enabled"):
+    if not cfg:
         return
 
     try:
-        from agent.secret_sources.bitwarden import apply_bitwarden_secrets
+        from agent.secret_sources.registry import apply_all
     except ImportError:
         return
 
-    result = apply_bitwarden_secrets(
-        enabled=True,
-        access_token_env=bw_cfg.get("access_token_env", "BWS_ACCESS_TOKEN"),
-        project_id=bw_cfg.get("project_id", ""),
-        override_existing=bool(bw_cfg.get("override_existing", False)),
-        cache_ttl_seconds=float(bw_cfg.get("cache_ttl_seconds", 300)),
-        auto_install=bool(bw_cfg.get("auto_install", True)),
-    )
+    try:
+        report = apply_all(cfg, home_path)
+    except Exception:  # noqa: BLE001 — secret backends cannot block startup
+        return
 
-    if result.applied:
+    if report.applied_any:
         # Re-run the ASCII sanitization pass: BSM values are user-supplied
         # and might have the same copy-paste corruption as a manually
         # edited .env (see #6843).
         _sanitize_loaded_credentials()
-        print(
-            f"  Bitwarden Secrets Manager: applied {len(result.applied)} "
-            f"secret{'s' if len(result.applied) != 1 else ''} "
-            f"({', '.join(sorted(result.applied))})",
-            file=sys.stderr,
-        )
-    if result.error:
-        print(
-            f"  Bitwarden Secrets Manager: {result.error}",
-            file=sys.stderr,
-        )
-    for warn in result.warnings:
-        print(
-            f"  Bitwarden Secrets Manager: {warn}",
-            file=sys.stderr,
-        )
+        for name, applied in report.provenance.items():
+            _SECRET_SOURCES[name] = applied.source
+
+    for source_report in report.sources:
+        if source_report.applied:
+            print(
+                f"  {source_report.label}: applied "
+                f"{len(source_report.applied)} "
+                f"secret{'s' if len(source_report.applied) != 1 else ''} "
+                f"({', '.join(sorted(source_report.applied))})",
+                file=sys.stderr,
+            )
+        if source_report.result.error:
+            print(
+                f"  {source_report.label}: {source_report.result.error}",
+                file=sys.stderr,
+            )
+        for warning in source_report.result.warnings:
+            print(f"  {source_report.label}: {warning}", file=sys.stderr)
+    for conflict in report.conflicts:
+        print(f"  Secret sources: {conflict}", file=sys.stderr)
 
 
 def _load_secrets_config(home_path: Path) -> dict:

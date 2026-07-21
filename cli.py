@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     pass
 
 import logging
+import copy
 import os
 import shutil
 import sys
@@ -99,6 +100,8 @@ from hermes_agent.storage.session_availability import format_session_store_unava
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from hermes_cli.cli_billing_mixin import CLIBillingMixin
+from hermes_cli.cli_capability_commands import CLICapabilityCommandsMixin
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -253,6 +256,20 @@ def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
         return []
 
 
+def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
+    """Resolve the canonical prefill path with legacy config compatibility."""
+    env_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "").strip()
+    if env_path:
+        return env_path
+    top_level = str(config.get("prefill_messages_file", "") or "").strip()
+    if top_level:
+        return top_level
+    agent_cfg = config.get("agent", {})
+    if isinstance(agent_cfg, dict):
+        return str(agent_cfg.get("prefill_messages_file", "") or "").strip()
+    return ""
+
+
 def _parse_reasoning_config(effort: str) -> dict | None:
     """Parse a reasoning effort level into an OpenRouter reasoning config dict."""
     from hermes_constants import parse_reasoning_effort
@@ -264,13 +281,9 @@ def _parse_reasoning_config(effort: str) -> dict | None:
 
 def _parse_service_tier_config(raw: str) -> str | None:
     """Parse a persisted service-tier preference into a Responses API value."""
-    value = str(raw or "").strip().lower()
-    if not value or value in {"normal", "default", "standard", "off", "none"}:
-        return None
-    if value in {"fast", "priority", "on"}:
-        return "priority"
-    logger.warning("Unknown service_tier '%s', ignoring", raw)
-    return None
+    from hermes_cli.session_scope import parse_service_tier
+
+    return parse_service_tier(raw)
 
 def load_cli_config() -> Dict[str, Any]:
     """
@@ -724,7 +737,21 @@ import fire
 
 # Import the agent and tool systems
 from run_agent import AIAgent
-from model_tools import get_tool_definitions, get_toolset_for_tool
+
+
+def get_tool_definitions(*args, **kwargs):
+    """Take a tool snapshot after the bounded MCP startup rendezvous."""
+    from hermes_cli.mcp_startup import wait_for_mcp_discovery
+    from model_tools import get_tool_definitions as _get_tool_definitions
+
+    wait_for_mcp_discovery()
+    return _get_tool_definitions(*args, **kwargs)
+
+
+def get_toolset_for_tool(*args, **kwargs):
+    from model_tools import get_toolset_for_tool as _get_toolset_for_tool
+
+    return _get_toolset_for_tool(*args, **kwargs)
 
 # Extracted CLI modules (Phase 3)
 from hermes_cli.banner import build_welcome_banner
@@ -1685,6 +1712,22 @@ _ACCENT = _SkinAwareAnsi("response_border", "#FFD700", bold=True)
 # Terminal.app modes.  Hardcoded skin colors like #B8860B
 # (dark goldenrod) become invisible against light cream backgrounds.
 _DIM = "\x1b[2;3m"
+
+
+def _b(value: str) -> str:
+    """Bold on an interactive terminal and remain plain in worker output."""
+    try:
+        return f"\x1b[1m{value}\x1b[0m" if sys.stdout.isatty() else str(value)
+    except Exception:
+        return str(value)
+
+
+def _d(value: str) -> str:
+    """Dim-italic on an interactive terminal and plain in worker output."""
+    try:
+        return f"\x1b[2;3m{value}\x1b[0m" if sys.stdout.isatty() else str(value)
+    except Exception:
+        return str(value)
 
 
 def _accent_hex() -> str:
@@ -2675,7 +2718,7 @@ def save_config_value(key_path: str, value: any) -> bool:
 # HermesCLI Class
 # ============================================================================
 
-class HermesCLI:
+class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
     """
     Interactive CLI for the Hermes Agent.
     
@@ -2727,6 +2770,9 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        # reasoning_full: print the complete post-response reasoning recap
+        # instead of clamping it to the first ten lines.
+        self.reasoning_full = CLI_CONFIG["display"].get("reasoning_full", False)
         _configure_output_history(
             enabled=CLI_CONFIG["display"].get("persistent_output", True),
             max_lines=CLI_CONFIG["display"].get("persistent_output_max_lines", 200),
@@ -2893,16 +2939,19 @@ class HermesCLI:
         
         # Ephemeral prefill messages (few-shot priming, never persisted)
         self.prefill_messages = _load_prefill_messages(
-            CLI_CONFIG["agent"].get("prefill_messages_file", "")
+            _resolve_prefill_messages_file(CLI_CONFIG)
         )
         
-        # Reasoning config (OpenRouter reasoning effort level)
-        self.reasoning_config = _parse_reasoning_config(
-            CLI_CONFIG["agent"].get("reasoning_effort", "")
-        )
+        # Resolve per-model reasoning before the agent is constructed.
+        from hermes_constants import resolve_reasoning_config
+
+        self.reasoning_config = resolve_reasoning_config(CLI_CONFIG, self.model)
         self.service_tier = _parse_service_tier_config(
             CLI_CONFIG["agent"].get("service_tier", "")
         )
+        from hermes_cli.cli_session_defaults import capture_initial_model_runtime
+
+        self._initial_model_runtime = capture_initial_model_runtime(self)
         
         # OpenRouter provider routing preferences
         pr = CLI_CONFIG.get("provider_routing", {}) or {}
@@ -2948,6 +2997,7 @@ class HermesCLI:
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
         self._resumed = False
+
         # Per-prompt elapsed timer — started at the beginning of each chat turn,
         # frozen when the agent thread completes, displayed in the status bar.
         self._prompt_start_time: Optional[float] = None  # time.time() when turn started
@@ -3013,6 +3063,7 @@ class HermesCLI:
         # not the background process_loop thread.
         self._pending_relaunch: list[str] | None = None
         self._last_ctrl_c_time = 0
+        self._pending_credit_notices: list[tuple[str, str, str | None]] = []
         self._clarify_state = None
         self._clarify_freetext = False
         self._clarify_deadline = 0
@@ -3268,7 +3319,9 @@ class HermesCLI:
         # _try_activate_fallback() switches provider/model.
         agent = getattr(self, "agent", None)
         model_name = (getattr(agent, "model", None) or self.model or "unknown")
-        model_short = model_name.split("/")[-1] if "/" in model_name else model_name
+        from hermes_cli.model_display import display_model_name
+
+        model_short = display_model_name(model_name)
         if model_short.endswith(".gguf"):
             model_short = model_short[:-5]
         if len(model_short) > 26:
@@ -3787,6 +3840,39 @@ class HermesCLI:
         self._spinner_text = text or ""
         self._tool_start_time = 0.0  # clear tool timer when switching to thinking
         self._invalidate()
+
+    def _on_notice(self, notice) -> None:
+        """Queue driver notices until the agent releases the live terminal."""
+        try:
+            text = str(getattr(notice, "text", "") or "")
+            if not text:
+                return
+            level = str(getattr(notice, "level", "info") or "info")
+            key = getattr(notice, "key", None)
+            self._pending_credit_notices.append((level, text, key))
+        except Exception:
+            logger.debug("failed to queue credit notice", exc_info=True)
+
+    def _flush_credit_notices(self) -> None:
+        """Render queued notices at a clean post-turn boundary."""
+        pending = self._pending_credit_notices
+        if not pending:
+            return
+        self._pending_credit_notices = []
+        for level, text, _key in pending:
+            color = {
+                "error": "\033[31m",
+                "warn": "\033[33m",
+                "success": "\033[32m",
+                "info": _DIM,
+            }.get(level, _DIM)
+            _cprint(f"  {color}{text}{_RST}")
+
+    def _on_notice_clear(self, key: str) -> None:
+        """Remove matching notices that have not reached the terminal yet."""
+        self._pending_credit_notices = [
+            item for item in self._pending_credit_notices if item[2] != key
+        ]
 
     # ── Streaming display ────────────────────────────────────────────────
 
@@ -4734,6 +4820,10 @@ class HermesCLI:
                 resolved_meta = self._session_db.sessions.get(self.session_id)
                 if resolved_meta:
                     session_meta = resolved_meta
+            self._restore_session_cwd(
+                session_meta,
+                quiet=bool(getattr(self, "quiet_mode", False)),
+            )
             restored = self._session_db.messages.all_as_conversation(self.session_id)
             if restored:
                 restored = [m for m in restored if m.get("role") != "session_meta"]
@@ -4759,6 +4849,9 @@ class HermesCLI:
                 pass
         
         try:
+            from hermes_cli.mcp_startup import wait_for_mcp_discovery
+
+            wait_for_mcp_discovery()
             runtime = runtime_override or {
                 "api_key": self.api_key,
                 "base_url": self.base_url,
@@ -4803,6 +4896,8 @@ class HermesCLI:
 
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
+                notice_callback=self._on_notice,
+                notice_clear_callback=self._on_notice_clear,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 checkpoint_max_total_size_mb=self.checkpoint_max_total_size_mb,
@@ -4819,6 +4914,12 @@ class HermesCLI:
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
             _active_agent_ref = self.agent
+            try:
+                from agent.credits_tracker import seed_credits_at_session_start
+
+                seed_credits_at_session_start(self.agent)
+            except Exception:
+                logger.debug("credits session-start seed failed open", exc_info=True)
             # Route agent status output through prompt_toolkit so ANSI escape
             # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
             self.agent._print_fn = _cprint
@@ -4994,6 +5095,8 @@ class HermesCLI:
             if resolved_meta:
                 session_meta = resolved_meta
 
+        self._restore_session_cwd(session_meta)
+
         restored = self._session_db.messages.all_as_conversation(self.session_id)
         if restored:
             restored = [m for m in restored if m.get("role") != "session_meta"]
@@ -5024,6 +5127,32 @@ class HermesCLI:
             pass
 
         return True
+
+    def _restore_session_cwd(self, session_meta: dict, *, quiet: bool = False) -> None:
+        """Apply the shared resume cwd policy to this CLI surface."""
+        if _active_worktree is not None:
+            return
+        from hermes_cli.session_cwd import restore_session_cwd
+
+        outcome = restore_session_cwd(session_meta)
+        if outcome.status in {"unrecorded", "unchanged"}:
+            return
+        if outcome.status == "restored":
+            message = f"↻ Working directory: {outcome.recorded_path}"
+        elif outcome.status == "missing":
+            message = (
+                "⚠ Session's working directory is gone: "
+                f"{outcome.recorded_path} — staying in {outcome.current_path or '.'}"
+            )
+        else:
+            message = (
+                "⚠ Could not enter session's working directory "
+                f"{outcome.recorded_path}: {outcome.error}"
+            )
+        if quiet:
+            print(message, file=sys.stderr)
+        else:
+            self._console_print(f"[dim]{_escape(message)}[/dim]")
 
     def _display_resumed_history(self):
         """Render a compact recap of previous conversation messages.
@@ -6238,6 +6367,13 @@ class HermesCLI:
         self._pending_title = None
         self._resumed = False
 
+        # Model, reasoning, and fast mode are conversation-scoped by default.
+        # Restore durable config only after the old conversation is finalized
+        # and before the new agent/session record is initialized.
+        from hermes_cli.cli_session_defaults import reset_cli_session_runtime
+
+        reset_cli_session_runtime(self, CLI_CONFIG)
+
         if self.agent:
             self.agent.session_id = self.session_id
             self.agent.session_start = self.session_start
@@ -6574,6 +6710,8 @@ class HermesCLI:
             )
         else:
             _cprint(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
+
+        self._restore_session_cwd(session_meta)
 
     def _handle_sessions_command(self, cmd_original: str) -> None:
         """Handle /sessions [list|<id_or_title>] — browse or resume previous sessions.
@@ -7206,14 +7344,18 @@ class HermesCLI:
                 )
                 return
 
+        from hermes_cli.model_display import format_model_for_display
+
+        display_old = format_model_for_display(old_model)
+        display_new = format_model_for_display(result.new_model)
         self._pending_model_switch_note = (
-            f"[Note: model was just switched from {old_model} to {result.new_model} "
+            f"[Note: model was just switched from {display_old} to {display_new} "
             f"via {result.provider_label or result.target_provider}. "
             f"Adjust your self-identification accordingly.]"
         )
 
         provider_label = result.provider_label or result.target_provider
-        _cprint(f"  ✓ Model switched: {result.new_model}")
+        _cprint(f"  ✓ Model switched: {display_new}")
         _cprint(f"    Provider: {provider_label}")
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
@@ -7327,23 +7469,90 @@ class HermesCLI:
                 return
             self._close_model_picker()
 
+    def _snapshot_model_runtime(self) -> dict:
+        """Capture CLI and live-agent model state for a one-turn lease."""
+        agent = getattr(self, "agent", None)
+        primary_runtime = getattr(agent, "_primary_runtime", None) if agent else None
+        try:
+            primary_runtime = copy.deepcopy(primary_runtime)
+        except Exception:
+            logger.debug("Could not deepcopy CLI primary runtime snapshot", exc_info=True)
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "requested_provider": self.requested_provider,
+            "_explicit_api_key": getattr(self, "_explicit_api_key", None),
+            "_explicit_base_url": getattr(self, "_explicit_base_url", None),
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "api_mode": self.api_mode,
+            "agent_primary_runtime": primary_runtime,
+        }
+
+    def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
+        """Restore a model runtime consumed by the completed agent turn."""
+        if not snapshot:
+            return
+        for key in (
+            "model",
+            "provider",
+            "requested_provider",
+            "_explicit_api_key",
+            "_explicit_base_url",
+            "api_key",
+            "base_url",
+            "api_mode",
+        ):
+            if key in snapshot:
+                setattr(self, key, snapshot.get(key))
+
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return
+        primary = snapshot.get("agent_primary_runtime")
+        if primary is not None and hasattr(agent, "_restore_primary_runtime"):
+            try:
+                agent._primary_runtime = copy.deepcopy(primary)
+                agent._fallback_activated = True
+                agent._rate_limited_until = 0
+                if agent._restore_primary_runtime():
+                    return
+            except Exception:
+                logger.debug(
+                    "CLI one-turn model restore via primary runtime failed",
+                    exc_info=True,
+                )
+        if hasattr(agent, "switch_model"):
+            try:
+                agent.switch_model(
+                    new_model=snapshot.get("model", ""),
+                    new_provider=snapshot.get("provider", ""),
+                    api_key=snapshot.get("api_key", ""),
+                    base_url=snapshot.get("base_url", ""),
+                    api_mode=snapshot.get("api_mode", ""),
+                )
+            except Exception as exc:
+                logger.warning("CLI one-turn model restore failed: %s", exc)
+
     def _handle_model_switch(self, cmd_original: str):
         """Handle /model command — switch model.
 
         Supports:
           /model                              — show current model + usage hints
-          /model <name>                       — switch model (persists by default)
+          /model <name>                       — switch model (this session only)
+          /model <name> --once                — switch for the next turn only
           /model <name> --session             — switch for this session only
           /model <name> --global              — switch and persist (explicit)
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
 
-        Persistence defaults to on (``model.persist_switch_by_default`` in
-        config.yaml, default True). Use ``--session`` for a one-off switch.
+        Persistence defaults to off (``model.persist_switch_by_default`` in
+        config.yaml, default False). Use ``--global`` to persist or ``--once``
+        for the next turn only.
         """
         from hermes_cli.model_switch import (
             switch_model,
-            parse_model_flags,
+            parse_model_flags_detailed,
             resolve_persist_behavior,
         )
         from hermes_cli.providers import get_label
@@ -7352,19 +7561,26 @@ class HermesCLI:
         parts = cmd_original.split(None, 1)  # split off '/model'
         raw_args = parts[1].strip() if len(parts) > 1 else ""
 
-        # Parse --provider, --global, --session, and --refresh flags
-        (
-            model_input,
-            explicit_provider,
+        parsed_flags = parse_model_flags_detailed(raw_args)
+        model_input = parsed_flags.model_input
+        explicit_provider = parsed_flags.explicit_provider
+        is_global_flag = parsed_flags.is_global
+        force_refresh = parsed_flags.force_refresh
+        is_session = parsed_flags.is_session
+        one_turn = parsed_flags.is_once
+        if is_global_flag and one_turn:
+            _cprint("  ✗ /model --once cannot be combined with --global")
+            return
+        if one_turn and not model_input and not explicit_provider:
+            _cprint("  ✗ /model --once requires a model or provider.")
+            return
+        # Resolve persistence once through the shared session-default policy.
+        persist_global = resolve_persist_behavior(
             is_global_flag,
-            force_refresh,
             is_session,
-        ) = parse_model_flags(raw_args)
-        # Resolve the effective persistence once: --session overrides the
-        # config-gated default, --global forces persist, otherwise defer to
-        # model.persist_switch_by_default (defaults to True so /model survives
-        # across sessions).
-        persist_global = resolve_persist_behavior(is_global_flag, is_session)
+            is_once=one_turn,
+            explicit_provider=explicit_provider,
+        )
 
         # --refresh: wipe the on-disk picker cache before building the
         # provider list. Forces a live re-fetch of every authed provider's
@@ -7405,14 +7621,20 @@ class HermesCLI:
             try:
                 if ctx is None:
                     raise RuntimeError("inventory context unavailable")
-                providers = build_models_payload(ctx, max_models=50)["providers"]
+                providers = build_models_payload(
+                    ctx,
+                    max_models=50,
+                    probe_custom_providers=force_refresh,
+                    probe_current_custom_provider=not force_refresh,
+                )["providers"]
             except Exception:
                 providers = []
 
             if not providers:
                 _cprint("  No authenticated providers found.")
                 _cprint("")
-                _cprint("  /model <name>                        switch model (persists)")
+                _cprint("  /model <name>                        switch model for this session")
+                _cprint("  /model <name> --once                 switch for the next turn only")
                 _cprint("  /model <name> --session              switch for this session only")
                 _cprint("  /model --provider <slug>             switch provider")
                 _cprint("  /model --refresh                     re-fetch live model lists")
@@ -7452,6 +7674,13 @@ class HermesCLI:
         # Update requested_provider so _ensure_runtime_credentials() doesn't
         # overwrite the switch on the next turn (it re-resolves from this).
         old_model = self.model
+        one_turn_restore_snapshot = None
+        if one_turn:
+            one_turn_restore_snapshot = getattr(
+                self,
+                "_pending_one_turn_model_restore",
+                None,
+            ) or self._snapshot_model_runtime()
         # Snapshot CLI-level fields before mutation so a failed in-place swap
         # rolls the whole CLI back to the old working model (#50163).
         _cli_snapshot = {
@@ -7503,15 +7732,24 @@ class HermesCLI:
         # Store a note to prepend to the next user message so the model
         # knows a switch occurred (avoids injecting system messages mid-history
         # which breaks providers and prompt caching).
+        from hermes_cli.model_display import format_model_for_display
+
+        display_old = format_model_for_display(old_model)
+        display_new = format_model_for_display(result.new_model)
         self._pending_model_switch_note = (
-            f"[Note: model was just switched from {old_model} to {result.new_model} "
+            f"[Note: model was just switched from {display_old} to {display_new} "
             f"via {result.provider_label or result.target_provider}. "
+            f"{'This override applies to the next turn only. ' if one_turn else ''}"
             f"Adjust your self-identification accordingly.]"
         )
+        if one_turn:
+            self._pending_one_turn_model_restore = one_turn_restore_snapshot
+        else:
+            self._pending_one_turn_model_restore = None
 
         # Display confirmation with full metadata
         provider_label = result.provider_label or result.target_provider
-        _cprint(f"  ✓ Model switched: {result.new_model}")
+        _cprint(f"  ✓ Model switched: {display_new}")
         _cprint(f"    Provider: {provider_label}")
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
@@ -7550,10 +7788,23 @@ class HermesCLI:
 
         # Persistence
         if persist_global:
-            save_config_value("model.default", result.new_model)
+            saved = save_config_value("model.default", result.new_model)
             if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            _cprint("    Saved to config.yaml")
+                saved = (
+                    save_config_value("model.provider", result.target_provider) and saved
+                )
+            if saved:
+                model_cfg = CLI_CONFIG.get("model")
+                if not isinstance(model_cfg, dict):
+                    model_cfg = {}
+                    CLI_CONFIG["model"] = model_cfg
+                model_cfg["default"] = result.new_model
+                model_cfg["provider"] = result.target_provider
+                _cprint("    Saved to config.yaml")
+            else:
+                _cprint("    Config save failed; switch remains session-only")
+        elif one_turn:
+            _cprint("    (next turn only — restores after one response)")
         else:
             _cprint("    (session only — add --global to persist)")
 
@@ -8036,8 +8287,56 @@ class HermesCLI:
 
     def _handle_skills_command(self, cmd: str):
         """Handle /skills slash command — delegates to hermes_cli.skills_hub."""
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        approval_commands = {
+            "pending", "approve", "apply", "reject", "deny", "drop",
+            "diff", "approval", "mode",
+        }
+        if args and args[0].lower() in approval_commands:
+            from hermes_cli.write_approval_commands import handle_pending_subcommand
+            from tools import write_approval as wa
+
+            output = handle_pending_subcommand(
+                wa.SKILLS,
+                args,
+                set_mode_fn=lambda enabled: self._save_write_approval("skills", enabled),
+            )
+            if output is not None:
+                print(output)
+                return
         from hermes_cli.skills_hub import handle_skills_slash
         handle_skills_slash(cmd, ChatConsole())
+
+    def _handle_memory_command(self, cmd: str):
+        """Review staged memory writes and configure their approval gate."""
+        from hermes_cli.write_approval_commands import handle_pending_subcommand
+        from tools import write_approval as wa
+        from tools.memory_tool import load_on_disk_store
+
+        parts = cmd.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        agent = getattr(self, "agent", None)
+        store = getattr(agent, "_memory_store", None) if agent is not None else None
+        if store is None:
+            store = load_on_disk_store()
+        output = handle_pending_subcommand(
+            wa.MEMORY,
+            args,
+            memory_store=store,
+            set_mode_fn=lambda enabled: self._save_write_approval("memory", enabled),
+        )
+        if output is None:
+            output = (
+                "Unknown /memory subcommand. Use: pending, approve <id>, "
+                "reject <id>, approval <on|off>."
+            )
+        print(output)
+
+    @staticmethod
+    def _save_write_approval(subsystem: str, enabled: bool) -> None:
+        if not save_config_value(f"{subsystem}.write_approval", bool(enabled)):
+            raise RuntimeError("failed to persist config.yaml")
 
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
@@ -8294,11 +8593,17 @@ class HermesCLI:
         elif canonical == "personality":
             # Use original case (handler lowercases the personality name itself)
             self._handle_personality_command(cmd_original)
+        elif canonical == "pet":
+            self._handle_pet_command(cmd_original)
+        elif canonical == "hatch":
+            self._handle_hatch_command(cmd_original)
         elif canonical == "retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
                 # Re-queue the message so process_loop sends it to the agent
                 self._pending_input.put(retry_msg)
+        elif canonical == "prompt":
+            self._handle_prompt_compose_command(cmd_original)
         elif canonical == "undo":
             if self._confirm_destructive_slash(
                 "undo",
@@ -8312,6 +8617,10 @@ class HermesCLI:
             self.save_conversation()
         elif canonical == "cron":
             self._handle_cron_command(cmd_original)
+        elif canonical == "suggestions":
+            self._handle_suggestions_command(cmd_original)
+        elif canonical == "blueprint":
+            self._handle_blueprint_command(cmd_original)
         elif canonical == "curator":
             self._handle_curator_command(cmd_original)
         elif canonical == "kanban":
@@ -8319,6 +8628,10 @@ class HermesCLI:
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)
+        elif canonical == "learn":
+            self._handle_learn_command(cmd_original)
+        elif canonical == "memory":
+            self._handle_memory_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
         elif canonical == "status":
@@ -8327,6 +8640,8 @@ class HermesCLI:
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"
             self._console_print(f"  Status bar {state}")
+        elif canonical == "timestamps":
+            self._handle_timestamps_command(cmd_original)
         elif canonical == "verbose":
             self._toggle_verbose()
         elif canonical == "footer":
@@ -8341,6 +8656,10 @@ class HermesCLI:
             self._manual_compress(cmd_original)
         elif canonical == "usage":
             self._show_usage()
+        elif canonical == "subscription":
+            self._show_subscription()
+        elif canonical == "topup":
+            self._show_billing(cmd_original)
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "copy":
@@ -8350,6 +8669,10 @@ class HermesCLI:
         elif canonical == "update":
             if self._handle_update_command():
                 return False
+        elif canonical == "version":
+            from hermes_cli.main import _print_version_info
+
+            _print_version_info(check_updates=True)
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
@@ -8400,6 +8723,8 @@ class HermesCLI:
             self._handle_stop_command()
         elif canonical == "agents":
             self._handle_agents_command()
+        elif canonical == "journey":
+            self._handle_journey_command(cmd_original)
         elif canonical == "background":
             self._handle_background_command(cmd_original)
         elif canonical == "queue":
@@ -8440,6 +8765,8 @@ class HermesCLI:
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
         elif canonical == "goal":
             self._handle_goal_command(cmd_original)
+        elif canonical == "moa":
+            self._handle_moa_command(cmd_original)
         elif canonical == "subgoal":
             self._handle_subgoal_command(cmd_original)
         elif canonical == "skin":
@@ -9529,7 +9856,8 @@ class HermesCLI:
 
         Usage:
             /reasoning              Show current effort level and display state
-            /reasoning <level>      Set reasoning effort (none, minimal, low, medium, high, xhigh, max, ultra)
+            /reasoning <level>      Set effort for this session only
+            /reasoning <level> --global  Persist effort to config.yaml
             /reasoning show|on      Show model thinking/reasoning in output
             /reasoning hide|off     Hide model thinking/reasoning from output
         """
@@ -9545,12 +9873,16 @@ class HermesCLI:
             else:
                 level = rc.get("effort", "medium")
             display_state = "on ✓" if self.show_reasoning else "off"
+            full_state = "full" if self.reasoning_full else "clamped to 10 lines"
             _cprint(f"  {_ACCENT}Reasoning effort:  {level}{_RST}")
-            _cprint(f"  {_ACCENT}Reasoning display: {display_state}{_RST}")
-            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|max|ultra|show|hide>{_RST}")
+            _cprint(f"  {_ACCENT}Reasoning display: {display_state} ({full_state}){_RST}")
+            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|max|ultra|show|hide|full|clamp> [--global]{_RST}")
             return
 
-        arg = parts[1].strip().lower()
+        from hermes_cli.session_scope import parse_session_scoped_args
+
+        scoped = parse_session_scoped_args(parts[1])
+        arg = scoped.value.lower()
 
         # Display toggle
         if arg in {"show", "on"}:
@@ -9569,21 +9901,43 @@ class HermesCLI:
             _cprint(f"  {_ACCENT}✓ Reasoning display: OFF (saved){_RST}")
             return
 
+        if arg in {"full", "all"}:
+            self.reasoning_full = True
+            save_config_value("display.reasoning_full", True)
+            _cprint(f"  {_ACCENT}✓ Reasoning display: FULL (saved){_RST}")
+            _cprint(f"  {_DIM}  The post-response recap box will print complete thinking.{_RST}")
+            if not self.show_reasoning:
+                _cprint(f"  {_DIM}  Note: reasoning display is OFF — run /reasoning show to see it.{_RST}")
+            return
+        if arg in {"clamp", "collapse", "short"}:
+            self.reasoning_full = False
+            save_config_value("display.reasoning_full", False)
+            _cprint(f"  {_ACCENT}✓ Reasoning display: CLAMPED to 10 lines (saved){_RST}")
+            return
+
         # Effort level change
         parsed = _parse_reasoning_config(arg)
         if parsed is None:
             _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
             _cprint(f"  {_DIM}Valid levels: none, minimal, low, medium, high, xhigh, max, ultra{_RST}")
             _cprint(f"  {_DIM}Display:      show, hide{_RST}")
+            _cprint(f"  {_DIM}Scope:        session-scoped by default, --global to persist{_RST}")
             return
 
         self.reasoning_config = parsed
         self.agent = None  # Force agent re-init with new reasoning config
 
-        if save_config_value("agent.reasoning_effort", arg):
+        if scoped.persist_global and save_config_value("agent.reasoning_effort", arg):
+            agent_cfg = CLI_CONFIG.get("agent")
+            if not isinstance(agent_cfg, dict):
+                agent_cfg = {}
+                CLI_CONFIG["agent"] = agent_cfg
+            agent_cfg["reasoning_effort"] = arg
             _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
+        elif scoped.persist_global:
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only; config save failed){_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (this session — use --global to persist){_RST}")
 
     def _handle_busy_command(self, cmd: str):
         """Handle /busy — control what Enter does while Hermes is working.
@@ -9628,7 +9982,7 @@ class HermesCLI:
             _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' (session only){_RST}")
 
     def _handle_fast_command(self, cmd: str):
-        """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
+        """Toggle fast mode, session-scoped unless ``--global`` is explicit."""
         if not self._fast_command_available():
             _cprint("  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode).")
             return
@@ -9646,10 +10000,13 @@ class HermesCLI:
         if len(parts) < 2 or parts[1].strip().lower() == "status":
             status = "fast" if self.service_tier == "priority" else "normal"
             _cprint(f"  {_ACCENT}{feature_name}: {status}{_RST}")
-            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status] [--global]{_RST}")
             return
 
-        arg = parts[1].strip().lower()
+        from hermes_cli.session_scope import parse_session_scoped_args
+
+        scoped = parse_session_scoped_args(parts[1])
+        arg = scoped.value.lower()
 
         if arg in {"fast", "on"}:
             self.service_tier = "priority"
@@ -9661,14 +10018,21 @@ class HermesCLI:
             label = "NORMAL"
         else:
             _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
-            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status] [--global]{_RST}")
             return
 
         self.agent = None  # Force agent re-init with new service-tier config
-        if save_config_value("agent.service_tier", saved_value):
+        if scoped.persist_global and save_config_value("agent.service_tier", saved_value):
+            agent_cfg = CLI_CONFIG.get("agent")
+            if not isinstance(agent_cfg, dict):
+                agent_cfg = {}
+                CLI_CONFIG["agent"] = agent_cfg
+            agent_cfg["service_tier"] = saved_value
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
+        elif scoped.persist_global:
+            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only; config save failed){_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only){_RST}")
+            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (this session — use --global to persist){_RST}")
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -9842,14 +10206,20 @@ class HermesCLI:
     def _show_usage(self):
         """Show rate limits (if available) and session token usage."""
         if not self.agent:
-            print("(._.) No active agent -- send a message first.")
+            if self._print_nous_credits_block():
+                self._print_usage_cta()
+            else:
+                print("(._.) No active agent -- send a message first.")
             return
 
         agent = self.agent
         calls = agent.session_api_calls
 
         if calls == 0:
-            print("(._.) No API calls made yet in this session.")
+            if self._print_nous_credits_block():
+                self._print_usage_cta()
+            else:
+                print("(._.) No API calls made yet in this session.")
             return
 
         # ── Rate limits (shown first when available) ────────────────
@@ -9917,6 +10287,26 @@ class HermesCLI:
         print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
         print(f"  Messages:         {msg_count}")
         print(f"  Compressions:     {compressions}")
+        try:
+            from agent.context_breakdown import compute_session_context_breakdown
+
+            breakdown = compute_session_context_breakdown(
+                agent,
+                self.conversation_history,
+            )
+            categories = breakdown.get("categories") or []
+            estimated_total = int(breakdown.get("estimated_total") or 0)
+            if categories:
+                print("  Context breakdown (estimated):")
+                for category in categories:
+                    tokens = int(category.get("tokens") or 0)
+                    percent = round(tokens / estimated_total * 100) if estimated_total else 0
+                    print(
+                        f"    {str(category.get('label') or category.get('id')) + ':':<24}"
+                        f"{tokens:>10,} ({percent:>3}%)"
+                    )
+        except Exception:
+            logger.debug("Could not compute context breakdown", exc_info=True)
         if cost_result.status == "unknown":
             print(f"  Note:             Pricing unknown for {agent.model}")
 
@@ -9942,6 +10332,9 @@ class HermesCLI:
             print()
             for line in account_lines:
                 print(line)
+
+        if self._print_nous_credits_block():
+            self._print_usage_cta()
 
         if self.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -10034,22 +10427,38 @@ class HermesCLI:
             return
 
         new_mcp = new_cfg.get("mcp_servers") or {}
+        # The startup snapshot comes from the expanded config. Compare the
+        # same representation so ${VAR} templates do not make unrelated
+        # config saves look like MCP server changes.
+        from hermes_cli.config import _expand_env_vars
+
+        new_mcp = _expand_env_vars(new_mcp)
         if new_mcp == self._config_mcp_servers:
             return  # mcp_servers unchanged (some other section was edited)
 
         self._config_mcp_servers = new_mcp
+        runtime_cfg = new_cfg.get("mcp")
+        auto_reload = (
+            runtime_cfg.get("auto_reload_on_config_change", True)
+            if isinstance(runtime_cfg, dict)
+            else True
+        )
+        if not auto_reload:
+            print()
+            print("🔄 MCP server config changed — reload skipped (auto-reload disabled).")
+            print("   New settings are not applied yet. Run /reload-mcp to apply them.")
+            print("   ⚠️  Reloading rebuilds the tool set and invalidates the prompt cache.")
+            return
+
         # Notify user and reload.  Run in a separate thread with a hard
-        # timeout so a hung MCP server cannot block the process_loop
-        # indefinitely (which would freeze the entire TUI).
+        # timeout inside the MCP lifecycle itself. Never join here: this
+        # watcher runs on the input loop and must remain responsive.
         print()
         print("🔄 MCP server config changed — reloading connections...")
         _reload_thread = threading.Thread(
             target=self._reload_mcp, daemon=True
         )
         _reload_thread.start()
-        _reload_thread.join(timeout=30)
-        if _reload_thread.is_alive():
-            print("  ⚠️  MCP reload timed out (30s). Some servers may not have reconnected.")
 
     def _confirm_destructive_slash(self, command: str, detail: str) -> Optional[str]:
         """Prompt the user to confirm a destructive session slash command.
@@ -11053,7 +11462,8 @@ class HermesCLI:
         return ""
 
     def _approval_callback(self, command: str, description: str,
-                           *, allow_permanent: bool = True) -> str:
+                           *, allow_permanent: bool = True,
+                           smart_denied: bool = False) -> str:
         """
         Prompt for dangerous command approval through the prompt_toolkit UI.
 
@@ -11076,7 +11486,11 @@ class HermesCLI:
             self._approval_state = {
                 "command": command,
                 "description": description,
-                "choices": self._approval_choices(command, allow_permanent=allow_permanent),
+                "choices": self._approval_choices(
+                    command,
+                    allow_permanent=allow_permanent,
+                    smart_denied=smart_denied,
+                ),
                 "selected": 0,
                 "response_queue": response_queue,
             }
@@ -11107,9 +11521,22 @@ class HermesCLI:
             _cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
             return "deny"
 
-    def _approval_choices(self, command: str, *, allow_permanent: bool = True) -> list[str]:
+    def _approval_choices(
+        self,
+        command: str,
+        *,
+        allow_permanent: bool = True,
+        smart_denied: bool = False,
+    ) -> list[str]:
         """Return approval choices for a dangerous command prompt."""
-        choices = ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
+        if smart_denied:
+            choices = ["once", "deny"]
+        else:
+            choices = (
+                ["once", "session", "always", "deny"]
+                if allow_permanent
+                else ["once", "session", "deny"]
+            )
         if len(command) > 70:
             choices.append("view")
         return choices
@@ -11626,6 +12053,12 @@ class HermesCLI:
                 if _srn:
                     agent_message = _srn + "\n\n" + agent_message
                     self._pending_skills_reload_note = None
+                one_turn_model_restore = getattr(
+                    self,
+                    "_pending_one_turn_model_restore",
+                    None,
+                )
+                self._pending_one_turn_model_restore = None
                 try:
                     result = self.agent.run_conversation(
                         user_message=agent_message,
@@ -11648,6 +12081,9 @@ class HermesCLI:
                         "error": _summary,
                     }
                 finally:
+                    if one_turn_model_restore:
+                        self._restore_model_runtime_snapshot(one_turn_model_restore)
+                    self._flush_credit_notices()
                     # Clear thread-local callbacks so a reused thread doesn't
                     # hold stale references to a disposed CLI instance.
                     try:
@@ -11838,11 +12274,12 @@ class HermesCLI:
                     r_fill = w - 2 - len(r_label)
                     r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
                     r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
-                    # Collapse long reasoning: show first 10 lines
+                    # Collapse long reasoning unless the user explicitly asks
+                    # for the complete recap with `/reasoning full`.
                     lines = reasoning.strip().splitlines()
-                    if len(lines) > 10:
+                    if len(lines) > 10 and not self.reasoning_full:
                         display_reasoning = "\n".join(lines[:10])
-                        display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines){_RST}"
+                        display_reasoning += f"\n{_DIM}  ... ({len(lines) - 10} more lines — /reasoning full to show){_RST}"
                     else:
                         display_reasoning = reasoning.strip()
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")

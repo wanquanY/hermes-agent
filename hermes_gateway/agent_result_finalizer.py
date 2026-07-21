@@ -45,23 +45,31 @@ class AgentResultFinalizer:
         final_response = result.get("final_response")
         token_summary = self._token_summary(agent)
         if not final_response:
-            return self._empty_response(result, token_summary)
+            return self._empty_response(result, token_summary, agent)
 
         final_response = self._append_media_tags(final_response, result)
         effective_session_id, session_was_split = self._sync_split_session(agent)
-        effective_history_offset = 0 if session_was_split else self._history_offset
+        compacted_in_place = bool(
+            getattr(agent, "_last_compaction_in_place", False)
+        )
+        effective_history_offset = (
+            0 if session_was_split or compacted_in_place else self._history_offset
+        )
         return {
             "final_response": final_response,
             "last_reasoning": result.get("last_reasoning"),
             "messages": result.get("messages", []),
             "api_calls": result.get("api_calls", 0),
             "completed": result.get("completed"),
+            "failed": result.get("failed", False),
             "interrupted": result.get("interrupted", False),
             "partial": result.get("partial", False),
             "error": result.get("error"),
+            "compression_exhausted": result.get("compression_exhausted", False),
             "interrupt_message": result.get("interrupt_message"),
             "tools": self._tools,
             "history_offset": effective_history_offset,
+            "compacted_in_place": compacted_in_place,
             "last_prompt_tokens": token_summary["last_prompt_tokens"],
             "input_tokens": token_summary["input_tokens"],
             "output_tokens": token_summary["output_tokens"],
@@ -75,8 +83,13 @@ class AgentResultFinalizer:
         self,
         result: dict[str, Any],
         token_summary: dict[str, Any],
+        agent,
     ) -> dict[str, Any]:
         error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
+        effective_session_id, session_was_split = self._sync_split_session(agent)
+        compacted_in_place = bool(
+            getattr(agent, "_last_compaction_in_place", False)
+        )
         return {
             "final_response": error_msg,
             "messages": result.get("messages", []),
@@ -89,12 +102,18 @@ class AgentResultFinalizer:
             "error": result.get("error"),
             "compression_exhausted": result.get("compression_exhausted", False),
             "tools": self._tools,
-            "history_offset": self._history_offset,
+            "history_offset": (
+                0
+                if session_was_split or compacted_in_place
+                else self._history_offset
+            ),
+            "compacted_in_place": compacted_in_place,
             "last_prompt_tokens": token_summary["last_prompt_tokens"],
             "input_tokens": token_summary["input_tokens"],
             "output_tokens": token_summary["output_tokens"],
             "model": token_summary["model"],
             "context_length": token_summary["context_length"],
+            "session_id": effective_session_id,
         }
 
     def _token_summary(self, agent) -> dict[str, Any]:

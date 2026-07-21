@@ -222,6 +222,12 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["status"], "completed")
         self.assertEqual(result["results"][0]["summary"], "Done!")
+        self.assertEqual(len(result["live_transcripts"]), 1)
+        self.assertEqual(
+            result["results"][0]["live_transcript"],
+            result["live_transcripts"][0],
+        )
+        self.assertTrue(os.path.exists(result["live_transcripts"][0]))
         mock_run.assert_called_once()
 
     @patch("tools.delegate_tool._run_single_child")

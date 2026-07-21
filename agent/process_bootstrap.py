@@ -166,7 +166,7 @@ def build_provider_http_client(
     base_url: str = "",
     *,
     async_mode: bool = False,
-    verify=True,
+    verify=None,
 ):
     """Build the canonical httpx client for OpenAI-compatible providers.
 
@@ -180,6 +180,21 @@ def build_provider_http_client(
 
     try:
         import httpx
+
+        if verify is None:
+            try:
+                from agent.ssl_verify import resolve_httpx_verify
+                from hermes_cli.config import get_custom_provider_tls_settings
+
+                tls = get_custom_provider_tls_settings(str(base_url or ""))
+                verify = resolve_httpx_verify(
+                    ca_bundle=tls.get("ssl_ca_cert"),
+                    ssl_verify=tls.get("ssl_verify"),
+                    base_url=str(base_url or ""),
+                )
+            except Exception:
+                logger.debug("provider TLS settings resolution failed", exc_info=True)
+                verify = True
 
         keepalive_expiry = _positive_env_number(
             "HERMES_PROVIDER_HTTPX_KEEPALIVE_EXPIRY",

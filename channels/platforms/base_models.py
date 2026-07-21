@@ -65,6 +65,9 @@ class MessageEvent:
     # Reply context
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
+    reply_to_author_id: Optional[str] = None
+    reply_to_author_name: Optional[str] = None
+    reply_to_is_own_message: bool = False
     
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.
@@ -159,6 +162,9 @@ class SendResult:
     error: Optional[str] = None
     raw_response: Any = None
     retryable: bool = False  # True for transient connection errors — base will retry automatically
+    # Authoritative server-requested retry delay (for example Telegram
+    # FloodWait). Unified retry policy honors it before local backoff.
+    retry_after: Optional[float] = None
     # When the adapter had to split an oversized payload across multiple
     # platform messages (e.g. Telegram edit_message overflow split-and-deliver),
     # ``message_id`` is the LAST visible message id (so subsequent edits target
@@ -316,6 +322,17 @@ def _merge_caption(existing_text: Optional[str], new_text: str) -> str:
     return existing_text
 
 
+def _invalidate_pending_stt_cache(event: MessageEvent) -> None:
+    """Drop cached transcripts whenever new media joins a pending event."""
+    for attribute in (
+        "_gateway_pending_stt_text",
+        "_gateway_pending_stt_transcripts",
+        "_gateway_pending_stt_echo_sent",
+    ):
+        if hasattr(event, attribute):
+            delattr(event, attribute)
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
@@ -346,6 +363,7 @@ def merge_pending_message_event(
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = _merge_caption(existing.text, event.text)
+            _invalidate_pending_stt_cache(existing)
             return
 
         if existing_has_media or incoming_has_media:
@@ -364,6 +382,7 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
+            _invalidate_pending_stt_cache(existing)
             return
 
         if (

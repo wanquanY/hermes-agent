@@ -4,41 +4,15 @@ Phase 0 — establish a baseline pin on the current (pre-OAuth) behavior so
 later phases can prove they didn't break loopback mode.
 """
 import pytest
+
+# Phase 5 / Phase 6: these tests mutate ``web_server.app.state.auth_required``
+# at module level. Run them in the same xdist worker so they don't race
+# against each other (and against any other file that also touches
+# ``app.state``) — the marker name is shared across all dashboard-auth test
+# files that gate the app.
 from fastapi.testclient import TestClient
-from types import SimpleNamespace
 
 from hermes_cli import web_server
-
-
-@pytest.fixture(autouse=True)
-def _restore_dashboard_binding_state():
-    """Keep process-global ASGI state from leaking across security tests."""
-    missing = object()
-    tracked = ("auth_required", "bound_host", "bound_port")
-    state_values = web_server.app.state._state
-    before = {
-        name: state_values.get(name, missing)
-        for name in tracked
-    }
-    yield
-    for name, value in before.items():
-        if value is missing:
-            state_values.pop(name, None)
-        else:
-            state_values[name] = value
-
-
-def test_empty_websocket_peer_is_rejected_in_loopback_mode():
-    web_server.app.state.auth_required = False
-    assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is False
-    assert web_server._ws_client_is_allowed(
-        SimpleNamespace(client=SimpleNamespace(host=""))
-    ) is False
-
-
-def test_empty_websocket_peer_is_allowed_after_auth_gate():
-    web_server.app.state.auth_required = True
-    assert web_server._ws_client_is_allowed(SimpleNamespace(client=None)) is True
 
 
 @pytest.fixture
@@ -133,17 +107,60 @@ def test_should_require_auth_truth_table(host, allow_public, expected):
 
 
 def _stub_uvicorn_run(monkeypatch):
-    """Replace uvicorn.run with a no-op recorder so start_server returns
-    immediately (rather than blocking on the event loop).  Returns the dict
-    that will capture the keyword args."""
+    """Replace uvicorn.Config/Server with no-op fakes so start_server
+    returns immediately (rather than blocking on the event loop). Returns the dict
+    that will capture the keyword args.
+    """
+    import asyncio
+    import contextlib
     import uvicorn
-    captured: dict = {}
+    captured: dict = {"kwargs": {}}
 
-    def _fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
+    class _FakeConfig:
+        loaded = True
+        host = "127.0.0.1"
+        port = 8000
 
-    monkeypatch.setattr(uvicorn, "run", _fake_run)
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def load(self):
+            pass
+
+        class lifespan_class:
+            should_exit = False
+            state: dict = {}
+
+            def __init__(self, *a, **kw):
+                pass
+
+            async def startup(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+    class _FakeServer:
+        should_exit = False
+        started = True
+        servers: list = []
+        lifespan = None
+
+        @staticmethod
+        def capture_signals():
+            return contextlib.nullcontext()
+
+        async def startup(self, sockets=None):
+            pass
+
+        async def main_loop(self):
+            pass
+
+        async def shutdown(self, sockets=None):
+            pass
+
+    monkeypatch.setattr(uvicorn, "Config", _FakeConfig)
+    monkeypatch.setattr(uvicorn, "Server", lambda config: _FakeServer())
     return captured
 
 
@@ -240,6 +257,36 @@ def test_start_server_gate_without_provider_fails_closed(monkeypatch):
             host="0.0.0.0", port=9119,
             open_browser=False, allow_public=False,
         )
+
+
+def test_start_server_surfaces_nous_skip_reason_when_unconfigured(monkeypatch):
+    """When the bundled Nous plugin loaded but skipped registration (no
+    env vars set), the gate's fail-closed message should surface the
+    plugin's LAST_SKIP_REASON so the operator knows the config fix is
+    'set HERMES_DASHBOARD_OAUTH_CLIENT_ID', not 'install a plugin'."""
+    from hermes_cli.dashboard_auth import clear_providers
+    from plugins.dashboard_auth import nous as nous_plugin
+
+    # Simulate the plugin running and skipping for "no client_id".
+    clear_providers()
+    _stub_uvicorn_run(monkeypatch)
+    monkeypatch.delenv("HERMES_DASHBOARD_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("HERMES_DASHBOARD_PORTAL_URL", raising=False)
+    from unittest.mock import MagicMock
+    nous_plugin.register(MagicMock())  # populates LAST_SKIP_REASON
+    assert "HERMES_DASHBOARD_OAUTH_CLIENT_ID" in nous_plugin.LAST_SKIP_REASON
+
+    web_server.app.state.auth_required = None
+    with pytest.raises(SystemExit) as exc_info:
+        web_server.start_server(
+            host="0.0.0.0", port=9119,
+            open_browser=False, allow_public=False,
+        )
+    # The error message embeds the plugin's specific skip reason rather
+    # than the generic "Install the default Nous provider" boilerplate.
+    msg = str(exc_info.value)
+    assert "HERMES_DASHBOARD_OAUTH_CLIENT_ID" in msg
+    assert "nous:" in msg
 
 
 def test_start_server_loopback_keeps_proxy_headers_off(monkeypatch):

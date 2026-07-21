@@ -257,18 +257,18 @@ class TestTelegramYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "off"
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "off"
 
     def test_top_level_reply_to_mode_all(self, tmp_path, monkeypatch):
         hermes_home = self._write_config(tmp_path, "telegram:\n  reply_to_mode: all\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "all"
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "all"
 
     def test_extra_reply_to_mode_off(self, tmp_path, monkeypatch):
         """telegram.extra.reply_to_mode is also honoured."""
@@ -278,9 +278,9 @@ class TestTelegramYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "off"
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "off"
 
     def test_env_var_takes_precedence_over_yaml(self, tmp_path, monkeypatch):
         """Existing TELEGRAM_REPLY_TO_MODE env var is not overwritten by YAML."""
@@ -288,9 +288,9 @@ class TestTelegramYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setenv("TELEGRAM_REPLY_TO_MODE", "first")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "first"
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "first"
 
     def test_top_level_takes_precedence_over_extra(self, tmp_path, monkeypatch):
         """telegram.reply_to_mode wins over telegram.extra.reply_to_mode."""
@@ -301,9 +301,9 @@ class TestTelegramYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "all"
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "all"
 
 
 class TestDMTopicFallbackReplyToMode:

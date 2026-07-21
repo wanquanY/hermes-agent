@@ -43,6 +43,8 @@ _PROVIDER_ENV_HINTS = (
     "KIMI_API_KEY",
     "KIMI_CN_API_KEY",
     "GMI_API_KEY",
+    "FIREWORKS_API_KEY",
+    "UPSTAGE_API_KEY",
     "MINIMAX_API_KEY",
     "MINIMAX_CN_API_KEY",
     "KILOCODE_API_KEY",
@@ -205,6 +207,84 @@ def _fail_and_issue(text: str, detail: str, fix: str, issues: list[str]) -> None
     """Emit a check_fail and append the corresponding fix instruction."""
     check_fail(text, detail)
     issues.append(fix)
+
+
+_DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("display", "tool_progress_overrides", "display.platforms"),
+    (
+        "delegation",
+        "max_async_children",
+        "delegation.max_concurrent_children",
+    ),
+)
+
+_DEPRECATED_COMPRESSION_SUMMARY_KEYS: tuple[str, ...] = (
+    "summary_model",
+    "summary_provider",
+    "summary_base_url",
+)
+
+_DEPRECATED_ENV_VARS: tuple[tuple[str, str], ...] = (
+    ("HERMES_TOOL_PROGRESS", "display.tool_progress in config.yaml"),
+    ("HERMES_TOOL_PROGRESS_MODE", "display.tool_progress in config.yaml"),
+    ("TERMINAL_CWD", "terminal.cwd in config.yaml"),
+    ("MESSAGING_CWD", "terminal.cwd in config.yaml"),
+    ("QQ_HOME_CHANNEL", "QQBOT_HOME_CHANNEL"),
+    ("QQ_HOME_CHANNEL_NAME", "QQBOT_HOME_CHANNEL_NAME"),
+)
+
+
+def collect_deprecated_config_keys(
+    raw_config: dict | None,
+) -> list[tuple[str, str]]:
+    """Find legacy keys explicitly present in the on-disk config."""
+    if not isinstance(raw_config, dict):
+        return []
+    findings: list[tuple[str, str]] = []
+    for section, key, replacement in _DEPRECATED_CONFIG_KEYS:
+        section_value = raw_config.get(section)
+        if isinstance(section_value, dict) and key in section_value:
+            findings.append((f"{section}.{key}", replacement))
+
+    compression = raw_config.get("compression")
+    if isinstance(compression, dict):
+        for key in _DEPRECATED_COMPRESSION_SUMMARY_KEYS:
+            if key in compression:
+                findings.append((f"compression.{key}", "auxiliary.compression"))
+    return findings
+
+
+def collect_deprecated_env_vars(
+    env_map: dict | None,
+) -> list[tuple[str, str]]:
+    """Find non-empty legacy variables in the on-disk dotenv mapping."""
+    if not isinstance(env_map, dict):
+        return []
+    return [
+        (name, replacement)
+        for name, replacement in _DEPRECATED_ENV_VARS
+        if env_map.get(name) is not None and str(env_map[name]).strip()
+    ]
+
+
+def report_deprecated_config_and_env(
+    raw_config: dict | None = None,
+    env_map: dict | None = None,
+) -> list[tuple[str, str]]:
+    """Report legacy config without mutating it or creating blocking issues."""
+    findings = collect_deprecated_config_keys(raw_config)
+    findings.extend(collect_deprecated_env_vars(env_map))
+    if not findings:
+        check_ok("No deprecated config keys or env vars")
+        return findings
+
+    for legacy, replacement in findings:
+        check_warn(f"Deprecated: {legacy}", f"(use {replacement} instead)")
+        check_info(
+            f"Replace {legacy} → {replacement} "
+            "(warn-only; not auto-migrated here)"
+        )
+    return findings
 
 
 def _check_gateway_service_linger(issues: list[str]) -> None:
@@ -452,6 +532,23 @@ def run_doctor(args):
         check_ok("Virtual environment active")
     else:
         check_warn("Not in virtual environment", "(recommended)")
+
+    _section("SSL / CA Certificates")
+    try:
+        from agent.errors import SSLConfigurationError
+        from agent.ssl_guard import verify_ca_bundle_with_fallback
+
+        verify_ca_bundle_with_fallback()
+        check_ok("SSL CA certificate bundle is valid")
+    except SSLConfigurationError as exc:
+        _fail_and_issue(
+            "SSL CA certificate bundle is broken",
+            str(exc),
+            "Repair the configured CA bundle before making provider requests",
+            issues,
+        )
+    except Exception as exc:
+        check_warn("SSL certificate check skipped", str(exc))
     
     _section("Required Packages")
     required_packages = [
@@ -559,7 +656,13 @@ def run_doctor(args):
 
             user_providers = cfg.get("providers")
             if isinstance(user_providers, dict):
-                known_providers.update(str(name).strip().lower() for name in user_providers if str(name).strip())
+                from hermes_cli.config import is_provider_enabled
+
+                known_providers.update(
+                    str(name).strip().lower()
+                    for name, provider_cfg in user_providers.items()
+                    if str(name).strip() and is_provider_enabled(provider_cfg)
+                )
             for entry in custom_providers:
                 if not isinstance(entry, dict):
                     continue
@@ -628,6 +731,8 @@ def run_doctor(args):
                 "huggingface",
                 "lmstudio",
                 "nous",
+                "fireworks",
+                "deepinfra",
             }
             if (
                 default_model
@@ -750,12 +855,28 @@ def run_doctor(args):
                             model_section[k] = raw_config.pop(k)
                         else:
                             raw_config.pop(k)
-                    from utils import atomic_yaml_write
-                    atomic_yaml_write(config_path, raw_config)
+                    from hermes_cli.config import atomic_config_write
+
+                    atomic_config_write(config_path, raw_config)
                     check_ok("Migrated stale root-level keys into model section")
                     fixed_count += 1
                 else:
                     issues.append("Stale root-level provider/base_url in config.yaml — run 'hermes doctor --fix'")
+        except Exception:
+            pass
+
+        # Read the raw files: merged defaults and bridged process variables
+        # would create false positives for legacy settings.
+        try:
+            import yaml as _yaml_deprecated
+            from hermes_cli.config import load_env as _load_env_deprecated
+
+            with open(config_path, encoding="utf-8") as stream:
+                raw_deprecated = _yaml_deprecated.safe_load(stream) or {}
+            report_deprecated_config_and_env(
+                raw_deprecated,
+                _load_env_deprecated(),
+            )
         except Exception:
             pass
 
@@ -774,6 +895,15 @@ def run_doctor(args):
                     for hint_line in ci.hint.splitlines():
                         check_info(hint_line)
                     issues.append(ci.message)
+        except Exception:
+            pass
+
+    if not config_path.exists():
+        # Legacy dotenv variables remain diagnosable without config.yaml.
+        try:
+            from hermes_cli.config import load_env as _load_env_deprecated
+
+            report_deprecated_config_and_env({}, _load_env_deprecated())
         except Exception:
             pass
 

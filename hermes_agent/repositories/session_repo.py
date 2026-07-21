@@ -14,7 +14,6 @@ Wire-only legacy aliases are folded before requests enter the domain layer.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import time
 import json
@@ -24,7 +23,19 @@ from typing import Any, Iterable, Protocol, runtime_checkable
 
 from hermes_agent.domain.run_state_machine import TERMINAL_RUN_STATUSES
 from hermes_agent.domain.session_runtime_state import session_info_record
+from hermes_agent.domain.text_safety import scrub_lone_surrogates
 from hermes_agent.repositories.base import RepositoryConnection
+from hermes_agent.repositories.session_repo_support import (
+    affected as _affected,
+    column_exists as _column_exists,
+    row_any as _row_any,
+    row_int as _row_int,
+    row_text as _row_text,
+    sanitize_session_title,
+    sanitize_title as _sanitize_title,
+    table_columns as _table_columns,
+    table_exists as _table_exists,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +214,16 @@ class SessionRepo(Protocol):
     def set_title(self, session_id: str, title: str, *, title_source: str = "user") -> bool: ...
 
     def update_cwd(self, session_id: str, cwd: str) -> bool: ...
+
+    def update_git_context(
+        self,
+        session_id: str,
+        *,
+        branch: str,
+        repo_root: str,
+    ) -> bool: ...
+
+    def backfill_repo_roots(self, cwd_to_root: dict[str, str]) -> int: ...
 
     def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool: ...
 
@@ -625,6 +646,52 @@ class SessionRepoImpl:
                 (now, stable),
             )
         return rowcount > 0
+
+    def update_git_context(
+        self,
+        session_id: str,
+        *,
+        branch: str,
+        repo_root: str,
+    ) -> bool:
+        stable = str(session_id or "").strip()
+        if not stable:
+            raise ValueError("session_id is required for update_git_context")
+        required = {"git_branch", "git_repo_root"}
+        if not required.issubset(self._session_columns):
+            return False
+        now = time.time()
+        rowcount = int(
+            self._conn.execute(
+                "UPDATE sessions SET git_branch = ?, git_repo_root = ?, "
+                "updated_at = ? WHERE id = ?",
+                (str(branch or ""), str(repo_root or ""), now, stable),
+            ).rowcount
+            or 0
+        )
+        if rowcount:
+            self._conn.execute(
+                "UPDATE session_index SET updated_at = ? WHERE session_id = ?",
+                (now, stable),
+            )
+        return rowcount > 0
+
+    def backfill_repo_roots(self, cwd_to_root: dict[str, str]) -> int:
+        if "git_repo_root" not in self._session_columns:
+            return 0
+        rows = [
+            (str(root or ""), str(cwd or ""))
+            for cwd, root in cwd_to_root.items()
+            if str(cwd or "").strip()
+        ]
+        if not rows:
+            return 0
+        before = int(self._conn.total_changes)
+        self._conn.executemany(
+            "UPDATE sessions SET git_repo_root = ? WHERE cwd = ?",
+            rows,
+        )
+        return int(self._conn.total_changes) - before
 
     def update_usage(self, session_id: str, fields: dict[str, Any]) -> bool:
         stable = str(session_id or "").strip()
@@ -1900,7 +1967,7 @@ def _apply_column(
     if value is None:
         return
     assignments.append(f"{column} = ?")
-    params.append(value)
+    params.append(scrub_lone_surrogates(value))
 
 
 def _row_to_session(row: Any) -> Session:
@@ -1936,126 +2003,18 @@ def _encode_model_config(value: dict[str, Any] | str | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return scrub_lone_surrogates(value)
+    return json.dumps(
+        scrub_lone_surrogates(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _is_user_visible_conversation(spec: SessionSpec) -> bool:
     session_kind = str(spec.session_kind or "hermes_session").strip().lower()
     conversation_kind = str(spec.conversation_kind or "direct").strip().lower()
     return session_kind != "execution" and conversation_kind in {"direct", "team"}
-
-
-MAX_SESSION_TITLE_LENGTH = 100
-
-
-def sanitize_session_title(title: str | None) -> str | None:
-    if not title:
-        return None
-    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(title))
-    cleaned = re.sub(
-        r"[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufffc\ufff9-\ufffb]",
-        "",
-        cleaned,
-    )
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned:
-        return None
-    if len(cleaned) > MAX_SESSION_TITLE_LENGTH:
-        raise ValueError(
-            f"Title too long ({len(cleaned)} chars, max {MAX_SESSION_TITLE_LENGTH})"
-        )
-    return cleaned
-
-
-def _sanitize_title(title: str) -> str:
-    return sanitize_session_title(title) or ""
-
-
-def _table_columns(conn: RepositoryConnection, table_name: str) -> set[str]:
-    try:
-        return {
-            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        }
-    except Exception:
-        return set()
-
-
-def _table_exists(conn: RepositoryConnection, table_name: str) -> bool:
-    return bool(_table_columns(conn, table_name))
-
-
-def ensure_session_lineage_repository_schema(conn: RepositoryConnection) -> None:
-    """Upgrade legacy lineage rows to the Session aggregate's canonical shape."""
-    columns = _table_columns(conn, "session_lineage")
-    additions = {
-        "parent_session_id": "TEXT",
-        "root_session_id": "TEXT NOT NULL DEFAULT ''",
-        "branch_from_message_row_id": "INTEGER",
-        "branch_from_turn_id": "TEXT",
-        "branch_from_run_id": "TEXT",
-        "branch_from_client_message_id": "TEXT",
-        "branch_origin": "TEXT NOT NULL DEFAULT 'legacy'",
-        "branch_mode": "TEXT NOT NULL DEFAULT 'legacy'",
-        "branch_depth": "INTEGER NOT NULL DEFAULT 0",
-        "created_at": "REAL NOT NULL DEFAULT 0",
-    }
-    for name, ddl in additions.items():
-        if name not in columns:
-            conn.execute(f"ALTER TABLE session_lineage ADD COLUMN {name} {ddl}")
-    conn.execute(
-        "UPDATE session_lineage SET root_session_id = session_id "
-        "WHERE COALESCE(root_session_id, '') = ''"
-    )
-    conn.execute(
-        "DELETE FROM session_lineage WHERE rowid NOT IN ("
-        "SELECT MAX(rowid) FROM session_lineage GROUP BY session_id"
-        ")"
-    )
-    conn.executescript(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_lineage_session
-            ON session_lineage(session_id);
-        CREATE INDEX IF NOT EXISTS idx_session_lineage_parent
-            ON session_lineage(parent_session_id, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_session_lineage_root
-            ON session_lineage(root_session_id, branch_depth, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_session_lineage_branch_point
-            ON session_lineage(branch_from_message_row_id);
-        """
-    )
-
-
-def _column_exists(conn: RepositoryConnection, table_name: str, column_name: str) -> bool:
-    return column_name in _table_columns(conn, table_name)
-
-
-def _affected(cursor: Any) -> int:
-    return max(0, int(getattr(cursor, "rowcount", 0) or 0))
-
-
-def _row_text(row: Any, key: str, index: int) -> str:
-    if isinstance(row, sqlite3.Row):
-        return str(row[key] or "")
-    return str(row[index] or "")
-
-
-def _row_int(row: Any, key: str, index: int) -> int:
-    if isinstance(row, sqlite3.Row):
-        return int(row[key] or 0)
-    return int(row[index] or 0)
-
-
-def _row_any(row: Any, key: str, default: Any = None) -> Any:
-    if isinstance(row, sqlite3.Row):
-        try:
-            return row[key]
-        except (KeyError, IndexError):
-            return default
-    if isinstance(row, dict):
-        return row.get(key, default)
-    return getattr(row, key, default)
 
 
 __all__ = [
@@ -2068,7 +2027,6 @@ __all__ = [
     "SessionIndexPatch",
     "SessionMessageAppendProjection",
     "SessionMessageSnapshotProjection",
-    "ensure_session_lineage_repository_schema",
     "sanitize_session_title",
     "SessionNotFound",
     "SessionRepo",

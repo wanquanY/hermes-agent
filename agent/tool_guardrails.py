@@ -472,4 +472,7 @@ def _positive_int(value: Any, default: int) -> int:
 
 
 def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    # Tool-produced text can contain an unpaired UTF-16 surrogate. Hashing
+    # only needs stable bytes, so preserve it deterministically instead of
+    # letting strict UTF-8 encoding abort the conversation loop.
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()

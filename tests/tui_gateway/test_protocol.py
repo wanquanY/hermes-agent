@@ -1273,7 +1273,9 @@ def test_run_control_control_events_do_not_mark_session_busy(capture):
     assert status["result"]["active_run_id"] == ""
 
 
-def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
+def test_run_submit_queues_behind_persisted_active_run(server, monkeypatch):
+    from tui_gateway.services.pending_prompt_queue import pending_prompt_queue
+
     class _Runs:
         def session_status(self, _session_id):
             return {
@@ -1299,16 +1301,30 @@ def test_run_submit_rejects_persisted_active_run(server, monkeypatch):
     db = types.SimpleNamespace(runs=_Runs())
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
-    resp = server.handle_request(
-        {
-            "id": "r1",
-            "method": "run.submit",
-            "params": {"conversation_session_id": "stored-active", "text": "hello"},
-        }
-    )
+    pending_prompt_queue.reset_for_tests()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r1",
+                "method": "run.submit",
+                "params": {
+                    "conversation_session_id": "stored-active",
+                    "client_run_id": "run-next",
+                    "turn_id": "turn-next",
+                    "text": "hello",
+                },
+            }
+        )
 
-    assert resp["error"]["code"] == 4009
-    assert resp["error"]["data"]["active_run_id"] == "run-active"
+        assert resp["result"]["status"] == "queued"
+        assert resp["result"]["blocked_by_run_id"] == "run-active"
+        queued = pending_prompt_queue.peek("", "stored-active")
+        assert queued is not None
+        assert queued.run_id == "run-next"
+        assert queued.turn_id == "turn-next"
+        assert queued.params["text"] == "hello"
+    finally:
+        pending_prompt_queue.reset_for_tests()
 
 
 def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):

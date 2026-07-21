@@ -121,6 +121,45 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
         pricing_version="openai-gpt-5.6-2026-07",
     ),
+    # ── Anthropic Claude 4.8 / Sonnet 5 ────────────────────────────────
+    (
+        "anthropic",
+        "claude-opus-4-8",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("5.00"),
+        output_cost_per_million=Decimal("25.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("6.25"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-05",
+    ),
+    (
+        "anthropic",
+        "claude-opus-4-8-fast",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("10.00"),
+        output_cost_per_million=Decimal("50.00"),
+        cache_read_cost_per_million=Decimal("1.00"),
+        cache_write_cost_per_million=Decimal("12.50"),
+        source="official_docs_snapshot",
+        source_url="https://openrouter.ai/anthropic/claude-opus-4.8-fast",
+        pricing_version="anthropic-pricing-2026-05",
+    ),
+    # Introductory pricing is published through 2026-08-31; update this
+    # snapshot when the standard $3/$15 rate takes effect.
+    (
+        "anthropic",
+        "claude-sonnet-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-06-intro",
+    ),
     # ── Anthropic Claude 4.7 ─────────────────────────────────────────────
     # Opus 4.5/4.6/4.7 share $5/$25 pricing (new tokenizer, up to 35% more
     # tokens for the same text).
@@ -456,13 +495,51 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # Source: https://aws.amazon.com/bedrock/pricing/
     (
         "bedrock",
-        "anthropic.claude-opus-4-6",
+        "anthropic.claude-opus-4-8",
     ): PricingEntry(
-        input_cost_per_million=Decimal("15.00"),
-        output_cost_per_million=Decimal("75.00"),
+        input_cost_per_million=Decimal("5.00"),
+        output_cost_per_million=Decimal("25.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("6.25"),
         source="official_docs_snapshot",
         source_url="https://aws.amazon.com/bedrock/pricing/",
-        pricing_version="bedrock-pricing-2026-04",
+        pricing_version="anthropic-list-2026-07",
+    ),
+    (
+        "bedrock",
+        "anthropic.claude-opus-4-7",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("5.00"),
+        output_cost_per_million=Decimal("25.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("6.25"),
+        source="official_docs_snapshot",
+        source_url="https://aws.amazon.com/bedrock/pricing/",
+        pricing_version="anthropic-list-2026-07",
+    ),
+    (
+        "bedrock",
+        "anthropic.claude-opus-4-6",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("5.00"),
+        output_cost_per_million=Decimal("25.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("6.25"),
+        source="official_docs_snapshot",
+        source_url="https://aws.amazon.com/bedrock/pricing/",
+        pricing_version="anthropic-list-2026-07",
+    ),
+    (
+        "bedrock",
+        "anthropic.claude-sonnet-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("3.00"),
+        output_cost_per_million=Decimal("15.00"),
+        cache_read_cost_per_million=Decimal("0.30"),
+        cache_write_cost_per_million=Decimal("3.75"),
+        source="official_docs_snapshot",
+        source_url="https://aws.amazon.com/bedrock/pricing/",
+        pricing_version="bedrock-pricing-2026-06",
     ),
     (
         "bedrock",
@@ -470,6 +547,8 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("3.00"),
         output_cost_per_million=Decimal("15.00"),
+        cache_read_cost_per_million=Decimal("0.30"),
+        cache_write_cost_per_million=Decimal("3.75"),
         source="official_docs_snapshot",
         source_url="https://aws.amazon.com/bedrock/pricing/",
         pricing_version="bedrock-pricing-2026-04",
@@ -480,6 +559,8 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("3.00"),
         output_cost_per_million=Decimal("15.00"),
+        cache_read_cost_per_million=Decimal("0.30"),
+        cache_write_cost_per_million=Decimal("3.75"),
         source="official_docs_snapshot",
         source_url="https://aws.amazon.com/bedrock/pricing/",
         pricing_version="bedrock-pricing-2026-04",
@@ -490,6 +571,8 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     ): PricingEntry(
         input_cost_per_million=Decimal("0.80"),
         output_cost_per_million=Decimal("4.00"),
+        cache_read_cost_per_million=Decimal("0.08"),
+        cache_write_cost_per_million=Decimal("1.00"),
         source="official_docs_snapshot",
         source_url="https://aws.amazon.com/bedrock/pricing/",
         pricing_version="bedrock-pricing-2026-04",
@@ -612,6 +695,22 @@ def resolve_billing_route(
     return BillingRoute(provider=provider_name or "unknown", model=model.split("/")[-1] if model else "", base_url=base_url or "", billing_mode="unknown")
 
 
+def _normalize_bedrock_model_name(model: str) -> str:
+    """Strip inference-profile geography/version suffixes for pricing lookup."""
+    name = model.lower().strip()
+    for prefix in (
+        "global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.",
+        "ca.", "sa.", "me.", "af.",
+    ):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    name = re.sub(r"(\d+)\.(\d+)", r"\1-\2", name)
+    name = re.sub(r":\d+$", "", name)
+    name = re.sub(r"-v\d+$", "", name)
+    return re.sub(r"-\d{8}$", "", name)
+
+
 def _normalize_anthropic_model_name(model: str) -> str:
     """Normalize Anthropic model name variants to canonical form.
 
@@ -638,6 +737,12 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     # Try normalized name for Anthropic (handles dot-notation like opus-4.7)
     if route.provider == "anthropic":
         normalized = _normalize_anthropic_model_name(model)
+        if normalized != model:
+            entry = _OFFICIAL_DOCS_PRICING.get((route.provider, normalized))
+            if entry:
+                return entry
+    if route.provider == "bedrock":
+        normalized = _normalize_bedrock_model_name(model)
         if normalized != model:
             entry = _OFFICIAL_DOCS_PRICING.get((route.provider, normalized))
             if entry:

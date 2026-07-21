@@ -632,7 +632,10 @@ describe('createSlashHandler', () => {
     })
 
     const h = createSlashHandler(ctx)
-    expect(h('/undo')).toBe(true)
+    // Use an unregistered command so this exercises the generic gateway
+    // dispatch fallback. `/undo` is now a first-class local command and must
+    // not fall through this path.
+    expect(h('/prefill-command')).toBe(true)
     await vi.waitFor(() => {
       expect(ctx.composer.setInput).toHaveBeenCalledWith('edit this prompt')
     })

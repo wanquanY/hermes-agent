@@ -762,6 +762,7 @@ _QUICK_STATE_FILES = (
     "channel_directory.json",
     "channel_aliases.json",
     "processes.json",
+    "gateway/discord_message_recovery.db",
     # Pairing stores (generic + per-platform JSONs outside state.db)
     "pairing",                          # legacy location (gateway/pairing.py)
     "platforms/pairing",                # new location (gateway/pairing.py)
@@ -992,7 +993,7 @@ def _count_cron_jobs(path: Path) -> Optional[int]:
     if not path.is_file():
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None

@@ -121,9 +121,12 @@ def _is_blocked_type(text: str) -> Optional[str]:
 # Per-process cached backend; lazily instantiated on first call.
 _backend_lock = threading.Lock()
 _backend: Optional[ComputerUseBackend] = None
-# Session-scoped approval state.
-_session_auto_approve = False
-_always_allow: set = set()  # action names the user unlocked for the session
+# Approval state is isolated by runtime session and by delivery rung. A
+# background approval must never unlock a visible foreground focus change in
+# this or another concurrent conversation.
+_approval_lock = threading.Lock()
+_session_auto_approve: Dict[str, bool] = {}
+_always_allow: Dict[str, set[Tuple[str, str]]] = {}
 
 
 def _get_backend() -> ComputerUseBackend:
@@ -144,7 +147,7 @@ def _get_backend() -> ComputerUseBackend:
 
 def reset_backend_for_tests() -> None:  # pragma: no cover
     """Test helper — tear down the cached backend."""
-    global _backend, _session_auto_approve, _always_allow
+    global _backend
     with _backend_lock:
         if _backend is not None:
             try:
@@ -152,8 +155,9 @@ def reset_backend_for_tests() -> None:  # pragma: no cover
             except Exception:
                 pass
         _backend = None
-    _session_auto_approve = False
-    _always_allow = set()
+    with _approval_lock:
+        _session_auto_approve.clear()
+        _always_allow.clear()
 
 
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
@@ -184,12 +188,12 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
         self.calls.append(("scroll", kw))
         return ActionResult(ok=True, action="scroll")
 
-    def type_text(self, text: str) -> ActionResult:
-        self.calls.append(("type", {"text": text}))
+    def type_text(self, text: str, **kw) -> ActionResult:
+        self.calls.append(("type", {"text": text, **kw}))
         return ActionResult(ok=True, action="type")
 
-    def key(self, keys: str) -> ActionResult:
-        self.calls.append(("key", {"keys": keys}))
+    def key(self, keys: str, **kw) -> ActionResult:
+        self.calls.append(("key", {"keys": keys, **kw}))
         return ActionResult(ok=True, action="key")
 
     def list_apps(self) -> List[Dict[str, Any]]:
@@ -214,6 +218,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing `action`"})
+    session_id = str(kwargs.get("session_id") or "")
 
     # Safety: validate actions before approval prompt.
     if action == "type":
@@ -237,7 +242,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
 
     # Approval gate (destructive actions only).
     if action in _DESTRUCTIVE_ACTIONS:
-        err = _request_approval(action, args)
+        err = _request_approval(action, args, session_id)
         if err is not None:
             return err
 
@@ -257,13 +262,21 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
         return json.dumps({"error": f"{action} failed: {e}"})
 
 
-def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
-    """Return None if approved, or a JSON error string if denied."""
-    global _session_auto_approve, _always_allow
-    if _session_auto_approve:
-        return None
-    if action in _always_allow:
-        return None
+def _request_approval(
+    action: str,
+    args: Dict[str, Any],
+    session_id: str = "",
+) -> Optional[str]:
+    """Return None when this session and delivery rung are approved."""
+    delivery_scope = (
+        "foreground" if args.get("delivery_mode") == "foreground" else "background"
+    )
+    scope_key = (action, delivery_scope)
+    with _approval_lock:
+        if _session_auto_approve.get(session_id):
+            return None
+        if scope_key in _always_allow.get(session_id, set()):
+            return None
     cb = _approval_callback
     if cb is None:
         # No CLI approval wired — default allow. Gateway approval is handled
@@ -278,35 +291,41 @@ def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
     if verdict == "approve_once":
         return None
     if verdict == "approve_session" or verdict == "always_approve":
-        _always_allow.add(action)
-        if verdict == "always_approve":
-            _session_auto_approve = True
+        with _approval_lock:
+            _always_allow.setdefault(session_id, set()).add(scope_key)
+            if verdict == "always_approve":
+                _session_auto_approve[session_id] = True
         return None
     return json.dumps({"error": "denied by user", "action": action})
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    foreground = (
+        " [FOREGROUND — briefly raises the window / changes focus]"
+        if args.get("delivery_mode") == "foreground"
+        else ""
+    )
     if action in {"click", "double_click", "right_click", "middle_click"}:
         if args.get("element") is not None:
-            return f"{action} element #{args['element']}"
+            return f"{action} element #{args['element']}{foreground}"
         coord = args.get("coordinate")
         if coord:
-            return f"{action} at {tuple(coord)}"
-        return action
+            return f"{action} at {tuple(coord)}{foreground}"
+        return action + foreground
     if action == "drag":
         src = args.get("from_element") or args.get("from_coordinate")
         dst = args.get("to_element") or args.get("to_coordinate")
-        return f"drag {src} → {dst}"
+        return f"drag {src} → {dst}{foreground}"
     if action == "scroll":
-        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}"
+        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{foreground}"
     if action == "type":
         text = args.get("text", "")
-        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "")
+        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "") + foreground
     if action == "key":
-        return f"key {args.get('keys', '')!r}"
+        return f"key {args.get('keys', '')!r}{foreground}"
     if action == "focus_app":
         return f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")
-    return action
+    return action + foreground
 
 
 def _dispatch(
@@ -345,6 +364,9 @@ def _dispatch(
         res = backend.focus_app(app, raise_window=bool(args.get("raise_window")))
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
+    delivery_mode = args.get("delivery_mode")
+    bring_to_front = bool(args.get("bring_to_front"))
+
     if action in {"click", "double_click", "right_click", "middle_click"}:
         button = args.get("button")
         click_count = 1
@@ -363,6 +385,8 @@ def _dispatch(
             element=element if element is not None else None,
             x=x, y=y, button=button or "left", click_count=click_count,
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
@@ -380,6 +404,8 @@ def _dispatch(
             to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
@@ -392,15 +418,25 @@ def _dispatch(
             x=coord[0] if coord and coord[0] is not None else None,
             y=coord[1] if coord and coord[1] is not None else None,
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "type":
-        res = backend.type_text(args.get("text", ""))
+        res = backend.type_text(
+            args.get("text", ""),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
+        )
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "key":
-        res = backend.key(args.get("keys", ""))
+        res = backend.key(
+            args.get("keys", ""),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
+        )
         return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "set_value":
@@ -421,6 +457,18 @@ def _text_response(res: ActionResult) -> str:
     payload: Dict[str, Any] = {"ok": res.ok, "action": res.action}
     if res.message:
         payload["message"] = res.message
+    for field_name in (
+        "verified",
+        "effect",
+        "escalation",
+        "path",
+        "degraded",
+        "delivery_mode",
+        "code",
+    ):
+        value = getattr(res, field_name)
+        if value is not None:
+            payload[field_name] = value
     if res.meta:
         payload["meta"] = res.meta
     return json.dumps(payload)

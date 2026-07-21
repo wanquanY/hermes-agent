@@ -71,6 +71,8 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_cli.auxiliary_tasks import CONFIGURABLE_AUXILIARY_TASKS
+from hermes_cli.oneshot_lifecycle import run_and_exit_oneshot as _run_and_exit_oneshot
 
 
 def _add_accept_hooks_flag(parser) -> None:
@@ -2059,6 +2061,7 @@ def select_provider_and_model(args=None):
         get_compatible_custom_providers,
         load_config,
         get_env_value,
+        is_provider_enabled,
     )
     from hermes_cli.providers import resolve_provider_full
 
@@ -2254,7 +2257,11 @@ def select_provider_and_model(args=None):
     if active == "openrouter" and get_env_value("OPENAI_BASE_URL"):
         active = "custom"
 
-    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS
+    from hermes_cli.models import (
+        CANONICAL_PROVIDERS,
+        _PROVIDER_ALIASES,
+        _PROVIDER_LABELS,
+    )
 
     provider_labels = dict(_PROVIDER_LABELS)  # derive from canonical list
     if active and active in _custom_provider_map:
@@ -2267,11 +2274,44 @@ def select_provider_and_model(args=None):
     print(f"  Active provider:  {active_label}")
     print()
 
-    # Step 1: Provider selection — flat list from CANONICAL_PROVIDERS
-    all_providers = [(p.slug, p.tui_desc) for p in CANONICAL_PROVIDERS]
+    # Step 1: Provider selection — one visibility policy across every picker.
+    model_catalog = config.get("model_catalog")
+    excluded = {
+        str(name).strip().lower()
+        for name in (
+            model_catalog.get("excluded_providers", [])
+            if isinstance(model_catalog, dict)
+            else []
+        )
+        if str(name).strip()
+    }
+    names_for_slug = {p.slug: {p.slug.lower()} for p in CANONICAL_PROVIDERS}
+    for alias, canonical in _PROVIDER_ALIASES.items():
+        names_for_slug.setdefault(canonical, {canonical.lower()}).add(alias.lower())
+
+    def _canonical_provider_visible(slug: str) -> bool:
+        names = names_for_slug.get(slug, {slug.lower()})
+        if names & excluded:
+            return False
+        providers_cfg = config.get("providers")
+        if not isinstance(providers_cfg, dict):
+            return True
+        return all(
+            is_provider_enabled(provider_cfg)
+            for name, provider_cfg in providers_cfg.items()
+            if str(name).strip().lower() in names
+        )
+
+    all_providers = [
+        (provider.slug, provider.tui_desc)
+        for provider in CANONICAL_PROVIDERS
+        if _canonical_provider_visible(provider.slug)
+    ]
 
     for key, provider_info in _custom_provider_map.items():
         name = provider_info["name"]
+        if {key.lower(), str(name).strip().lower()} & excluded:
+            continue
         base_url = provider_info["base_url"]
         short_url = base_url.replace("https://", "").replace("http://", "").rstrip("/")
         saved_model = provider_info.get("model", "")
@@ -2314,6 +2354,10 @@ def select_provider_and_model(args=None):
     # Step 2: Provider-specific setup + model selection
     if selected_provider == "openrouter":
         _model_flow_openrouter(config, current_model)
+    elif selected_provider == "moa":
+        from hermes_cli.moa_cmd import select_moa_as_default
+
+        select_moa_as_default(config)
     elif selected_provider == "ai-gateway":
         _model_flow_ai_gateway(config, current_model)
     elif selected_provider == "nous":
@@ -2436,17 +2480,24 @@ def _clear_stale_openai_base_url():
 # configure new providers through the normal `hermes model` flow first.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# (task_key, display_name, short_description)
-_AUX_TASKS: list[tuple[str, str, str]] = [
-    ("vision", "Vision", "image/screenshot analysis"),
-    ("compression", "Compression", "context summarization"),
-    ("web_extract", "Web extract", "web page summarization"),
-    ("approval", "Approval", "smart command approval"),
-    ("mcp", "MCP", "MCP tool reasoning"),
-    ("skills_hub", "Skills hub", "skills search/install"),
-    ("curator", "Curator", "skill-usage review pass"),
-    ("background_review", "Background review", "memory/skill learning review"),
-]
+# Keep the legacy public name used by the interactive picker and tests while
+# sourcing the catalog from the shared namespace registry.
+_AUX_TASKS: list[tuple[str, str, str]] = list(CONFIGURABLE_AUXILIARY_TASKS)
+
+
+def _all_aux_tasks() -> list[tuple[str, str, str]]:
+    """Return built-in and plugin-owned auxiliary tasks in stable order."""
+    tasks = list(_AUX_TASKS)
+    try:
+        from hermes_cli.plugins import get_plugin_auxiliary_tasks
+
+        for entry in get_plugin_auxiliary_tasks():
+            tasks.append(
+                (entry["key"], entry["display_name"], entry["description"])
+            )
+    except Exception:
+        pass
+    return tasks
 
 
 def _format_aux_current(task_cfg: dict) -> str:
@@ -2508,7 +2559,7 @@ def _reset_aux_to_auto() -> int:
         aux = {}
         cfg["auxiliary"] = aux
     count = 0
-    for task, _name, _desc in _AUX_TASKS:
+    for task, _name, _desc in _all_aux_tasks():
         entry = aux.setdefault(task, {})
         if not isinstance(entry, dict):
             entry = {}
@@ -2551,10 +2602,11 @@ def _aux_config_menu() -> None:
         print()
 
         # Build the task menu with current settings inline
-        name_col = max(len(name) for _, name, _ in _AUX_TASKS) + 2
-        desc_col = max(len(desc) for _, _, desc in _AUX_TASKS) + 4
+        all_tasks = _all_aux_tasks()
+        name_col = max(len(name) for _, name, _ in all_tasks) + 2
+        desc_col = max(len(desc) for _, _, desc in all_tasks) + 4
         entries: list[tuple[str, str]] = []
-        for task_key, name, desc in _AUX_TASKS:
+        for task_key, name, desc in all_tasks:
             task_cfg = (
                 aux.get(task_key, {}) if isinstance(aux.get(task_key), dict) else {}
             )
@@ -2605,7 +2657,7 @@ def _aux_select_for_task(task: str) -> None:
     current_model = str(task_cfg.get("model") or "").strip()
     current_base_url = str(task_cfg.get("base_url") or "").strip()
 
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
+    display_name = next((name for key, name, _ in _all_aux_tasks() if key == task), task)
 
     # Gather authenticated providers (has credentials + curated model list)
     try:
@@ -2676,7 +2728,7 @@ def _aux_flow_provider_model(
     from hermes_cli.auth import _prompt_model_selection
     from hermes_cli.models import get_pricing_for_provider
 
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
+    display_name = next((name for key, name, _ in _all_aux_tasks() if key == task), task)
 
     # Fetch live pricing for this provider (non-blocking)
     pricing: dict = {}
@@ -2723,7 +2775,7 @@ def _aux_flow_custom_endpoint(task: str, task_cfg: dict) -> None:
     """Prompt for a direct OpenAI-compatible base_url + optional api_key/model."""
     import getpass
 
-    display_name = next((name for key, name, _ in _AUX_TASKS if key == task), task)
+    display_name = next((name for key, name, _ in _all_aux_tasks() if key == task), task)
     current_base_url = str(task_cfg.get("base_url") or "").strip()
     current_model = str(task_cfg.get("model") or "").strip()
 
@@ -10556,6 +10608,13 @@ def cmd_logs(args):
     )
 
 
+def cmd_console(args):
+    """Open the safe, curated Hermes command console."""
+    from hermes_cli.console_engine import run_console_repl
+
+    return run_console_repl()
+
+
 def _build_provider_choices() -> list[str]:
     """Build the --provider choices list from CANONICAL_PROVIDERS + 'auto'."""
     try:
@@ -10585,10 +10644,10 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "debug", "doctor",
+        "config", "console", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
-        "journey", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
-        "model", "pairing", "plugins", "postinstall", "profile", "proxy",
+        "journey", "learning", "memory-graph", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
+        "moa", "model", "pairing", "pets", "plugins", "postinstall", "profile", "project", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets",
@@ -10689,6 +10748,27 @@ _AGENT_SUBCOMMANDS = {
 }
 
 
+def _is_tui_chat_launch(args) -> bool:
+    return bool(getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1")
+
+
+def _command_has_dedicated_mcp_startup(args) -> bool:
+    """Return whether the actual runtime entrypoint initializes MCP itself."""
+    if args.command == "acp":
+        return True
+    if args.command == "gateway" and getattr(args, "gateway_command", None) == "run":
+        return True
+    if args.command == "cron" and getattr(args, "cron_command", None) in {"run", "tick"}:
+        return True
+    return False
+
+
+def _should_background_mcp_startup(args) -> bool:
+    if _is_tui_chat_launch(args):
+        return False
+    return args.command in {None, "chat", "rl"}
+
+
 def _prepare_agent_startup(args) -> None:
     """Discover plugins/MCP/hooks for commands that can run an agent turn."""
     _sub_attr, _sub_set = _AGENT_SUBCOMMANDS.get(args.command, (None, None))
@@ -10708,19 +10788,33 @@ def _prepare_agent_startup(args) -> None:
             "plugin discovery failed at CLI startup",
             exc_info=True,
         )
-    try:
-        # MCP tool discovery — no event loop running in CLI/TUI startup,
-        # so inline is safe.  Moved here from model_tools.py module scope
-        # to avoid freezing the gateway's event loop on its first message
-        # via the same lazy import path (#16856).
-        from tools.mcp_tool import discover_mcp_tools
+    run_inline_mcp_discovery = True
+    if _is_tui_chat_launch(args) or _command_has_dedicated_mcp_startup(args):
+        run_inline_mcp_discovery = False
+    elif _should_background_mcp_startup(args):
+        try:
+            from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        discover_mcp_tools()
-    except Exception:
-        logger.debug(
-            "MCP tool discovery failed at CLI startup",
-            exc_info=True,
-        )
+            start_background_mcp_discovery(
+                logger=logger,
+                thread_name="cli-mcp-discovery",
+            )
+        except Exception:
+            logger.debug(
+                "Background MCP tool discovery failed at CLI startup",
+                exc_info=True,
+            )
+        run_inline_mcp_discovery = False
+    if run_inline_mcp_discovery:
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+
+            discover_mcp_tools()
+        except Exception:
+            logger.debug(
+                "MCP tool discovery failed at CLI startup",
+                exc_info=True,
+            )
     try:
         from hermes_cli.config import load_config
         from agent.shell_hooks import register_from_config
@@ -10789,15 +10883,12 @@ def _try_termux_fast_cli_launch() -> bool:
 
     if getattr(args, "oneshot", None):
         _prepare_agent_startup(args)
-        from hermes_cli.oneshot import run_oneshot
-
-        sys.exit(
-            run_oneshot(
-                args.oneshot,
-                model=getattr(args, "model", None),
-                provider=getattr(args, "provider", None),
-                toolsets=getattr(args, "toolsets", None),
-            )
+        _run_and_exit_oneshot(
+            args.oneshot,
+            model=getattr(args, "model", None),
+            provider=getattr(args, "provider", None),
+            toolsets=getattr(args, "toolsets", None),
+            usage_file=getattr(args, "usage_file", None),
         )
 
     if (args.resume or args.continue_last) and args.command is None:
@@ -10939,6 +11030,29 @@ def main():
         help="Disable TLS verification for Nous login (testing only)",
     )
     model_parser.set_defaults(func=cmd_model)
+
+    from hermes_cli.moa_cmd import cmd_moa
+
+    moa_parser = subparsers.add_parser(
+        "moa",
+        help="Configure Mixture of Agents provider/model slots",
+        description="Configure the provider/model set used by /moa <prompt>.",
+    )
+    moa_subparsers = moa_parser.add_subparsers(dest="moa_command")
+    moa_subparsers.add_parser(
+        "list", aliases=["ls"], help="Show current MoA model slots"
+    )
+    moa_configure = moa_subparsers.add_parser(
+        "configure", aliases=["config"], help="Interactively pick MoA models"
+    )
+    moa_configure.add_argument(
+        "name", nargs="?", help="Preset name to create or update"
+    )
+    moa_delete = moa_subparsers.add_parser(
+        "delete", aliases=["rm"], help="Delete a MoA preset"
+    )
+    moa_delete.add_argument("name", help="Preset name to delete")
+    moa_parser.set_defaults(func=cmd_moa)
 
     # =========================================================================
     # fallback command — manage the fallback provider chain
@@ -12064,6 +12178,11 @@ Examples:
         "key", nargs="?", help="Configuration key (e.g., model, terminal.backend)"
     )
     config_set.add_argument("value", nargs="?", help="Value to set")
+    config_set.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the notice for a key the running version does not recognize",
+    )
 
     # config path
     config_subparsers.add_parser("path", help="Print config file path")
@@ -12078,6 +12197,12 @@ Examples:
     config_subparsers.add_parser("migrate", help="Update config with new options")
 
     config_parser.set_defaults(func=cmd_config)
+
+    # Safe command console.  Its engine dispatches only explicitly registered
+    # Hermes operations and never evaluates shell syntax.
+    from hermes_cli.subcommands.console import build_console_parser
+
+    build_console_parser(subparsers, cmd_console=cmd_console)
 
     # =========================================================================
     # pairing command
@@ -12227,6 +12352,11 @@ Examples:
     )
     skills_audit.add_argument(
         "name", nargs="?", help="Specific skill to audit (default: all)"
+    )
+    skills_audit.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run AST-level analysis on Python files (opt-in diagnostic)",
     )
 
     skills_uninstall = skills_subparsers.add_parser(
@@ -12460,10 +12590,29 @@ Examples:
         logging.getLogger(__name__).debug("curator CLI wiring failed: %s", _exc)
 
     # =========================================================================
+    # pets command — shared petdex mascot store and renderer
+    # =========================================================================
+    pets_parser = subparsers.add_parser(
+        "pets",
+        help="Browse, install, and select petdex animated pets",
+        description=(
+            "Install and configure petdex mascots shared by CLI, TUI, and "
+            "desktop surfaces."
+        ),
+    )
+    try:
+        from hermes_cli.pets import register_cli as _register_pets_cli
+
+        _register_pets_cli(pets_parser)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("pets CLI wiring failed: %s", _exc)
+
+    # =========================================================================
     # journey command — canonical learned-skill + memory timeline
     # =========================================================================
     journey_parser = subparsers.add_parser(
         "journey",
+        aliases=["learning", "memory-graph"],
         help="Show what this Hermes profile has learned over time",
         description=(
             "Render the canonical profile-scoped learning graph as a timeline. "
@@ -12708,6 +12857,49 @@ Examples:
         action="store_true",
         help="Emit machine-readable status JSON",
     )
+    computer_use_doctor = computer_use_sub.add_parser(
+        "doctor",
+        help="Run cua-driver health_report and render its check matrix",
+    )
+    computer_use_doctor.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="CHECK",
+        help="Run only a named health check; repeat for multiple checks",
+    )
+    computer_use_doctor.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        metavar="CHECK",
+        help="Skip a named health check; repeat for multiple checks",
+    )
+    computer_use_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the raw structured health payload as JSON",
+    )
+    computer_use_permissions = computer_use_sub.add_parser(
+        "permissions",
+        help="Check or request Computer Use OS permissions",
+    )
+    permissions_sub = computer_use_permissions.add_subparsers(
+        dest="computer_use_permissions_action"
+    )
+    permissions_status = permissions_sub.add_parser(
+        "status",
+        help="Report Accessibility and Screen Recording readiness",
+    )
+    permissions_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit normalized permission status JSON",
+    )
+    permissions_sub.add_parser(
+        "grant",
+        help="Ask cua-driver to request the required OS grants",
+    )
 
     def cmd_computer_use(args):
         action = getattr(args, "computer_use_action", None)
@@ -12736,6 +12928,59 @@ Examples:
             status = get_cua_driver_status(check_latest=bool(getattr(args, "check", False)))
             print_cua_driver_status(status, as_json=bool(getattr(args, "json", False)))
             return
+        if action == "doctor":
+            from tools.computer_use.doctor import run_doctor
+
+            raise SystemExit(
+                run_doctor(
+                    include=list(getattr(args, "include", []) or []),
+                    skip=list(getattr(args, "skip", []) or []),
+                    json_output=bool(getattr(args, "json", False)),
+                )
+            )
+        if action == "permissions":
+            permissions_action = getattr(
+                args,
+                "computer_use_permissions_action",
+                None,
+            )
+            if permissions_action == "grant":
+                from tools.computer_use.permissions import request_permissions_grant
+
+                raise SystemExit(request_permissions_grant())
+            if permissions_action == "status":
+                from tools.computer_use.permissions import computer_use_status
+
+                status = computer_use_status()
+                if bool(getattr(args, "json", False)):
+                    print(json.dumps(status, indent=2, sort_keys=True))
+                elif not status["platform_supported"]:
+                    print(f"Computer Use is not supported on {status['platform']}.")
+                elif not status["installed"]:
+                    print("cua-driver: not installed. Run: hermes computer-use install")
+                else:
+                    glyph = lambda value: (  # noqa: E731
+                        "✅" if value is True else "❌" if value is False else "•"
+                    )
+                    print(
+                        f"cua-driver: {status['version'] or 'installed'} "
+                        f"({status['platform']})"
+                    )
+                    if status["can_grant"]:
+                        print(f"  {glyph(status['accessibility'])} Accessibility")
+                        print(f"  {glyph(status['screen_recording'])} Screen Recording")
+                        if not status["ready"]:
+                            print("  Grant: hermes computer-use permissions grant")
+                    else:
+                        print(f"  {glyph(status['ready'])} driver health")
+                    for check in status["checks"]:
+                        if check["status"] != "ok":
+                            print(f"  ⚠ {check['label']}: {check['message']}")
+                    if status["error"]:
+                        print(f"  ⚠ {status['error']}")
+                raise SystemExit(0 if status["ready"] else 1)
+            computer_use_permissions.print_help()
+            return
         # No subcommand → show help
         computer_use_parser.print_help()
 
@@ -12743,87 +12988,24 @@ Examples:
     # =========================================================================
     # mcp command — manage MCP server connections
     # =========================================================================
-    mcp_parser = subparsers.add_parser(
-        "mcp",
-        help="Manage MCP servers and run Hermes as an MCP server",
-        description=(
-            "Manage MCP server connections and run Hermes as an MCP server.\n\n"
-            "MCP servers provide additional tools via the Model Context Protocol.\n"
-            "Use 'hermes mcp add' to connect to a new server, or\n"
-            "'hermes mcp serve' to expose Hermes conversations over MCP."
-        ),
-    )
-    mcp_sub = mcp_parser.add_subparsers(dest="mcp_action")
-
-    mcp_serve_p = mcp_sub.add_parser(
-        "serve",
-        help="Run Hermes as an MCP server (expose conversations to other agents)",
-    )
-    mcp_serve_p.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging on stderr",
-    )
-    _add_accept_hooks_flag(mcp_serve_p)
-
-    mcp_add_p = mcp_sub.add_parser(
-        "add", help="Add an MCP server (discovery-first install)"
-    )
-    mcp_add_p.add_argument("name", help="Server name (used as config key)")
-    mcp_add_p.add_argument("--url", help="HTTP/SSE endpoint URL")
-    # dest="mcp_command" so this flag does not clobber the top-level
-    # subparser's args.command attribute, which the dispatcher reads to
-    # route to cmd_mcp.  Without an explicit dest, argparse derives
-    # dest="command" from the flag name and sets it to None when the
-    # flag is omitted, causing `hermes mcp add ...` to fall through to
-    # interactive chat.
-    mcp_add_p.add_argument(
-        "--command", dest="mcp_command", help="Stdio command (e.g. npx)"
-    )
-    mcp_add_p.add_argument(
-        "--args", nargs="*", default=[], help="Arguments for stdio command"
-    )
-    mcp_add_p.add_argument("--auth", choices=["oauth", "header"], help="Auth method")
-    mcp_add_p.add_argument("--preset", help="Known MCP preset name")
-    mcp_add_p.add_argument(
-        "--env",
-        nargs="*",
-        default=[],
-        help="Environment variables for stdio servers (KEY=VALUE)",
-    )
-
-    mcp_rm_p = mcp_sub.add_parser("remove", aliases=["rm"], help="Remove an MCP server")
-    mcp_rm_p.add_argument("name", help="Server name to remove")
-
-    mcp_sub.add_parser("list", aliases=["ls"], help="List configured MCP servers")
-
-    mcp_test_p = mcp_sub.add_parser("test", help="Test MCP server connection")
-    mcp_test_p.add_argument("name", help="Server name to test")
-
-    mcp_cfg_p = mcp_sub.add_parser(
-        "configure", aliases=["config"], help="Toggle tool selection"
-    )
-    mcp_cfg_p.add_argument("name", help="Server name to configure")
-
-    mcp_login_p = mcp_sub.add_parser(
-        "login",
-        help="Force re-authentication for an OAuth-based MCP server",
-    )
-    mcp_login_p.add_argument("name", help="Server name to re-authenticate")
-
-    _add_accept_hooks_flag(mcp_parser)
-
     def cmd_mcp(args):
         from hermes_cli.mcp_config import mcp_command
 
         mcp_command(args)
 
-    mcp_parser.set_defaults(func=cmd_mcp)
+    from hermes_cli.subcommands.mcp import build_mcp_parser
+
+    build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)
 
     # =========================================================================
     # sessions command
     # =========================================================================
+    from hermes_cli.projects_cmd import build_parser as build_projects_parser
+    from hermes_cli.projects_cmd import projects_command
+
+    projects_parser = build_projects_parser(subparsers)
+    projects_parser.set_defaults(func=projects_command)
+
     sessions_parser = subparsers.add_parser(
         "sessions",
         help="Manage session history (list, rename, export, prune, delete)",
@@ -12840,13 +13022,36 @@ Examples:
     )
 
     sessions_export = sessions_subparsers.add_parser(
-        "export", help="Export sessions to a JSONL file"
+        "export", help="Export sessions to JSONL or an Agent Trace"
     )
     sessions_export.add_argument(
-        "output", help="Output JSONL file path (use - for stdout)"
+        "output",
+        nargs="?",
+        help="Output file (JSONL/one trace), directory (many traces), or - for stdout",
+    )
+    sessions_export.add_argument(
+        "--format",
+        choices=["jsonl", "trace"],
+        default="jsonl",
+        help="Export format (trace uses Claude Code JSONL)",
     )
     sessions_export.add_argument("--source", help="Filter by source")
     sessions_export.add_argument("--session-id", help="Export a specific session")
+    sessions_export.add_argument(
+        "--upload",
+        action="store_true",
+        help="Trace only: explicitly upload one session to Hugging Face",
+    )
+    sessions_export.add_argument(
+        "--public",
+        action="store_true",
+        help="Trace upload only: use a public dataset (private is the default)",
+    )
+    sessions_export.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Trace only: disable forced secret redaction after manual review",
+    )
 
     sessions_delete = sessions_subparsers.add_parser(
         "delete", help="Delete a specific session"
@@ -12895,8 +13100,6 @@ Examples:
             return False
 
     def cmd_sessions(args):
-        import json as _json
-
         try:
             db = open_cli_session_store()
         except Exception as e:
@@ -12939,34 +13142,9 @@ Examples:
                     print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
 
         elif action == "export":
-            if args.session_id:
-                resolved_session_id = db.sessions.resolve_id(args.session_id)
-                if not resolved_session_id:
-                    print(f"Session '{args.session_id}' not found.")
-                    return
-                data = db.sessions.export(resolved_session_id)
-                if not data:
-                    print(f"Session '{args.session_id}' not found.")
-                    return
-                line = _json.dumps(data, ensure_ascii=False) + "\n"
-                if args.output == "-":
+            from hermes_cli.session_export_commands import run_session_export
 
-                    sys.stdout.write(line)
-                else:
-                    with open(args.output, "w", encoding="utf-8") as f:
-                        f.write(line)
-                    print(f"Exported 1 session to {args.output}")
-            else:
-                sessions = db.sessions.export_all(source=args.source)
-                if args.output == "-":
-
-                    for s in sessions:
-                        sys.stdout.write(_json.dumps(s, ensure_ascii=False) + "\n")
-                else:
-                    with open(args.output, "w", encoding="utf-8") as f:
-                        for s in sessions:
-                            f.write(_json.dumps(s, ensure_ascii=False) + "\n")
-                    print(f"Exported {len(sessions)} sessions to {args.output}")
+            run_session_export(args, db)
 
         elif action == "delete":
             resolved_session_id = db.sessions.resolve_id(args.session_id)
@@ -13727,15 +13905,12 @@ Examples:
     # Handle top-level --oneshot / -z: single-shot mode, stdout = final
     # response only, nothing else. Bypasses cli.py entirely.
     if getattr(args, "oneshot", None):
-        from hermes_cli.oneshot import run_oneshot
-
-        sys.exit(
-            run_oneshot(
-                args.oneshot,
-                model=getattr(args, "model", None),
-                provider=getattr(args, "provider", None),
-                toolsets=getattr(args, "toolsets", None),
-            )
+        _run_and_exit_oneshot(
+            args.oneshot,
+            model=getattr(args, "model", None),
+            provider=getattr(args, "provider", None),
+            toolsets=getattr(args, "toolsets", None),
+            usage_file=getattr(args, "usage_file", None),
         )
 
     # Handle top-level --resume / --continue as shortcut to chat

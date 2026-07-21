@@ -120,6 +120,26 @@ auto-installs it). Post-navigation redirects from a public URL onto a private
 address are still blocked (you can't use a redirect-to-internal trick to reach
 your LAN through the public path).
 
+### Visible local browser (headed mode)
+
+Local `agent-browser` sessions are headless by default. To watch and interact
+with the Chromium window while Hermes works, enable headed mode:
+
+```yaml
+# ~/.hermes/config.yaml
+browser:
+  headed: true
+```
+
+`AGENT_BROWSER_HEADED=1` is also supported as an environment fallback. This
+setting applies only to locally launched browser sessions; cloud/CDP-attached
+sessions are unchanged.
+
+The visible window stays open between agent turns so logins and interactive
+state are not destroyed after every response. It is still closed by normal
+session shutdown or by the browser inactivity reaper (`browser.inactivity_timeout`,
+120 seconds by default).
+
 ### Camofox local mode
 
 [Camofox](https://github.com/jo-inc/camofox-browser) is a self-hosted Node.js server wrapping Camoufox (a Firefox fork with C++ fingerprint spoofing). It provides local anti-detection browsing without cloud dependencies.

@@ -4,11 +4,11 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import time
 from pathlib import Path as _Path
 from typing import Any, Dict, Optional
 
+from agent.secret_scope import get_profile_env
 try:
     import discord
     DISCORD_AVAILABLE = True
@@ -266,7 +266,9 @@ class DiscordCommandSyncMixin:
             logger.warning("[%s] Slash command sync failed: %s", self.name, e, exc_info=True)
     
     def _get_discord_command_sync_policy(self) -> str:
-        raw = str(os.getenv("DISCORD_COMMAND_SYNC_POLICY", "safe") or "").strip().lower()
+        raw = str(
+            get_profile_env("DISCORD_COMMAND_SYNC_POLICY", "safe") or ""
+        ).strip().lower()
         if raw in _DISCORD_COMMAND_SYNC_POLICIES:
             return raw
         if raw:

@@ -81,6 +81,18 @@ _HAS_MISTRAL = _safe_find_spec("mistralai")
 DEFAULT_PROVIDER = "local"
 DEFAULT_LOCAL_MODEL = "base"
 DEFAULT_LOCAL_STT_LANGUAGE = "en"
+
+# Native dispatcher names. Kept in sync with
+# ``agent.transcription_registry._BUILTIN_NAMES`` so plugins cannot shadow
+# implementations owned by this module.
+BUILTIN_STT_PROVIDERS = frozenset({
+    "local",
+    "local_command",
+    "groq",
+    "openai",
+    "mistral",
+    "xai",
+})
 DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
@@ -472,7 +484,13 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
     command = [ffmpeg, "-y", "-i", file_path, converted_path]
 
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
         return converted_path, None
     except subprocess.CalledProcessError as e:
         details = e.stderr.strip() or e.stdout.strip() or str(e)
@@ -515,9 +533,22 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             # User-provided templates (env var) may contain shell syntax; auto-detected commands are safe for list mode.
             use_shell = bool(os.getenv(LOCAL_STT_COMMAND_ENV, "").strip())
             if use_shell:
-                subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+                subprocess.run(
+                    command,
+                    shell=True,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
             else:
-                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True)
+                subprocess.run(
+                    shlex.split(command),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
             
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
@@ -878,6 +909,21 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
+
+    from tools.voice_plugin_dispatch import dispatch_transcription_plugin
+
+    provider_config = stt_config.get(provider, {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+    plugin_result = dispatch_transcription_plugin(
+        file_path=file_path,
+        provider=provider,
+        builtin_names=BUILTIN_STT_PROVIDERS,
+        model=model or provider_config.get("model") or provider_config.get("model_id"),
+        language=provider_config.get("language") or provider_config.get("language_code"),
+    )
+    if plugin_result is not None:
+        return plugin_result
 
     # No provider available
     return {

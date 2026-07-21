@@ -517,6 +517,101 @@ def test_build_process_event_source_returns_none_for_short_session_key(monkeypat
     assert source is None
 
 
+@pytest.mark.asyncio
+async def test_concurrent_completion_claims_inject_once(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_injection(_text, _event):
+        started.set()
+        await release.wait()
+        return True
+
+    service._inject_completion_notification = AsyncMock(
+        side_effect=blocked_injection
+    )
+    event = {
+        "type": "completion",
+        "session_id": "proc-one",
+        "started_at": 123.0,
+    }
+
+    first = asyncio.create_task(
+        service.deliver_completion_notification("done", event)
+    )
+    await started.wait()
+    duplicate = await service.deliver_completion_notification("done", dict(event))
+    release.set()
+
+    assert await first is True
+    assert duplicate is None
+    assert service._inject_completion_notification.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_claim_is_released_for_retry(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._inject_completion_notification = AsyncMock(
+        side_effect=[False, True]
+    )
+    event = {
+        "type": "completion",
+        "session_id": "proc-retry",
+        "started_at": 123.0,
+    }
+
+    assert await service.deliver_completion_notification("done", event) is False
+    assert await service.deliver_completion_notification("done", event) is True
+    assert service._inject_completion_notification.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_process_incarnations_have_distinct_delivery_identity(
+    monkeypatch, tmp_path
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._inject_completion_notification = AsyncMock(return_value=True)
+
+    for started_at in (10.0, 20.0):
+        assert await service.deliver_completion_notification(
+            "done",
+            {
+                "type": "completion",
+                "session_id": "proc-reused",
+                "started_at": started_at,
+            },
+        ) is True
+
+    assert service._inject_completion_notification.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_delivery_retention_is_bounded(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._completion_delivery_retention = 2
+    service._inject_completion_notification = AsyncMock(return_value=True)
+
+    for index in range(3):
+        await service.deliver_completion_notification(
+            "done",
+            {
+                "type": "completion",
+                "session_id": f"proc-{index}",
+                "started_at": float(index),
+            },
+        )
+
+    assert len(service._completion_deliveries_delivered) == 2
+    assert ("completion", "proc-0", 0.0) not in (
+        service._completion_deliveries_delivered
+    )
+
+
 # ---------------------------------------------------------------------------
 # _parse_session_key helper
 # ---------------------------------------------------------------------------

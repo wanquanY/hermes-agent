@@ -52,8 +52,21 @@ def _module_registers_tools(module_path: Path) -> bool:
     """
     try:
         source = module_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    # Most modules under tools/ are implementation helpers rather than
+    # registry entry points. Avoid paying the full AST parse cost unless the
+    # source can contain either supported opt-in form. The loader marker is a
+    # local architectural extension, so a register-only upstream prefilter
+    # would incorrectly hide those adapters.
+    has_register_candidate = "registry" in source and "register" in source
+    if not has_register_candidate and "TOOL_LOADER_MODULE" not in source:
+        return False
+
+    try:
         tree = ast.parse(source, filename=str(module_path))
-    except (OSError, SyntaxError):
+    except SyntaxError:
         return False
 
     for stmt in tree.body:

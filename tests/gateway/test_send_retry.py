@@ -283,3 +283,73 @@ class TestSendWithRetryFallback:
             result = await adapter._send_with_retry("chat1", "hello", max_retries=2)
         assert not result.success
         assert len(adapter._send_calls) == 2  # original + fallback only
+
+
+class TestSendWithRetryAfter:
+    @pytest.mark.asyncio
+    async def test_retry_after_honored_on_first_retry(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(
+                success=False,
+                error="Flood control exceeded. Retry in 37 seconds",
+                retryable=True,
+                retry_after=37.0,
+            ),
+            SendResult(success=True, message_id="ok"),
+        ]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await adapter._send_with_retry(
+                "chat1",
+                "hello",
+                max_retries=2,
+                base_delay=2.0,
+            )
+
+        assert result.success
+        assert sleep.call_args_list[0].args[0] >= 37.0
+
+    @pytest.mark.asyncio
+    async def test_retry_after_from_subsequent_result(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="ConnectError", retryable=True),
+            SendResult(
+                success=False,
+                error="Flood control exceeded. Retry in 30 seconds",
+                retryable=True,
+                retry_after=30.0,
+            ),
+            SendResult(success=True, message_id="ok"),
+        ]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await adapter._send_with_retry(
+                "chat1",
+                "hello",
+                max_retries=3,
+                base_delay=2.0,
+            )
+
+        assert result.success
+        assert sleep.call_args_list[1].args[0] >= 30.0
+
+    @pytest.mark.asyncio
+    async def test_no_retry_after_uses_default_backoff(self):
+        adapter = _StubAdapter()
+        adapter._send_results = [
+            SendResult(success=False, error="ConnectError", retryable=True),
+            SendResult(success=True, message_id="ok"),
+        ]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await adapter._send_with_retry(
+                "chat1",
+                "hello",
+                max_retries=2,
+                base_delay=2.0,
+            )
+
+        assert result.success
+        assert sleep.call_args_list[0].args[0] < 3.0

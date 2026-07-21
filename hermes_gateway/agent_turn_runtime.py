@@ -34,9 +34,10 @@ from hermes_gateway.process_watcher import process_watcher_for
 from hermes_gateway.response_normalization import normalize_empty_agent_response
 from hermes_gateway.resume_pending import should_clear_resume_pending_after_turn
 from hermes_gateway.response_filters import is_intentional_silence_agent_result
-from hermes_gateway.session_context import build_session_context, build_session_context_prompt
+from hermes_gateway.session_context import build_session_context
 from hermes_gateway.session_navigation_commands import session_navigation_for
 from hermes_gateway.session_runtime_state import session_runtime_state_for
+from hermes_gateway.session_turn_lease import session_turn_lease_for
 from hermes_gateway.voice_runtime import voice_runtime_for
 
 logger = logging.getLogger(__name__)
@@ -148,14 +149,13 @@ class GatewayAgentTurnRuntime:
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
         if getattr(session_entry, "was_auto_reset", False):
-            # Treat auto-reset as a full conversation boundary — drop every
-            # session-scoped transient state so the fresh session does not
-            # inherit the previous conversation's model/reasoning overrides
-            # or a queued "/model switched" note.
-            runner._session_model_overrides.pop(session_key, None)
-            runtime_config_for(runner).set_session_reasoning_override(session_key, None)
-            if hasattr(runner, "_pending_model_notes"):
-                runner._pending_model_notes.pop(session_key, None)
+            session_runtime_state_for(runner).clear_conversation_scope(
+                session_key,
+                reason="auto_reset",
+            )
+            # The cache is keyed by routing key and otherwise carries the old
+            # compressor/memory instances into the new durable conversation.
+            agent_cache_for(runner).evict_cached_agent(session_key)
         
         # Emit session:start for new or auto-reset sessions
         _is_new_session = (
@@ -189,8 +189,12 @@ class GatewayAgentTurnRuntime:
         except Exception:
             logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
-        # Build the context prompt to inject
-        context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
+        turn_context_notes: list[str] = []
+        context_prompt = agent_turn_context_for(runner).pinned_context_prompt(
+            context=context,
+            redact_pii=_redact_pii,
+            session_key=session_key,
+        )
         
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
@@ -202,7 +206,7 @@ class GatewayAgentTurnRuntime:
                 context_note = "[System note: The user's session was automatically reset by the daily schedule. This is a fresh conversation with no prior context.]"
             else:
                 context_note = "[System note: The user's previous session expired due to inactivity. This is a fresh conversation with no prior context.]"
-            context_prompt = context_note + "\n\n" + context_prompt
+            turn_context_notes.append(context_note)
 
             # Send a user-facing notification explaining the reset, unless:
             # - notifications are disabled in config
@@ -292,6 +296,16 @@ class GatewayAgentTurnRuntime:
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
+        # Busy guards are keyed by routing key, while transcript ownership is
+        # keyed by the resolved session_id. Session navigation can map multiple
+        # routing keys to one durable conversation, so serialize the entire
+        # load/run/persist region at that true ownership boundary.
+        await session_turn_lease_for(runner).acquire(
+            session_entry.session_id,
+            routing_key=_quick_key,
+            generation=run_generation,
+        )
+
         # Load conversation history from transcript
         history = await run_sqlite_io(
             runner.session_store.load_transcript,
@@ -305,20 +319,23 @@ class GatewayAgentTurnRuntime:
             session_key=session_key,
             event=event,
             quick_key=_quick_key,
+            run_generation=run_generation,
             load_gateway_config=_load_gateway_config,
             runtime_config_for=runtime_config_for,
             agent_cache_for=agent_cache_for,
             resolve_runtime_agent_kwargs=_resolve_runtime_agent_kwargs,
         )
 
-        context_prompt = await agent_turn_context_for(runner).enrich_context_prompt(
-            context_prompt=context_prompt,
+        turn_context_notes.extend(
+            await agent_turn_context_for(runner).collect_turn_notes(
             history=history,
             source=source,
             event=event,
+            session_key=session_key,
             home_target_env_var=home_target_env_var,
             platform_notice_for=platform_notice_for,
             voice_runtime_for=voice_runtime_for,
+            )
         )
 
         # -----------------------------------------------------------------
@@ -372,6 +389,7 @@ class GatewayAgentTurnRuntime:
                 run_generation=run_generation,
                 event_message_id=runner._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                turn_context_notes=turn_context_notes,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -457,7 +475,29 @@ class GatewayAgentTurnRuntime:
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
-                session_entry.session_id = agent_result["session_id"]
+                rotated_session_id = str(agent_result["session_id"])
+                updated = await run_sqlite_io(
+                    runner.session_store.update_entry_session_id,
+                    session_entry.session_key,
+                    rotated_session_id,
+                )
+                if updated:
+                    session_turn_lease_for(runner).rebind(
+                        _quick_key,
+                        run_generation,
+                        rotated_session_id,
+                    )
+                    try:
+                        await run_sqlite_io(
+                            session_navigation_for(runner).record_telegram_topic_binding,
+                            source,
+                            session_entry,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to synchronize topic binding after agent session rotation",
+                            exc_info=True,
+                        )
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:

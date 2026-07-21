@@ -258,3 +258,79 @@ class TestStickyOuterInterruptSurvivesClearInterrupt:
             "The sticky _outer_interrupted flag did not survive the "
             "_interrupt_requested clear() — the bug regressed."
         )
+
+
+class TestSupersededStreamFence:
+    @patch("run_agent.AIAgent._replace_primary_openai_client")
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_stale_attempt_cannot_emit_late_chunks_after_retry(
+        self,
+        mock_close,
+        mock_create,
+        mock_replace,
+        monkeypatch,
+    ):
+        import time
+
+        import httpx
+
+        from tests.run_agent.test_streaming import (
+            _make_stream_chunk,
+            _make_tool_call_delta,
+        )
+
+        monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "0.05")
+        monkeypatch.setenv("HERMES_STREAM_RETRIES", "1")
+
+        class LateChunkAfterStaleStream:
+            response = SimpleNamespace(headers={})
+
+            def __iter__(self):
+                yield _make_stream_chunk(content="old start ")
+                yield _make_stream_chunk(
+                    tool_calls=[
+                        _make_tool_call_delta(
+                            index=0,
+                            tc_id="call_1",
+                            name="terminal",
+                        )
+                    ]
+                )
+                time.sleep(0.45)
+                yield _make_stream_chunk(content="old late ")
+                raise httpx.RemoteProtocolError("peer closed connection")
+
+        class RetryStream:
+            response = SimpleNamespace(headers={})
+
+            def __iter__(self):
+                return iter(
+                    [
+                        _make_stream_chunk(content="new final"),
+                        _make_stream_chunk(
+                            finish_reason="stop",
+                            model="test/model",
+                        ),
+                    ]
+                )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = [
+            LateChunkAfterStaleStream(),
+            RetryStream(),
+        ]
+        mock_create.return_value = mock_client
+
+        agent = _make_agent()
+        agent._interrupt_requested = False
+        deltas = []
+        agent.stream_delta_callback = deltas.append
+
+        response = agent._interruptible_streaming_api_call({})
+
+        delivered = "".join(delta for delta in deltas if isinstance(delta, str))
+        assert "old late" not in delivered
+        assert "new final" in delivered
+        assert response.choices[0].message.content == "new final"
+        assert mock_close.called

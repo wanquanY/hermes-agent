@@ -5,7 +5,7 @@ that connect() refuses to start on non-loopback without API_SERVER_KEY.
 """
 
 import socket
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -111,22 +111,94 @@ class TestConnectBindGuard:
         result = await adapter.connect()
         assert result is False
 
-    def test_allows_loopback_without_key(self):
-        """Loopback with no key should pass the guard."""
+    @pytest.mark.asyncio
+    async def test_refuses_loopback_without_key(self):
+        """Loopback is still an agent-control auth boundary."""
         adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"host": "127.0.0.1"}))
         assert adapter._api_key == ""
-        # The guard condition: is_network_accessible(host) AND NOT api_key
-        # For loopback, is_network_accessible is False so the guard does not block.
         assert is_network_accessible(adapter._host) is False
+        assert await adapter.connect() is False
+        assert adapter._app is None
+        assert adapter._background_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_refuses_weak_key_without_partial_startup(self):
+        adapter = APIServerAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={"host": "127.0.0.1", "key": "short"},
+            )
+        )
+
+        assert await adapter.connect() is False
+        assert adapter._app is None
+        assert adapter._background_tasks == set()
 
     @pytest.mark.asyncio
     async def test_allows_wildcard_with_key(self):
         """Non-loopback with a key should pass the guard."""
         adapter = APIServerAdapter(
-            PlatformConfig(enabled=True, extra={"host": "0.0.0.0", "key": "sk-test"})
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "host": "0.0.0.0",
+                    "key": "sk-test-strong-key-0123456789",
+                },
+            )
         )
-        # The guard checks: is_network_accessible(host) AND NOT api_key
-        # With a key set, the guard should not block.
-        assert adapter._api_key == "sk-test"
+        assert adapter._api_key_passes_startup_guard() is True
         assert is_network_accessible("0.0.0.0") is True
-        # Combined: the guard condition is False (key is set), so it passes
+
+
+class TestBindMechanics:
+    _KEY = "sk-test-strong-key-0123456789"
+
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            return sock.getsockname()[1]
+
+    def _make_adapter(self, port: int) -> APIServerAdapter:
+        return APIServerAdapter(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "key": self._KEY,
+                },
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_immediate_rebind_after_disconnect(self):
+        port = self._free_port()
+        first = self._make_adapter(port)
+        assert await first.connect() is True
+        await first.disconnect()
+
+        second = self._make_adapter(port)
+        try:
+            assert await second.connect() is True
+        finally:
+            await second.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_live_listener_conflict_is_non_retryable_and_cleans_up(self):
+        port = self._free_port()
+        first = self._make_adapter(port)
+        second = self._make_adapter(port)
+        assert await first.connect() is True
+        try:
+            assert await second.connect() is False
+            assert second._runner is None
+            assert second._site is None
+            assert second.is_connected is False
+            assert second.has_fatal_error is True
+            assert second.fatal_error_retryable is False
+            assert second.fatal_error_code == "api_server_port_in_use"
+            assert str(port) in (second.fatal_error_message or "")
+        finally:
+            await first.disconnect()
+            await second.disconnect()

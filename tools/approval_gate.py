@@ -72,6 +72,7 @@ def run_approval_gate(
     surface: str = "gateway",
     fail_closed_when_no_human: bool = False,
     no_human_block_message: str = "",
+    one_operation_only: bool = False,
 ) -> dict:
     """Run the single human approval gate for commands and arbitrary tools.
 
@@ -109,7 +110,21 @@ def run_approval_gate(
     display_description = _redact_user_visible(description)
     safe_target = _redact_user_visible(display_target)
     primary_key = keys[0]
-    allow_permanent = all(key in permanent for key in keys)
+    allow_permanent = (
+        not one_operation_only and all(key in permanent for key in keys)
+    )
+
+    def approval_payload() -> dict:
+        payload = {
+            "command": safe_target,
+            "pattern_key": primary_key,
+            "pattern_keys": keys,
+            "description": display_description,
+            "allow_permanent": allow_permanent,
+        }
+        if one_operation_only:
+            payload["smart_denied"] = True
+        return payload
 
     if is_gateway or is_ask:
         if notify_cb is None:
@@ -125,15 +140,9 @@ def run_approval_gate(
                     "outcome": "no_human_responder",
                     "user_consent": False,
                 }
-            approval_data = {
-                "command": safe_target,
-                "pattern_key": primary_key,
-                "pattern_keys": keys,
-                "description": display_description,
-                "allow_permanent": allow_permanent,
-            }
+            approval_data = approval_payload()
             state.submit_pending(session_key, approval_data)
-            return {
+            result = {
                 "approved": False,
                 "pattern_key": primary_key,
                 "status": "pending_approval",
@@ -145,17 +154,14 @@ def run_approval_gate(
                     f"**Target:**\n```\n{safe_target}\n```"
                 ),
             }
+            if one_operation_only:
+                result.update(smart_denied=True, allow_permanent=False)
+            return result
 
         decision = state.await_gateway_decision(
             session_key,
             notify_cb,
-            {
-                "command": safe_target,
-                "pattern_key": primary_key,
-                "pattern_keys": keys,
-                "description": display_description,
-                "allow_permanent": allow_permanent,
-            },
+            approval_payload(),
             surface=surface,
             timeout_seconds=timeout_seconds,
         )
@@ -181,7 +187,7 @@ def run_approval_gate(
                 resolved=resolved,
                 reason=decision.get("reason"),
             )
-        if persist_decision:
+        if persist_decision and not one_operation_only:
             state.persist_approval_choice(session_key, choice, keys, permanent)
         return {
             "approved": True,
@@ -220,6 +226,7 @@ def run_approval_gate(
         allow_permanent=allow_permanent,
         timeout_seconds=timeout_seconds,
         approval_callback=approval_callback,
+        smart_denied=one_operation_only,
     )
     state.fire_approval_hook(
         "post_approval_response",
@@ -239,7 +246,7 @@ def run_approval_gate(
             resolved=True,
             reason=None,
         )
-    if persist_decision:
+    if persist_decision and not one_operation_only:
         state.persist_approval_choice(session_key, choice, keys, permanent)
     return {
         "approved": True,

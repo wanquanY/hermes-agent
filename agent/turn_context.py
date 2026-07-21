@@ -230,6 +230,20 @@ def build_turn_context(
     # Preserve the original user message (no nudge injection).
     original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+    reaction_callback = getattr(agent, "reaction_callback", None)
+    if callable(reaction_callback):
+        try:
+            from agent.reactions import detect_reaction
+
+            if reaction := detect_reaction(
+                original_user_message
+                if isinstance(original_user_message, str)
+                else None
+            ):
+                reaction_callback(reaction)
+        except Exception:
+            logger.debug("reaction callback failed", exc_info=True)
+
     # Track memory nudge trigger (turn-based, checked here).
     should_review_memory = False
     if (agent._memory_nudge_interval > 0

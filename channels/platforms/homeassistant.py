@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
+from agent.secret_scope import get_profile_env
 try:
     import aiohttp
     AIOHTTP_AVAILABLE = True
@@ -43,7 +44,7 @@ def check_ha_requirements() -> bool:
     """Check if Home Assistant dependencies are available and configured."""
     if not AIOHTTP_AVAILABLE:
         return False
-    if not os.getenv("HASS_TOKEN"):
+    if not get_profile_env("HASS_TOKEN"):
         return False
     return True
 
@@ -74,8 +75,8 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 
         # Configuration from extra
         extra = config.extra or {}
-        token = config.token or os.getenv("HASS_TOKEN", "")
-        url = extra.get("url") or os.getenv("HASS_URL", "http://homeassistant.local:8123")
+        token = config.token or get_profile_env("HASS_TOKEN", "")
+        url = extra.get("url") or get_profile_env("HASS_URL", "http://homeassistant.local:8123")
         self._hass_url: str = url.rstrip("/")
         self._hass_token: str = token
 

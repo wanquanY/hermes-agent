@@ -26,7 +26,13 @@ import logging
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from typing import Optional
+
+from channels.session_context import (
+    declare_stateless_channel,
+    restore_async_delivery_capability,
+)
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
@@ -121,11 +127,51 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
     return valid, None
 
 
+def _write_usage_file(
+    path: Optional[str], result: dict, failure: Optional[str] = None
+) -> None:
+    """Write a best-effort machine-readable usage report for batch callers."""
+    if not path:
+        return
+    try:
+        import json
+
+        report = {
+            key: result.get(key)
+            for key in (
+                "estimated_cost_usd",
+                "cost_status",
+                "cost_source",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+                "api_calls",
+                "model",
+                "provider",
+                "session_id",
+                "completed",
+                "service_tier",
+            )
+        }
+        report["failed"] = bool(result.get("failed")) or failure is not None
+        if failure is not None:
+            report["failure"] = failure
+        destination = Path(path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        logging.debug("oneshot usage report write failed", exc_info=True)
+
+
 def run_oneshot(
     prompt: str,
     model: Optional[str] = None,
     provider: Optional[str] = None,
     toolsets: object = None,
+    usage_file: Optional[str] = None,
 ) -> int:
     """Execute a single prompt and print only the final content block.
 
@@ -137,8 +183,9 @@ def run_oneshot(
             HERMES_INFERENCE_PROVIDER env var, then config.yaml's model.provider,
             then "auto".
         toolsets: Optional comma-separated string or iterable of toolsets.
+        usage_file: Optional JSON report path for tokens, cost, and run status.
 
-    Returns the exit code.  Caller should sys.exit() with the return.
+    Returns the exit code. The lifecycle owner terminates the process.
     """
     # Silence every stdlib logger for the duration.  AIAgent, tools, and
     # provider adapters all log to stderr through the root logger; file
@@ -170,32 +217,61 @@ def run_oneshot(
     # definition — a prompt would hang forever.
     os.environ["HERMES_YOLO_MODE"] = "1"
     os.environ["HERMES_ACCEPT_HOOKS"] = "1"
+    async_capability_token = declare_stateless_channel()
 
     # Redirect stderr AND stdout to devnull for the entire call tree.
     # We'll print the final response to the real stdout at the end.
     real_stdout = sys.stdout
+    real_stderr = sys.stderr
     devnull = open(os.devnull, "w", encoding="utf-8")
 
+    response: Optional[str] = None
+    result: dict = {}
+    failure: BaseException | None = None
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
-            response = _run_agent(
-                prompt,
-                model=model,
-                provider=provider,
-                toolsets=explicit_toolsets,
-                use_config_toolsets=use_config_toolsets,
-            )
+            try:
+                response, result = _run_agent(
+                    prompt,
+                    model=model,
+                    provider=provider,
+                    toolsets=explicit_toolsets,
+                    use_config_toolsets=use_config_toolsets,
+                )
+            except BaseException as exc:
+                failure = exc
     finally:
         try:
             devnull.close()
         except Exception:
             pass
+        restore_async_delivery_capability(async_capability_token)
+
+    if failure is not None:
+        if isinstance(failure, (KeyboardInterrupt, SystemExit)):
+            _write_usage_file(usage_file, result, failure=repr(failure))
+            raise failure
+        _write_usage_file(usage_file, result, failure=str(failure))
+        real_stderr.write(f"hermes -z: agent failed: {failure}\n")
+        real_stderr.flush()
+        return 1
+
+    _write_usage_file(usage_file, result)
 
     if response:
         real_stdout.write(response)
         if not response.endswith("\n"):
             real_stdout.write("\n")
         real_stdout.flush()
+
+    if (result.get("failed") or result.get("partial")) and not (response or "").strip():
+        return 2
+    if not (response or "").strip():
+        real_stderr.write(
+            "hermes -z: no final response was produced; treating the run as failed.\n"
+        )
+        real_stderr.flush()
+        return 1
     return 0
 
 
@@ -221,7 +297,7 @@ def _run_agent(
     provider: Optional[str] = None,
     toolsets: object = None,
     use_config_toolsets: bool = True,
-) -> str:
+) -> tuple[str, dict]:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns the final response string."""
     # Imports are local so they don't run when hermes is invoked for
@@ -310,39 +386,47 @@ def _run_agent(
     if isinstance(_fb, dict):
         _fb = [_fb] if _fb.get("provider") and _fb.get("model") else []
 
-    agent = AIAgent(
-        api_key=runtime.get("api_key"),
-        base_url=runtime.get("base_url"),
-        provider=runtime.get("provider"),
-        api_mode=runtime.get("api_mode"),
-        model=effective_model,
-        enabled_toolsets=toolsets_list,
-        quiet_mode=True,
-        platform="cli",
-        session_db=session_db,
-        credential_pool=runtime.get("credential_pool"),
-        fallback_model=_fb or None,
-        # Interactive callbacks are intentionally NOT wired beyond this
-        # one.  In oneshot mode there's no user sitting at a terminal:
-        #   - clarify  → returns a synthetic "pick a default" instruction
-        #                so the agent continues instead of stalling on
-        #                the tool's built-in "not available" error
-        #   - sudo password prompt → terminal_tool gates on
-        #                HERMES_INTERACTIVE which we never set
-        #   - shell-hook approval → auto-approved via HERMES_ACCEPT_HOOKS=1
-        #                (set above); also falls back to deny on non-tty
-        #   - dangerous-command approval → bypassed via HERMES_YOLO_MODE=1
-        #   - skill secret capture → returns gracefully when no callback set
-        clarify_callback=_oneshot_clarify_callback,
-    )
+    agent = None
+    try:
+        agent = AIAgent(
+            api_key=runtime.get("api_key"),
+            base_url=runtime.get("base_url"),
+            provider=runtime.get("provider"),
+            api_mode=runtime.get("api_mode"),
+            model=effective_model,
+            enabled_toolsets=toolsets_list,
+            quiet_mode=True,
+            platform="cli",
+            session_db=session_db,
+            credential_pool=runtime.get("credential_pool"),
+            fallback_model=_fb or None,
+            clarify_callback=_oneshot_clarify_callback,
+        )
+        agent.suppress_status_output = True
+        agent.stream_delta_callback = None
+        agent.tool_gen_callback = None
 
-    # Belt-and-braces: make sure AIAgent doesn't invoke any streaming
-    # display callbacks that would bypass our stdout capture.
-    agent.suppress_status_output = True
-    agent.stream_delta_callback = None
-    agent.tool_gen_callback = None
-
-    return agent.chat(prompt) or ""
+        result = agent.run_conversation(prompt)
+        return result.get("final_response") or "", result
+    finally:
+        if agent is not None:
+            try:
+                messages = getattr(agent, "_session_messages", None)
+                if isinstance(messages, list):
+                    agent.shutdown_memory_provider(messages)
+                else:
+                    agent.shutdown_memory_provider()
+            except Exception:
+                logging.debug("oneshot memory/context cleanup failed", exc_info=True)
+            try:
+                agent.close()
+            except Exception:
+                logging.debug("oneshot agent cleanup failed", exc_info=True)
+        if session_db is not None:
+            try:
+                session_db.close()
+            except Exception:
+                logging.debug("oneshot session store cleanup failed", exc_info=True)
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:

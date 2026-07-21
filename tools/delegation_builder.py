@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
+
+from tools.delegation_live_log import attach_live_transcript_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ def build_child_agent(
     role: str = "leaf",
     delegate_call_id: Optional[str] = None,
     agent_name: Optional[str] = None,
+    live_transcript_writer: Optional[Any] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -333,6 +336,7 @@ def build_child_agent(
         stream_delta_callback=child_output_delta_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
+    attach_live_transcript_callbacks(child, live_transcript_writer)
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth

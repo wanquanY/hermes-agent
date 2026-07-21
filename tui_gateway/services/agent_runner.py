@@ -40,6 +40,7 @@ import time
 import uuid
 from typing import Any, Optional
 
+from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway.run_worker import RunStartFrame
 from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services.profile_context import profile_context_for_params
@@ -337,7 +338,9 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                 persisted_tier = str(
                     persisted_config.get("service_tier") or ""
                 ).strip()
-                if persisted_tier:
+                if persisted_tier.lower() == "normal":
+                    session_record["create_service_tier_override"] = ""
+                elif persisted_tier:
                     session_record["create_service_tier_override"] = persisted_tier
             persisted_model = str(
                 persisted_session.get("model")
@@ -366,6 +369,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                 frame.conversation_session_id,
                 include_storage_metadata=True,
             )
+            full_history = sanitize_replay_history(full_history, now=time.time())
             if _should_project_participant_transcript(run_context):
                 try:
                     participants = db.participants.list_conversation_participants(

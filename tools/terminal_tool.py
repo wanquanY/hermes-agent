@@ -335,10 +335,39 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _docker_volume_uses_host_path(volume_spec: str) -> bool:
+    if not isinstance(volume_spec, str):
+        return False
+    volume = volume_spec.strip()
+    return bool(volume) and (
+        volume.startswith(("/", "~", "./", "../"))
+        or (len(volume) >= 3 and volume[1] == ":" and volume[2] in ("/", "\\"))
+    )
+
+
+def _docker_has_host_access(config: Dict[str, Any]) -> bool:
+    if config.get("env_type") != "docker":
+        return False
+    if config.get("host_cwd") and config.get("docker_mount_cwd_to_workspace"):
+        return True
+    return any(
+        _docker_volume_uses_host_path(volume)
+        for volume in config.get("docker_volumes", [])
+    )
+
+
+def _check_all_guards(
+    command: str,
+    env_type: str,
+    has_host_access: bool = False,
+) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
-    return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback())
+    return _check_all_guards_impl(
+        command,
+        env_type,
+        approval_callback=_get_approval_callback(),
+        has_host_access=has_host_access,
+    )
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -1956,7 +1985,11 @@ def terminal_tool(
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
         if not force:
-            approval = _check_all_guards(command, env_type)
+            approval = _check_all_guards(
+                command,
+                env_type,
+                has_host_access=_docker_has_host_access(config),
+            )
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "pending_approval":
@@ -1969,6 +2002,8 @@ def terminal_tool(
                         "command": approval.get("command", command),
                         "description": approval.get("description", "command flagged"),
                         "pattern_key": approval.get("pattern_key", ""),
+                        "smart_denied": approval.get("smart_denied", False),
+                        "allow_permanent": approval.get("allow_permanent", True),
                     }, ensure_ascii=False)
                 # Command was blocked
                 desc = approval.get("description", "command flagged")
@@ -2299,13 +2334,23 @@ def check_terminal_requirements() -> bool:
             if not docker:
                 logger.error("Docker executable not found in PATH or common install locations")
                 return False
-            result = subprocess.run([docker, "version"], capture_output=True, timeout=5)
+            result = subprocess.run(
+                [docker, "version"],
+                capture_output=True,
+                timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
             return result.returncode == 0
 
         elif env_type == "singularity":
             executable = shutil.which("apptainer") or shutil.which("singularity")
             if executable:
-                result = subprocess.run([executable, "--version"], capture_output=True, timeout=5)
+                result = subprocess.run(
+                    [executable, "--version"],
+                    capture_output=True,
+                    timeout=5,
+                    stdin=subprocess.DEVNULL,
+                )
                 return result.returncode == 0
             return False
 

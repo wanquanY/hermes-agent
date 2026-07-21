@@ -9,12 +9,12 @@ without coupling to the runner coordinator.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
+from agent.secret_scope import get_profile_env
 from hermes_cli.config import cfg_get
-from hermes_constants import get_hermes_home, parse_reasoning_effort
+from hermes_constants import get_hermes_home, resolve_reasoning_config
 
 logger = logging.getLogger(__name__)
 
@@ -62,18 +62,18 @@ def _try_resolve_fallback_provider(hermes_home: Path | None = None) -> dict | No
 
     try:
         cfg = load_gateway_runtime_config(hermes_home)
-        fb = cfg.get("fallback_providers") or cfg.get("fallback_model")
-        if not fb:
-            return None
-        fb_list = fb if isinstance(fb, list) else [fb]
-        for entry in fb_list:
-            if not isinstance(entry, dict):
-                continue
+        from hermes_cli.fallback_config import (
+            get_fallback_chain,
+            resolve_entry_api_key,
+        )
+
+        for entry in get_fallback_chain(cfg):
             try:
                 runtime = resolve_runtime_provider(
-                    requested=entry.get("provider"),
+                    requested=entry["provider"],
+                    target_model=entry["model"],
                     explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=entry.get("api_key"),
+                    explicit_api_key=resolve_entry_api_key(entry),
                 )
                 logger.info(
                     "Fallback provider resolved: %s model=%s",
@@ -108,7 +108,7 @@ def resolve_runtime_agent_kwargs(hermes_home: Path | None = None) -> dict:
 
     try:
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=get_profile_env("HERMES_INFERENCE_PROVIDER"),
         )
     except AuthError as auth_exc:
         logger.warning("Primary provider auth failed: %s; trying fallback", auth_exc)
@@ -130,20 +130,46 @@ def resolve_runtime_agent_kwargs(hermes_home: Path | None = None) -> dict:
     }
 
 
-def load_reasoning_config(config: dict | None = None) -> dict | None:
-    """Load and parse ``agent.reasoning_effort`` from config."""
+def resolve_runtime_agent_kwargs_for_provider(
+    provider: str,
+    *,
+    explicit_api_key: str | None = None,
+    explicit_base_url: str | None = None,
+) -> dict:
+    """Resolve one explicitly routed provider through the shared auth chain."""
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    runtime = resolve_runtime_provider(
+        requested=provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+    return {
+        "api_key": runtime.get("api_key"),
+        "base_url": runtime.get("base_url"),
+        "provider": runtime.get("provider"),
+        "api_mode": runtime.get("api_mode"),
+        "command": runtime.get("command"),
+        "args": list(runtime.get("args") or []),
+        "credential_pool": runtime.get("credential_pool"),
+    }
+
+
+def load_reasoning_config(
+    config: dict | None = None,
+    model: str = "",
+) -> dict | None:
+    """Resolve global/per-model reasoning for the configured model."""
     cfg = config if config is not None else load_gateway_runtime_config()
-    effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
-    result = parse_reasoning_effort(effort)
-    if effort and result is None:
-        logger.warning("Unknown reasoning_effort '%s', using default (medium)", effort)
-    return result
+    return resolve_reasoning_config(cfg, model or resolve_gateway_model(cfg))
 
 
 def load_fallback_model(config: dict | None = None) -> list | dict | None:
     """Load fallback provider chain from config."""
+    from hermes_cli.fallback_config import get_fallback_chain
+
     cfg = config if config is not None else load_gateway_runtime_config()
-    return cfg.get("fallback_providers") or cfg.get("fallback_model") or None
+    return get_fallback_chain(cfg) or None
 
 
 def redact_approval_command(cmd: str | None) -> str:

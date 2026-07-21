@@ -1403,7 +1403,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     # Inject output from referenced cron jobs as context.
     context_from = job.get("context_from")
     if context_from:
-        from cron.jobs import OUTPUT_DIR
+        from cron.jobs import get_cron_output_dir
         if isinstance(context_from, str):
             context_from = [context_from]
         for source_job_id in context_from:
@@ -1412,7 +1412,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 logger.warning("context_from: skipping invalid job_id %r", source_job_id)
                 continue
             try:
-                job_output_dir = OUTPUT_DIR / source_job_id
+                job_output_dir = get_cron_output_dir() / source_job_id
                 if not job_output_dir.exists():
                     continue  # silent skip — no output yet
                 output_files = sorted(
@@ -1801,6 +1801,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         platform="",
         chat_id="",
         chat_name="",
+        async_delivery=False,
     )
     _cron_delivery_vars = (
         "HERMES_CRON_AUTO_DELIVER_PLATFORM",
@@ -1858,6 +1859,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
+        _model_cfg = {}
         try:
             import yaml
             _cfg_path = str(_get_hermes_home() / "config.yaml")
@@ -1882,11 +1884,6 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 apply_ipv4_preference(force=True)
         except Exception:
             pass
-
-        # Reasoning config from config.yaml
-        from hermes_constants import parse_reasoning_effort
-        effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
-        reasoning_config = parse_reasoning_effort(effort)
 
         # Prefill messages from env or config.yaml
         prefill_messages = None
@@ -1916,6 +1913,17 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             format_runtime_provider_error,
         )
         from hermes_cli.auth import AuthError
+        primary_model_for_drift = model
+        configured_provider_for_drift = (
+            str(_model_cfg.get("provider") or "").strip().lower()
+            if isinstance(_model_cfg, dict)
+            else ""
+        )
+        primary_provider_for_drift = (
+            str(job.get("provider") or "").strip().lower()
+            or configured_provider_for_drift
+            or None
+        )
         try:
             # Do not inject HERMES_INFERENCE_PROVIDER here. resolve_runtime_provider()
             # already prefers persisted config over stale shell/env overrides when
@@ -1924,27 +1932,48 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # example DeepSeek) for cron jobs that do not pin provider/model.
             runtime_kwargs = {
                 "requested": job.get("provider"),
+                # Provider transports can choose api_mode from the model. Use
+                # the job's effective model (job pin > env > profile config),
+                # never a stale persisted default from another turn.
+                "target_model": model,
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
             runtime = resolve_runtime_provider(**runtime_kwargs)
+            primary_provider_for_drift = (
+                str(runtime.get("provider") or "").strip().lower()
+                or primary_provider_for_drift
+            )
         except AuthError as auth_exc:
             # Primary provider auth failed — try fallback chain before giving up.
             logger.warning("Job '%s': primary auth failed (%s), trying fallback", job_id, auth_exc)
-            fb = _cfg.get("fallback_providers") or _cfg.get("fallback_model")
-            fb_list = (fb if isinstance(fb, list) else [fb]) if fb else []
+            from hermes_cli.fallback_config import (
+                get_fallback_chain,
+                resolve_entry_api_key,
+            )
+
+            fb_list = get_fallback_chain(_cfg)
             runtime = None
             for entry in fb_list:
-                if not isinstance(entry, dict):
-                    continue
                 try:
-                    fb_kwargs = {"requested": entry.get("provider")}
+                    fb_model = entry["model"]
+                    fb_kwargs = {
+                        "requested": entry["provider"],
+                        "target_model": fb_model,
+                    }
                     if entry.get("base_url"):
                         fb_kwargs["explicit_base_url"] = entry["base_url"]
-                    if entry.get("api_key"):
-                        fb_kwargs["explicit_api_key"] = entry["api_key"]
+                    fb_api_key = resolve_entry_api_key(entry)
+                    if fb_api_key:
+                        fb_kwargs["explicit_api_key"] = fb_api_key
                     runtime = resolve_runtime_provider(**fb_kwargs)
-                    logger.info("Job '%s': fallback resolved to %s", job_id, runtime.get("provider"))
+                    model = fb_model
+                    logger.info(
+                        "Job '%s': fallback resolved to %s model %s",
+                        job_id,
+                        runtime.get("provider"),
+                        fb_model,
+                    )
                     break
                 except Exception as fb_exc:
                     logger.debug("Job '%s': fallback %s failed: %s", job_id, entry.get("provider"), fb_exc)
@@ -1954,7 +1983,33 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
 
-        fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
+        from hermes_constants import resolve_reasoning_config
+
+        reasoning_config = resolve_reasoning_config(_cfg, str(model))
+
+        from cron.inference_snapshot import (
+            inference_drift_changes,
+            inference_drift_error,
+        )
+
+        drift_changes = inference_drift_changes(
+            job,
+            current_provider=(
+                primary_provider_for_drift or runtime.get("provider")
+            ),
+            current_model=primary_model_for_drift,
+        )
+        if drift_changes:
+            logger.warning(
+                "Job '%s': skipped because unpinned inference config drifted (%s)",
+                job_id,
+                "; ".join(drift_changes),
+            )
+            raise inference_drift_error(job_id, drift_changes)
+
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        fallback_model = get_fallback_chain(_cfg) or None
         credential_pool = None
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
         if runtime_provider:

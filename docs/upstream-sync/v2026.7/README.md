@@ -4,11 +4,12 @@
 
 ## 当前状态
 
-- 当前阶段：阶段 1-12 已合入 `dev`；阶段 13（学习图谱、成长时间线与后台自我改进成本控制）正在主仓库独立分支手工吸收。
-- 阶段 13 分支：`codex/absorb-upstream-learning-journey`，直接基于当前 `dev`，不再使用额外 worktree。
+- 当前阶段：阶段 1-13 已完成既有吸收；阶段 14 在主仓库分支按本地重构架构吸收完整能力面与 Skill / Plugin / MCP 三层资产。
+- 阶段 14 分支：`codex/manual-upstream-capabilities-p0`，直接使用当前主仓库，不再创建额外 worktree。
 - 吸收方式：只参考上游行为、失败场景和测试，禁止 merge、rebase 或 cherry-pick `upstream/main`。
 - 阶段 1-12 冻结快照：`upstream/main @ 6997dc81cd21dc88c6cb808a1fb3626b6ce71254`。
 - 阶段 13 参考快照：`upstream/main @ a9cc17fd8`，2026-07-17 已成功刷新。旧阶段证据仍使用各自固定 SHA，不以新快照改写历史结论。
+- 阶段 14 固定快照：`upstream/main @ fb0ed8396c1c598e3c116f41eea476ce18aa2dd3`，2026-07-20；阶段验收期间不再刷新。
 
 ## 文件职责
 
@@ -42,6 +43,7 @@
 | `phase-12-acceptance.md` | 阶段 12 专项、全量、静态、Doxie 证据与统一实机验收入口 |
 | `phase-13-design.md` | 阶段 13 Learning Graph、Journey、统一成长投影与后台复盘成本控制设计 |
 | `phase-13-acceptance.md` | 阶段 13 专项、全量、契约与用户验收证据 |
+| `phase-14-acceptance.md` | 阶段 14 完整能力面、三层资产、Figma 与 Desktop 验收证据 |
 | `absorption-ledger.csv` | 全量稳定 ID、阶段归属、决策和验收口径 |
 | `review-checklist.md` | 用户逐阶段验收清单 |
 | `evidence/baseline.json` | 可机读 Git 基线 |
@@ -111,6 +113,12 @@ python scripts/upstream_absorption_baseline.py \
   aux-model digest 路由，并对 session、memory、stdout、技能所有权和归档边界做隔离。
   阶段专项 434 passed；Hermes 标准全量 1,596 files、29,228 passed、0 failed；静态、
   分层与 Hermes Web production build 全绿。Doxie desktop 成长页消费与视觉验收待跨仓联调。
+- 阶段 14：UP1-UP24 已按固定 `fb0ed8396c1c` 快照手工吸收。Skill / Plugin / MCP
+  使用统一资产图并补入 Figma；checkpoint、渠道投影、Kimi/Moonshot、custom endpoint、
+  interim event、LSP 和 auxiliary task 均按本地 owner 重构；Doxie 对应吸收多窗口、事件去重、
+  keep-awake 和规范 interim projection。三层聚合 328 passed，Figma 能力聚合 55 passed，
+  Doxie 四个 Figma fidelity 正式场景全绿。实机 Figma MCP 因 Desktop server 未启动仍只记为
+  readiness 前置条件。
 - 发布级长稳证据：真实反向代理、真实 macOS reopen 与 24 小时 soak 尚待统一实机验收，
   未被自动门禁结果替代。
 - 用户验收：阶段 1-12 已合入 `dev`；阶段 13 当前仅在

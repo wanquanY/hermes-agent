@@ -11,6 +11,9 @@ from typing import Any
 from channels.platforms.base_models import MessageEvent
 from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.busy_session_runtime import busy_session_runtime_for
+from hermes_gateway.final_delivery_confirmation import (
+    stream_confirmed_final_delivery,
+)
 from hermes_gateway.goal_commands import goal_command_for
 from hermes_gateway.interrupt_control import is_control_interrupt_message
 from hermes_gateway.media_context import build_media_placeholder
@@ -77,7 +80,17 @@ class AgentPendingFollowupRuntime:
             return result or {"final_response": response, "messages": context.history}
 
         if not result.get("interrupted"):
-            await self._deliver_first_response_if_needed(adapter, result, context)
+            # Keep the raw result for interruption, transcript, and recursive
+            # turn state, but deliver the finalized task result. The finalizer
+            # owns empty/failure normalization and final response processing;
+            # bypassing it here makes the queued path observably different
+            # from an ordinary completed turn.
+            delivery_result = response if isinstance(response, dict) else result
+            await self._deliver_first_response_if_needed(
+                adapter,
+                delivery_result,
+                context,
+            )
             await self._release_post_delivery_callback(adapter, context)
 
         updated_history = result.get("messages", context.history)
@@ -238,15 +251,12 @@ class AgentPendingFollowupRuntime:
                 )
 
         previewed = bool(result.get("response_previewed"))
-        already_streamed = bool(
-            (stream_consumer and getattr(stream_consumer, "final_response_sent", False))
-            or previewed
-            or (
-                stream_consumer
-                and getattr(stream_consumer, "final_content_delivered", False)
-            )
-        )
         first_response = result.get("final_response", "")
+        already_streamed = stream_confirmed_final_delivery(
+            stream_consumer,
+            first_response,
+            previewed=previewed,
+        )
         if is_intentional_silence_agent_result(result, first_response):
             logger.info(
                 "Queued follow-up for session %s: suppressing intentional-silence marker.",

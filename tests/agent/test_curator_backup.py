@@ -400,6 +400,23 @@ def test_snapshot_cron_jobs_malformed_json_still_captured(backup_env):
     assert "parse_warning" in mf["cron_jobs"]
 
 
+def test_snapshot_cron_jobs_accepts_utf8_bom_and_normalizes_copy(backup_env):
+    cb = backup_env["cb"]
+    _write_skill(backup_env["skills"], "alpha")
+    cron_dir = backup_env["home"] / "cron"
+    cron_dir.mkdir()
+    payload = json.dumps({"jobs": [{"id": "a"}, {"id": "b"}]})
+    (cron_dir / "jobs.json").write_bytes(b"\xef\xbb\xbf" + payload.encode())
+
+    snap = cb.snapshot_skills(reason="test")
+
+    manifest = json.loads((snap / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["cron_jobs"]["jobs_count"] == 2
+    backup_bytes = (snap / cb.CRON_JOBS_FILENAME).read_bytes()
+    assert not backup_bytes.startswith(b"\xef\xbb\xbf")
+    assert json.loads(backup_bytes) == json.loads(payload)
+
+
 def test_rollback_restores_cron_skill_links(backup_env):
     """End-to-end: snapshot with job [alpha,beta], curator-style in-place
     rewrite to [umbrella], then rollback → skills restored to [alpha,beta]."""

@@ -1435,6 +1435,30 @@ class TestQuickSnapshot:
         assert copied.exists()
         assert "120363408391911677@g.us" in copied.read_text()
 
+    def test_copies_discord_recovery_ledger(self, hermes_home):
+        gateway_dir = hermes_home / "gateway"
+        gateway_dir.mkdir()
+        ledger = gateway_dir / "discord_message_recovery.db"
+        connection = sqlite3.connect(ledger)
+        connection.execute("CREATE TABLE recovery (message_id TEXT)")
+        connection.execute("INSERT INTO recovery VALUES ('m1')")
+        connection.commit()
+        connection.close()
+
+        from hermes_cli.backup import create_quick_snapshot
+
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+        copied = (
+            hermes_home
+            / "state-snapshots"
+            / snap_id
+            / "gateway"
+            / "discord_message_recovery.db"
+        )
+        with sqlite3.connect(copied) as copied_connection:
+            rows = copied_connection.execute("SELECT * FROM recovery").fetchall()
+        assert rows == [("m1",)]
+
     def test_missing_files_skipped(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot
         snap_id = create_quick_snapshot(hermes_home=hermes_home)
@@ -2061,6 +2085,20 @@ class TestRestoreCronJobsIfEmptied:
 
         result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
         assert result is None
+
+    def test_utf8_bom_live_file_is_counted_and_restored(self, tmp_path):
+        from hermes_cli.backup import _count_cron_jobs, restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}, {"id": "b"}])
+        snap_id = self._make_snapshot(hermes_home)
+        jobs_path.write_bytes(b"\xef\xbb\xbf" + b'{"jobs": []}')
+
+        assert _count_cron_jobs(jobs_path) == 0
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+        assert result is not None
+        assert result["job_count"] == 2
 
     def test_noop_when_live_file_unreadable(self, tmp_path):
         """An unparseable live file is left alone — that's a different failure

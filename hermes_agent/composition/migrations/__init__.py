@@ -6,7 +6,7 @@ from .base import MigrationRecord
 from .base import MigrationRunner
 from .base import load_migrations
 
-CURRENT_SCHEMA_VERSION = 55
+CURRENT_SCHEMA_VERSION = 58
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",

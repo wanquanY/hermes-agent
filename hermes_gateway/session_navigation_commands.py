@@ -13,6 +13,7 @@ from hermes_gateway.config import Platform
 from hermes_gateway.session import SessionSource
 from hermes_gateway.assets import telegram_botfather_threads_settings_path
 from hermes_gateway.session_runtime_state import session_runtime_state_for
+from agent.api_content import extract_api_content_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -601,7 +602,10 @@ class GatewaySessionNavigationCommandService:
         )
         if not new_entry:
             return t("gateway.resume.switch_failed")
-        session_runtime_state_for(self._runner).clear_session_boundary_security_state(session_key)
+        session_runtime_state_for(self._runner).clear_conversation_scope(
+            session_key,
+            reason="resume",
+        )
 
         # Evict any cached agent for this session so the next message
         # rebuilds with the correct session_id end-to-end — mirrors
@@ -710,6 +714,7 @@ class GatewaySessionNavigationCommandService:
                     reasoning_details=msg.get("reasoning_details"),
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
                     codex_message_items=msg.get("codex_message_items"),
+                    api_content=extract_api_content_sidecar(msg),
                 )
             except Exception:
                 logger.debug("Failed to copy message into branch session %s", new_session_id, exc_info=True)

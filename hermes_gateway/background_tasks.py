@@ -14,8 +14,11 @@ from channels.platforms.base import MessageEvent
 from hermes_constants import get_hermes_home
 from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 from hermes_gateway.config import Platform
+from hermes_gateway.checkpoint_config import checkpoint_agent_kwargs
 from hermes_gateway.fast_command import fast_command_for
 from hermes_gateway.gateway_runtime_config import runtime_config_for
+from hermes_gateway.platform_runtime import platform_runtime_for
+from hermes_gateway.profile_runtime import profile_runtime_for
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +78,33 @@ class GatewayBackgroundTaskMixin:
         media_urls: Optional[List[str]] = None,
         media_types: Optional[List[str]] = None,
     ) -> None:
+        """Enter the source profile before resolving any runtime dependency."""
+        with profile_runtime_for(self).scope_for_source(source):
+            await self._run_background_task_scoped(
+                prompt,
+                source,
+                task_id,
+                event_message_id=event_message_id,
+                media_urls=media_urls,
+                media_types=media_types,
+            )
+
+    async def _run_background_task_scoped(
+        self,
+        prompt: str,
+        source: "SessionSource",
+        task_id: str,
+        event_message_id: Optional[str] = None,
+        media_urls: Optional[List[str]] = None,
+        media_types: Optional[List[str]] = None,
+    ) -> None:
         """Execute a background agent task and deliver the result to the chat."""
         from run_agent import AIAgent
 
         media_urls = media_urls or []
         media_types = media_types or []
 
-        adapter = self.adapters.get(source.platform)
+        adapter = platform_runtime_for(self).adapter_for_source(source)
         if not adapter:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
             return
@@ -90,7 +113,8 @@ class GatewayBackgroundTaskMixin:
 
         try:
             user_config = load_gateway_config()
-            model, runtime_kwargs = runtime_config_for(self).resolve_session_agent_runtime(
+            runtime_config = runtime_config_for(self)
+            model, runtime_kwargs = runtime_config.resolve_session_agent_runtime(
                 source=source,
                 user_config=user_config,
             )
@@ -109,12 +133,21 @@ class GatewayBackgroundTaskMixin:
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
-            pr = self._provider_routing
+            pr = runtime_config.load_provider_routing()
+            prefill_messages = runtime_config.load_prefill_messages()
+            fallback_model = runtime_config.load_fallback_model()
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
-            reasoning_config = runtime_config_for(self).resolve_session_reasoning_config(source=source)
-            self._reasoning_config = reasoning_config
-            self._service_tier = fast_command_for(self).load_service_tier()
-            turn_route = runtime_config_for(self).resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            reasoning_config = runtime_config.resolve_session_reasoning_config(
+                source=source,
+                model=model,
+            )
+            service_tier = fast_command_for(self).load_service_tier()
+            turn_route = runtime_config.resolve_turn_agent_config(
+                prompt,
+                model,
+                runtime_kwargs,
+                service_tier=service_tier,
+            )
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -142,8 +175,12 @@ class GatewayBackgroundTaskMixin:
                     verbose_logging=False,
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
+                    ephemeral_system_prompt=(
+                        runtime_config.load_ephemeral_system_prompt() or None
+                    ),
+                    prefill_messages=prefill_messages or None,
                     reasoning_config=reasoning_config,
-                    service_tier=self._service_tier,
+                    service_tier=service_tier,
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=pr.get("only"),
                     providers_ignored=pr.get("ignore"),
@@ -160,7 +197,8 @@ class GatewayBackgroundTaskMixin:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     session_db=self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=fallback_model,
+                    **checkpoint_agent_kwargs(user_config),
                 )
                 try:
                     return agent.run_conversation(

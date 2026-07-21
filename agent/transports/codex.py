@@ -5,6 +5,8 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
+import hashlib
+
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
@@ -216,6 +218,15 @@ class ResponsesApiTransport(ProviderTransport):
             # standard OpenAI routing as a belt-and-braces fallback.
             prompt_cache_key = kwargs.get("prompt_cache_key")
             cache_scope_id = str(prompt_cache_key or session_id or "").strip()
+            # Codex caps both cache-affinity headers at 64 characters. Keep
+            # the body-level prompt_cache_key untouched and hash only the
+            # routing hint so long, externally supplied session identities
+            # remain deterministic without turning cache affinity into a
+            # correctness boundary.
+            if len(cache_scope_id) > 64:
+                cache_scope_id = "pck_" + hashlib.sha256(
+                    cache_scope_id.encode("utf-8", "replace")
+                ).hexdigest()[:24]
             if cache_scope_id:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}

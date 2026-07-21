@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import uuid
 from typing import Optional
+
+from channels.platforms.api_server_support import _redact_api_error_text
+from hermes_agent.application.active_work_registry import WorkRejected
+from hermes_agent.application.cron_fire_service import cron_fire_service
 
 try:
     from aiohttp import web
 except ImportError:  # pragma: no cover - optional dependency gate
     web = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 
 class APIServerJobsMixin:
@@ -37,6 +46,11 @@ class APIServerJobsMixin:
         """Validate and extract job_id. Returns (job_id, error_response)."""
         job_id = request.match_info["job_id"]
         if not self._JOB_ID_RE.fullmatch(job_id):
+            logger.warning(
+                "Cron jobs API rejected invalid job_id %r: %s",
+                job_id,
+                self._request_audit_log_suffix(request),
+            )
             return job_id, web.json_response(
                 {"error": "Invalid job ID format"}, status=400,
             )
@@ -55,7 +69,10 @@ class APIServerJobsMixin:
             jobs = self._cron_api_module()._cron_list(include_disabled=include_disabled)
             return web.json_response({"jobs": jobs})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_create_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs — create a new cron job."""
@@ -94,6 +111,7 @@ class APIServerJobsMixin:
                 "schedule": schedule,
                 "name": name,
                 "deliver": deliver,
+                "origin": self._cron_origin_from_request(request),
             }
             if skills:
                 kwargs["skills"] = skills
@@ -103,7 +121,10 @@ class APIServerJobsMixin:
             job = self._cron_api_module()._cron_create(**kwargs)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_get_job(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs/{job_id} — get a single cron job."""
@@ -122,7 +143,10 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_update_job(self, request: "web.Request") -> "web.Response":
         """PATCH /api/jobs/{job_id} — update a cron job."""
@@ -155,7 +179,10 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_delete_job(self, request: "web.Request") -> "web.Response":
         """DELETE /api/jobs/{job_id} — delete a cron job."""
@@ -174,7 +201,10 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"ok": True})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_pause_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/pause — pause a cron job."""
@@ -193,7 +223,10 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_resume_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/resume — resume a paused cron job."""
@@ -212,7 +245,10 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
 
     async def _handle_run_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/run — trigger immediate execution."""
@@ -231,6 +267,76 @@ class APIServerJobsMixin:
                 return web.json_response({"error": "Job not found"}, status=404)
             return web.json_response({"job": job})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response(
+                {"error": _redact_api_error_text(e)},
+                status=500,
+            )
+
+    async def _handle_cron_fire(self, request: "web.Request") -> "web.Response":
+        """POST /api/cron/fire — authenticated Chronos fire ingress."""
+        cron_err = self._check_jobs_available()
+        if cron_err:
+            return cron_err
+
+        auth = request.headers.get("Authorization", "")
+        token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        claims = await asyncio.to_thread(cron_fire_service.verify_token, token)
+        if claims is None:
+            return web.json_response({"error": "invalid fire token"}, status=401)
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        job_id = str(body.get("job_id") or "").strip() if isinstance(body, dict) else ""
+        if not job_id:
+            return web.json_response({"error": "missing job_id"}, status=400)
+
+        request_profile = self._request_profile()
+        try:
+            lease = self._active_work_registry.register(
+                kind="cron_fire",
+                surface="api_server",
+                work_id=f"cron:{job_id}:{uuid.uuid4().hex}",
+                metadata={
+                    "job_id": job_id,
+                    "profile": request_profile or "",
+                },
+            )
+        except WorkRejected as exc:
+            return web.json_response(
+                {"error": "runtime is draining", "code": exc.code},
+                status=503,
+                headers={"Retry-After": "1"},
+            )
+
+        loop = asyncio.get_running_loop()
+
+        async def _fire() -> None:
+            try:
+                with self._profile_scope(request_profile):
+                    await asyncio.to_thread(
+                        cron_fire_service.fire_due,
+                        job_id,
+                        adapters=None,
+                        loop=loop,
+                    )
+            finally:
+                lease.release()
+
+        try:
+            task = asyncio.create_task(_fire())
+        except BaseException:
+            lease.release()
+            raise
+        try:
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        except (AttributeError, TypeError):
+            pass
+        return web.json_response(
+            {"status": "accepted", "job_id": job_id},
+            status=202,
+        )
 
     # ------------------------------------------------------------------

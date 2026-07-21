@@ -30,6 +30,22 @@ class TestBuildReplayEntry:
         )
         assert entry == {"role": "user", "content": "hello"}
 
+    def test_user_preserves_provider_wire_sidecar(self):
+        entry = build_replay_entry(
+            "user",
+            "clean",
+            {
+                "role": "user",
+                "content": "clean",
+                "api_content": "clean\n\n<memory-context>wire</memory-context>",
+            },
+        )
+        assert entry == {
+            "role": "user",
+            "content": "clean",
+            "api_content": "clean\n\n<memory-context>wire</memory-context>",
+        }
+
     def test_tool_message_has_only_role_and_content(self):
         # Tool messages aren't routed through this helper in production
         # (they take the rich-passthrough branch), but the helper itself
@@ -49,6 +65,18 @@ class TestBuildReplayEntry:
             {"role": "assistant", "content": "ok"},
         )
         assert entry == {"role": "assistant", "content": "ok"}
+
+    def test_assistant_preserves_provider_wire_sidecar(self):
+        entry = build_replay_entry(
+            "assistant",
+            "clean answer",
+            {
+                "role": "assistant",
+                "content": "clean answer",
+                "api_content": " exact provider answer ",
+            },
+        )
+        assert entry["api_content"] == " exact provider answer "
 
     def test_assistant_preserves_reasoning(self):
         msg = {

@@ -17,11 +17,6 @@ METHOD_SCAN_DIRS = (
 EXPLICITLY_OMITTED_FROM_MANIFEST = {
     "agents.list",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "artifacts.prune",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "billing.auto_reload",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "billing.charge",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "billing.charge_status",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "billing.state",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "billing.step_up",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "browser.manage",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "cli.exec",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "clipboard.paste",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
@@ -33,7 +28,6 @@ EXPLICITLY_OMITTED_FROM_MANIFEST = {
     "config.get",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "config.set",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "config.show",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
-    "credits.view",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "delegation.pause",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "delegation.status",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.
     "events.compact",  # audited: legacy methods not yet declared in manifest, see issue/audit M-3 follow-up.

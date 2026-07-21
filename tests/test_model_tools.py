@@ -113,7 +113,7 @@ class TestHandleFunctionCall:
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
 
-    def test_forwards_parent_agent_to_registry_tools(self):
+    def test_forwards_runtime_context_to_registry_tools(self):
         parent_agent = object()
 
         with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
@@ -121,6 +121,7 @@ class TestHandleFunctionCall:
                 "test_agent_profile",
                 {"draft_id": "draft-1", "messages": ["hello"]},
                 task_id="task-1",
+                session_id="session-1",
                 parent_agent=parent_agent,
                 skip_pre_tool_call_hook=True,
             )
@@ -130,6 +131,7 @@ class TestHandleFunctionCall:
             "test_agent_profile",
             {"draft_id": "draft-1", "messages": ["hello"]},
             task_id="task-1",
+            session_id="session-1",
             parent_agent=parent_agent,
             user_task=None,
         )

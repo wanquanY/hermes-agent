@@ -1058,6 +1058,143 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 # Main entry point
 # =============================================================================
 
+# ContextVar bypass: set while replaying an already-approved staged skill write
+# so skill_manage() does not re-gate (and re-stage) it.
+_skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
+    "skill_gate_bypass", default=False
+)
+
+
+def _validate_skill_write_request(
+    action: str,
+    name: str,
+    *,
+    content: Optional[str],
+    category: Optional[str],
+    file_path: Optional[str],
+    file_content: Optional[str],
+    old_string: Optional[str],
+    new_string: Optional[str],
+) -> Optional[str]:
+    """Reject structurally invalid mutations before they enter the queue."""
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    error = _validate_name(name)
+    if error:
+        return error
+    if action in {"create", "edit"}:
+        if not content:
+            return f"content is required for '{action}'. Provide the full SKILL.md text."
+        error = _validate_frontmatter(content) or _validate_content_size(content)
+        if error:
+            return error
+    if action == "create":
+        error = _validate_category(category)
+        if error:
+            return error
+    if action == "patch":
+        if not old_string:
+            return "old_string is required for 'patch'. Provide the text to find."
+        if new_string is None:
+            return "new_string is required for 'patch'. Use empty string to delete matched text."
+        if file_path:
+            error = _validate_file_path(file_path)
+            if error:
+                return error
+    if action == "write_file":
+        if not file_path:
+            return "file_path is required for 'write_file'. Example: 'references/api-guide.md'"
+        if file_content is None:
+            return "file_content is required for 'write_file'."
+        error = _validate_file_path(file_path)
+        if error:
+            return error
+    if action == "remove_file":
+        if not file_path:
+            return "file_path is required for 'remove_file'."
+        error = _validate_file_path(file_path)
+        if error:
+            return error
+    return None
+
+
+def _apply_skill_write_gate(action, name, **payload_kwargs):
+    """Evaluate the skill write gate before any persistent mutation.
+
+    Returns a JSON tool-result string when the write is staged or blocked, or
+    ``None`` when the caller may perform the real write. Approved pending
+    records bypass the gate exactly once through ``_skill_gate_bypass``.
+    """
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    if _skill_gate_bypass.get():
+        return None
+
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        logger.exception("skill write-approval module unavailable; preserving legacy write behavior")
+        return None
+
+    decision = wa.evaluate_gate(wa.SKILLS)
+    if decision.allow:
+        return None
+    if decision.blocked:
+        return tool_error(decision.message, success=False)
+
+    payload = {"action": action, "name": name}
+    payload.update({key: value for key, value in payload_kwargs.items() if value is not None})
+    gist = wa.skill_gist(
+        action,
+        name,
+        content=payload_kwargs.get("content") or "",
+        file_path=payload_kwargs.get("file_path") or "",
+        old_string=payload_kwargs.get("old_string") or "",
+        new_string=payload_kwargs.get("new_string") or "",
+    )
+    try:
+        record = wa.stage_write(
+            wa.SKILLS,
+            payload,
+            summary=gist,
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Skill write was not saved: approval staging failed ({exc}).",
+            success=False,
+        )
+    return json.dumps(
+        {
+            "success": True,
+            "staged": True,
+            "pending_id": record["id"],
+            "gist": gist,
+            "message": decision.message,
+        },
+        ensure_ascii=False,
+    )
+
+
+def apply_skill_pending(payload: Dict[str, Any]) -> str:
+    """Replay one approved skill write without staging it again."""
+    token = _skill_gate_bypass.set(True)
+    try:
+        return skill_manage(
+            action=payload.get("action", ""),
+            name=payload.get("name", ""),
+            content=payload.get("content"),
+            category=payload.get("category"),
+            file_path=payload.get("file_path"),
+            file_content=payload.get("file_content"),
+            old_string=payload.get("old_string"),
+            new_string=payload.get("new_string"),
+            replace_all=payload.get("replace_all", False),
+            absorbed_into=payload.get("absorbed_into"),
+        )
+    finally:
+        _skill_gate_bypass.reset(token)
+
 def skill_manage(
     action: str,
     name: str,
@@ -1078,6 +1215,38 @@ def skill_manage(
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)
+
+    validation_error = _validate_skill_write_request(
+        action,
+        name,
+        content=content,
+        category=category,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+    )
+    if validation_error:
+        return tool_error(validation_error, success=False)
+
+    # Stage structurally valid persistent mutations when approval is enabled.
+    # The action helpers intentionally validate again during approval replay so
+    # state drift (deleted target, changed patch context, new name collision)
+    # fails closed instead of applying against assumptions from staging time.
+    gate_result = _apply_skill_write_gate(
+        action,
+        name,
+        content=content,
+        category=category,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        absorbed_into=absorbed_into,
+    )
+    if gate_result is not None:
+        return gate_result
 
     if action == "create":
         if not content:

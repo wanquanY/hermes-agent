@@ -69,7 +69,8 @@ class TestKimiProfileParity:
             provider_profile=get_provider_profile("kimi"),
             reasoning_config=rc,
         )
-        assert profile["extra_body"]["thinking"] == legacy["extra_body"]["thinking"]
+        assert "thinking" not in profile.get("extra_body", {})
+        assert "thinking" not in legacy.get("extra_body", {})
         assert profile["reasoning_effort"] == legacy["reasoning_effort"] == "high"
 
     def test_thinking_disabled(self, transport):
@@ -88,7 +89,7 @@ class TestKimiProfileParity:
         assert "reasoning_effort" not in profile
         assert "reasoning_effort" not in legacy
 
-    def test_reasoning_effort_default(self, transport):
+    def test_enabled_without_effort_uses_server_selected_thinking(self, transport):
         rc = {"enabled": True}
         legacy = transport.build_kwargs(
             model="kimi-k2", messages=_msgs(), tools=None,
@@ -99,18 +100,22 @@ class TestKimiProfileParity:
             provider_profile=get_provider_profile("kimi"),
             reasoning_config=rc,
         )
-        assert profile["reasoning_effort"] == legacy["reasoning_effort"] == "medium"
+        assert profile["extra_body"]["thinking"] == legacy["extra_body"]["thinking"] == {
+            "type": "enabled"
+        }
+        assert "reasoning_effort" not in profile
+        assert "reasoning_effort" not in legacy
 
 
 class TestOpenRouterProfileParity:
     def test_provider_preferences(self, transport):
         prefs = {"allow": ["anthropic"]}
         legacy = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"), provider_preferences=prefs,
         )
         profile = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"),
             provider_preferences=prefs,
         )
@@ -119,11 +124,11 @@ class TestOpenRouterProfileParity:
     def test_reasoning_full_config(self, transport):
         rc = {"enabled": True, "effort": "high"}
         legacy = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"), supports_reasoning=True, reasoning_config=rc,
         )
         profile = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"),
             supports_reasoning=True, reasoning_config=rc,
         )
@@ -131,11 +136,11 @@ class TestOpenRouterProfileParity:
 
     def test_default_reasoning(self, transport):
         legacy = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"), supports_reasoning=True,
         )
         profile = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6", messages=_msgs(), tools=None,
+            model="deepseek/deepseek-chat", messages=_msgs(), tools=None,
             provider_profile=get_provider_profile("openrouter"),
             supports_reasoning=True,
         )

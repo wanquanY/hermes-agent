@@ -104,10 +104,10 @@ async def wait_for_wakeup_or_timeout(
 
     wake_task = asyncio.create_task(wakeup.wait())
     stop_task = asyncio.create_task(shutdown.wait())
+    deadline_task = asyncio.create_task(asyncio.sleep(max(float(timeout), 0.0)))
     try:
         done, _ = await asyncio.wait(
-            {wake_task, stop_task},
-            timeout=max(float(timeout), 0.0),
+            {wake_task, stop_task, deadline_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         if stop_task in done and shutdown.is_set():
@@ -119,3 +119,4 @@ async def wait_for_wakeup_or_timeout(
     finally:
         await cancel_and_drain(wake_task)
         await cancel_and_drain(stop_task)
+        await cancel_and_drain(deadline_task)

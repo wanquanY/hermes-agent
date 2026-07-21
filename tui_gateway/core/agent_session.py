@@ -164,15 +164,67 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
 
 
 def _agent_cbs(sid: str) -> dict:
-    return _tool_event_bridge().agent_callbacks(
+    callbacks = _tool_event_bridge().agent_callbacks(
         sid,
         block=_block,
         status_update=_status_update,
     )
+    if _server._load_interim_assistant_messages():
+        callbacks["interim_assistant_callback"] = (
+            lambda text, *, already_streamed=False: _server._emit(
+                "message.interim",
+                sid,
+                {
+                    "text": str(text),
+                    "already_streamed": bool(already_streamed),
+                },
+            )
+        )
+    return callbacks
 
 
 def _wire_callbacks(sid: str):
     wire_secret_callbacks(sid, block=_block)
+    from tools.project_tools import set_project_workspace_callback
+
+    set_project_workspace_callback(_apply_project_workspace)
+
+
+def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
+    """Move a live GUI session after an intentional project tool action."""
+    key = str(task_id or "")
+    sid = ""
+    session = None
+    with _sessions_lock:
+        if key in _sessions:
+            sid, session = key, _sessions[key]
+        else:
+            for candidate_sid, candidate in _sessions.items():
+                agent = candidate.get("agent")
+                if (
+                    candidate.get("session_key") == key
+                    or getattr(agent, "session_id", None) == key
+                ):
+                    sid, session = candidate_sid, candidate
+                    break
+    if session is None:
+        return
+    try:
+        resolved = _set_session_cwd(session, path)
+        agent = session.get("agent")
+        info = (
+            _session_info(agent, session)
+            if agent is not None
+            else {
+                "cwd": resolved,
+                "branch": _git_branch_for_cwd(resolved),
+                "project": session.get("project"),
+                "lazy": True,
+            }
+        )
+        _emit("session.info", sid, info)
+    except (OSError, ValueError):
+        logger.debug("project workspace move rejected", exc_info=True)
 
 
 def _render_personality_prompt(value) -> str:
@@ -328,21 +380,28 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
-    old_agent = session.get("agent")
-    reasoning_override = getattr(old_agent, "reasoning_config", None)
-    if reasoning_override is None:
-        reasoning_override = session.get("create_reasoning_override")
-    service_tier_override = getattr(old_agent, "service_tier", None)
-    if service_tier_override is None:
-        service_tier_override = session.get("create_service_tier_override")
+    from tui_gateway.services.pending_prompt_queue import (
+        pending_prompt_queue,
+        queue_scope_for_db,
+    )
+
+    conversation_session_id = str(session.get("session_key") or sid).strip()
+    pending_prompt_queue.clear(
+        queue_scope_for_db(_db_for_stable_session(conversation_session_id)),
+        conversation_session_id,
+    )
     tokens = _set_session_context(session["session_key"])
     try:
+        # /new is a conversation boundary. Runtime pins belong to the old
+        # conversation and the fresh agent must re-derive durable defaults.
+        session.pop("model_override", None)
+        session.pop("create_reasoning_override", None)
+        session.pop("create_service_tier_override", None)
+        session.pop("one_turn_model_restore", None)
         new_agent = _make_agent(
             sid,
             session["session_key"],
             session_id=session["session_key"],
-            reasoning_config_override=reasoning_override,
-            service_tier_override=service_tier_override,
         )
     finally:
         _clear_session_context(tokens)
@@ -450,6 +509,31 @@ def _make_agent(
     reasoning_config_override: dict | None = None,
     service_tier_override: str | None = None,
 ):
+    from tui_gateway.synthetic_turn import maybe_build_synthetic_agent
+
+    synthetic = maybe_build_synthetic_agent(
+        session_id or key,
+        model_override=model_override,
+    )
+    if synthetic is not None:
+        return synthetic
+
+    # Let fast MCP servers land before AIAgent snapshots the tool registry.
+    # This is bounded by config; slow servers are handled by late refresh.
+    try:
+        from hermes_cli.mcp_startup import wait_for_mcp_discovery
+
+        wait_for_mcp_discovery()
+    except Exception:
+        pass
+    # Legacy embedders may still publish an entry-local discovery thread.
+    try:
+        from tui_gateway.entry import wait_for_mcp_discovery as wait_for_legacy_mcp
+
+        wait_for_legacy_mcp()
+    except Exception:
+        pass
+
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from tui_gateway.services.runtime_credentials import remember_requested_runtime_provider
@@ -719,7 +803,7 @@ def _make_agent(
             else _load_reasoning_config()
         ),
         service_tier=(
-            service_tier_override
+            (None if service_tier_override == "" else service_tier_override)
             if service_tier_override is not None
             else _load_service_tier()
         ),
@@ -748,6 +832,12 @@ def _make_agent(
             model if _codex_account_mode == "platform" and _model_explicit else ""
         )
     remember_requested_runtime_provider(agent, runtime, requested_provider)
+    try:
+        from agent.credits_tracker import seed_credits_at_session_start
+
+        seed_credits_at_session_start(agent)
+    except Exception:
+        logger.debug("credits session-start seed failed open", exc_info=True)
     return agent
 
 

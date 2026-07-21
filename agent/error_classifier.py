@@ -206,6 +206,17 @@ _CONTEXT_OVERFLOW_PATTERNS = [
     "exceeds the maximum number of input tokens",
 ]
 
+# Provider advisories for an empty generation frequently mention
+# ``max_tokens`` as one possible cause. Match them before the bare overflow
+# token above can route a transient response into a compression loop.
+_EMPTY_PROVIDER_RESPONSE_PATTERNS = [
+    "returned an empty response",
+    "empty response despite retries",
+    "provider returned an empty response",
+    "model returning empty responses",
+    "empty response stream",
+]
+
 # Model not found patterns
 _MODEL_NOT_FOUND_PATTERNS = [
     "is not a valid model",
@@ -623,6 +634,15 @@ def classify_api_error(
 
     is_disconnect = any(p in error_msg for p in _SERVER_DISCONNECT_PATTERNS)
     if is_disconnect and not status_code:
+        # Long-reasoning models routinely stay silent past upstream proxy idle
+        # windows.  A transport disconnect for one of these families is a
+        # timeout even when the session is large; compressing here would delete
+        # context in response to a network-layer failure.
+        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+
+        if get_reasoning_stale_timeout_floor(model) is not None:
+            return _result(FailoverReason.timeout, retryable=True)
+
         # Absolute token/message-count thresholds are only a proxy for smaller
         # context windows.  Large-context sessions can have hundreds of
         # messages while still being far below their actual token budget.
@@ -752,9 +772,21 @@ def _classify_by_status(
         )
 
     if status_code in {500, 502}:
+        if any(p in error_msg for p in _EMPTY_PROVIDER_RESPONSE_PATTERNS):
+            return result_fn(
+                FailoverReason.server_error,
+                retryable=True,
+                should_compress=False,
+            )
         return result_fn(FailoverReason.server_error, retryable=True)
 
     if status_code in {503, 529}:
+        if any(p in error_msg for p in _EMPTY_PROVIDER_RESPONSE_PATTERNS):
+            return result_fn(
+                FailoverReason.server_error,
+                retryable=True,
+                should_compress=False,
+            )
         return result_fn(FailoverReason.overloaded, retryable=True)
 
     # Other 4xx — non-retryable
@@ -870,6 +902,13 @@ def _classify_400(
             FailoverReason.format_error,
             retryable=False,
             should_fallback=True,
+        )
+
+    if any(p in error_msg for p in _EMPTY_PROVIDER_RESPONSE_PATTERNS):
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_compress=False,
         )
 
     # Context overflow from 400
@@ -1055,6 +1094,13 @@ def _classify_by_message(
             retryable=True,
             should_rotate_credential=True,
             should_fallback=True,
+        )
+
+    if any(p in error_msg for p in _EMPTY_PROVIDER_RESPONSE_PATTERNS):
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_compress=False,
         )
 
     # Context overflow patterns

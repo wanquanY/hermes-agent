@@ -1,10 +1,8 @@
 # ruff: noqa: F401,F403,F405,F821,ARG001
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import sys
 import time
 import uuid
 from typing import Any
@@ -14,8 +12,25 @@ from hermes_runtime_event_payloads import terminal_text_metadata
 from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
-from tui_gateway.services.prompt_attachments import submitted_attachments as _normalize_submitted_attachments
-from tui_gateway.services.prompt_attachments import submitted_image_paths as _normalize_submitted_image_paths
+from tui_gateway.methods.prompt_persistence import (
+    commit_scope_summary_after_compression as _commit_scope_summary_after_compression,
+    latest_assistant_message_id_for_turn as _latest_assistant_message_id_for_turn,
+    persist_prompt_user_turn,
+)
+from tui_gateway.methods.prompt_support import (
+    MessageDeltaNormalizer as _MessageDeltaNormalizer,
+    apply_dovie_product_runtime_policy as _apply_dovie_product_runtime_policy,
+    attachment_path_helpers as _attachment_path_helpers,
+    payload_text as _payload_text,
+    prompt_terminal_status_from_result as _prompt_terminal_status_from_result,
+    submitted_attachments as _submitted_attachments,
+    submitted_image_paths as _submitted_image_paths,
+    text_probe as _text_probe,
+    turn_identity as _turn_identity,
+    turn_matches as _turn_matches,
+    turn_reasoning_config as _turn_reasoning_config,
+    worker_bootstrap_model_is_preselected as _worker_bootstrap_model_is_preselected,
+)
 from tui_gateway.services.prompt_image_routing import build_image_aware_run_message
 from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
 from tui_gateway.services.toolset_scope import ensure_session_turn_toolsets
@@ -25,31 +40,6 @@ _server = bind_server_globals(globals())
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
-
-
-def _attachment_path_helpers():
-    from tui_gateway.services.attachment_paths import (
-        IMAGE_EXTENSIONS,
-        detect_file_drop,
-        resolve_attachment_path,
-        split_path_input,
-    )
-
-    cli_mod = sys.modules.get("cli")
-    if cli_mod is not None:
-        return (
-            getattr(cli_mod, "_IMAGE_EXTENSIONS", IMAGE_EXTENSIONS),
-            getattr(cli_mod, "_detect_file_drop", detect_file_drop),
-            getattr(cli_mod, "_resolve_attachment_path", resolve_attachment_path),
-            getattr(cli_mod, "_split_path_input", split_path_input),
-        )
-
-    return (
-        IMAGE_EXTENSIONS,
-        detect_file_drop,
-        resolve_attachment_path,
-        split_path_input,
-    )
 
 
 def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> None:
@@ -75,83 +65,12 @@ def _log_prompt_stage(session: dict, sid: str, stage: str, **fields: Any) -> Non
     emit_dovie_diagnostic("[dovie-prompt-stage]", pairs)
 
 
-def _text_probe(value: Any) -> dict[str, Any]:
-    text = str(value or "")
-    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
-    return {
-        "len": len(text),
-        "sha1": digest,
-        "preview": text[:80].replace("\n", "\\n"),
-    }
-
-
-def _payload_text(payload: dict | None) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    for key in ("delta", "text", "snapshot", "output", "message"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            return value
-    return ""
-
-
-def _apply_dovie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
-    if agent is None or not isinstance(raw_context, dict):
-        return
-    team_mission = raw_context.get("team_mission") or raw_context.get("teamMission")
-    team_mission = team_mission if isinstance(team_mission, dict) else {}
-    setattr(
-        agent,
-        "_delegate_inherits_parent_tools",
-        bool(team_mission.get("delegate_inherits_parent_tools") or team_mission.get("delegateInheritsParentTools")),
-    )
-
-
-def _prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
-    if result.get("interrupted"):
-        return "interrupted"
-    error = str(result.get("error") or "").strip()
-    if not error:
-        return "complete"
-    raw_text = str(raw or "").strip()
-    if not raw_text:
-        return "error"
-    if bool(result.get("failed")) and raw_text.lower().startswith(("error:", "failed:", "exception:")):
-        return "error"
-    return "complete"
-
-
-def _worker_bootstrap_model_is_preselected(
-    session: dict,
-    requested_model: str,
-    _model_descriptor: dict,
-) -> bool:
-    """Return whether the control plane already selected this worker model.
-
-    ``RunStartFrame`` materialization stores the turn's explicit model in the
-    worker session before ``prompt.submit`` runs.  Replaying that selection
-    through the interactive ``/model`` pipeline is both redundant and wrong:
-    it performs synchronous provider discovery before the agent even exists.
-    The override is materialized from the same immutable RunStartFrame as the
-    prompt request, so an exact model match is the authority boundary.  A
-    descriptor enriches reasoning/context semantics when present, but must not
-    be required: internal team and restored-session runs can legitimately omit
-    it, and routing those runs through interactive ``/model`` validation makes
-    first-token delivery depend on a relay exposing a reachable ``/models``.
-    """
-    from tui_gateway.process_role import is_worker_process
-
-    if not is_worker_process() or session.get("agent") is not None:
-        return False
-    override = session.get("model_override")
-    if not isinstance(override, dict):
-        return False
-    override_model = str(override.get("model") or "").strip()
-    return bool(
-        requested_model
-        and override_model == requested_model
-        and bool(override.get("model_explicit"))
-    )
+def _persist_prompt_user_turn(**kwargs: Any) -> None:
+    """Bind gateway-owned dependencies to the persistence service."""
+    kwargs.setdefault("db_for_stable_session", _db_for_stable_session)
+    kwargs.setdefault("log_prompt_stage", _log_prompt_stage)
+    kwargs.setdefault("logger", logger)
+    persist_prompt_user_turn(**kwargs)
 
 
 def _apply_prompt_model_selection(
@@ -284,196 +203,6 @@ def _fail_unavailable_runtime_agent(
             turn_id=turn_id,
             message=message,
         )
-
-
-def _persist_prompt_user_turn(
-    *,
-    sid: str,
-    session: dict,
-    conversation_session_id: str,
-    runtime_scope_key: str,
-    run_id: str,
-    turn_id: str,
-    client_message_id: str,
-    text: Any,
-    persist_user_message: str,
-    user_message_persistence: str,
-    attachments: list[dict],
-    draft_text: str,
-    model: str,
-    model_descriptor: dict,
-    dovie_product_context: str,
-) -> None:
-    if session.get("transient"):
-        return
-    if str(user_message_persistence or "").strip().lower() == "external":
-        # A control-plane writer already committed the canonical visible user
-        # event for this run/turn. The execution runtime consumes the input but
-        # is not a second transcript owner.
-        return
-    canonical_session_id = str(conversation_session_id or "").strip()
-    if not canonical_session_id or not run_id or not turn_id:
-        return
-    content = str(persist_user_message or text or "")
-    if not content.strip() and not attachments:
-        return
-    db = _db_for_stable_session(canonical_session_id)
-    if db is None:
-        _log_prompt_stage(
-            session,
-            sid,
-            "user-persist-skipped",
-            run_id=run_id,
-            turn_id=turn_id,
-            reason="db-unavailable",
-        )
-        return
-    try:
-        if db.sessions.get(canonical_session_id) is None:
-            db.sessions.create(canonical_session_id, source="tui", transient=False)
-    except Exception as exc:
-        logger.warning(
-            "prompt.submit user turn session ensure failed sid=%s conversation_session_id=%s: %s",
-            sid,
-            canonical_session_id,
-            exc,
-            exc_info=True,
-        )
-    metadata: dict[str, Any] = {
-        "run_id": run_id,
-        "turn_id": turn_id,
-        "participant_id": "user",
-        "participantId": "user",
-        "turn_message_index": 0,
-        "persist_message_key": f"run:{run_id}|turn:{turn_id}|idx:0",
-        "runtime_scope_key": runtime_scope_key or canonical_session_id,
-        "conversation_session_id": canonical_session_id,
-        "prompt_submit_owned": True,
-    }
-    if client_message_id:
-        metadata["client_message_id"] = client_message_id
-    if attachments:
-        metadata["attachments"] = attachments
-    if draft_text:
-        metadata["draft_text"] = draft_text
-    if model:
-        metadata["model"] = model
-    if model_descriptor:
-        metadata["model_descriptor"] = model_descriptor
-    if dovie_product_context:
-        metadata["dovie_product_context"] = dovie_product_context
-    try:
-        message_id = db.messages.append(
-            session_id=canonical_session_id,
-            role="user",
-            content=content,
-            participant_id="user",
-            metadata=metadata,
-        )
-        _log_prompt_stage(
-            session,
-            sid,
-            "user-persisted",
-            run_id=run_id,
-            turn_id=turn_id,
-            message_id=message_id,
-            content_len=len(content),
-            client_message_id=client_message_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "prompt.submit user turn persistence failed sid=%s conversation_session_id=%s run_id=%s turn_id=%s: %s",
-            sid,
-            canonical_session_id,
-            run_id,
-            turn_id,
-            exc,
-            exc_info=True,
-        )
-        _log_prompt_stage(
-            session,
-            sid,
-            "user-persist-failed",
-            run_id=run_id,
-            turn_id=turn_id,
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
-
-
-class _MessageDeltaNormalizer:
-    """Normalizes agent stream callbacks into explicit Gateway text events.
-
-    The Gateway ABI is append-only for string stream callbacks.  Earlier
-    versions tried to infer cumulative/snapshot callbacks from text content,
-    but that is not a valid protocol: legitimate chunks can share a prefix with
-    prior output (for example later markdown labels beginning with the same
-    Chinese word as the response).  Any producer that needs snapshot semantics
-    must send an explicit structured callback instead of a bare string.
-    """
-
-    def __init__(self) -> None:
-        self.text = ""
-
-    @staticmethod
-    def _structured_value(value) -> dict:
-        if not isinstance(value, dict):
-            return {}
-        return value
-
-    @staticmethod
-    def _protocol_offset(value: str) -> int:
-        return len(str(value or "").encode("utf-16-le")) // 2
-
-    def feed(self, value) -> dict | None:
-        if value is None:
-            return None
-        structured = self._structured_value(value)
-        mode = str(structured.get("mode") or "").strip().lower()
-        if structured:
-            raw_value = structured.get("delta") or structured.get("text") or structured.get("output")
-        else:
-            raw_value = value
-        incoming = str(raw_value or "")
-        if not incoming:
-            return None
-        if mode in {"snapshot", "replace", "cumulative"}:
-            return self.feed_snapshot(incoming)
-        current = self.text
-        offset = self._protocol_offset(self.text)
-        self.text = current + incoming
-        return {
-            "mode": "append",
-            "text": incoming,
-            "delta": incoming,
-            "offset": offset,
-        }
-
-    def feed_snapshot(self, value: str) -> dict | None:
-        snapshot = str(value or "")
-        if not snapshot:
-            return None
-        if snapshot == self.text:
-            return None
-        if not snapshot.startswith(self.text):
-            return None
-        delta = snapshot[len(self.text):]
-        if not delta:
-            return None
-        offset = self._protocol_offset(self.text)
-        self.text = snapshot
-        return {
-            "mode": "append",
-            "text": delta,
-            "delta": delta,
-            "offset": offset,
-        }
-
-    def reconcile_final_text(self, value: str) -> dict | None:
-        return self.feed_snapshot(str(value or ""))
-
-    def reset(self) -> None:
-        self.text = ""
 
 
 @method("prompt.submit")
@@ -684,6 +413,9 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 model=requested_model,
                 model_descriptor=model_descriptor,
                 dovie_product_context=dovie_product_context,
+                db_for_stable_session=_db_for_stable_session,
+                log_prompt_stage=_log_prompt_stage,
+                logger=logger,
             )
 
     if requested_model:
@@ -836,129 +568,6 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
             "runtime_scope_key": effective_runtime_scope_key,
         },
     )
-
-
-def _submitted_attachments(params: dict) -> list[dict]:
-    return _normalize_submitted_attachments(params)
-
-
-def _submitted_image_paths(params: dict) -> list[str]:
-    return _normalize_submitted_image_paths(params)
-
-
-def _turn_reasoning_config(params: dict) -> dict | None:
-    raw = params.get("reasoning_config")
-    if raw is None:
-        raw = params.get("reasoningConfig")
-    if not isinstance(raw, dict):
-        return None
-    config = dict(raw)
-    if config.get("enabled") is False:
-        return {"enabled": False}
-    effort = str(config.get("effort") or "").strip()
-    if effort:
-        return {"effort": effort}
-    return config or None
-
-
-def _turn_identity(metadata: dict | None) -> dict:
-    metadata = metadata if isinstance(metadata, dict) else {}
-    return {
-        key: str(metadata.get(key) or "").strip()
-        for key in ("run_id", "turn_id", "client_message_id")
-        if str(metadata.get(key) or "").strip()
-    }
-
-
-def _turn_matches(candidate: dict, target: dict) -> bool:
-    if not candidate or not target:
-        return False
-    return any(
-        candidate.get(key) and target.get(key) and candidate.get(key) == target.get(key)
-        for key in ("run_id", "turn_id", "client_message_id")
-    )
-
-
-def _latest_assistant_message_id_for_turn(session_id: str, turn_metadata: dict | None) -> str:
-    target = _turn_identity(turn_metadata)
-    if not session_id or not target:
-        return ""
-    db = _db_for_stable_session(session_id)
-    if db is None:
-        return ""
-    try:
-        messages = db.messages.all_as_conversation(
-            session_id,
-            include_ancestors=False,
-            include_storage_metadata=True,
-        )
-    except Exception:
-        return ""
-
-    active_turn: dict = {}
-    latest_message_id = ""
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "")
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        if role == "user":
-            active_turn = _turn_identity(metadata)
-            continue
-        if role != "assistant":
-            continue
-        message_turn = _turn_identity(metadata) or active_turn
-        if _turn_matches(message_turn, target):
-            latest_message_id = str(message.get("message_id") or "").strip()
-    return latest_message_id
-
-
-def _commit_scope_summary_after_compression(
-    *,
-    session: dict,
-    history: list[dict],
-) -> None:
-    run_context = session.get("run_context")
-    if run_context is None:
-        return
-    conversation_session_id = str(
-        getattr(run_context, "conversation_session_id", "") or ""
-    ).strip()
-    snapshot_id = str(
-        getattr(run_context, "activity_context_snapshot_id", "")
-        or getattr(run_context, "context_snapshot_id", "")
-        or ""
-    ).strip()
-    if not conversation_session_id or not snapshot_id:
-        return
-    try:
-        db = _db_for_stable_session(conversation_session_id)
-        memory_service = getattr(db, "conversation_memory", None) if db is not None else None
-        if memory_service is None:
-            return
-        from hermes_agent.domain.context_compaction import (
-            ContextCompactionService,
-            ContextScope,
-        )
-
-        ContextCompactionService(memory_service).checkpoint(
-            ContextScope.from_run_context(run_context),
-            history,
-        )
-    except RuntimeError as exc:
-        logger.info(
-            "context summary CAS lost conversation=%s participant=%s: %s",
-            conversation_session_id,
-            str(getattr(run_context, "participant_id", "") or ""),
-            exc,
-        )
-    except Exception:
-        logger.warning(
-            "context summary commit failed conversation=%s participant=%s",
-            conversation_session_id,
-            str(getattr(run_context, "participant_id", "") or ""),
-            exc_info=True,
-        )
 
 
 def _run_prompt_submit(
@@ -1327,6 +936,10 @@ def _run_prompt_submit(
         goal_followup = None  # set by the post-turn goal hook below
         post_turn_history = list(history)
         terminal_attempted = False
+        one_turn_model_restore = session.pop(
+            _ONE_TURN_MODEL_RESTORE_KEY,
+            None,
+        )
         try:
             _log_prompt_stage(
                 session,
@@ -1569,6 +1182,25 @@ def _run_prompt_submit(
                         part for part in (base_system_context, turn_system_context) if part
                     )
                 agent.reasoning_callback = _emit_reasoning_delta
+                if _server._load_interim_assistant_messages():
+                    def _interim_assistant_callback(
+                        commentary: str,
+                        *,
+                        already_streamed: bool = False,
+                    ) -> None:
+                        _emit(
+                            "message.interim",
+                            sid,
+                            {
+                                "text": str(commentary),
+                                "already_streamed": bool(already_streamed),
+                                **current_message_identity_payload(),
+                            },
+                        )
+
+                    agent.interim_assistant_callback = _interim_assistant_callback
+                else:
+                    agent.interim_assistant_callback = None
                 _log_prompt_stage(
                     session,
                     sid,
@@ -1651,6 +1283,9 @@ def _run_prompt_submit(
                     },
                 )
             finally:
+                # The agent is cached across turns; never retain a closure tied
+                # to this turn's run/message identity.
+                agent.interim_assistant_callback = None
                 if "previous_stream_text_boundary_callback" in locals():
                     if previous_stream_text_boundary_callback is active_context_missing:
                         session.pop("stream_text_boundary_callback", None)
@@ -1767,6 +1402,9 @@ def _run_prompt_submit(
                 interrupt_message_id = _latest_assistant_message_id_for_turn(
                     str(session.get("session_key") or sid),
                     turn_metadata,
+                    db_for_stable_session=_db_for_stable_session,
+                    turn_identity=_turn_identity,
+                    turn_matches=_turn_matches,
                 )
                 if interrupt_message_id:
                     interrupt_payload["message_id"] = interrupt_message_id
@@ -1789,6 +1427,8 @@ def _run_prompt_submit(
                     _commit_scope_summary_after_compression(
                         session=session,
                         history=[item for item in history if isinstance(item, dict)],
+                        db_for_stable_session=_db_for_stable_session,
+                        logger=logger,
                     )
                 if isinstance(result.get("messages"), list):
                     with session["history_lock"]:
@@ -1922,9 +1562,14 @@ def _run_prompt_submit(
                 payload["nonfatal_error"] = str(result.get("error") or "").strip()
             if status_note:
                 payload["warning"] = status_note
+            if isinstance(result, dict) and result.get("response_previewed"):
+                payload["response_previewed"] = True
             message_id = _latest_assistant_message_id_for_turn(
                 str(session.get("session_key") or sid),
                 turn_metadata,
+                db_for_stable_session=_db_for_stable_session,
+                turn_identity=_turn_identity,
+                turn_matches=_turn_matches,
             )
             if message_id:
                 payload["message_id"] = message_id
@@ -2061,6 +1706,21 @@ def _run_prompt_submit(
             _emit("error", sid, {"message": str(e)})
             terminal_attempted = True
         finally:
+            if one_turn_model_restore:
+                try:
+                    _restore_session_model_runtime(
+                        session,
+                        one_turn_model_restore,
+                    )
+                    _call_restart_slash_worker(sid, session)
+                    _persist_live_session_runtime(session)
+                    _persist_live_session_system_prompt(session)
+                    _emit("session.info", sid, _session_info(agent, session))
+                except Exception:
+                    logger.debug(
+                        "TUI one-turn model restore failed",
+                        exc_info=True,
+                    )
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
@@ -2079,6 +1739,17 @@ def _run_prompt_submit(
                 terminalize_if_still_active("prompt worker exited before terminal event was emitted")
             else:
                 terminalize_if_still_active("prompt worker terminal event did not close active run")
+
+        # Accepted user work has priority over automatic goal continuations.
+        # Re-enter through run.submit so the queued turn receives a fresh
+        # control-plane reservation and retains its original typed payload.
+        from tui_gateway.methods.run import schedule_pending_prompt_drain
+
+        if schedule_pending_prompt_drain(
+            str(session.get("session_key") or sid),
+            db=_db_for_stable_session(str(session.get("session_key") or sid)),
+        ):
+            return
 
         # Chain a goal-continuation turn if the judge said so. We do
         # this AFTER the finally releases session["running"], so the

@@ -19,9 +19,23 @@ except ImportError:  # pragma: no cover - optional dependency gate
 from channels.platforms.api_server_support import (
     _coerce_request_bool,
     _openai_error,
+    _redact_api_error_text,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _approval_event_choices(
+    *,
+    smart_denied: bool,
+    allow_permanent: bool,
+) -> tuple[str, ...]:
+    """Return the only approval choices valid for the pending request."""
+    if smart_denied:
+        return ("once", "deny")
+    if allow_permanent:
+        return ("once", "session", "always", "deny")
+    return ("once", "session", "deny")
 
 
 class APIServerRunsMixin:
@@ -58,7 +72,12 @@ class APIServerRunsMixin:
             if q is None:
                 return
             try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
+                loop.call_soon_threadsafe(
+                    self._put_run_event_if_active,
+                    run_id,
+                    q,
+                    event,
+                )
             except Exception:
                 pass
 
@@ -91,6 +110,16 @@ class APIServerRunsMixin:
             # _thinking and subagent_progress are intentionally not forwarded
 
         return _callback
+
+    def _put_run_event_if_active(
+        self,
+        run_id: str,
+        queue: "asyncio.Queue[Optional[Dict]]",
+        event: Optional[Dict],
+    ) -> None:
+        """Publish only while the run still owns its bounded transport."""
+        if self._run_streams.get(run_id) is queue:
+            queue.put_nowait(event)
 
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs — start an agent run, return run_id immediately."""
@@ -171,7 +200,9 @@ class APIServerRunsMixin:
 
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or conversation_session_id or run_id
-        approval_session_key = gateway_session_key or session_id or run_id
+        # Approval queues authorize host-side operations and therefore belong
+        # to one execution, not a reusable conversation or memory scope.
+        approval_session_key = run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
@@ -186,7 +217,7 @@ class APIServerRunsMixin:
                     error="runtime drain timeout",
                     last_event="run.cancelled",
                 )
-                q.put_nowait({
+                self._put_run_event_if_active(run_id, q, {
                     "event": "run.cancelled",
                     "run_id": run_id,
                     "timestamp": time.time(),
@@ -196,15 +227,13 @@ class APIServerRunsMixin:
             loop.call_soon_threadsafe(_persist)
 
         def _cancel_run_for_drain() -> None:
+            self._stopping_run_ids.add(run_id)
             agent = run_control.get("agent")
             if agent is not None:
                 try:
                     agent.interrupt("API runtime drain timeout")
                 except Exception:
                     logger.debug("run %s drain interrupt failed", run_id, exc_info=True)
-            task = run_control.get("task")
-            if task is not None and not task.done():
-                loop.call_soon_threadsafe(task.cancel)
 
         try:
             work_lease = self._active_work_registry.register(
@@ -232,12 +261,17 @@ class APIServerRunsMixin:
             if delta is None:
                 return
             try:
-                loop.call_soon_threadsafe(q.put_nowait, {
-                    "event": "message.delta",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "delta": delta,
-                })
+                loop.call_soon_threadsafe(
+                    self._put_run_event_if_active,
+                    run_id,
+                    q,
+                    {
+                        "event": "message.delta",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "delta": delta,
+                    },
+                )
             except Exception:
                 pass
 
@@ -248,17 +282,33 @@ class APIServerRunsMixin:
             session_id=session_id,
             model=body.get("model", self._model_name),
         )
+        route = self._resolve_route(body.get("model"))
+        request_profile = self._request_profile()
 
         async def _run_and_close():
             try:
                 self._set_run_status(run_id, "running")
-                agent = self._create_agent(
-                    ephemeral_system_prompt=ephemeral_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_text_cb,
-                    tool_progress_callback=event_cb,
-                    gateway_session_key=gateway_session_key,
-                )
+                if run_id in self._stopping_run_ids:
+                    self._put_run_event_if_active(run_id, q, {
+                        "event": "run.cancelled",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                    })
+                    self._set_run_status(
+                        run_id,
+                        "cancelled",
+                        last_event="run.cancelled",
+                    )
+                    return
+                with self._profile_scope(request_profile):
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=ephemeral_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_text_cb,
+                        tool_progress_callback=event_cb,
+                        gateway_session_key=gateway_session_key,
+                        route=route,
+                    )
                 self._active_run_agents[run_id] = agent
                 run_control["agent"] = agent
 
@@ -268,11 +318,16 @@ class APIServerRunsMixin:
                         from hermes_agent.gateway.runtime_config import redact_approval_command
 
                         event["command"] = redact_approval_command(event.get("command"))
+                    choices = _approval_event_choices(
+                        smart_denied=bool(event.get("smart_denied")),
+                        allow_permanent=event.get("allow_permanent") is not False,
+                    )
+                    self._run_approval_choices[run_id] = choices
                     event.update({
                         "event": "approval.request",
                         "run_id": run_id,
                         "timestamp": time.time(),
-                        "choices": ["once", "session", "always", "deny"],
+                        "choices": list(choices),
                     })
                     self._set_run_status(
                         run_id,
@@ -280,7 +335,12 @@ class APIServerRunsMixin:
                         last_event="approval.request",
                     )
                     try:
-                        loop.call_soon_threadsafe(q.put_nowait, event)
+                        loop.call_soon_threadsafe(
+                            self._put_run_event_if_active,
+                            run_id,
+                            q,
+                            event,
+                        )
                     except Exception:
                         pass
 
@@ -296,34 +356,35 @@ class APIServerRunsMixin:
                     effective_task_id = session_id or run_id
                     approval_token = None
                     session_tokens = []
-                    try:
-                        # Bind approval/session identity for this API run via
-                        # contextvars so concurrent runs do not share process
-                        # environment state.
-                        approval_token = set_current_session_key(approval_session_key)
-                        session_tokens = self._bind_api_server_session(
-                            session_key=approval_session_key,
-                        )
-                        register_gateway_notify(approval_session_key, _approval_notify)
-                        r = agent.run_conversation(
-                            user_message=user_message,
-                            conversation_history=conversation_history,
-                            task_id=effective_task_id,
-                        )
-                    finally:
+                    with self._profile_scope(request_profile):
                         try:
-                            unregister_gateway_notify(approval_session_key)
+                            # Bind approval/session identity for this API run via
+                            # contextvars so concurrent runs do not share process
+                            # environment state.
+                            approval_token = set_current_session_key(approval_session_key)
+                            session_tokens = self._bind_api_server_session(
+                                session_key=approval_session_key,
+                            )
+                            register_gateway_notify(approval_session_key, _approval_notify)
+                            r = agent.run_conversation(
+                                user_message=user_message,
+                                conversation_history=conversation_history,
+                                task_id=effective_task_id,
+                            )
                         finally:
-                            if approval_token is not None:
-                                try:
-                                    reset_current_session_key(approval_token)
-                                except Exception:
-                                    pass
-                            if session_tokens:
-                                try:
-                                    clear_session_vars(session_tokens)
-                                except Exception:
-                                    pass
+                            try:
+                                unregister_gateway_notify(approval_session_key)
+                            finally:
+                                if approval_token is not None:
+                                    try:
+                                        reset_current_session_key(approval_token)
+                                    except Exception:
+                                        pass
+                                if session_tokens:
+                                    try:
+                                        clear_session_vars(session_tokens)
+                                    except Exception:
+                                        pass
                     u = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -332,12 +393,25 @@ class APIServerRunsMixin:
                     return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+                if run_id in self._stopping_run_ids:
+                    self._put_run_event_if_active(run_id, q, {
+                        "event": "run.cancelled",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                    })
+                    self._set_run_status(
+                        run_id,
+                        "cancelled",
+                        last_event="run.cancelled",
+                    )
                 # Check for structured failure (non-retryable client errors like
                 # 401/400 return failed=True instead of raising, so the except
                 # block below never fires — issue #15561).
-                if isinstance(result, dict) and result.get("failed"):
-                    error_msg = result.get("error") or "agent run failed"
-                    q.put_nowait({
+                elif isinstance(result, dict) and result.get("failed"):
+                    error_msg = _redact_api_error_text(
+                        result.get("error") or "agent run failed"
+                    )
+                    self._put_run_event_if_active(run_id, q, {
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -351,7 +425,7 @@ class APIServerRunsMixin:
                     )
                 else:
                     final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                    q.put_nowait({
+                    self._put_run_event_if_active(run_id, q, {
                         "event": "run.completed",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -372,7 +446,7 @@ class APIServerRunsMixin:
                     last_event="run.cancelled",
                 )
                 try:
-                    q.put_nowait({
+                    self._put_run_event_if_active(run_id, q, {
                         "event": "run.cancelled",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -385,24 +459,22 @@ class APIServerRunsMixin:
                 self._set_run_status(
                     run_id,
                     "failed",
-                    error=str(exc),
+                    error=_redact_api_error_text(exc),
                     last_event="run.failed",
                 )
                 try:
-                    q.put_nowait({
+                    self._put_run_event_if_active(run_id, q, {
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
-                        "error": str(exc),
+                        "error": _redact_api_error_text(exc),
                     })
                 except Exception:
                     pass
             finally:
-                # If the asyncio wrapper is cancelled (for example via
-                # /stop), the executor thread can still be blocked waiting
-                # on an approval Event.  Unregistering here releases those
-                # waits immediately; the in-thread unregister is harmlessly
-                # idempotent on normal completion.
+                # Release any approval wait when the actual executor-backed
+                # run ends. Stop is cooperative and deliberately keeps this
+                # wrapper tracked until that point.
                 try:
                     from tools.approval import unregister_gateway_notify
 
@@ -411,12 +483,14 @@ class APIServerRunsMixin:
                     pass
                 # Sentinel: signal SSE stream to close
                 try:
-                    q.put_nowait(None)
+                    self._put_run_event_if_active(run_id, q, None)
                 except Exception:
                     pass
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                self._run_approval_choices.pop(run_id, None)
+                self._stopping_run_ids.discard(run_id)
                 work_lease.release()
 
         try:
@@ -426,6 +500,7 @@ class APIServerRunsMixin:
             self._run_streams.pop(run_id, None)
             self._run_streams_created.pop(run_id, None)
             self._run_approval_sessions.pop(run_id, None)
+            self._run_approval_choices.pop(run_id, None)
             raise
         run_control["task"] = task
         self._active_run_tasks[run_id] = task
@@ -477,6 +552,7 @@ class APIServerRunsMixin:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
         q = self._run_streams[run_id]
+        self._run_stream_subscribers.add(run_id)
 
         response = web.StreamResponse(
             status=200,
@@ -504,6 +580,7 @@ class APIServerRunsMixin:
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
+            self._run_stream_subscribers.discard(run_id)
             self._run_streams.pop(run_id, None)
             self._run_streams_created.pop(run_id, None)
 
@@ -532,11 +609,14 @@ class APIServerRunsMixin:
         raw_choice = str(body.get("choice", "")).strip().lower()
         aliases = {"approve": "once", "approved": "once", "allow": "once"}
         choice = aliases.get(raw_choice, raw_choice)
-        allowed = {"once", "session", "always", "deny"}
+        allowed = self._run_approval_choices.get(
+            run_id,
+            ("once", "session", "always", "deny"),
+        )
         if choice not in allowed:
             return web.json_response(
                 _openai_error(
-                    "Invalid approval choice; expected one of: once, session, always, deny",
+                    "Invalid approval choice; expected one of: " + ", ".join(allowed),
                     code="invalid_approval_choice",
                 ),
                 status=400,
@@ -612,6 +692,7 @@ class APIServerRunsMixin:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
         self._set_run_status(run_id, "stopping", last_event="run.stopping")
+        self._stopping_run_ids.add(run_id)
 
         if agent is not None:
             try:
@@ -619,37 +700,29 @@ class APIServerRunsMixin:
             except Exception:
                 pass
 
-        if task is not None and not task.done():
-            task.cancel()
-            # Bounded wait: run_conversation() executes in the default
-            # executor thread which task.cancel() cannot preempt — we rely on
-            # agent.interrupt() above to break the loop. Cap the wait so a
-            # slow/unresponsive interrupt can't hang this handler.
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[api_server] stop for run %s timed out after 5s; "
-                    "agent may still be finishing the current step",
-                    run_id,
-                )
-            except (asyncio.CancelledError, Exception):
-                pass
-
         return web.json_response({"run_id": run_id, "status": "stopping"})
 
     async def _sweep_orphaned_runs(self) -> None:
-        """Periodically clean up run streams that were never consumed."""
+        """Periodically expire transports and terminal status records."""
         while True:
             await asyncio.sleep(60)
+            self._sweep_orphaned_runs_once(time.time())
+
+    def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
+        """Bound transport buffers without confusing them with live work."""
+        if now is None:
             now = time.time()
-            stale = [
-                run_id
-                for run_id, created_at in list(self._run_streams_created.items())
-                if now - created_at > self._RUN_STREAM_TTL
-            ]
-            for run_id in stale:
-                logger.debug("[api_server] sweeping orphaned run %s", run_id)
+        stale = [
+            run_id
+            for run_id, created_at in list(self._run_streams_created.items())
+            if now - created_at > self._RUN_STREAM_TTL
+            and run_id not in self._run_stream_subscribers
+        ]
+        for run_id in stale:
+            logger.debug("[api_server] sweeping expired run transport %s", run_id)
+            task = self._active_run_tasks.get(run_id)
+            task_done = task is None or task.done()
+            if task_done:
                 try:
                     from tools.approval import unregister_gateway_notify
 
@@ -658,19 +731,22 @@ class APIServerRunsMixin:
                         unregister_gateway_notify(approval_session_key)
                 except Exception:
                     pass
-                self._run_streams.pop(run_id, None)
-                self._run_streams_created.pop(run_id, None)
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            if task_done:
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                self._run_approval_choices.pop(run_id, None)
+                self._stopping_run_ids.discard(run_id)
 
-            stale_statuses = [
-                run_id
-                for run_id, status in list(self._run_statuses.items())
-                if status.get("status") in {"completed", "failed", "cancelled"}
-                and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
-            ]
-            for run_id in stale_statuses:
-                self._run_statuses.pop(run_id, None)
+        stale_statuses = [
+            run_id
+            for run_id, status in list(self._run_statuses.items())
+            if status.get("status") in {"completed", "failed", "cancelled"}
+            and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
+        ]
+        for run_id in stale_statuses:
+            self._run_statuses.pop(run_id, None)
 
     # ------------------------------------------------------------------

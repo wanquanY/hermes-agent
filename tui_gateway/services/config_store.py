@@ -36,11 +36,10 @@ def load_cfg(hermes_home: Path) -> dict:
 
 def save_cfg(hermes_home: Path, cfg: dict) -> None:
     global _cfg_cache, _cfg_mtime, _cfg_path
-    import yaml
+    from hermes_cli.config import atomic_config_write
 
     path = hermes_home / "config.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f)
+    atomic_config_write(path, cfg)
     with _cfg_lock:
         _cfg_cache = copy.deepcopy(cfg)
         _cfg_path = path

@@ -17,6 +17,8 @@ from typing import Iterable, Optional
 
 import httpx
 
+from channels.platforms.telegram_security import redact_telegram_error
+
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_API_HOST = "api.telegram.org"
@@ -112,11 +114,15 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
                 if ip is None:
                     logger.warning(
                         "[Telegram] Primary api.telegram.org connection failed (%s); trying fallback IPs %s",
-                        exc,
+                        redact_telegram_error(exc),
                         ", ".join(self._fallback_ips),
                     )
                     continue
-                logger.warning("[Telegram] Fallback IP %s failed: %s", ip, exc)
+                logger.warning(
+                    "[Telegram] Fallback IP %s failed: %s",
+                    ip,
+                    redact_telegram_error(exc),
+                )
                 continue
 
         if last_error is None:
@@ -188,7 +194,11 @@ async def _query_doh_provider(
                 continue
         return ips
     except Exception as exc:
-        logger.debug("DoH query to %s failed: %s", provider["url"], exc)
+        logger.debug(
+            "DoH query to %s failed: %s",
+            provider["url"],
+            redact_telegram_error(exc),
+        )
         return []
 
 

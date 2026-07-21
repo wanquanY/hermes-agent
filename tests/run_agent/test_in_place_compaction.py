@@ -87,8 +87,8 @@ class TestInPlaceCompaction:
             row = db.sessions.get(sid)
             assert row["end_reason"] is None
             assert row["title"] == "my-research"
-            # Pre-compaction messages remain under the one id (FTS continuity).
-            assert row["message_count"] >= 8
+            # The active projection is now the compacted transcript.
+            assert row["message_count"] == 3
             # Flush cursor must NOT be reset to 0. Rotation resets it (a fresh
             # row starts empty); in-place keeps writing to the same row, so the
             # cursor only ever advances as current-turn messages are persisted.
@@ -97,6 +97,23 @@ class TestInPlaceCompaction:
             assert len(compressed) == 3
             assert compressed[-1]["role"] == "system"
             assert "Context compacted" in compressed[-1]["content"]
+            active = db.messages.all_as_conversation(sid)
+            all_rows = db.messages.all_as_conversation(
+                sid,
+                include_inactive=True,
+            )
+            assert active == compressed
+            assert len(all_rows) > len(active)
+            assert db.sessions.get(sid)["system_prompt"] == _sp
+            assert agent._last_compaction_in_place is True
+
+            from agent.conversation_compression import (
+                conversation_history_after_compression,
+            )
+
+            baseline = conversation_history_after_compression(agent, compressed)
+            assert baseline == compressed
+            assert baseline is not compressed
 
     def test_in_place_alternation_preserved(self):
         """The compacted list must not introduce consecutive same-role messages."""
@@ -130,7 +147,7 @@ class TestRotationStillDefault:
             agent._last_flushed_db_idx = 5
 
             messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-            compress_context(
+            compressed, _ = compress_context(
                 agent, messages, approx_tokens=100_000, system_message="sys"
             )
 
@@ -143,8 +160,13 @@ class TestRotationStillDefault:
             ).fetchall()
             assert len(child) == 1
             assert child[0]["title"] == "my-research #2"
-            # Flush cursor reset for the new row.
-            assert agent._last_flushed_db_idx == 0
+            # The continuation handoff is durable before the turn finalizer,
+            # and the current buffer cursor acknowledges those exact rows.
+            assert db.messages.all_as_conversation(agent.session_id) == compressed
+            assert agent._last_flushed_db_idx == len(compressed)
+            assert agent._last_flushed_db_buffer_id == id(compressed)
+            assert agent._last_flushed_db_visible_session_id == agent.session_id
+            assert agent._last_compaction_in_place is False
 
 
 class TestInPlaceConfigDefault:

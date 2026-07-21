@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -12,12 +13,17 @@ from hermes_agent.gateway.runtime_config import (
     load_gateway_runtime_config,
     resolve_runtime_agent_kwargs,
 )
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_override
 from hermes_gateway.media_context import build_document_context_note
 from hermes_gateway.session import SessionSource, is_shared_multi_user_session
 
 logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
+
+
+def _runtime_home():
+    override = get_hermes_home_override()
+    return override or _hermes_home
 
 
 class GatewayInboundMessagePreparationMixin:
@@ -66,7 +72,10 @@ class GatewayInboundMessagePreparationMixin:
                     audio_paths.append(path)
 
             if image_paths:
-                image_mode = self._decide_image_input_mode()
+                # Capability lookup may fetch models.dev metadata or probe a
+                # local Ollama server. Keep that blocking I/O off the shared
+                # gateway event loop so one image cannot stall every session.
+                image_mode = await asyncio.to_thread(self._decide_image_input_mode)
                 if image_mode == "native":
                     pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
                     if pending_native is None:
@@ -86,7 +95,23 @@ class GatewayInboundMessagePreparationMixin:
                     message_text = await self._enrich_message_with_vision(message_text, image_paths)
 
             if audio_paths:
-                message_text = await self._enrich_message_with_transcription(message_text, audio_paths)
+                message_text, transcripts = await self._transcribe_pending_audio_event_once(
+                    event,
+                    message_text,
+                )
+                adapter = self._adapter_for_source(source)
+                metadata = self._thread_metadata_for_source(
+                    source,
+                    self._reply_anchor_for_event(event),
+                )
+                await self._echo_pending_stt_transcripts_once(
+                    event,
+                    adapter,
+                    source,
+                    transcripts,
+                    metadata=metadata,
+                    log_context="Transcript",
+                )
                 if _transcription_unavailable(message_text):
                     await self._notify_stt_unavailable(source, event)
 
@@ -108,7 +133,13 @@ class GatewayInboundMessagePreparationMixin:
 
         if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
             reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            if getattr(event, "reply_to_is_own_message", False):
+                message_text = (
+                    f'[Replying to your previous message: "{reply_snippet}"]\n\n'
+                    f"{message_text}"
+                )
+            else:
+                message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
 
         if "@" in message_text:
             expanded_text = await self._expand_context_references(message_text, source)
@@ -119,7 +150,7 @@ class GatewayInboundMessagePreparationMixin:
         return message_text
 
     async def _notify_stt_unavailable(self, source: SessionSource, event: MessageEvent) -> None:
-        adapter = self.adapters.get(source.platform)
+        adapter = self._adapter_for_source(source)
         if not adapter:
             return
         metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
@@ -148,7 +179,7 @@ class GatewayInboundMessagePreparationMixin:
             from agent.model_metadata import get_model_context_length
 
             cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
-            runtime = resolve_runtime_agent_kwargs(_hermes_home)
+            runtime = resolve_runtime_agent_kwargs(_runtime_home())
             config_context_length = _configured_context_length()
             context_length = get_model_context_length(
                 getattr(self, "_model", ""),
@@ -164,7 +195,7 @@ class GatewayInboundMessagePreparationMixin:
                 allowed_root=cwd,
             )
             if result.blocked:
-                adapter = self.adapters.get(source.platform)
+                adapter = self._adapter_for_source(source)
                 if adapter:
                     await adapter.send(
                         source.chat_id,
@@ -234,7 +265,7 @@ def _prepend_document_context(event: MessageEvent, message_text: str) -> str:
 
 def _configured_context_length() -> int | None:
     try:
-        config = load_gateway_runtime_config(_hermes_home)
+        config = load_gateway_runtime_config(_runtime_home())
         model_config = config.get("model", {})
         if isinstance(model_config, dict):
             raw_context_length = model_config.get("context_length")

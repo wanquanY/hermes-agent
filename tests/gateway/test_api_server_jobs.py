@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,6 +152,9 @@ class TestCreateJob:
                     "name": "test-job",
                     "schedule": "*/5 * * * *",
                     "prompt": "do something",
+                }, headers={
+                    "X-Forwarded-For": "203.0.113.11",
+                    "User-Agent": "cron-client",
                 })
                 assert resp.status == 200
                 data = await resp.json()
@@ -160,6 +164,9 @@ class TestCreateJob:
                 assert call_kwargs["name"] == "test-job"
                 assert call_kwargs["schedule"] == "*/5 * * * *"
                 assert call_kwargs["prompt"] == "do something"
+                assert call_kwargs["origin"]["platform"] == "api_server"
+                assert call_kwargs["origin"]["forwarded_for"] == "203.0.113.11"
+                assert call_kwargs["origin"]["user_agent"] == "cron-client"
 
     @pytest.mark.asyncio
     async def test_create_job_missing_name(self, adapter):
@@ -279,6 +286,33 @@ class TestGetJob:
                 assert resp.status == 400
                 data = await resp.json()
                 assert "Invalid" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_job_id_logs_sanitized_source_context(
+        self,
+        adapter,
+        caplog,
+    ):
+        app = _create_app(adapter)
+        caplog.set_level(
+            logging.WARNING,
+            logger="channels.platforms.api_server_jobs",
+        )
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True):
+                response = await cli.get(
+                    "/api/jobs/not-valid",
+                    headers={
+                        "X-Forwarded-For": "203.0.113.9",
+                        "User-Agent": "probe scanner",
+                    },
+                )
+
+        assert response.status == 400
+        assert "Cron jobs API rejected invalid job_id" in caplog.text
+        assert "203.0.113.9" in caplog.text
+        assert "probe scanner" in caplog.text
+        assert adapter._clean_log_value("source\r\ninjected") == "source  injected"
 
 
 # ---------------------------------------------------------------------------

@@ -107,6 +107,29 @@ class TestInitialReplyToId:
         call_kwargs = adapter.send.call_args[1]
         assert call_kwargs["metadata"]["thread_id"] == metadata["thread_id"]
 
+    @pytest.mark.asyncio
+    async def test_final_edit_carries_original_reply_anchor(self):
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            metadata={"thread_id": "omt_topic789"},
+            initial_reply_to_id="om_msg_000",
+        )
+
+        await consumer._edit_message(
+            message_id="preview-1",
+            content="final answer",
+            finalize=True,
+        )
+
+        metadata = adapter.edit_message.call_args.kwargs["metadata"]
+        assert metadata == {
+            "thread_id": "omt_topic789",
+            "reply_to_message_id": "om_msg_000",
+            "notify": True,
+        }
+
 
 class TestOverflowFirstMessage:
     """Verify thread routing is preserved when the first message overflows."""

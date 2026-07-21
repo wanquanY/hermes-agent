@@ -107,11 +107,12 @@ def test_ensure_docker_available_uses_resolved_executable(monkeypatch):
 
     assert calls == [
         (["/opt/homebrew/bin/docker", "version"], {
-            "capture_output": True,
-            "text": True,
-            "timeout": 5,
-        })
-    ]
+                "capture_output": True,
+                "text": True,
+                "timeout": 5,
+                "stdin": subprocess.DEVNULL,
+            })
+        ]
 
 
 def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):

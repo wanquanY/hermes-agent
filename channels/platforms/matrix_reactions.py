@@ -154,6 +154,14 @@ class MatrixReactionMixin:
                 room_id,
             )
 
+            if await self._handle_choice_picker_reaction(
+                room_id=room_id,
+                reacts_to=reacts_to,
+                key=key,
+                sender=sender,
+            ):
+                return
+
             # Check if this reaction resolves a pending approval prompt.
             prompt = self._approval_prompts_by_event.get(reacts_to)
             if prompt and not prompt.resolved:
@@ -199,4 +207,3 @@ class MatrixReactionMixin:
     # ------------------------------------------------------------------
     # Text message aggregation (handles Matrix client-side splits)
     # ------------------------------------------------------------------
-

@@ -22,6 +22,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from agent.secret_scope import get_profile_env
 from urllib.parse import quote, unquote
 
 import httpx
@@ -164,7 +166,7 @@ def _looks_like_e164_number(value: str) -> bool:
 
 def check_signal_requirements() -> bool:
     """Check if Signal is configured (has URL and account)."""
-    return bool(os.getenv("SIGNAL_HTTP_URL") and os.getenv("SIGNAL_ACCOUNT"))
+    return bool(get_profile_env("SIGNAL_HTTP_URL") and get_profile_env("SIGNAL_ACCOUNT"))
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +191,7 @@ class SignalAdapter(BasePlatformAdapter):
         self.ignore_stories = extra.get("ignore_stories", True)
 
         # Parse allowlists — group policy is derived from presence of group allowlist
-        group_allowed_str = os.getenv("SIGNAL_GROUP_ALLOWED_USERS", "")
+        group_allowed_str = get_profile_env("SIGNAL_GROUP_ALLOWED_USERS", "")
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
 
         # Mention filter — only respond in groups when the bot account is @mentioned.
@@ -198,7 +200,7 @@ class SignalAdapter(BasePlatformAdapter):
         if _rm_cfg is not None:
             self.require_mention = bool(_rm_cfg)
         else:
-            self.require_mention = os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in ("true", "1", "yes", "on")
+            self.require_mention = get_profile_env("SIGNAL_REQUIRE_MENTION", "false").lower() in ("true", "1", "yes", "on")
 
         # DM allowlist — mirrors SIGNAL_ALLOWED_USERS checked by run.py.
         # Stored here so the reaction hooks can skip unauthorized senders
@@ -206,7 +208,7 @@ class SignalAdapter(BasePlatformAdapter):
         # every inbound DM from any contact gets a 👀 reaction).
         # "*" means all users allowed (open mode); empty means no restriction
         # recorded at adapter level (run.py still enforces auth separately).
-        dm_allowed_str = os.getenv("SIGNAL_ALLOWED_USERS", "*")
+        dm_allowed_str = get_profile_env("SIGNAL_ALLOWED_USERS", "*")
         self.dm_allow_from = set(_parse_comma_list(dm_allowed_str))
 
         # HTTP client
@@ -1486,7 +1488,7 @@ class SignalAdapter(BasePlatformAdapter):
            contacts from seeing the 👀 reaction (which fires before run.py's
            auth gate and would otherwise reveal that a bot is listening).
         """
-        if os.getenv("SIGNAL_REACTIONS", "true").lower() in {"false", "0", "no"}:
+        if get_profile_env("SIGNAL_REACTIONS", "true").lower() in {"false", "0", "no"}:
             return False
         if event is not None:
             sender = getattr(getattr(event, "source", None), "user_id", None)

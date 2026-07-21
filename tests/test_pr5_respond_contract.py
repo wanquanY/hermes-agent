@@ -414,6 +414,24 @@ class TestRespondThreeStateContract:
         assert result["error"]["code"] == 4404
 
 
+class TestEphemeralTerminalRespondContract:
+    def test_terminal_read_response_unblocks_without_durable_interaction(self):
+        from tui_gateway import server
+
+        ev = threading.Event()
+        with server._prompt_lock:
+            server._pending["terminal-rid"] = ("runtime-1", ev)
+
+        handler = _get_method("terminal.read.respond")
+        result = handler(1, {"request_id": "terminal-rid", "text": '{"text":"ok"}'})
+
+        assert result["result"] == {"status": "resolved", "resolved": 1}
+        assert ev.is_set()
+        assert server._answers["terminal-rid"] == '{"text":"ok"}'
+        registry = getattr(server, "_interactive_registry", None)
+        assert registry is None or registry.lookup("terminal-rid") is None
+
+
 class TestRespondExpiredState:
     """Lazy TTL expiry: a pending request past TTL → expired → 4404."""
 

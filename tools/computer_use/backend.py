@@ -67,7 +67,13 @@ class CaptureResult:
 
 @dataclass
 class ActionResult:
-    """Result of any action (click / type / scroll / drag / key / wait)."""
+    """Transport result plus cua-driver's optional semantic verdict.
+
+    ``ok`` only says the tool call ran. ``effect`` and ``verified`` say
+    whether the requested UI change actually landed; ``escalation`` tells the
+    agent which bounded delivery rung to try next. Older drivers omit these
+    additive fields and remain compatible.
+    """
 
     ok: bool
     action: str
@@ -77,6 +83,13 @@ class ActionResult:
     capture: Optional[CaptureResult] = None
     # Arbitrary extra fields for debugging / telemetry.
     meta: Dict[str, Any] = field(default_factory=dict)
+    verified: Optional[bool] = None
+    effect: Optional[str] = None
+    escalation: Optional[Dict[str, Any]] = None
+    path: Optional[str] = None
+    degraded: Optional[bool] = None
+    delivery_mode: Optional[str] = None
+    code: Optional[str] = None
 
 
 class ComputerUseBackend(ABC):
@@ -115,6 +128,8 @@ class ComputerUseBackend(ABC):
         button: str = "left",           # left | right | middle
         click_count: int = 1,
         modifiers: Optional[List[str]] = None,
+        delivery_mode: Optional[str] = None,
+        bring_to_front: bool = False,
     ) -> ActionResult: ...
 
     @abstractmethod
@@ -127,6 +142,8 @@ class ComputerUseBackend(ABC):
         to_xy: Optional[Tuple[int, int]] = None,
         button: str = "left",
         modifiers: Optional[List[str]] = None,
+        delivery_mode: Optional[str] = None,
+        bring_to_front: bool = False,
     ) -> ActionResult: ...
 
     @abstractmethod
@@ -139,14 +156,28 @@ class ComputerUseBackend(ABC):
         x: Optional[int] = None,
         y: Optional[int] = None,
         modifiers: Optional[List[str]] = None,
+        delivery_mode: Optional[str] = None,
+        bring_to_front: bool = False,
     ) -> ActionResult: ...
 
     # ── Keyboard ────────────────────────────────────────────────────
     @abstractmethod
-    def type_text(self, text: str) -> ActionResult: ...
+    def type_text(
+        self,
+        text: str,
+        *,
+        delivery_mode: Optional[str] = None,
+        bring_to_front: bool = False,
+    ) -> ActionResult: ...
 
     @abstractmethod
-    def key(self, keys: str) -> ActionResult:
+    def key(
+        self,
+        keys: str,
+        *,
+        delivery_mode: Optional[str] = None,
+        bring_to_front: bool = False,
+    ) -> ActionResult:
         """Send a key combo, e.g. 'cmd+s', 'ctrl+alt+t', 'return'."""
 
     # ── Introspection ───────────────────────────────────────────────

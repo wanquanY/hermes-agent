@@ -35,12 +35,7 @@ def _desktop_terminal_owner(params: dict, rid):
     agent runtime is idle. Manual PTYs are owned by that durable conversation
     id plus its workspace binding, not by an ephemeral runtime container.
     """
-    requested_id = str(
-        params.get("stored_session_id")
-        or params.get("conversation_session_id")
-        or params.get("session_id")
-        or ""
-    ).strip()
+    requested_id = str(params.get("session_id") or "").strip()
     if not requested_id:
         return None, _err(rid, 4006, "session_id required")
 

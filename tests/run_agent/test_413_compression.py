@@ -414,7 +414,13 @@ class TestPreflightCompression:
         events = []
         agent.status_callback = lambda ev, msg: events.append((ev, msg))
 
-        def _fake_compress(messages, current_tokens=None, focus_topic=None):
+        def _fake_compress(
+            messages,
+            current_tokens=None,
+            focus_topic=None,
+            force=False,
+            memory_context="",
+        ):
             events.append(("compress", "started"))
             return [{"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"}]
 
@@ -433,12 +439,171 @@ class TestPreflightCompression:
             "role": "user",
             "content": f"{SUMMARY_PREFIX}\nPrevious conversation",
         }
-        assert compressed[1]["role"] == "system"
-        assert "Context compacted" in compressed[1]["content"]
-        assert new_system_prompt == "new system prompt"
+        assert compressed[1] == {"role": "user", "content": "hello"}
+        assert compressed[2]["role"] == "system"
+        assert "Context compacted" in compressed[2]["content"]
+        assert new_system_prompt == "You are helpful."
         assert events[0][0] == "lifecycle"
         assert "Compacting context" in events[0][1]
         assert events[1] == ("compress", "started")
+
+    def test_compression_reuses_cached_prompt_when_memory_is_current(self, agent):
+        agent.compression_enabled = False
+        agent._memory_enabled = True
+        agent._user_profile_enabled = False
+        agent._memory_manager = None
+        agent._cached_system_prompt = (
+            "cached system prompt\n\n<memory>same facts</memory>"
+        )
+        memory_store = MagicMock()
+        memory_store.format_for_system_prompt.return_value = (
+            "<memory>same facts</memory>"
+        )
+        agent._memory_store = memory_store
+
+        with (
+            patch.object(
+                agent.context_compressor,
+                "compress",
+                return_value=[
+                    {
+                        "role": "user",
+                        "content": f"{SUMMARY_PREFIX}\nPrevious conversation",
+                    }
+                ],
+            ),
+            patch.object(agent, "_build_system_prompt") as build_prompt,
+        ):
+            _, new_system_prompt = agent._compress_context(
+                [{"role": "user", "content": "hello"}],
+                "system prompt",
+                approx_tokens=1234,
+            )
+
+        assert new_system_prompt == agent._cached_system_prompt
+        assert new_system_prompt == (
+            "cached system prompt\n\n<memory>same facts</memory>"
+        )
+        build_prompt.assert_not_called()
+        memory_store.load_from_disk.assert_called_once()
+
+    def test_compression_rebuilds_prompt_when_memory_changes(self, agent):
+        agent.compression_enabled = False
+        agent._memory_enabled = True
+        agent._user_profile_enabled = False
+        agent._memory_manager = None
+        agent._cached_system_prompt = (
+            "cached system prompt\n\n<memory>old facts</memory>"
+        )
+        memory_store = MagicMock()
+        memory_store.format_for_system_prompt.return_value = (
+            "<memory>new facts</memory>"
+        )
+        agent._memory_store = memory_store
+
+        with (
+            patch.object(
+                agent.context_compressor,
+                "compress",
+                return_value=[
+                    {
+                        "role": "user",
+                        "content": f"{SUMMARY_PREFIX}\nPrevious conversation",
+                    }
+                ],
+            ),
+            patch.object(
+                agent,
+                "_build_system_prompt",
+                return_value="rebuilt system prompt",
+            ) as build_prompt,
+        ):
+            _, new_system_prompt = agent._compress_context(
+                [{"role": "user", "content": "hello"}],
+                "system prompt",
+                approx_tokens=1234,
+            )
+
+        assert new_system_prompt == "rebuilt system prompt"
+        build_prompt.assert_called_once_with("system prompt")
+        memory_store.load_from_disk.assert_called_once()
+
+    def test_compression_rebuilds_stale_restored_prompt(self, agent):
+        agent.compression_enabled = False
+        agent._memory_enabled = True
+        agent._user_profile_enabled = False
+        agent._memory_manager = None
+        agent._cached_system_prompt = "system prompt\n\n<memory>fact A</memory>"
+        memory_store = MagicMock()
+        memory_store.format_for_system_prompt.return_value = (
+            "<memory>fact A\nfact B</memory>"
+        )
+        agent._memory_store = memory_store
+
+        with (
+            patch.object(
+                agent.context_compressor,
+                "compress",
+                return_value=[
+                    {
+                        "role": "user",
+                        "content": f"{SUMMARY_PREFIX}\nPrevious conversation",
+                    }
+                ],
+            ),
+            patch.object(
+                agent,
+                "_build_system_prompt",
+                return_value="rebuilt with fact B",
+            ) as build_prompt,
+        ):
+            _, new_system_prompt = agent._compress_context(
+                [{"role": "user", "content": "hello"}],
+                "system prompt",
+                approx_tokens=1234,
+            )
+
+        assert new_system_prompt == "rebuilt with fact B"
+        build_prompt.assert_called_once_with("system prompt")
+
+    def test_compression_rebuilds_leftover_empty_memory_block(self, agent):
+        agent.compression_enabled = False
+        agent._memory_enabled = True
+        agent._user_profile_enabled = False
+        agent._memory_manager = None
+        agent._cached_system_prompt = (
+            "system prompt\n\nMEMORY (your personal notes) "
+            "[1% — 10/2,200 chars]\nold fact"
+        )
+        memory_store = MagicMock()
+        memory_store.format_for_system_prompt.return_value = None
+        agent._memory_store = memory_store
+
+        with (
+            patch.object(
+                agent.context_compressor,
+                "compress",
+                return_value=[
+                    {
+                        "role": "user",
+                        "content": f"{SUMMARY_PREFIX}\nPrevious conversation",
+                    }
+                ],
+            ),
+            patch.object(
+                agent,
+                "_build_system_prompt",
+                return_value="rebuilt without memory",
+            ) as build_prompt,
+        ):
+            _, new_system_prompt = agent._compress_context(
+                [{"role": "user", "content": "hello"}],
+                "system prompt",
+                approx_tokens=1234,
+            )
+
+        assert new_system_prompt == "rebuilt without memory"
+        build_prompt.assert_called_once_with("system prompt")
 
     def test_preflight_compresses_oversized_history(self, agent):
         """When loaded history exceeds the model's context threshold, compress before API call."""

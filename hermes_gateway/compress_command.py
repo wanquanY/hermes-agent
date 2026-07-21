@@ -9,6 +9,7 @@ from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import agent_cache_for
+from hermes_gateway.checkpoint_config import checkpoint_agent_kwargs
 from hermes_gateway.gateway_runtime_config import runtime_config_for
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class GatewayCompressCommandMixin:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                **checkpoint_agent_kwargs(),
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None

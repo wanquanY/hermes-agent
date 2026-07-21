@@ -66,6 +66,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Literal, Optional, Sequence
+
+from agent.secret_scope import get_profile_env
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -517,7 +519,7 @@ class FeishuAdapter(
 
         # Env-only so adapter and gateway auth bypass share one source; yaml
         # feishu.allow_bots is bridged to this env var at config load.
-        allow_bots = os.getenv("FEISHU_ALLOW_BOTS", "none").strip().lower()
+        allow_bots = get_profile_env("FEISHU_ALLOW_BOTS", "none").strip().lower()
         if allow_bots not in {"none", "mentions", "all"}:
             logger.warning(
                 "[Feishu] Unknown allow_bots=%r, falling back to 'none'. Valid: none, mentions, all.",
@@ -526,52 +528,52 @@ class FeishuAdapter(
             allow_bots = "none"
 
         return FeishuAdapterSettings(
-            app_id=str(extra.get("app_id") or os.getenv("FEISHU_APP_ID", "")).strip(),
-            app_secret=str(extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET", "")).strip(),
-            domain_name=str(extra.get("domain") or os.getenv("FEISHU_DOMAIN", "feishu")).strip().lower(),
+            app_id=str(extra.get("app_id") or get_profile_env("FEISHU_APP_ID", "")).strip(),
+            app_secret=str(extra.get("app_secret") or get_profile_env("FEISHU_APP_SECRET", "")).strip(),
+            domain_name=str(extra.get("domain") or get_profile_env("FEISHU_DOMAIN", "feishu")).strip().lower(),
             connection_mode=str(
-                extra.get("connection_mode") or os.getenv("FEISHU_CONNECTION_MODE", "websocket")
+                extra.get("connection_mode") or get_profile_env("FEISHU_CONNECTION_MODE", "websocket")
             ).strip().lower(),
-            encrypt_key=os.getenv("FEISHU_ENCRYPT_KEY", "").strip(),
-            verification_token=os.getenv("FEISHU_VERIFICATION_TOKEN", "").strip(),
-            group_policy=os.getenv("FEISHU_GROUP_POLICY", "allowlist").strip().lower(),
+            encrypt_key=get_profile_env("FEISHU_ENCRYPT_KEY", "").strip(),
+            verification_token=get_profile_env("FEISHU_VERIFICATION_TOKEN", "").strip(),
+            group_policy=get_profile_env("FEISHU_GROUP_POLICY", "allowlist").strip().lower(),
             allowed_group_users=frozenset(
                 item.strip()
-                for item in os.getenv("FEISHU_ALLOWED_USERS", "").split(",")
+                for item in get_profile_env("FEISHU_ALLOWED_USERS", "").split(",")
                 if item.strip()
             ),
-            bot_open_id=os.getenv("FEISHU_BOT_OPEN_ID", "").strip(),
-            bot_user_id=os.getenv("FEISHU_BOT_USER_ID", "").strip(),
-            bot_name=os.getenv("FEISHU_BOT_NAME", "").strip(),
+            bot_open_id=get_profile_env("FEISHU_BOT_OPEN_ID", "").strip(),
+            bot_user_id=get_profile_env("FEISHU_BOT_USER_ID", "").strip(),
+            bot_name=get_profile_env("FEISHU_BOT_NAME", "").strip(),
             dedup_cache_size=max(
                 32,
-                int(os.getenv("HERMES_FEISHU_DEDUP_CACHE_SIZE", str(_DEFAULT_DEDUP_CACHE_SIZE))),
+                int(get_profile_env("HERMES_FEISHU_DEDUP_CACHE_SIZE", str(_DEFAULT_DEDUP_CACHE_SIZE))),
             ),
             text_batch_delay_seconds=float(
-                os.getenv("HERMES_FEISHU_TEXT_BATCH_DELAY_SECONDS", str(_DEFAULT_TEXT_BATCH_DELAY_SECONDS))
+                get_profile_env("HERMES_FEISHU_TEXT_BATCH_DELAY_SECONDS", str(_DEFAULT_TEXT_BATCH_DELAY_SECONDS))
             ),
             text_batch_split_delay_seconds=float(
-                os.getenv("HERMES_FEISHU_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0")
+                get_profile_env("HERMES_FEISHU_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0")
             ),
             text_batch_max_messages=max(
                 1,
-                int(os.getenv("HERMES_FEISHU_TEXT_BATCH_MAX_MESSAGES", str(_DEFAULT_TEXT_BATCH_MAX_MESSAGES))),
+                int(get_profile_env("HERMES_FEISHU_TEXT_BATCH_MAX_MESSAGES", str(_DEFAULT_TEXT_BATCH_MAX_MESSAGES))),
             ),
             text_batch_max_chars=max(
                 1,
-                int(os.getenv("HERMES_FEISHU_TEXT_BATCH_MAX_CHARS", str(_DEFAULT_TEXT_BATCH_MAX_CHARS))),
+                int(get_profile_env("HERMES_FEISHU_TEXT_BATCH_MAX_CHARS", str(_DEFAULT_TEXT_BATCH_MAX_CHARS))),
             ),
             media_batch_delay_seconds=float(
-                os.getenv("HERMES_FEISHU_MEDIA_BATCH_DELAY_SECONDS", str(_DEFAULT_MEDIA_BATCH_DELAY_SECONDS))
+                get_profile_env("HERMES_FEISHU_MEDIA_BATCH_DELAY_SECONDS", str(_DEFAULT_MEDIA_BATCH_DELAY_SECONDS))
             ),
             webhook_host=str(
-                extra.get("webhook_host") or os.getenv("FEISHU_WEBHOOK_HOST", _DEFAULT_WEBHOOK_HOST)
+                extra.get("webhook_host") or get_profile_env("FEISHU_WEBHOOK_HOST", _DEFAULT_WEBHOOK_HOST)
             ).strip(),
             webhook_port=int(
-                extra.get("webhook_port") or os.getenv("FEISHU_WEBHOOK_PORT", str(_DEFAULT_WEBHOOK_PORT))
+                extra.get("webhook_port") or get_profile_env("FEISHU_WEBHOOK_PORT", str(_DEFAULT_WEBHOOK_PORT))
             ),
             webhook_path=(
-                str(extra.get("webhook_path") or os.getenv("FEISHU_WEBHOOK_PATH", _DEFAULT_WEBHOOK_PATH)).strip()
+                str(extra.get("webhook_path") or get_profile_env("FEISHU_WEBHOOK_PATH", _DEFAULT_WEBHOOK_PATH)).strip()
                 or _DEFAULT_WEBHOOK_PATH
             ),
             ws_reconnect_nonce=_coerce_required_int(extra.get("ws_reconnect_nonce"), default=30, min_value=0),
@@ -583,7 +585,7 @@ class FeishuAdapter(
             group_rules=group_rules,
             allow_bots=allow_bots,
             require_mention=_to_boolean(
-                extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
+                extra.get("require_mention", get_profile_env("FEISHU_REQUIRE_MENTION", "true"))
             ),
         )
 
@@ -642,6 +644,10 @@ class FeishuAdapter(
             .register_p2_customized_event(
                 "drive.notice.comment_add_v1",
                 self._on_drive_comment_event,
+            )
+            .register_p2_customized_event(
+                "vc.bot.meeting_invited_v1",
+                self._on_meeting_invited_event,
             )
             .build()
         )
@@ -984,6 +990,20 @@ class FeishuAdapter(
             handle_drive_comment_event(self._client, data, self_open_id=self._bot_open_id),
         )
 
+    def _on_meeting_invited_event(self, data: Any) -> None:
+        """Route a VC bot invitation through the normal gateway pipeline."""
+        from channels.platforms.feishu_meeting_invite import (
+            handle_meeting_invited_event,
+        )
+
+        loop = self._loop
+        if not self._loop_accepts_callbacks(loop):
+            logger.warning(
+                "[Feishu] Dropping meeting invite event before adapter loop is ready"
+            )
+            return
+        self._submit_on_loop(loop, handle_meeting_invited_event(self, data))
+
     def _on_reaction_event(self, event_type: str, data: Any) -> None:
         """Route user reactions on bot messages as synthetic text events."""
         event = getattr(data, "event", None)
@@ -1320,7 +1340,7 @@ class FeishuAdapter(
     # =========================================================================
 
     def _reactions_enabled(self) -> bool:
-        return os.getenv("FEISHU_REACTIONS", "true").strip().lower() not in {"false", "0", "no"}
+        return get_profile_env("FEISHU_REACTIONS", "true").strip().lower() not in {"false", "0", "no"}
 
     async def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
         """Return the reaction_id on success, else None. The id is needed later for deletion."""

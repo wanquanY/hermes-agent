@@ -618,31 +618,38 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     c.print(f"[bold green]Installed:[/] {install_dir.relative_to(SKILLS_DIR)}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
 
-    # Recipe detection: if the installed skill declares a
-    # metadata.hermes.recipe block, it is a runnable automation. Register it as
+    # Blueprint detection: if the installed skill declares a
+    # metadata.hermes.blueprint block, it is a runnable automation. Register it as
     # a Suggested Cron Job rather than auto-scheduling — installing never
     # silently creates a recurring job; the user accepts it via /suggestions.
     # This is the single surface every automation proposal flows through.
     try:
-        from tools.recipes import RecipeError, recipe_spec_for_installed, register_recipe_suggestion
+        from tools.blueprints import (
+            BlueprintError,
+            blueprint_spec_for_installed,
+            register_blueprint_suggestion,
+        )
 
         try:
-            spec = recipe_spec_for_installed(bundle.name)
-        except RecipeError as _rec_err:
-            c.print(f"[yellow]Recipe block present but invalid:[/] {_rec_err}\n")
+            spec = blueprint_spec_for_installed(bundle.name)
+        except BlueprintError as blueprint_error:
+            c.print(
+                f"[yellow]Blueprint block present but invalid:[/] "
+                f"{blueprint_error}\n"
+            )
             spec = None
         if spec is not None:
-            registered = register_recipe_suggestion(spec)
+            registered = register_blueprint_suggestion(spec)
             if registered is not None:
                 c.print(
-                    f"[bold cyan]Recipe:[/] '{bundle.name}' is an automation "
+                    f"[bold cyan]Blueprint:[/] '{bundle.name}' is an automation "
                     f"(schedule [bold]{spec.schedule}[/])."
                 )
                 c.print(
                     "[dim]Added to your suggestions — run[/] [bold]/suggestions[/] "
                     "[dim]to schedule or dismiss it.[/]\n"
                 )
-    except Exception:  # pragma: no cover - recipe detection is best-effort
+    except Exception:  # pragma: no cover - blueprint detection is best-effort
         pass
 
     if invalidate_cache:
@@ -958,8 +965,12 @@ def do_update(name: Optional[str] = None, console: Optional[Console] = None) -> 
     c.print(f"[bold green]Updated {len(updates)} skill(s).[/]\n")
 
 
-def do_audit(name: Optional[str] = None, console: Optional[Console] = None) -> None:
-    """Re-run security scan on installed hub skills."""
+def do_audit(
+    name: Optional[str] = None,
+    console: Optional[Console] = None,
+    deep: bool = False,
+) -> None:
+    """Re-run the security scan, optionally adding AST diagnostics."""
     from tools.skills_hub import HubLockFile, SKILLS_DIR
     from tools.skills_guard import scan_skill, format_scan_report
 
@@ -980,6 +991,9 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None) -> N
 
     c.print(f"\n[bold]Auditing {len(targets)} skill(s)...[/]\n")
 
+    if deep:
+        from tools.skills_ast_audit import ast_scan_path, format_ast_report
+
     for entry in targets:
         skill_path = SKILLS_DIR / entry["install_path"]
         if not skill_path.exists():
@@ -988,6 +1002,8 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None) -> N
 
         result = scan_skill(skill_path, source=entry.get("identifier", entry["source"]))
         c.print(format_scan_report(result))
+        if deep:
+            c.print(format_ast_report(ast_scan_path(skill_path), skill_name=entry["name"]))
         c.print()
 
 
@@ -1605,7 +1621,10 @@ def skills_command(args) -> None:
     elif action == "update":
         do_update(name=getattr(args, "name", None))
     elif action == "audit":
-        do_audit(name=getattr(args, "name", None))
+        do_audit(
+            name=getattr(args, "name", None),
+            deep=getattr(args, "deep", False),
+        )
     elif action == "uninstall":
         do_uninstall(args.name)
     elif action == "reset":
@@ -1783,8 +1802,9 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         do_update(name=name, console=c)
 
     elif action == "audit":
-        name = args[0] if args else None
-        do_audit(name=name, console=c)
+        deep = "--deep" in args
+        name = next((arg for arg in args if arg != "--deep"), None)
+        do_audit(name=name, console=c, deep=deep)
 
     elif action == "uninstall":
         if not args:

@@ -193,6 +193,27 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "matching the background co-work model."
                 ),
             },
+            "delivery_mode": {
+                "type": "string",
+                "enum": ["background", "foreground"],
+                "description": (
+                    "Input delivery rung for click/double_click/right_click/"
+                    "middle_click/drag/scroll/type/key. `background` is the "
+                    "default and does not steal focus. Use `foreground` only "
+                    "after a prior result reports effect='suspected_noop', "
+                    "code='background_unavailable', or "
+                    "escalation.recommended='foreground'. Foreground briefly "
+                    "raises the target and requires a distinct approval."
+                ),
+            },
+            "bring_to_front": {
+                "type": "boolean",
+                "description": (
+                    "With delivery_mode='foreground', keep the target fronted "
+                    "after the action instead of restoring the previous app. "
+                    "Default false."
+                ),
+            },
             # ── return shape ───────────────────────────────────────
             "capture_after": {
                 "type": "boolean",

@@ -12,12 +12,20 @@ import dataclasses
 import inspect
 import json
 import logging
-import os
 import tempfile
 import html as _html
 import re
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
+
+from agent.secret_scope import get_profile_env
+from channels.platforms.telegram_duration import (
+    _coerce_duration_seconds,
+    _probe_voice_duration_seconds,
+)
+from channels.platforms.telegram_security import _redact_telegram_error_text
+from channels.platforms.telegram_ids import normalize_telegram_chat_id
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +96,7 @@ from channels.platforms.telegram_network import (
     discover_fallback_ips,
     parse_fallback_ip_env,
 )
-from utils import atomic_replace, env_float, env_int
+from utils import atomic_replace
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -402,12 +410,30 @@ def _rich_normalize_linebreaks(text: str) -> str:
     return ''.join(out)
 
 
+from channels.platforms.telegram_polling import (
+    TelegramPollingMixin,
+    _DRAIN_TIMEOUT,
+    _POLLING_ERROR_TASK_STUCK_TIMEOUT,
+    _POLLING_PROGRESS_TIMEOUT,
+    _UPDATER_START_TIMEOUT,
+    _UPDATER_STOP_TIMEOUT,
+)
 from channels.platforms.telegram_connection import TelegramConnectionMixin
 from channels.platforms.telegram_delivery import TelegramDeliveryMixin
 from channels.platforms.telegram_inbound import TelegramInboundMixin
+from channels.platforms.telegram_response_policy import TelegramResponsePolicyMixin
+from channels.platforms.telegram_reactions import TelegramReactionsMixin
 
 
-class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDeliveryMixin, BasePlatformAdapter):
+class TelegramAdapter(
+    TelegramReactionsMixin,
+    TelegramResponsePolicyMixin,
+    TelegramInboundMixin,
+    TelegramPollingMixin,
+    TelegramConnectionMixin,
+    TelegramDeliveryMixin,
+    BasePlatformAdapter,
+):
     """
     Telegram bot adapter.
 
@@ -439,6 +465,13 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
     # edit and the final edit, skipping the plain-text → MarkdownV2 conversion.
     # Fixes #25710.
     REQUIRES_EDIT_FINALIZE: bool = True
+    # Retrying a turn-final edit consumes more of the same Telegram flood
+    # budget while the completed answer remains undelivered. Move directly to
+    # the final fallback path instead.
+    FALLBACK_ON_FINAL_EDIT_FLOOD: bool = True
+    # A failed final edit can leave clients with only a partial/non-durable
+    # preview. Commit empty-tail fallbacks as a fresh final message.
+    RESEND_FINAL_ON_EMPTY_STREAM_FALLBACK: bool = True
 
     # Adaptive text-batch ingress: short messages need a tighter delay so the
     # first token reaches the agent fast.  Numbers tuned for "feels instant":
@@ -466,7 +499,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         """
         import math
 
-        raw = os.getenv(name)
+        raw = get_profile_env(name)
         try:
             value = float(raw) if raw is not None else float(default)
         except (TypeError, ValueError):
@@ -510,7 +543,11 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         self._rich_draft_disabled: bool = False
         # Buffer rapid/album photo updates so Telegram image bursts are handled
         # as a single MessageEvent instead of self-interrupting multiple turns.
-        self._media_batch_delay_seconds = env_float("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", 0.8)
+        self._media_batch_delay_seconds = self._env_float_clamped(
+            "HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS",
+            0.8,
+            min_value=0.0,
+        )
         self._pending_photo_batches: Dict[str, MessageEvent] = {}
         self._pending_photo_batch_tasks: Dict[str, asyncio.Task] = {}
         self._media_group_events: Dict[str, MessageEvent] = {}
@@ -539,7 +576,15 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
+        self._polling_generation: int = 0
+        self._polling_progress_event = asyncio.Event()
+        self._polling_progress_accepting: bool = False
+        self._polling_progress_verifier_task: Optional[asyncio.Task] = None
+        self._polling_teardown_started: bool = False
         self._polling_error_callback_ref = None
+        self._polling_heartbeat_task: Optional[asyncio.Task] = None
+        self._polling_pending_stuck_count: int = 0
+        self._polling_not_running_count: int = 0
         # After sustained reconnect storms the PTB httpx pool can return
         # SendResult(success=True) for sends that never actually transmit.
         # _handle_polling_network_error sets this; _verify_polling_after_reconnect
@@ -586,6 +631,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         )
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
+        self._choice_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
@@ -658,20 +704,31 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                     thread_id=str(thread_id) if thread_id is not None else None,
                 )
                 return bool(auth_fn(source))
-            except Exception:
+            except Exception as auth_error:
                 logger.debug(
-                    "[Telegram] Falling back to env-only callback auth for user %s",
+                    "[Telegram] Falling back to env-only callback auth for user %s: %s",
                     normalized_user_id,
-                    exc_info=True,
+                    _redact_telegram_error_text(auth_error),
                 )
 
-        allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+        allowed_config = self.config.extra.get("allow_from")
+        if isinstance(allowed_config, (list, tuple, set, frozenset)):
+            allowed_csv = ",".join(str(value) for value in allowed_config)
+        elif allowed_config not in {None, ""}:
+            allowed_csv = str(allowed_config)
+        else:
+            allowed_csv = get_profile_env("TELEGRAM_ALLOWED_USERS", "")
+        allowed_csv = allowed_csv.strip()
         if not allowed_csv:
             # Fail-closed: no allowlist means deny by default.
             # The runner auth path in _is_user_authorized() handles
             # GATEWAY_ALLOW_ALL_USERS; this fallback must not silently
             # allow everyone (fixes #24457).
-            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
+            return get_profile_env("GATEWAY_ALLOW_ALL_USERS", "").lower() in {
+                "true",
+                "1",
+                "yes",
+            }
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or normalized_user_id in allowed_ids
 
@@ -892,7 +949,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                 "retrying without reply/topic anchor: %s",
                 self.name,
                 media_label,
-                send_err,
+                _redact_telegram_error_text(send_err),
             )
             if reset_media is not None:
                 reset_media()
@@ -1191,7 +1248,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         reply_to_id, thread_kwargs = routing
 
         payload: Dict[str, Any] = {
-            "chat_id": int(chat_id),
+            "chat_id": normalize_telegram_chat_id(chat_id),
             "rich_message": self._rich_message_payload(content),
         }
         # Only forward non-None routing keys: when direct_messages_topic_id is
@@ -1224,7 +1281,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                     self._rich_send_disabled = True
                 logger.debug(
                     "[%s] sendRichMessage rejected (%s) — falling back to MarkdownV2",
-                    self.name, exc,
+                    self.name, _redact_telegram_error_text(exc),
                 )
                 return None
             # Transient / network / unknown: the request may have reached
@@ -1237,14 +1294,25 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                 _TimedOut = None
             is_timeout = (_TimedOut and isinstance(exc, _TimedOut)) or "timed out" in err_str
             is_connect_timeout = self._looks_like_connect_timeout(exc)
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is None:
+                match = re.search(
+                    r"retry\s+(?:in\s+)?(\d+(?:\.\d+)?)",
+                    err_str,
+                    re.IGNORECASE,
+                )
+                if match:
+                    retry_after = float(match.group(1))
+            safe_error = _redact_telegram_error_text(exc)
             logger.warning(
                 "[%s] sendRichMessage transient failure (no legacy resend): %s",
-                self.name, exc,
+                self.name, safe_error,
             )
             return SendResult(
                 success=False,
-                error=str(exc),
+                error=safe_error,
                 retryable=(is_connect_timeout or not is_timeout),
+                retry_after=retry_after,
             )
 
         message_id = None
@@ -1287,7 +1355,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
           semantics (the message may already be edited; do NOT legacy-resend)
         """
         payload: Dict[str, Any] = {
-            "chat_id": int(chat_id),
+            "chat_id": normalize_telegram_chat_id(chat_id),
             "message_id": int(message_id),
             "rich_message": self._rich_message_payload(content),
         }
@@ -1309,7 +1377,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                     return SendResult(success=True, message_id=message_id)
                 logger.debug(
                     "[%s] rich editMessageText rejected (%s) — falling back to MarkdownV2 edit",
-                    self.name, exc,
+                    self.name, _redact_telegram_error_text(exc),
                 )
                 return None
             if "not modified" in str(exc).lower():
@@ -1321,13 +1389,14 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                 _TimedOut = None
             is_timeout = (_TimedOut and isinstance(exc, _TimedOut)) or "timed out" in err_str
             is_connect_timeout = self._looks_like_connect_timeout(exc)
+            safe_error = _redact_telegram_error_text(exc)
             logger.warning(
                 "[%s] rich editMessageText transient failure (no legacy resend): %s",
-                self.name, exc,
+                self.name, safe_error,
             )
             return SendResult(
                 success=False,
-                error=str(exc),
+                error=safe_error,
                 retryable=(is_connect_timeout or not is_timeout),
             )
         # Telegram won't echo rich content for messages that predate the bot's
@@ -1370,7 +1439,7 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
         latches ``_rich_draft_disabled`` so later frames skip the rich attempt.
         """
         payload: Dict[str, Any] = {
-            "chat_id": int(chat_id),
+            "chat_id": normalize_telegram_chat_id(chat_id),
             "draft_id": int(draft_id),
             "rich_message": self._rich_message_payload(content),
         }
@@ -1385,12 +1454,12 @@ class TelegramAdapter(TelegramInboundMixin, TelegramConnectionMixin, TelegramDel
                 self._rich_draft_disabled = True
                 logger.debug(
                     "[%s] sendRichMessageDraft unsupported (%s) — using legacy drafts",
-                    self.name, exc,
+                    self.name, _redact_telegram_error_text(exc),
                 )
             else:
                 logger.debug(
                     "[%s] sendRichMessageDraft transient failure (%s) — legacy draft this frame",
-                    self.name, exc,
+                    self.name, _redact_telegram_error_text(exc),
                 )
             return False
 
@@ -1541,7 +1610,7 @@ def _resolve_notifications_mode() -> str:
     config.yaml display.platforms.telegram.notifications, defaulting to
     'important'.  Mirrors the post-construction logic that used to live in
     gateway/run.py::_create_adapter()."""
-    mode = os.getenv("HERMES_TELEGRAM_NOTIFICATIONS", "")
+    mode = get_profile_env("HERMES_TELEGRAM_NOTIFICATIONS", "")
     if not mode:
         try:
             from hermes_agent.gateway.runtime_config import platform_notifications_mode
@@ -1602,7 +1671,9 @@ async def _standalone_send(
     parse-mode fallback). Implements the standalone_sender_fn contract so
     deliver=telegram cron jobs succeed when cron runs separately from the
     gateway."""
-    token = getattr(pconfig, "token", None) or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    token = getattr(pconfig, "token", None) or get_profile_env(
+        "TELEGRAM_BOT_TOKEN", ""
+    )
     disable_link_previews = bool(
         getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews")
     )
@@ -1631,79 +1702,52 @@ def interactive_setup() -> None:
 
 
 def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
-    """Translate config.yaml telegram: keys into TELEGRAM_* env vars and
-    PlatformConfig.extra entries.
+    """Bridge Telegram YAML into immutable adapter configuration.
 
-    Implements the apply_yaml_config_fn contract (#24849). Mirrors the legacy
-    telegram_cfg block from gateway/config.py::load_gateway_config(). Env vars
-    take precedence over YAML. Returns a dict of extras to merge into
-    PlatformConfig.extra (disable_topic_auto_rename + runtime flags), or None.
+    Process-global environment mutation is unsafe when one gateway serves
+    multiple profiles. Environment values still take precedence, but YAML is
+    now carried through ``PlatformConfig.extra`` to the owning adapter.
     """
-    import json as _json
     extras: dict = {}
 
-    if "disable_topic_auto_rename" in telegram_cfg:
-        extras.setdefault("disable_topic_auto_rename", telegram_cfg["disable_topic_auto_rename"])
+    def _seed(key: str, env_name: str, value=...):
+        candidate = telegram_cfg.get(key) if value is ... else value
+        if candidate is not None and not get_profile_env(env_name, ""):
+            extras.setdefault(key, candidate)
 
-    _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
-    if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
-        os.environ["TELEGRAM_REQUIRE_MENTION"] = str(_effective_rm).lower()
-    if "mention_patterns" in telegram_cfg and not os.getenv("TELEGRAM_MENTION_PATTERNS"):
-        os.environ["TELEGRAM_MENTION_PATTERNS"] = _json.dumps(telegram_cfg["mention_patterns"])
-    if "exclusive_bot_mentions" in telegram_cfg and not os.getenv("TELEGRAM_EXCLUSIVE_BOT_MENTIONS"):
-        os.environ["TELEGRAM_EXCLUSIVE_BOT_MENTIONS"] = str(telegram_cfg["exclusive_bot_mentions"]).lower()
-    if "guest_mode" in telegram_cfg and not os.getenv("TELEGRAM_GUEST_MODE"):
-        os.environ["TELEGRAM_GUEST_MODE"] = str(telegram_cfg["guest_mode"]).lower()
-    if "observe_unmentioned_group_messages" in telegram_cfg and not os.getenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"):
-        os.environ["TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES"] = str(telegram_cfg["observe_unmentioned_group_messages"]).lower()
-    frc = telegram_cfg.get("free_response_chats")
-    if frc is not None and not os.getenv("TELEGRAM_FREE_RESPONSE_CHATS"):
-        if isinstance(frc, list):
-            frc = ",".join(str(v) for v in frc)
-        os.environ["TELEGRAM_FREE_RESPONSE_CHATS"] = str(frc)
-    ac = telegram_cfg.get("allowed_chats")
-    if ac is not None and not os.getenv("TELEGRAM_ALLOWED_CHATS"):
-        if isinstance(ac, list):
-            ac = ",".join(str(v) for v in ac)
-        os.environ["TELEGRAM_ALLOWED_CHATS"] = str(ac)
-    allowed_topics = telegram_cfg.get("allowed_topics")
-    if allowed_topics is not None and not os.getenv("TELEGRAM_ALLOWED_TOPICS"):
-        if isinstance(allowed_topics, list):
-            allowed_topics = ",".join(str(v) for v in allowed_topics)
-        os.environ["TELEGRAM_ALLOWED_TOPICS"] = str(allowed_topics)
-    ignored_threads = telegram_cfg.get("ignored_threads")
-    if ignored_threads is not None and not os.getenv("TELEGRAM_IGNORED_THREADS"):
-        if isinstance(ignored_threads, list):
-            ignored_threads = ",".join(str(v) for v in ignored_threads)
-        os.environ["TELEGRAM_IGNORED_THREADS"] = str(ignored_threads)
-    if "reactions" in telegram_cfg and not os.getenv("TELEGRAM_REACTIONS"):
-        os.environ["TELEGRAM_REACTIONS"] = str(telegram_cfg["reactions"]).lower()
-    if "proxy_url" in telegram_cfg and not os.getenv("TELEGRAM_PROXY"):
-        os.environ["TELEGRAM_PROXY"] = str(telegram_cfg["proxy_url"]).strip()
-    _telegram_extra = telegram_cfg.get("extra") if isinstance(telegram_cfg.get("extra"), dict) else {}
-    _telegram_rtm = (
-        telegram_cfg["reply_to_mode"] if "reply_to_mode" in telegram_cfg
-        else _telegram_extra.get("reply_to_mode")
+    _seed(
+        "require_mention",
+        "TELEGRAM_REQUIRE_MENTION",
+        telegram_cfg.get("require_mention", yaml_cfg.get("require_mention")),
     )
-    if _telegram_rtm is not None and not os.getenv("TELEGRAM_REPLY_TO_MODE"):
-        _rtm_str = "off" if _telegram_rtm is False else str(_telegram_rtm).lower()
-        os.environ["TELEGRAM_REPLY_TO_MODE"] = _rtm_str
-    allowed_users = telegram_cfg.get("allow_from")
-    if allowed_users is not None and not os.getenv("TELEGRAM_ALLOWED_USERS"):
-        if isinstance(allowed_users, list):
-            allowed_users = ",".join(str(v) for v in allowed_users)
-        os.environ["TELEGRAM_ALLOWED_USERS"] = str(allowed_users)
-    group_allowed_users = telegram_cfg.get("group_allow_from")
-    if group_allowed_users is not None and not os.getenv("TELEGRAM_GROUP_ALLOWED_USERS"):
-        if isinstance(group_allowed_users, list):
-            group_allowed_users = ",".join(str(v) for v in group_allowed_users)
-        os.environ["TELEGRAM_GROUP_ALLOWED_USERS"] = str(group_allowed_users)
-    group_allowed_chats = telegram_cfg.get("group_allowed_chats")
-    if group_allowed_chats is not None and not os.getenv("TELEGRAM_GROUP_ALLOWED_CHATS"):
-        if isinstance(group_allowed_chats, list):
-            group_allowed_chats = ",".join(str(v) for v in group_allowed_chats)
-        os.environ["TELEGRAM_GROUP_ALLOWED_CHATS"] = str(group_allowed_chats)
-    for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages"):
+    for key, env_name in (
+        ("mention_patterns", "TELEGRAM_MENTION_PATTERNS"),
+        ("exclusive_bot_mentions", "TELEGRAM_EXCLUSIVE_BOT_MENTIONS"),
+        ("guest_mode", "TELEGRAM_GUEST_MODE"),
+        (
+            "observe_unmentioned_group_messages",
+            "TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES",
+        ),
+        ("free_response_chats", "TELEGRAM_FREE_RESPONSE_CHATS"),
+        ("free_response_topics", "TELEGRAM_FREE_RESPONSE_TOPICS"),
+        ("allowed_chats", "TELEGRAM_ALLOWED_CHATS"),
+        ("allowed_topics", "TELEGRAM_ALLOWED_TOPICS"),
+        ("ignored_threads", "TELEGRAM_IGNORED_THREADS"),
+        ("reactions", "TELEGRAM_REACTIONS"),
+        ("proxy_url", "TELEGRAM_PROXY"),
+        ("group_allow_from", "TELEGRAM_GROUP_ALLOWED_USERS"),
+        ("group_allowed_chats", "TELEGRAM_GROUP_ALLOWED_CHATS"),
+    ):
+        _seed(key, env_name)
+
+    if "disable_topic_auto_rename" in telegram_cfg:
+        extras.setdefault(
+            "disable_topic_auto_rename",
+            telegram_cfg["disable_topic_auto_rename"],
+        )
+
+    _telegram_extra = telegram_cfg.get("extra") if isinstance(telegram_cfg.get("extra"), dict) else {}
+    for _key in ("disable_link_previews",):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
     # Pass through telegram-specific extra keys (e.g. base_url proxy override),

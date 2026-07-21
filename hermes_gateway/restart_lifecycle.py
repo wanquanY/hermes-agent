@@ -25,6 +25,17 @@ logger = logging.getLogger(__name__)
 class GatewayRestartLifecycleService:
     def __init__(self, runner):
         self._runner = runner
+        self._booted_from_chat_restart = False
+
+    def mark_booted_from_chat_restart(self, pending: bool) -> None:
+        """Capture the chat-restart marker before startup consumes it.
+
+        The flag is deliberately owned by the restart lifecycle rather than
+        the gateway runner: it is a one-shot input to restart redelivery
+        classification, not general runner state.
+        """
+        if pending:
+            self._booted_from_chat_restart = True
 
     async def launch_detached_restart_command(self) -> None:
         import shutil
@@ -211,8 +222,8 @@ class GatewayRestartLifecycleService:
         The previous gateway wrote ``.restart_last_processed.json`` with the
         triggering platform + update_id when it processed the /restart.  If
         we now see a /restart on the same platform with an update_id <= that
-        recorded value AND the marker is recent (< 5 minutes), it's a
-        redelivery and should be ignored.
+        recorded value, it is a redelivery when this process booted from that
+        restart. Otherwise the marker must still be recent (< 5 minutes).
 
         Only applies to Telegram today (the only platform that exposes a
         numeric cross-session update ordering); other platforms return False.
@@ -245,6 +256,18 @@ class GatewayRestartLifecycleService:
         recorded_uid = data.get("update_id")
         if not isinstance(recorded_uid, int):
             return False
+        if event.platform_update_id > recorded_uid:
+            return False
+
+        # A service-managed restart can take longer than the marker's normal
+        # five-minute trust window while adapters and in-flight work drain.
+        # When startup captured the chat restart marker, the first same-or-
+        # older update is still that command's redelivery. Consume this signal
+        # one-shot so a later genuine command is evaluated normally.
+        if self._booted_from_chat_restart:
+            self._booted_from_chat_restart = False
+            return True
+
         # Staleness guard: ignore markers older than 5 minutes.  A legitimately
         # old marker (e.g. crash recovery where notify never fired) should not
         # swallow a fresh /restart from the user.
@@ -252,7 +275,7 @@ class GatewayRestartLifecycleService:
         if isinstance(requested_at, (int, float)):
             if time.time() - requested_at > 300:
                 return False
-        return event.platform_update_id <= recorded_uid
+        return True
     async def send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
         """Notify the chat that initiated /restart that the gateway is back."""
         notify_path = gateway_home() / ".restart_notify.json"

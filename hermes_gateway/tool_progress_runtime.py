@@ -70,6 +70,19 @@ class ToolProgressRuntime:
         self.mode = env_value if env_value and not configured else (resolved or env_value or "all")
         self.enabled = self.mode != "off" and source.platform != Platform.WEBHOOK
 
+        self.live_status_mode = str(
+            resolve_display_setting(user_config, platform_key, "live_status", "full")
+            or "full"
+        ).strip().lower()
+        live_status_adapter = runner.adapters.get(source.platform)
+        self.live_status_adapter = (
+            live_status_adapter
+            if self.live_status_mode != "off"
+            and getattr(live_status_adapter, "supports_status_text", False)
+            else None
+        )
+        self.callback_enabled = self.enabled or self.live_status_adapter is not None
+
         self.queue: queue.Queue | None = queue.Queue() if self.enabled else None
         self._last_tool: str | None = None
         self._last_progress_msg: str | None = None
@@ -132,6 +145,7 @@ class ToolProgressRuntime:
         **kwargs,
     ) -> None:
         """Callback invoked by agent on tool lifecycle events."""
+        self._update_live_status(event_type, tool_name, args)
         if not self.queue or not self._run_still_current():
             return
 
@@ -159,6 +173,35 @@ class ToolProgressRuntime:
         self._last_progress_msg = msg
         self._repeat_count = 0
         self.queue.put(msg)
+
+    def clear_live_status(self) -> None:
+        """Clear this turn's live status without clobbering a newer turn."""
+        if self.live_status_adapter is None or not self._run_still_current():
+            return
+        self.live_status_adapter.set_status_text(self._source.chat_id, None)
+
+    def _update_live_status(
+        self,
+        event_type: str,
+        tool_name: str | None,
+        args: dict | None,
+    ) -> None:
+        adapter = self.live_status_adapter
+        if adapter is None or tool_name == "_thinking" or not self._run_still_current():
+            return
+        try:
+            if event_type == "tool.started" and tool_name:
+                from agent.display import build_status_phrase
+
+                phrase_args = args if self.live_status_mode == "full" else None
+                adapter.set_status_text(
+                    self._source.chat_id,
+                    build_status_phrase(tool_name, phrase_args),
+                )
+            elif event_type == "tool.completed":
+                adapter.set_status_text(self._source.chat_id, None)
+        except Exception as exc:
+            logger.debug("live status update failed: %s", exc)
 
     def reset_current_bubble(self) -> None:
         if self.queue is not None:

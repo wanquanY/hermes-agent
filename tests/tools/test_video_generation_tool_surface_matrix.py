@@ -42,10 +42,26 @@ def matrix_env(tmp_path, monkeypatch):
 
     # fal_client stub
     fake_fal = types.ModuleType("fal_client")
-    def _subscribe(endpoint, arguments=None, with_logs=False):
-        fal_calls.append({"endpoint": endpoint, "arguments": arguments})
-        return {"video": {"url": f"https://fake-fal/{endpoint.replace('/','_')}.mp4"}}
-    fake_fal.subscribe = _subscribe  # type: ignore
+    class _Handle:
+        def __init__(self, result):
+            self._result = result
+
+        def get(self):
+            return self._result
+
+    def _submit(endpoint, arguments=None, headers=None):
+        fal_calls.append(
+            {"endpoint": endpoint, "arguments": arguments, "headers": headers}
+        )
+        return _Handle(
+            {
+                "video": {
+                    "url": f"https://fake-fal/{endpoint.replace('/', '_')}.mp4"
+                }
+            }
+        )
+
+    fake_fal.submit = _submit  # type: ignore[attr-defined]
     monkeypatch.setitem(__import__("sys").modules, "fal_client", fake_fal)
 
     # httpx stub for xAI

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import uuid
 
 from tui_gateway.methods._shared import bind_server_globals
@@ -15,6 +16,12 @@ from tui_gateway.services.runtime_pool import (
     RuntimeLeaseError,
     acquire_runtime_lease,
 )
+from tui_gateway.services.pending_prompt_queue import (
+    PendingPrompt,
+    pending_prompt_queue,
+    queue_scope_for_db,
+)
+from tui_gateway.transport import bind_transport, reset_transport
 from tui_gateway.services.subagent_snapshots import (
     SUBAGENT_SNAPSHOT_EVENT_TYPES,
     build_subagent_run_snapshots,
@@ -27,6 +34,161 @@ _server = bind_server_globals(globals())
 _RETRYABLE_RUN_STATUSES = frozenset(
     {"cancelled", "canceled", "completed", "complete", "failed", "error", "interrupted"}
 )
+
+
+def _busy_submit_result(
+    rid,
+    *,
+    params: dict,
+    conversation_session_id: str,
+    run_id: str,
+    turn_id: str,
+    conflict: dict,
+    db: Any,
+) -> dict | None:
+    """Apply busy-input policy while preserving complete future-turn intent."""
+    mode = _load_busy_input_mode()
+    runtime_sid, session = _resolve_runtime_session(conversation_session_id)
+    text = params.get("text", "")
+    attachments = params.get("attachments")
+    has_attachments = isinstance(attachments, list) and bool(attachments)
+    agent = (session or {}).get("agent") if isinstance(session, dict) else None
+    if mode == "steer" and not has_attachments and agent is not None:
+        steer = getattr(agent, "steer", None)
+        if callable(steer):
+            try:
+                if steer(text):
+                    return _ok(
+                        rid,
+                        {
+                            "status": "steered",
+                            "run_id": str(conflict.get("run_id") or ""),
+                            "turn_id": str(conflict.get("turn_id") or ""),
+                            "conversation_session_id": conversation_session_id,
+                        },
+                    )
+            except Exception:
+                logger.debug("busy prompt steer failed; queueing", exc_info=True)
+
+    prompt = PendingPrompt.from_submit(
+        request_id=rid,
+        conversation_session_id=conversation_session_id,
+        run_id=run_id,
+        turn_id=turn_id,
+        params=params,
+        transport=current_transport() or (session or {}).get("transport"),
+        profile_context=_profile_context_for_params(params)
+        or ((session or {}).get("profile_context") if isinstance(session, dict) else None),
+        blocked_by_run_id=str(conflict.get("run_id") or ""),
+    )
+    position = pending_prompt_queue.enqueue(queue_scope_for_db(db), prompt)
+
+    if mode != "queue":
+        active_run_id = str(conflict.get("run_id") or "").strip()
+        active_turn_id = str(conflict.get("turn_id") or "").strip()
+
+        def _interrupt_active() -> None:
+            try:
+                _methods["session.interrupt"](
+                    f"busy-interrupt:{rid}",
+                    {
+                        "session_id": runtime_sid or conversation_session_id,
+                        "conversation_session_id": conversation_session_id,
+                        "run_id": active_run_id,
+                        "turn_id": active_turn_id,
+                        "completion_status": "interrupted",
+                        "_preserve_queued_prompts": True,
+                    },
+                )
+            except Exception:
+                logger.debug("busy prompt interrupt failed", exc_info=True)
+
+        threading.Thread(
+            target=_interrupt_active,
+            daemon=True,
+            name=f"busy-interrupt-{conversation_session_id[:24]}",
+        ).start()
+
+    return _ok(
+        rid,
+        {
+            "status": "queued",
+            "position": position,
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "conversation_session_id": conversation_session_id,
+            "blocked_by_run_id": str(conflict.get("run_id") or ""),
+        },
+    )
+
+
+def schedule_pending_prompt_drain(
+    conversation_session_id: str,
+    *,
+    db: Any = None,
+) -> bool:
+    """Claim and dispatch one queued prompt after the active run is terminal."""
+    stable = str(conversation_session_id or "").strip()
+    if not stable or not pending_prompt_queue.has_conversation(stable):
+        return False
+    use_db = db if db is not None else _run_db_for_stable_session(stable)
+    status = run_control.session_status(
+        stable,
+        db=use_db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
+    if status.get("running"):
+        return False
+    scope = queue_scope_for_db(use_db)
+    prompt = pending_prompt_queue.claim_next(scope, stable)
+    if prompt is None:
+        return False
+
+    def _dispatch() -> None:
+        transport_token = bind_transport(prompt.transport)
+        profile_tokens = _enter_profile_context(prompt.profile_context)
+        try:
+            response = _methods["run.submit"](prompt.request_id, dict(prompt.params))
+            error = response.get("error") if isinstance(response, dict) else None
+            if isinstance(error, dict) and int(error.get("code") or 0) == 4009:
+                pending_prompt_queue.requeue_front(scope, prompt)
+                return
+            if isinstance(error, dict):
+                runtime_sid, session = _resolve_runtime_session(stable)
+                if isinstance(session, dict) and prompt.transport is not None:
+                    session["transport"] = prompt.transport
+                _emit(
+                    "error",
+                    runtime_sid or stable,
+                    {
+                        "message": str(error.get("message") or "queued prompt failed"),
+                        "run_id": prompt.run_id,
+                        "turn_id": prompt.turn_id,
+                    },
+                )
+        except Exception as exc:
+            runtime_sid, session = _resolve_runtime_session(stable)
+            if isinstance(session, dict) and prompt.transport is not None:
+                session["transport"] = prompt.transport
+            _emit(
+                "error",
+                runtime_sid or stable,
+                {
+                    "message": f"queued prompt dispatch failed: {exc}",
+                    "run_id": prompt.run_id,
+                    "turn_id": prompt.turn_id,
+                },
+            )
+        finally:
+            _leave_profile_context(profile_tokens)
+            reset_transport(transport_token)
+
+    threading.Thread(
+        target=_dispatch,
+        daemon=True,
+        name=f"pending-prompt-{stable[:24]}",
+    ).start()
+    return True
 
 
 def _conversation_session_id_from_params(params: dict) -> str:
@@ -371,23 +533,15 @@ def _(rid, params: dict) -> dict:
                 metadata.get("gateway_pid") or "",
                 metadata.get("gateway_instance_id") or "",
             )
-            response = _err(rid, 4009, "session busy")
-            response["error"]["data"] = {
-                "conversation_session_id": target,
-                "active_run_id": conflict.get("run_id") or "",
-                "active_turn_id": conflict.get("turn_id") or "",
-                "active_status": conflict.get("status") or "",
-                "runtime_scope_key": conflict.get("runtime_scope_key") or "",
-                "execution_session_id": conflict.get("execution_session_id") or "",
-                "run_updated_at": conflict.get("updated_at") or 0,
-                "run_started_at": conflict.get("started_at") or 0,
-                "metadata": metadata,
-                "requested_run_id": requested_run_id,
-                "requested_turn_id": requested_turn_id,
-                "current_gateway_pid": os.getpid(),
-                "current_gateway_instance_id": _GATEWAY_INSTANCE_ID,
-            }
-            return response
+            return _busy_submit_result(
+                rid,
+                params=params,
+                conversation_session_id=target,
+                run_id=requested_run_id,
+                turn_id=requested_turn_id,
+                conflict=conflict,
+                db=run_db,
+            )
         existing_run = reservation.get("run") if isinstance(reservation, dict) else None
         if isinstance(existing_run, dict) and not reservation.get("created"):
             return _ok(

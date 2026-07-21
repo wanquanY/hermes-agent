@@ -10,10 +10,10 @@ from hermes_agent.gateway.runtime_config import (
     load_gateway_runtime_config,
     resolve_gateway_model as _resolve_gateway_model,
 )
+from hermes_cli.config import atomic_config_write
 from hermes_constants import get_hermes_home
 from hermes_gateway.config import Platform
 from hermes_gateway.runtime_footer import format_runtime_footer, resolve_footer_config
-from utils import atomic_yaml_write
 
 logger = logging.getLogger(__name__)
 GATEWAY_HOME = get_hermes_home()
@@ -83,7 +83,7 @@ class GatewayFooterCommandService:
             if not isinstance(display.get("runtime_footer"), dict):
                 display["runtime_footer"] = {}
             display["runtime_footer"]["enabled"] = new_state
-            atomic_yaml_write(config_path, user_config)
+            atomic_config_write(config_path, user_config)
         except Exception as e:
             logger.warning("Failed to save runtime_footer.enabled: %s", e)
             return t("hermes_gateway.config_save_failed", error=e)

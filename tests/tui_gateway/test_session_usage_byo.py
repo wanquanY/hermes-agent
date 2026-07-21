@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tui_gateway import server
+from tui_gateway.methods import billing as billing_methods
 from tui_gateway.methods import session as session_methods
 
 
@@ -27,7 +28,14 @@ def _session_usage_entry(sid: str, agent: SimpleNamespace) -> dict:
             "agent": agent,
         }
     try:
-        with patch.object(session_methods, "_get_usage", return_value=_usage_payload()):
+        with (
+            patch.object(session_methods, "_get_usage", return_value=_usage_payload()),
+            patch.object(
+                billing_methods,
+                "build_usage_payload",
+                return_value={"ok": True, "available": False},
+            ),
+        ):
             resp = server.handle_request({
                 "id": f"usage-{sid}",
                 "method": "session.usage",

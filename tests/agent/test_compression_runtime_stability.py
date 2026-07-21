@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -164,3 +165,48 @@ def test_worker_rpc_mapping_snapshot_restores_compression_state():
     assert compressor._ineffective_compression_count == 1  # noqa: SLF001
     assert compressor._fallback_compression_streak == 2  # noqa: SLF001
     assert compressor._verify_compaction_cleared_threshold is True  # noqa: SLF001
+
+
+def test_blocked_gate_refreshes_durable_clear_and_unblocks(tmp_path):
+    store = open_cli_session_store(tmp_path / "state.db")
+    store.sessions.create("session-1", "cli")
+    try:
+        compressor = _compressor(128_000)
+        compressor.bind_session_state(store, "session-1")
+        compressor._fallback_compression_streak = 2  # noqa: SLF001
+
+        store.runtime_stability.write_compression(
+            "session-1",
+            ineffective_count=0,
+            fallback_streak=0,
+            verdict_pending=False,
+        )
+
+        assert compressor.should_compress(compressor.threshold_tokens + 1) is True
+        assert compressor._fallback_compression_streak == 0  # noqa: SLF001
+    finally:
+        store.close()
+
+
+def test_failed_local_guard_persist_is_not_cleared_by_empty_durable_row():
+    compressor = _compressor(128_000)
+    store = SimpleNamespace(
+        runtime_stability=SimpleNamespace(
+            get=lambda _session_id: {
+                "compression_ineffective_count": 0,
+                "compression_fallback_streak": 0,
+                "compression_verdict_pending": False,
+                "compression_failure_cooldown_until": 0.0,
+                "compression_failure_error": "",
+            }
+        )
+    )
+    compressor.bind_session_state(store, "session-1")
+    compressor._summary_failure_cooldown_until = time.monotonic() + 30  # noqa: SLF001
+    compressor._last_summary_error = "local persist failed"  # noqa: SLF001
+    compressor._compression_state_persist_failed = True  # noqa: SLF001
+
+    cooldown = compressor.get_active_compression_failure_cooldown(refresh=True)
+
+    assert cooldown is not None
+    assert cooldown["error"] == "local persist failed"

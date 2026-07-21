@@ -635,6 +635,15 @@ class CodexAppServerSession:
                     if pending is None:
                         break
                     mark_notification(pending)
+                    # Approval requests race with the notifications that
+                    # describe their tool item.  The drain path must preserve
+                    # the same observer contract as the normal notification
+                    # path or UI consumers silently lose those tool events.
+                    if self._on_event is not None:
+                        try:
+                            self._on_event(pending)
+                        except Exception:  # pragma: no cover - display callback
+                            logger.debug("on_event callback raised", exc_info=True)
                     _apply_protocol_model_notification(result, pending)
                     _apply_token_usage_notification(result, pending)
                     _apply_compaction_notification(result, pending)

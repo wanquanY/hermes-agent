@@ -7,7 +7,7 @@ runtime limits keep the same behavior during migration.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import json
 import logging
 import threading
@@ -15,6 +15,8 @@ import time
 from typing import Any, Dict, Optional
 
 from tools import file_state
+from tools.daemon_pool import DaemonThreadPoolExecutor
+from tools.thread_context import propagate_context_to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +370,7 @@ def run_single_child(
         # Run child with an activity-based idle timeout. The configured value
         # is not a total runtime cap: active streaming, API progress, and tool
         # progress reset the idle timer.
-        _timeout_executor = ThreadPoolExecutor(
+        _timeout_executor = DaemonThreadPoolExecutor(
             max_workers=1,
             # Install a non-interactive approval callback in the worker thread
             # so dangerous-command prompts from the subagent don't fall back to
@@ -389,7 +391,9 @@ def run_single_child(
                 child_task_id=child_task_id,
             )
 
-        _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        _child_future = _timeout_executor.submit(
+            propagate_context_to_thread(_run_with_thread_capture)
+        )
         try:
             result = _wait_for_child_result_with_idle_timeout(
                 _child_future,

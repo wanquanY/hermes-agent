@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import os
 
+from agent.secret_scope import get_profile_env
+
 try:
     import httpx
 except ImportError:  # pragma: no cover — optional dep
@@ -51,7 +53,7 @@ def platform_httpx_limits() -> "httpx.Limits | None":
         return None
 
     def _env_float(name: str, default: float) -> float:
-        raw = os.environ.get(name, "").strip()
+        raw = get_profile_env(name, "").strip()
         if not raw:
             return default
         try:
@@ -61,7 +63,7 @@ def platform_httpx_limits() -> "httpx.Limits | None":
         return val if val > 0 else default
 
     def _env_int(name: str, default: int) -> int:
-        raw = os.environ.get(name, "").strip()
+        raw = get_profile_env(name, "").strip()
         if not raw:
             return default
         try:

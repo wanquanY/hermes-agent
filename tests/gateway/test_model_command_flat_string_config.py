@@ -103,7 +103,9 @@ async def test_model_global_persists_when_config_has_flat_string_model(tmp_path,
     )
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
-    assert written["model"]["base_url"] == "https://openrouter.ai/api/v1"
+    # Named providers resolve their endpoint from the provider registry.  The
+    # model section must not retain a stale or duplicated inline endpoint.
+    assert "base_url" not in written["model"]
 
 
 @pytest.mark.asyncio
@@ -160,12 +162,8 @@ async def test_model_global_persists_when_config_has_proper_dict_model(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_model_no_flag_persists_by_default(tmp_path, monkeypatch):
-    """A plain ``/model X`` (no --global) now persists to config.yaml.
-
-    This is the user-facing fix: switching models in one session survives
-    into the next without re-typing the switch every time.
-    """
+async def test_model_no_flag_stays_session_scoped_by_default(tmp_path, monkeypatch):
+    """A plain ``/model X`` changes only the current session by default."""
     cfg_path = _setup_isolated_home(
         tmp_path,
         monkeypatch,
@@ -179,7 +177,7 @@ async def test_model_no_flag_persists_by_default(tmp_path, monkeypatch):
     assert result is not None
     assert "gpt-5.5" in result
     written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    assert written["model"]["default"] == "gpt-5.5"
+    assert written["model"]["default"] == "old-model"
 
 
 @pytest.mark.asyncio

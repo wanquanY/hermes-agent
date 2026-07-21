@@ -33,6 +33,7 @@ class StreamConsumerFinalMixin:
                 # stale tool bubble above it so the next tool starts a
                 # new bubble below.
                 self._notify_new_message()
+                self._delivered_commentary_texts.append(text)
             return result.success
         except Exception as e:
             logger.error("Commentary send error: %s", e)
@@ -407,6 +408,7 @@ class StreamConsumerFinalMixin:
                         self._flood_strikes = 0
                         return True
                     else:
+                        immediate_final_fallback = False
                         if (
                             finalize
                             and is_turn_final
@@ -468,12 +470,30 @@ class StreamConsumerFinalMixin:
                                 self._MAX_FLOOD_STRIKES,
                                 self._current_edit_interval,
                             )
-                            if self._flood_strikes < self._MAX_FLOOD_STRIKES:
+                            immediate_final_fallback = (
+                                finalize
+                                and is_turn_final
+                                and getattr(
+                                    self.adapter,
+                                    "FALLBACK_ON_FINAL_EDIT_FLOOD",
+                                    False,
+                                ) is True
+                            )
+                            if (
+                                self._flood_strikes < self._MAX_FLOOD_STRIKES
+                                and not immediate_final_fallback
+                            ):
                                 # Don't disable edits yet — just slow down.
                                 # Update _last_edit_time so the next edit
                                 # respects the new interval.
                                 self._last_edit_time = time.monotonic()
                                 return False
+
+                            if immediate_final_fallback:
+                                logger.debug(
+                                    "Turn-final edit hit flood control; "
+                                    "entering fallback immediately"
+                                )
 
                         # Non-flood error OR flood strikes exhausted: enter
                         # fallback mode — send only the missing tail once the
@@ -486,9 +506,11 @@ class StreamConsumerFinalMixin:
                         self._fallback_final_send = True
                         self._edit_supported = False
                         self._already_sent = True
-                        # Best-effort: strip the cursor from the last visible
-                        # message so the user doesn't see a stuck ▉.
-                        await self._try_strip_cursor()
+                        # A turn-final Telegram flood skips this cosmetic edit:
+                        # another edit consumes the same flood budget and delays
+                        # the fallback send that carries the completed answer.
+                        if not immediate_final_fallback:
+                            await self._try_strip_cursor()
                         return False
                 else:
                     # Editing not supported — skip intermediate updates.

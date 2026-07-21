@@ -192,6 +192,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 or "tool_name" in msg
                 or "effect_disposition" in msg
                 or "timestamp" in msg  # #47868 — strict providers reject this
+                or "api_content" in msg
                 or any(key in msg for key in internal_message_keys)
             ):
                 needs_sanitize = True
@@ -238,6 +239,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 "tool_name",
                 "effect_disposition",
                 "timestamp",
+                "api_content",
                 *internal_message_keys,
             }
             present_message_keys = removable_message_keys.intersection(msg)

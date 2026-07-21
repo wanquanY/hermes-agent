@@ -348,6 +348,20 @@ class TestReadLog:
         result = registry.read_log(s.id, offset=10, limit=5)
         assert "5 lines" in result["showing"]
 
+    def test_terminal_output_is_consumed_only_when_page_reaches_tail(self, registry):
+        s = _make_session(
+            exited=True,
+            exit_code=0,
+            output="first\nsecond\nthird",
+        )
+        registry._finished[s.id] = s
+
+        registry.read_log(s.id, offset=1, limit=1)
+        assert not registry.is_completion_consumed(s.id)
+
+        registry.read_log(s.id, offset=2, limit=1)
+        assert registry.is_completion_consumed(s.id)
+
 
 # =========================================================================
 # Stdin helpers
@@ -960,10 +974,33 @@ class TestKillProcess:
         assert result["status"] == "not_found"
 
     def test_kill_already_exited(self, registry):
-        s = _make_session(exited=True, exit_code=0)
+        s = _make_session(exited=True, exit_code=0, output="finished output")
         registry._finished[s.id] = s
         result = registry.kill_process(s.id)
         assert result["status"] == "already_exited"
+        assert result["output"] == "finished output"
+        assert registry.is_completion_consumed(s.id)
+
+    def test_kill_already_exited_can_preserve_autonomous_notification(self, registry):
+        s = _make_session(exited=True, exit_code=0, output="finished output")
+        registry._finished[s.id] = s
+
+        result = registry.kill_process(s.id, consume_output=False)
+
+        assert result["output"] == "finished output"
+        assert not registry.is_completion_consumed(s.id)
+
+    def test_bulk_kill_does_not_consume_discarded_output(self, registry):
+        session = _make_session()
+        registry._running[session.id] = session
+        registry.kill_process = MagicMock(return_value={"status": "killed"})
+
+        assert registry.kill_all() == 1
+        registry.kill_process.assert_called_once_with(
+            session.id,
+            source="kill_all",
+            consume_output=False,
+        )
 
     def test_kill_detached_session_uses_host_pid(self, registry):
         s = _make_session(sid="proc_detached", command="sleep 999")

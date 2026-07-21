@@ -10,6 +10,8 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from agent.secret_scope import get_profile_env
 from urllib.parse import urlparse
 
 try:
@@ -418,13 +420,13 @@ class QQMediaMixin:
                     }
 
         # 2. QQ-specific env vars (set by `hermes setup gateway` / `hermes gateway`)
-        qq_stt_key = os.getenv("QQ_STT_API_KEY", "")
+        qq_stt_key = get_profile_env("QQ_STT_API_KEY", "")
         if qq_stt_key:
-            base_url = os.getenv(
+            base_url = get_profile_env(
                 "QQ_STT_BASE_URL",
                 "https://open.bigmodel.cn/api/coding/paas/v4",
             )
-            model = os.getenv("QQ_STT_MODEL", "glm-asr")
+            model = get_profile_env("QQ_STT_MODEL", "glm-asr")
             return {
                 "base_url": base_url.rstrip("/"),
                 "api_key": qq_stt_key,

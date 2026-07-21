@@ -590,6 +590,7 @@ def _git(cwd: Path, *args: str) -> str:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return ""

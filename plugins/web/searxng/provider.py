@@ -23,12 +23,16 @@ Env var::
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, get_provider_env
 
 logger = logging.getLogger(__name__)
+
+
+def _searxng_url() -> str:
+    """Return SEARXNG_URL from the active profile environment."""
+    return get_provider_env("SEARXNG_URL")
 
 
 class SearXNGWebSearchProvider(WebSearchProvider):
@@ -44,7 +48,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
 
     def is_available(self) -> bool:
         """Return True when ``SEARXNG_URL`` is set."""
-        return bool(os.getenv("SEARXNG_URL", "").strip())
+        return bool(_searxng_url())
 
     def supports_search(self) -> bool:
         return True
@@ -56,7 +60,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         """Execute a search against the configured SearXNG instance."""
         import httpx
 
-        base_url = os.getenv("SEARXNG_URL", "").strip().rstrip("/")
+        base_url = _searxng_url().rstrip("/")
         if not base_url:
             return {"success": False, "error": "SEARXNG_URL is not set"}
 

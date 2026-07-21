@@ -37,9 +37,11 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from channels.config import Platform, PlatformConfig
+from agent.secret_scope import get_profile_env
 from channels.platforms.helpers import MessageDeduplicator
 from channels.platforms.slack_inbound import SlackInboundMixin
 from channels.platforms.slack_support import _ThreadContextCache, _slash_user_id
+from channels.platforms.slack_block_kit import render_blocks
 from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -135,6 +137,10 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
     """
 
     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
+    supports_code_blocks = True
+    supports_status_text = True
+    splits_long_messages = True
+    typed_command_prefix = "!"
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SLACK)
@@ -172,9 +178,11 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
         self._THREAD_CACHE_TTL = 60.0
         # Track message IDs that should get reaction lifecycle (DMs / @mentions).
         self._reacting_message_ids: set = set()
-        # Track active assistant thread status indicators so stop_typing can
-        # clear them (chat_id → thread_ts).
-        self._active_status_threads: Dict[str, str] = {}
+        # Workspace-scoped Assistant statuses. Slack Connect can expose the
+        # same channel/thread identifiers in multiple workspaces.
+        self._active_status_threads: Dict[
+            Tuple[str, str, str], Dict[str, str]
+        ] = {}
         # Slash-command contexts: stash response_url + user_id so send()
         # can route the first reply ephemerally.  Keyed by
         # (channel_id, user_id) to avoid cross-user collisions.
@@ -344,7 +352,7 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
             return False
 
         raw_token = self.config.token
-        app_token = os.getenv("SLACK_APP_TOKEN")
+        app_token = get_profile_env("SLACK_APP_TOKEN")
 
         if not raw_token:
             logger.error("[Slack] SLACK_BOT_TOKEN not set")
@@ -580,8 +588,31 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
 
         logger.info("[Slack] Disconnected")
 
-    def _get_client(self, chat_id: str) -> Any:
+    @staticmethod
+    def _metadata_team_id(metadata: Optional[Dict[str, Any]]) -> str:
+        if not metadata:
+            return ""
+        return str(
+            metadata.get("team_id")
+            or metadata.get("team")
+            or metadata.get("slack_team_id")
+            or ""
+        )
+
+    @staticmethod
+    def _workspace_thread_key(
+        team_id: str,
+        channel_id: str,
+        thread_ts: str,
+    ) -> Optional[Tuple[str, str, str]]:
+        if not channel_id or not thread_ts:
+            return None
+        return (str(team_id or ""), str(channel_id), str(thread_ts))
+
+    def _get_client(self, chat_id: str, team_id: Optional[str] = None) -> Any:
         """Return the workspace-specific WebClient for a channel."""
+        if team_id and team_id in self._team_clients:
+            return self._team_clients[team_id]
         team_id = self._channel_team.get(chat_id)
         if team_id and team_id in self._team_clients:
             return self._team_clients[team_id]
@@ -623,12 +654,18 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
             # Controlled via platform config: gateway.slack.reply_broadcast
             broadcast = self.config.extra.get("reply_broadcast", False)
 
+            # Opt-in Block Kit rendering is reserved for a single final
+            # message. The text field remains the accessibility fallback.
+            blocks = self._maybe_blocks(content) if len(chunks) == 1 else None
+
             for i, chunk in enumerate(chunks):
                 kwargs = {
                     "channel": chat_id,
                     "text": chunk,
                     "mrkdwn": True,
                 }
+                if blocks and i == 0:
+                    kwargs["blocks"] = blocks
                 if thread_ts:
                     kwargs["thread_ts"] = thread_ts
                     # Only broadcast the first chunk of the first reply
@@ -713,11 +750,16 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             formatted = self.format_message(content)
-            await self._get_client(chat_id).chat_update(
-                channel=chat_id,
-                ts=message_id,
-                text=formatted,
-            )
+            update_kwargs: Dict[str, Any] = {
+                "channel": chat_id,
+                "ts": message_id,
+                "text": formatted,
+            }
+            if finalize:
+                blocks = self._maybe_blocks(content)
+                if blocks:
+                    update_kwargs["blocks"] = blocks
+            await self._get_client(chat_id).chat_update(**update_kwargs)
             if finalize:
                 await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=message_id)
@@ -734,7 +776,8 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Show a typing/status indicator using assistant.threads.setStatus.
 
-        Displays "is thinking..." next to the bot name in a thread.
+        Displays a live tool phrase, configured fallback, or "is thinking..."
+        next to the bot name in a thread.
         Requires the assistant:write or chat:write scope.
         Auto-clears when the bot sends a reply to the thread.
         """
@@ -748,12 +791,28 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
         if not thread_ts:
             return  # Can only set status in a thread context
 
-        self._active_status_threads[chat_id] = thread_ts
+        team_id = self._metadata_team_id(metadata) or self._channel_team.get(
+            chat_id, ""
+        )
+        status_key = self._workspace_thread_key(team_id, chat_id, str(thread_ts))
+        if status_key:
+            self._active_status_threads[status_key] = {
+                "thread_ts": str(thread_ts),
+                "team_id": str(team_id or ""),
+            }
         try:
-            await self._get_client(chat_id).assistant_threads_setStatus(
+            status = (
+                getattr(self, "_status_text", {}).get(str(chat_id))
+                or getattr(self.config, "typing_status_text", None)
+                or "is thinking..."
+            )
+            await self._get_client(
+                chat_id,
+                team_id=team_id,
+            ).assistant_threads_setStatus(
                 channel_id=chat_id,
                 thread_ts=thread_ts,
-                status="is thinking...",
+                status=status,
             )
         except Exception as e:
             # Silently ignore — may lack assistant:write scope or not be
@@ -764,11 +823,60 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
         """Clear the assistant thread status indicator."""
         if not self._app:
             return
-        thread_ts = self._active_status_threads.pop(chat_id, None)
+        requested_thread_ts = str(
+            (metadata or {}).get("thread_id")
+            or (metadata or {}).get("thread_ts")
+            or ""
+        )
+        requested_team_id = self._metadata_team_id(metadata)
+        # Consume legacy channel-only entries left by an in-process upgrade;
+        # new writes always use workspace+channel+thread keys.
+        active = self._active_status_threads.pop(chat_id, None)
+        ambiguous = False
+        if active is None and requested_thread_ts:
+            if requested_team_id:
+                key = self._workspace_thread_key(
+                    requested_team_id,
+                    chat_id,
+                    requested_thread_ts,
+                )
+                if key:
+                    active = self._active_status_threads.pop(key, None)
+            else:
+                matches = [
+                    key
+                    for key in self._active_status_threads
+                    if key[1] == str(chat_id) and key[2] == requested_thread_ts
+                ]
+                if len(matches) == 1:
+                    active = self._active_status_threads.pop(matches[0], None)
+                ambiguous = len(matches) > 1
+        elif active is None:
+            matches = [
+                key
+                for key in self._active_status_threads
+                if key[1] == str(chat_id)
+            ]
+            if len(matches) == 1:
+                active = self._active_status_threads.pop(matches[0], None)
+
+        if isinstance(active, str):
+            thread_ts = active
+            team_id = ""
+        else:
+            active = active or {}
+            thread_ts = active.get("thread_ts", "")
+            team_id = active.get("team_id", "")
+        team_id = requested_team_id or team_id
+        if not thread_ts and requested_thread_ts and not ambiguous:
+            thread_ts = requested_thread_ts
         if not thread_ts:
             return
         try:
-            await self._get_client(chat_id).assistant_threads_setStatus(
+            await self._get_client(
+                chat_id,
+                team_id=team_id,
+            ).assistant_threads_setStatus(
                 channel_id=chat_id,
                 thread_ts=thread_ts,
                 status="",
@@ -1006,6 +1114,49 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
 
     # ----- Markdown → mrkdwn conversion -----
 
+    def _rich_blocks_enabled(self) -> bool:
+        """Whether final responses should use structured Slack blocks."""
+        raw = self.config.extra.get("rich_blocks")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _feedback_buttons_enabled(self) -> bool:
+        raw = self.config.extra.get("feedback_buttons")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _feedback_block() -> Dict[str, Any]:
+        return {
+            "type": "context_actions",
+            "elements": [
+                {
+                    "type": "feedback_buttons",
+                    "action_id": "hermes_feedback",
+                    "positive_button": {
+                        "text": {"type": "plain_text", "text": "Good Response"},
+                        "accessibility_label": "Submit positive feedback on this response",
+                        "value": "positive",
+                    },
+                    "negative_button": {
+                        "text": {"type": "plain_text", "text": "Bad Response"},
+                        "accessibility_label": "Submit negative feedback on this response",
+                        "value": "negative",
+                    },
+                }
+            ],
+        }
+
+    def _maybe_blocks(self, content: str) -> Optional[list]:
+        if not self._rich_blocks_enabled():
+            return None
+        try:
+            blocks = render_blocks(content, mrkdwn_fn=self.format_message)
+        except Exception:
+            logger.debug("[Slack] block render failed; using plain text", exc_info=True)
+            return None
+        if blocks and self._feedback_buttons_enabled() and len(blocks) < 50:
+            return [*blocks, self._feedback_block()]
+        return blocks
+
     def format_message(self, content: str) -> str:
         """Convert standard markdown to Slack mrkdwn format.
 
@@ -1153,7 +1304,11 @@ class SlackAdapter(SlackInboundMixin, BasePlatformAdapter):
 
     def _reactions_enabled(self) -> bool:
         """Check if message reactions are enabled via config/env."""
-        return os.getenv("SLACK_REACTIONS", "true").lower() not in {"false", "0", "no"}
+        return get_profile_env("SLACK_REACTIONS", "true").lower() not in {
+            "false",
+            "0",
+            "no",
+        }
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress reaction when message processing begins."""

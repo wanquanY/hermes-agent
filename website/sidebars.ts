@@ -151,7 +151,17 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-claude-code',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-codex',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-hermes-agent',
+                    'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-kanban-codex-lane',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-opencode',
+                  ],
+                },
+                {
+                  type: 'category',
+                  label: 'computer-use',
+                  key: 'skills-bundled-computer-use',
+                  collapsed: true,
+                  items: [
+                    'user-guide/skills/bundled/computer-use/computer-use-computer-use',
                   ],
                 },
                 {
@@ -246,6 +256,15 @@ const sidebars: SidebarsConfig = {
                 },
                 {
                   type: 'category',
+                  label: 'hermes-desktop-plugins',
+                  key: 'skills-bundled-hermes-desktop-plugins',
+                  collapsed: true,
+                  items: [
+                    'user-guide/skills/bundled/hermes-desktop-plugins/hermes-desktop-plugins-hermes-desktop-plugins',
+                  ],
+                },
+                {
+                  type: 'category',
                   label: 'mcp',
                   key: 'skills-bundled-mcp',
                   collapsed: true,
@@ -305,6 +324,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/productivity/productivity-nano-pdf',
                     'user-guide/skills/bundled/productivity/productivity-notion',
                     'user-guide/skills/bundled/productivity/productivity-ocr-and-documents',
+                    'user-guide/skills/bundled/productivity/productivity-petdex',
                     'user-guide/skills/bundled/productivity/productivity-powerpoint',
                     'user-guide/skills/bundled/productivity/productivity-teams-meeting-pipeline',
                   ],
@@ -361,6 +381,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/software-development/software-development-plan',
                     'user-guide/skills/bundled/software-development/software-development-python-debugpy',
                     'user-guide/skills/bundled/software-development/software-development-requesting-code-review',
+                    'user-guide/skills/bundled/software-development/software-development-simplify-code',
                     'user-guide/skills/bundled/software-development/software-development-spike',
                     'user-guide/skills/bundled/software-development/software-development-subagent-driven-development',
                     'user-guide/skills/bundled/software-development/software-development-systematic-debugging',
@@ -390,8 +411,11 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-optional-autonomous-ai-agents',
                   collapsed: true,
                   items: [
+                    'user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-antigravity-cli',
                     'user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-blackbox',
+                    'user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-grok',
                     'user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-honcho',
+                    'user-guide/skills/optional/autonomous-ai-agents/autonomous-ai-agents-openhands',
                   ],
                 },
                 {
@@ -425,6 +449,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/optional/creative/creative-hyperframes',
                     'user-guide/skills/optional/creative/creative-kanban-video-orchestrator',
                     'user-guide/skills/optional/creative/creative-meme-generation',
+                    'user-guide/skills/optional/creative/creative-unreal-mcp',
                   ],
                 },
                 {
@@ -435,6 +460,7 @@ const sidebars: SidebarsConfig = {
                   items: [
                     'user-guide/skills/optional/devops/devops-cli',
                     'user-guide/skills/optional/devops/devops-docker-management',
+                    'user-guide/skills/optional/devops/devops-hermes-s6-container-supervision',
                     'user-guide/skills/optional/devops/devops-pinggy-tunnel',
                     'user-guide/skills/optional/devops/devops-watchers',
                   ],
@@ -490,6 +516,7 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/optional/mcp/mcp-fastmcp',
+                    'user-guide/skills/optional/mcp/mcp-mcp-oauth-remote-gateway',
                     'user-guide/skills/optional/mcp/mcp-mcporter',
                   ],
                 },
@@ -540,6 +567,17 @@ const sidebars: SidebarsConfig = {
                 },
                 {
                   type: 'category',
+                  label: 'payments',
+                  key: 'skills-optional-payments',
+                  collapsed: true,
+                  items: [
+                    'user-guide/skills/optional/payments/payments-mpp-agent',
+                    'user-guide/skills/optional/payments/payments-stripe-link-cli',
+                    'user-guide/skills/optional/payments/payments-stripe-projects',
+                  ],
+                },
+                {
+                  type: 'category',
                   label: 'productivity',
                   key: 'skills-optional-productivity',
                   collapsed: true,
@@ -547,7 +585,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/optional/productivity/productivity-canvas',
                     'user-guide/skills/optional/productivity/productivity-here-now',
                     'user-guide/skills/optional/productivity/productivity-memento-flashcards',
-                    'user-guide/skills/optional/productivity/productivity-shop-app',
+                    'user-guide/skills/optional/productivity/productivity-shop',
                     'user-guide/skills/optional/productivity/productivity-shopify',
                     'user-guide/skills/optional/productivity/productivity-siyuan',
                     'user-guide/skills/optional/productivity/productivity-telephony',
@@ -581,6 +619,8 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/optional/security/security-1password',
                     'user-guide/skills/optional/security/security-oss-forensics',
                     'user-guide/skills/optional/security/security-sherlock',
+                    'user-guide/skills/optional/security/security-unbroker',
+                    'user-guide/skills/optional/security/security-web-pentest',
                   ],
                 },
                 {
@@ -589,6 +629,7 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-optional-software-development',
                   collapsed: true,
                   items: [
+                    'user-guide/skills/optional/software-development/software-development-code-wiki',
                     'user-guide/skills/optional/software-development/software-development-rest-graphql-debug',
                   ],
                 },
@@ -598,6 +639,7 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-optional-web-development',
                   collapsed: true,
                   items: [
+                    'user-guide/skills/optional/web-development/web-development-cloudflare-temporary-deploy',
                     'user-guide/skills/optional/web-development/web-development-page-agent',
                   ],
                 },

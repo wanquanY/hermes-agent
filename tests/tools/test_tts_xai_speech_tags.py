@@ -79,3 +79,67 @@ def test_generate_xai_tts_leaves_text_plain_by_default(tmp_path, monkeypatch):
     )
 
     assert captured["json"]["text"] == "Bonjour Monsieur Talbot. Ceci est un test."
+
+
+def test_generate_xai_tts_resolves_and_clamps_speed(tmp_path, monkeypatch):
+    captured = {}
+    response = Mock(content=b"mp3")
+    response.raise_for_status.return_value = None
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return response
+
+    monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+    monkeypatch.setattr("requests.post", fake_post)
+
+    _generate_xai_tts(
+        "Hello.",
+        str(tmp_path / "out.mp3"),
+        {"speed": 1.5, "xai": {"speed": 0.1}},
+    )
+
+    assert captured["json"]["speed"] == 0.7
+
+
+def test_generate_xai_tts_sends_non_default_latency(tmp_path, monkeypatch):
+    captured = {}
+    response = Mock(content=b"mp3")
+    response.raise_for_status.return_value = None
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return response
+
+    monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+    monkeypatch.setattr("requests.post", fake_post)
+
+    _generate_xai_tts(
+        "Hello.",
+        str(tmp_path / "out.mp3"),
+        {"xai": {"optimize_streaming_latency": 9}},
+    )
+
+    assert captured["json"]["optimize_streaming_latency"] == 2
+
+
+def test_generate_xai_tts_omits_api_defaults(tmp_path, monkeypatch):
+    captured = {}
+    response = Mock(content=b"mp3")
+    response.raise_for_status.return_value = None
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return response
+
+    monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+    monkeypatch.setattr("requests.post", fake_post)
+
+    _generate_xai_tts(
+        "Hello.",
+        str(tmp_path / "out.mp3"),
+        {"xai": {"speed": 1.0, "optimize_streaming_latency": 0}},
+    )
+
+    assert "speed" not in captured["json"]
+    assert "optimize_streaming_latency" not in captured["json"]

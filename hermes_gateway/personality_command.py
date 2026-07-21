@@ -5,9 +5,8 @@ from __future__ import annotations
 from agent.i18n import t
 from channels.platforms.base import MessageEvent
 from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
-from hermes_cli.config import cfg_get
+from hermes_cli.config import atomic_config_write, cfg_get
 from hermes_constants import get_hermes_home
-from utils import atomic_yaml_write
 
 GATEWAY_HOME = get_hermes_home()
 
@@ -69,7 +68,7 @@ class GatewayPersonalityCommandService:
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
                 config["agent"]["system_prompt"] = ""
-                atomic_yaml_write(config_path, config)
+                atomic_config_write(config_path, config)
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
             self._runner._ephemeral_system_prompt = ""
@@ -81,7 +80,7 @@ class GatewayPersonalityCommandService:
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
                 config["agent"]["system_prompt"] = new_prompt
-                atomic_yaml_write(config_path, config)
+                atomic_config_write(config_path, config)
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
 

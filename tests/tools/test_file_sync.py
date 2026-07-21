@@ -223,6 +223,31 @@ class TestRateLimiting:
             mgr.sync()
         assert upload.call_count == 1
 
+    def test_failed_sync_does_not_suppress_next_retry(self, tmp_files, monkeypatch):
+        """Rollback must leave the retry clock unchanged."""
+        from tools.environments import file_sync
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(file_sync, "_monotonic", lambda: clock["t"])
+
+        upload = MagicMock(side_effect=RuntimeError("transport down"))
+        mgr = FileSyncManager(
+            get_files_fn=_make_get_files(tmp_files),
+            upload_fn=upload,
+            delete_fn=MagicMock(),
+            sync_interval=10.0,
+        )
+
+        mgr.sync(force=True)
+        assert upload.call_count >= 1
+
+        upload.reset_mock()
+        upload.side_effect = None
+        clock["t"] = 1002.0
+
+        mgr.sync()
+        assert upload.call_count == 3
+
 
 class TestEdgeCases:
     def test_empty_file_list(self):

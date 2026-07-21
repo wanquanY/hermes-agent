@@ -41,17 +41,45 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import yaml
 
-from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
+from agent.credential_persistence import sanitize_borrowed_credential_payload
+from agent.secret_scope import get_profile_env
+from hermes_cli.config import (
+    atomic_config_write,
+    get_config_path,
+    get_hermes_home,
+    read_raw_config,
+)
 from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
-from utils import atomic_replace, atomic_yaml_write, is_truthy_value
+from utils import atomic_replace, is_truthy_value
 
 logger = logging.getLogger(__name__)
+
+_PROCESS_GLOBAL_ENV_NAMES = frozenset(
+    {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SSH_CLIENT",
+        "SSH_TTY",
+        "PYTEST_CURRENT_TEST",
+        # Setting this variable explicitly opts all profiles into one shared
+        # OAuth store; it is therefore deployment-global by definition.
+        "HERMES_SHARED_AUTH_DIR",
+    }
+)
+
+
+def _profile_env(name: str, default=None):
+    """Read provider/auth settings without crossing profile boundaries."""
+    if name in _PROCESS_GLOBAL_ENV_NAMES:
+        return os.getenv(name, default)
+    return get_profile_env(name, default)
 
 try:
     import fcntl
@@ -507,7 +535,7 @@ def get_anthropic_key() -> str:
     from hermes_cli.config import get_env_value
 
     for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
-        value = get_env_value(var) or os.getenv(var, "")
+        value = get_env_value(var) or _profile_env(var, "")
         if value:
             return value
     return ""
@@ -780,7 +808,7 @@ def _token_fingerprint(token: Any) -> Optional[str]:
 
 
 def _oauth_trace_enabled() -> bool:
-    raw = os.getenv("HERMES_OAUTH_TRACE", "").strip().lower()
+    raw = _profile_env("HERMES_OAUTH_TRACE", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -1239,15 +1267,43 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return list(global_entries) if isinstance(global_entries, list) else []
 
 
-def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
-    """Persist one provider's credential pool under auth.json."""
+def write_credential_pool(
+    provider_id: str,
+    entries: List[Dict[str, Any]],
+    *,
+    removed_ids: Optional[Iterable[str]] = None,
+) -> Path:
+    """Persist a pool without leaking borrowed secrets or dropping peer writes."""
+    removed = {entry_id for entry_id in (removed_ids or ()) if entry_id}
     with _auth_store_lock():
         auth_store = _load_auth_store()
         pool = auth_store.get("credential_pool")
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
-        pool[provider_id] = list(entries)
+        sanitized_entries = [
+            sanitize_borrowed_credential_payload(entry, provider_id)
+            if isinstance(entry, dict)
+            else entry
+            for entry in entries
+        ]
+        new_ids = {
+            entry.get("id")
+            for entry in sanitized_entries
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        merged: List[Dict[str, Any]] = list(sanitized_entries)
+        existing = pool.get(provider_id)
+        for disk_entry in existing if isinstance(existing, list) else ():
+            if not isinstance(disk_entry, dict):
+                continue
+            disk_id = disk_entry.get("id")
+            if not disk_id or disk_id in new_ids or disk_id in removed:
+                continue
+            merged.append(
+                sanitize_borrowed_credential_payload(disk_entry, provider_id)
+            )
+        pool[provider_id] = merged
         return _save_auth_store(auth_store)
 
 
@@ -1367,7 +1423,7 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
         for env_var in pconfig.api_key_env_vars:
             if env_var in _IMPLICIT_ENV_VARS:
                 continue
-            if has_usable_secret(os.getenv(env_var, "")):
+            if has_usable_secret(_profile_env(env_var, "")):
                 return True
 
     return False
@@ -1553,7 +1609,7 @@ def resolve_provider(
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
 
-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
+    if has_usable_secret(_profile_env("OPENAI_API_KEY")) or has_usable_secret(_profile_env("OPENROUTER_API_KEY")):
         return "openrouter"
 
     # Auto-detect API-key providers by checking their env vars
@@ -1569,7 +1625,7 @@ def resolve_provider(
         if pid in {"copilot", "lmstudio"}:
             continue
         for env_var in pconfig.api_key_env_vars:
-            if has_usable_secret(os.getenv(env_var, "")):
+            if has_usable_secret(_profile_env(env_var, "")):
                 return pid
 
     # AWS Bedrock — detect via boto3 credential chain (IAM roles, SSO, env vars).
@@ -1662,7 +1718,7 @@ def _scope_values(raw_scope: Any) -> set[str]:
 
 
 def _nous_legacy_session_keys_forced() -> bool:
-    return is_truthy_value(os.getenv(NOUS_LEGACY_SESSION_KEYS_ENV), default=False)
+    return is_truthy_value(_profile_env(NOUS_LEGACY_SESSION_KEYS_ENV), default=False)
 
 
 def _nous_scope_has_invoke(raw_scope: Any) -> bool:
@@ -2063,7 +2119,7 @@ def resolve_qwen_runtime_credentials(
             code="qwen_access_token_missing",
         )
 
-    base_url = os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL
+    base_url = _profile_env("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL
     return {
         "provider": "qwen-oauth",
         "base_url": base_url,
@@ -2974,7 +3030,7 @@ def _is_remote_session() -> bool:
     set ``SSH_CLIENT`` / ``SSH_TTY``, so the SSH-only check left
     them with no guidance and no fallback.
     """
-    if os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY"):
+    if _profile_env("SSH_CLIENT") or _profile_env("SSH_TTY"):
         return True
     # Browser-only remote IDEs / cloud shells.  Keep this list narrow
     # (well-known, documented env vars set by the host platform) so
@@ -2987,7 +3043,7 @@ def _is_remote_session() -> bool:
         "REPL_ID",             # Replit
         "STACKBLITZ",          # StackBlitz
     ):
-        if os.getenv(var):
+        if _profile_env(var):
             return True
     return False
 
@@ -3077,7 +3133,7 @@ def _ssh_user_at_host() -> str:
         hostname = _socket.gethostname() or "<this-host>"
     except OSError:
         hostname = "<this-host>"
-    user = os.getenv("USER") or os.getenv("LOGNAME") or "<user>"
+    user = _profile_env("USER") or _profile_env("LOGNAME") or "<user>"
     return f"{user}@{hostname}"
 
 
@@ -3397,7 +3453,7 @@ def _import_codex_cli_tokens(
     """
     codex_home = str(source_codex_home or "").strip()
     if not codex_home:
-        codex_home = os.getenv("CODEX_HOME", "").strip()
+        codex_home = _profile_env("CODEX_HOME", "").strip()
     if not codex_home:
         codex_home = str(Path.home() / ".codex")
     auth_path = Path(codex_home).expanduser() / "auth.json"
@@ -3435,7 +3491,7 @@ def resolve_codex_runtime_credentials(
     data = _read_codex_tokens()
     tokens = dict(data["tokens"])
     access_token = str(tokens.get("access_token", "") or "").strip()
-    refresh_timeout_seconds = float(os.getenv("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS", "20"))
+    refresh_timeout_seconds = float(_profile_env("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS", "20"))
 
     should_refresh = bool(force_refresh)
     if (not should_refresh) and refresh_if_expiring:
@@ -3456,7 +3512,7 @@ def resolve_codex_runtime_credentials(
                 access_token = str(tokens.get("access_token", "") or "").strip()
 
     base_url = (
-        os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+        _profile_env("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
         or DEFAULT_CODEX_BASE_URL
     )
 
@@ -3845,7 +3901,7 @@ def resolve_xai_oauth_runtime_credentials(
     data = _read_xai_oauth_tokens()
     tokens = dict(data["tokens"])
     access_token = str(tokens.get("access_token", "") or "").strip()
-    refresh_timeout_seconds = float(os.getenv("HERMES_XAI_REFRESH_TIMEOUT_SECONDS", "20"))
+    refresh_timeout_seconds = float(_profile_env("HERMES_XAI_REFRESH_TIMEOUT_SECONDS", "20"))
     discovery = dict(data.get("discovery") or {})
     token_endpoint = str(discovery.get("token_endpoint", "") or "").strip()
     redirect_uri = str(data.get("redirect_uri", "") or "").strip()
@@ -3904,8 +3960,8 @@ def resolve_xai_oauth_runtime_credentials(
                     raise
 
     base_url = _xai_validate_inference_base_url(
-        os.getenv("HERMES_XAI_BASE_URL", "").strip().rstrip("/")
-        or os.getenv("XAI_BASE_URL", "").strip().rstrip("/"),
+        _profile_env("HERMES_XAI_BASE_URL", "").strip().rstrip("/")
+        or _profile_env("XAI_BASE_URL", "").strip().rstrip("/"),
         fallback=DEFAULT_XAI_OAUTH_BASE_URL,
     )
     return {
@@ -3956,9 +4012,9 @@ def _resolve_verify(
     effective_ca = (
         ca_bundle
         or tls_state.get("ca_bundle")
-        or os.getenv("HERMES_CA_BUNDLE")
-        or os.getenv("SSL_CERT_FILE")
-        or os.getenv("REQUESTS_CA_BUNDLE")
+        or _profile_env("HERMES_CA_BUNDLE")
+        or _profile_env("SSL_CERT_FILE")
+        or _profile_env("REQUESTS_CA_BUNDLE")
     )
 
     if effective_insecure:
@@ -4174,7 +4230,7 @@ def _nous_shared_auth_dir() -> Path:
     ``<HERMES_HOME>/shared/``. Sits outside any named profile so all
     profiles under the same root share the store.
     """
-    override = os.getenv("HERMES_SHARED_AUTH_DIR", "").strip()
+    override = _profile_env("HERMES_SHARED_AUTH_DIR", "").strip()
     if override:
         return Path(override).expanduser()
     from hermes_constants import get_default_hermes_root
@@ -4755,8 +4811,8 @@ def resolve_nous_access_token(
 
         portal_base_url = (
             _optional_base_url(state.get("portal_base_url"))
-            or os.getenv("HERMES_PORTAL_BASE_URL")
-            or os.getenv("NOUS_PORTAL_BASE_URL")
+            or _profile_env("HERMES_PORTAL_BASE_URL")
+            or _profile_env("NOUS_PORTAL_BASE_URL")
             or DEFAULT_NOUS_PORTAL_URL
         ).rstrip("/")
         client_id = str(state.get("client_id") or DEFAULT_NOUS_CLIENT_ID)
@@ -5097,13 +5153,13 @@ def resolve_nous_runtime_credentials(
 
         portal_base_url = (
             _optional_base_url(state.get("portal_base_url"))
-            or os.getenv("HERMES_PORTAL_BASE_URL")
-            or os.getenv("NOUS_PORTAL_BASE_URL")
+            or _profile_env("HERMES_PORTAL_BASE_URL")
+            or _profile_env("NOUS_PORTAL_BASE_URL")
             or DEFAULT_NOUS_PORTAL_URL
         ).rstrip("/")
         inference_base_url = (
             _optional_base_url(state.get("inference_base_url"))
-            or os.getenv("NOUS_INFERENCE_BASE_URL")
+            or _profile_env("NOUS_INFERENCE_BASE_URL")
             or DEFAULT_NOUS_INFERENCE_URL
         ).rstrip("/")
         client_id = str(state.get("client_id") or DEFAULT_NOUS_CLIENT_ID)
@@ -5723,7 +5779,7 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        env_url = _profile_env(pconfig.base_url_env_var, "").strip()
 
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -5749,13 +5805,13 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
         return {"configured": False}
 
     command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
+        _profile_env("HERMES_COPILOT_ACP_COMMAND", "").strip()
+        or _profile_env("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+    raw_args = _profile_env("HERMES_COPILOT_ACP_ARGS", "").strip()
     args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    base_url = _profile_env(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
@@ -5879,9 +5935,9 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
 
     # api_key mode (default)
     try:
-        api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or os.getenv("AZURE_FOUNDRY_API_KEY", "")
+        api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or _profile_env("AZURE_FOUNDRY_API_KEY", "")
     except Exception:
-        api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "")
+        api_key = _profile_env("AZURE_FOUNDRY_API_KEY", "")
     info["logged_in"] = has_usable_secret(api_key)
     return info
 
@@ -5912,7 +5968,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        env_url = _profile_env(pconfig.base_url_env_var, "").strip()
 
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -5941,16 +5997,16 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             code="invalid_provider",
         )
 
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    base_url = _profile_env(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
     command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
+        _profile_env("HERMES_COPILOT_ACP_COMMAND", "").strip()
+        or _profile_env("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+    raw_args = _profile_env("HERMES_COPILOT_ACP_ARGS", "").strip()
     args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
@@ -6033,7 +6089,7 @@ def _update_config_for_provider(
 
     config["model"] = model_cfg
 
-    atomic_yaml_write(config_path, config, sort_keys=False)
+    atomic_config_write(config_path, config, sort_keys=False)
     return config_path
 
 
@@ -6100,7 +6156,7 @@ def _reset_config_provider() -> Path:
         model["provider"] = "auto"
         if "base_url" in model:
             model["base_url"] = OPENROUTER_BASE_URL
-    atomic_yaml_write(config_path, config, sort_keys=False)
+    atomic_config_write(config_path, config, sort_keys=False)
     return config_path
 
 
@@ -6406,7 +6462,7 @@ def _login_openai_codex(
                 do_import = "n"
             if do_import in {"y", "yes"}:
                 _save_codex_tokens(cli_tokens)
-                base_url = os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/") or DEFAULT_CODEX_BASE_URL
+                base_url = _profile_env("HERMES_CODEX_BASE_URL", "").strip().rstrip("/") or DEFAULT_CODEX_BASE_URL
                 config_path = _update_config_for_provider("openai-codex", base_url)
                 print()
                 print("Credentials imported. Note: if Codex CLI refreshes its token,")
@@ -6783,8 +6839,8 @@ def _xai_oauth_loopback_login(
         )
 
     base_url = _xai_validate_inference_base_url(
-        os.getenv("HERMES_XAI_BASE_URL", "").strip().rstrip("/")
-        or os.getenv("XAI_BASE_URL", "").strip().rstrip("/"),
+        _profile_env("HERMES_XAI_BASE_URL", "").strip().rstrip("/")
+        or _profile_env("XAI_BASE_URL", "").strip().rstrip("/"),
         fallback=DEFAULT_XAI_OAUTH_BASE_URL,
     )
     return {
@@ -6961,7 +7017,7 @@ def _codex_device_code_poll_once(
         )
 
     base_url = (
-        os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+        _profile_env("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
         or DEFAULT_CODEX_BASE_URL
     )
     return {
@@ -7402,13 +7458,13 @@ def _nous_device_code_login(
     pconfig = PROVIDER_REGISTRY["nous"]
     portal_base_url = (
         portal_base_url
-        or os.getenv("HERMES_PORTAL_BASE_URL")
-        or os.getenv("NOUS_PORTAL_BASE_URL")
+        or _profile_env("HERMES_PORTAL_BASE_URL")
+        or _profile_env("NOUS_PORTAL_BASE_URL")
         or pconfig.portal_base_url
     ).rstrip("/")
     requested_inference_url = (
         inference_base_url
-        or os.getenv("NOUS_INFERENCE_BASE_URL")
+        or _profile_env("NOUS_INFERENCE_BASE_URL")
         or pconfig.inference_base_url
     ).rstrip("/")
     client_id = client_id or pconfig.client_id
@@ -7527,8 +7583,8 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
     insecure = bool(getattr(args, "insecure", False))
     ca_bundle = (
         getattr(args, "ca_bundle", None)
-        or os.getenv("HERMES_CA_BUNDLE")
-        or os.getenv("SSL_CERT_FILE")
+        or _profile_env("HERMES_CA_BUNDLE")
+        or _profile_env("SSL_CERT_FILE")
     )
 
     try:
@@ -7731,7 +7787,7 @@ def logout_command(args) -> None:
         if should_reset_config:
             _reset_config_provider()
         print(f"Logged out of {provider_name}.")
-        if should_reset_config and os.getenv("OPENROUTER_API_KEY"):
+        if should_reset_config and _profile_env("OPENROUTER_API_KEY"):
             print("Hermes will use OpenRouter for inference.")
         elif should_reset_config:
             print("Run `hermes model` or configure an API key to use Hermes.")

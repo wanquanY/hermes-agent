@@ -23,10 +23,10 @@ import base64
 import hashlib
 import hmac
 import logging
-import os
 import urllib.parse
 from typing import Any, Dict, Optional
 
+from agent.secret_scope import get_profile_env
 from channels.config import Platform, PlatformConfig
 from channels.platforms.base import (
     BasePlatformAdapter,
@@ -50,7 +50,10 @@ def check_sms_requirements() -> bool:
         import aiohttp  # noqa: F401
     except ImportError:
         return False
-    return bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"))
+    return bool(
+        get_profile_env("TWILIO_ACCOUNT_SID")
+        and get_profile_env("TWILIO_AUTH_TOKEN")
+    )
 
 
 class SmsAdapter(BasePlatformAdapter):
@@ -65,14 +68,16 @@ class SmsAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SMS)
-        self._account_sid: str = os.environ["TWILIO_ACCOUNT_SID"]
-        self._auth_token: str = os.environ["TWILIO_AUTH_TOKEN"]
-        self._from_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
+        self._account_sid: str = get_profile_env("TWILIO_ACCOUNT_SID", "")
+        self._auth_token: str = get_profile_env("TWILIO_AUTH_TOKEN", "")
+        self._from_number: str = get_profile_env("TWILIO_PHONE_NUMBER", "")
         self._webhook_port: int = int(
-            os.getenv("SMS_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT))
+            get_profile_env("SMS_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT))
         )
-        self._webhook_host: str = os.getenv("SMS_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST)
-        self._webhook_url: str = os.getenv("SMS_WEBHOOK_URL", "").strip()
+        self._webhook_host: str = get_profile_env(
+            "SMS_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST
+        )
+        self._webhook_url: str = get_profile_env("SMS_WEBHOOK_URL", "").strip()
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
 
@@ -96,7 +101,9 @@ class SmsAdapter(BasePlatformAdapter):
             self._set_fatal_error("sms_missing_phone_number", msg, retryable=False)
             return False
 
-        insecure_no_sig = os.getenv("SMS_INSECURE_NO_SIGNATURE", "").lower() == "true"
+        insecure_no_sig = (
+            get_profile_env("SMS_INSECURE_NO_SIGNATURE", "").lower() == "true"
+        )
 
         if not self._webhook_url and not insecure_no_sig:
             msg = (

@@ -5,18 +5,25 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from hermes_agent.domain.text_safety import scrub_lone_surrogates
+
 CONTENT_JSON_PREFIX = "\x00json:"
 
 
 def encode_message_content(content: Any) -> Any:
     """Encode structured message content for SQLite storage."""
 
-    if content is None or isinstance(content, (str, bytes, int, float)):
+    if content is None or isinstance(content, (bytes, int, float)):
         return content
+    if isinstance(content, str):
+        return scrub_lone_surrogates(content)
     try:
-        return CONTENT_JSON_PREFIX + json.dumps(content, ensure_ascii=False)
+        return CONTENT_JSON_PREFIX + json.dumps(
+            scrub_lone_surrogates(content),
+            ensure_ascii=False,
+        )
     except (TypeError, ValueError):
-        return str(content)
+        return scrub_lone_surrogates(str(content))
 
 
 def decode_message_content(content: Any, *, allow_legacy_json: bool = False) -> Any:

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from typing import Any, Dict, Optional
 
+from agent.secret_scope import get_profile_env
 try:
     import discord
     DISCORD_AVAILABLE = True
@@ -191,11 +191,11 @@ class DiscordContextMixin:
         if to_resolve:
             print(f"[{self.name}] Could not resolve usernames: {', '.join(to_resolve)}")
     
-        # Update internal set and env var so gateway auth checks use IDs
+        # Keep the resolved identity set adapter-local. Process-global auth
+        # mutation would leak one profile's members into another profile.
         self._allowed_user_ids = numeric_ids
-        os.environ["DISCORD_ALLOWED_USERS"] = ",".join(sorted(numeric_ids))
         if resolved_count:
-            print(f"[{self.name}] Updated DISCORD_ALLOWED_USERS with {resolved_count} resolved ID(s)")
+            print(f"[{self.name}] Resolved {resolved_count} Discord allowlist ID(s)")
     
     def format_message(self, content: str) -> str:
         """
@@ -230,7 +230,12 @@ class DiscordContextMixin:
             if isinstance(configured, str):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
-        return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
+        return get_profile_env("DISCORD_REQUIRE_MENTION", "true").lower() not in {
+            "false",
+            "0",
+            "no",
+            "off",
+        }
     
     def _discord_allow_any_attachment(self) -> bool:
         """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
@@ -245,7 +250,9 @@ class DiscordContextMixin:
             if isinstance(configured, str):
                 return configured.lower() not in {"false", "0", "no", "off", ""}
             return bool(configured)
-        return os.getenv("DISCORD_ALLOW_ANY_ATTACHMENT", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env(
+            "DISCORD_ALLOW_ANY_ATTACHMENT", "false"
+        ).lower() in {"true", "1", "yes", "on"}
     
     def _discord_max_attachment_bytes(self) -> int:
         """Return the per-attachment byte cap. 0 means unlimited.
@@ -256,7 +263,7 @@ class DiscordContextMixin:
         """
         configured = self.config.extra.get("max_attachment_bytes")
         if configured is None:
-            configured = os.getenv("DISCORD_MAX_ATTACHMENT_BYTES")
+            configured = get_profile_env("DISCORD_MAX_ATTACHMENT_BYTES")
         if configured is None or configured == "":
             return 32 * 1024 * 1024
         try:
@@ -296,7 +303,7 @@ class DiscordContextMixin:
         """
         raw = self.config.extra.get("free_response_channels")
         if raw is None:
-            raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")
+            raw = get_profile_env("DISCORD_FREE_RESPONSE_CHANNELS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         # Coerce non-list scalars (str/int/float) to str before splitting.
@@ -327,7 +334,9 @@ class DiscordContextMixin:
             if isinstance(configured, str):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
-        return os.getenv("DISCORD_THREAD_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env(
+            "DISCORD_THREAD_REQUIRE_MENTION", "false"
+        ).lower() in {"true", "1", "yes", "on"}
     
     def _discord_history_backfill(self) -> bool:
         """Return whether history backfill is enabled for shared sessions."""
@@ -336,7 +345,11 @@ class DiscordContextMixin:
             if isinstance(configured, str):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
-        return os.getenv("DISCORD_HISTORY_BACKFILL", "true").lower() in {"true", "1", "yes"}
+        return get_profile_env("DISCORD_HISTORY_BACKFILL", "true").lower() in {
+            "true",
+            "1",
+            "yes",
+        }
     
     def _discord_history_backfill_limit(self) -> int:
         """Return the max number of messages to scan backwards for context.
@@ -352,7 +365,7 @@ class DiscordContextMixin:
                 return int(configured)
             except (ValueError, TypeError):
                 pass
-        raw = os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT", "50")
+        raw = get_profile_env("DISCORD_HISTORY_BACKFILL_LIMIT", "50")
         try:
             return int(raw)
         except (ValueError, TypeError):
@@ -382,7 +395,9 @@ class DiscordContextMixin:
             return ""
     
         # Determine which bot messages to include in context
-        allow_bots_raw = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
+        allow_bots_raw = get_profile_env(
+            "DISCORD_ALLOW_BOTS", "none"
+        ).lower().strip()
         include_other_bots = allow_bots_raw != "none"
     
         # Use the in-memory cache to narrow the fetch window on hot paths.
@@ -925,6 +940,44 @@ class DiscordContextMixin:
         except Exception as e:
             logger.warning("[%s] send_model_picker failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
+
+    async def send_choice_picker(
+        self,
+        chat_id: str,
+        title: str,
+        choices: list,
+        session_key: str,
+        on_choice_selected,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a flat Discord select menu for finite command choices."""
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            target_id = (metadata or {}).get("thread_id") or chat_id
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            title_lines = title.splitlines()
+            embed = discord.Embed(
+                title="⚙ " + (title_lines[0] if title_lines else "Choose an option"),
+                description="\n".join(title_lines[1:]) or None,
+                color=discord.Color.blue(),
+            )
+            view = _discord_public_attr("ChoicePickerView")(
+                choices=choices,
+                on_choice_selected=on_choice_selected,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            message = await channel.send(embed=embed, view=view)
+            view._message = message
+            return SendResult(success=True, message_id=str(message.id))
+        except Exception as exc:
+            logger.warning("[%s] send_choice_picker failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
     
     def _get_parent_channel_id(self, channel: Any) -> Optional[str]:
         """Return the parent channel ID for a Discord thread-like channel, if present."""

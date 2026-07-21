@@ -9,6 +9,7 @@ from dovie_extension.display_transcript import (
     sanitize_session_list_item,
     sanitize_transcript_messages,
 )
+from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services.message_history import load_conversation_history
 from tui_gateway.services import run_control
@@ -886,7 +887,13 @@ def _(rid, params: dict) -> dict:
             create_reasoning_override = parse_reasoning_effort(_effort)
         except Exception:
             create_reasoning_override = None
-    create_service_tier_override = "priority" if params.get("fast") else None
+    # Presence is part of the contract: omitted inherits the profile, true
+    # pins priority, and false pins normal for this conversation.
+    create_service_tier_override = None
+    if "fast" in params:
+        create_service_tier_override = (
+            "priority" if is_truthy_value(params.get("fast")) else ""
+        )
     # Opt-in eager teardown on transport disconnect (dovie sidecar / dashboard
     # embed). Consumed by _close_sessions_for_transport on the reaper path.
     close_on_disconnect = is_truthy_value(params.get("close_on_disconnect", False))
@@ -1679,7 +1686,10 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     try:
         db.sessions.reopen(target)
-        history = load_conversation_history(db, target)
+        history = sanitize_replay_history(
+            load_conversation_history(db, target),
+            now=time.time(),
+        )
         # Participant-aware projection keeps only the viewing actor's own
         # replies as assistant. Other participants become attributed user-role
         # conversation context and legacy system rows are excluded.
@@ -1992,6 +2002,21 @@ def _(rid, params: dict) -> dict:
     if _is_byo_codex_agent(agent):
         model_usage_entry["byo"] = True
 
+    try:
+        from tui_gateway.methods.billing import build_usage_payload
+
+        account_usage = build_usage_payload()
+        if account_usage.get("available"):
+            usage["usage"] = account_usage
+        else:
+            from agent.account_usage import nous_credits_lines
+
+            credits = nous_credits_lines()
+            if credits:
+                usage["credits_lines"] = credits
+    except Exception:
+        pass
+
     structured = {
         "updatedAt": updated_at,
         "sessions": [
@@ -2008,6 +2033,37 @@ def _(rid, params: dict) -> dict:
         rid,
         structured,
     )
+
+
+@method("session.context_breakdown")
+def _(rid, params: dict) -> dict:
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    agent = session.get("agent")
+    if agent is None:
+        usage = _session_usage_snapshot(session) or _get_usage(None)
+        return _ok(
+            rid,
+            {
+                "categories": [],
+                "context_max": usage.get("context_max", 0) or 0,
+                "context_percent": usage.get("context_percent", 0) or 0,
+                "context_used": usage.get("context_used", 0) or 0,
+                "estimated_total": (
+                    usage.get("context_used", 0) or usage.get("total", 0) or 0
+                ),
+                "model": _metadata_mirror(session).get("model", ""),
+            },
+        )
+    with session["history_lock"]:
+        history = list(session.get("history", []))
+    try:
+        from agent.context_breakdown import compute_session_context_breakdown
+
+        return _ok(rid, compute_session_context_breakdown(agent, history))
+    except Exception as exc:
+        return _err(rid, 5000, f"Could not compute context breakdown: {exc}")
 
 
 @method("session.status")
@@ -2236,46 +2292,18 @@ def _(rid, params: dict) -> dict:
 @method("session.close")
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
-    runtime_sid = sid
-    with _sessions_lock:
-        session = _sessions.pop(runtime_sid, None)
-    if not session and sid:
-        try:
-            with _sessions_lock:
-                snapshot = list(_sessions.items())
-        except Exception:
-            snapshot = []
-        for candidate_sid, candidate in snapshot:
-            if candidate.get("session_key") == sid:
-                runtime_sid = candidate_sid
-                with _sessions_lock:
-                    session = _sessions.pop(candidate_sid, None)
-                break
-    if not session:
-        return _ok(rid, {"closed": False})
-    _finalize_session(session)
-    try:
-        from tools.approval import unregister_gateway_notify
-
-        unregister_gateway_notify(session["session_key"])
-    except Exception:
-        pass
-    try:
-        agent = session.get("agent")
-        if agent and hasattr(agent, "close"):
-            agent.close()
-    except Exception:
-        pass
-    try:
-        worker = session.get("slash_worker")
-        if worker:
-            worker.close()
-    except Exception:
-        pass
+    # Serialize only the ownership claim against session.resume. Finalization
+    # may flush state, run hooks, or wait on workers and must happen after the
+    # global resume lock is released.
+    with _session_resume_lock:
+        claimed = _pop_session_by_id(sid)
+    closed = _teardown_popped_session(claimed, end_reason="tui_close")
+    runtime_sid = claimed[0] if claimed is not None else str(sid or "")
+    session = claimed[1] if claimed is not None else {}
     return _ok(
         rid,
         {
-            "closed": True,
+            "closed": closed,
             "session_id": runtime_sid,
             "conversation_session_id": session.get("session_key") or sid,
         },

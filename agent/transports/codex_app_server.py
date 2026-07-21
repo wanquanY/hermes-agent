@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from hermes_constants import get_hermes_home
 from tools.environments.local import hermes_subprocess_env
 
 # Default minimum codex version we test against. The PR sets this from the
@@ -58,6 +59,7 @@ def _detect_user_https_proxy() -> Optional[str]:
         proc = subprocess.run(
             ["scutil", "--proxy"],
             capture_output=True, text=True, timeout=1.5,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode == 0 and proc.stdout:
             https_enabled = False
@@ -82,6 +84,7 @@ def _detect_user_https_proxy() -> Optional[str]:
         proc = subprocess.run(
             [shell, "-ilc", "printf %s \"$HTTPS_PROXY\""],
             capture_output=True, text=True, timeout=2.0,
+            stdin=subprocess.DEVNULL,
         )
         if proc.returncode == 0:
             value = (proc.stdout or "").strip()
@@ -105,7 +108,7 @@ def _kanban_writable_root(spawn_env: dict[str, str]) -> str:
 
     kanban_home = spawn_env.get("HERMES_KANBAN_HOME", "").strip() or spawn_env.get(
         "HERMES_HOME",
-        os.path.expanduser("~/.hermes"),
+        str(get_hermes_home()),
     )
     board = spawn_env.get("HERMES_KANBAN_BOARD", "").strip()
     if board and board != "default":
@@ -491,6 +494,7 @@ def check_codex_binary(
             capture_output=True,
             text=True,
             timeout=10,
+            stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         return False, (

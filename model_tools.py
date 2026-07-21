@@ -171,7 +171,9 @@ def _run_async(coro):
                 worker_loop.close()
 
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(_run_in_worker)
+        from tools.thread_context import propagate_context_to_thread
+
+        future = pool.submit(propagate_context_to_thread(_run_in_worker))
         try:
             started_at = time.monotonic()
             while True:
@@ -338,6 +340,8 @@ def get_tool_definitions(
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
     enabled_tools: List[str] = None,
+    skip_tool_search_assembly: bool = False,
+    tool_search_context_length: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -351,6 +355,11 @@ def get_tool_definitions(
             from the same toolset.
         disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
         quiet_mode: Suppress status prints.
+        skip_tool_search_assembly: Return the complete pre-disclosure tool list.
+            Used only by the Tool Search bridges to build their scoped catalog.
+        tool_search_context_length: Active model context window for the
+            progressive-disclosure threshold. When omitted, an offline config
+            lookup is used and Tool Search falls back to its fixed threshold.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -378,13 +387,16 @@ def get_tool_definitions(
             registry._generation,
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
+            bool(skip_tool_search_assembly),
+            int(tool_search_context_length or 0),
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
             # Update _last_resolved_tool_names so downstream callers see
             # consistent state even on a cache hit.
-            global _last_resolved_tool_names
-            _last_resolved_tool_names = [t["function"]["name"] for t in cached]
+            if not skip_tool_search_assembly:
+                global _last_resolved_tool_names
+                _last_resolved_tool_names = [t["function"]["name"] for t in cached]
             # Return a shallow copy of the list but share the dict references —
             # schemas are treated as read-only by all known callers.
             return list(cached)
@@ -394,6 +406,8 @@ def get_tool_definitions(
         disabled_toolsets,
         quiet_mode,
         enabled_tools=enabled_tools,
+        skip_tool_search_assembly=skip_tool_search_assembly,
+        tool_search_context_length=tool_search_context_length,
     )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
@@ -418,6 +432,8 @@ def _compute_tool_definitions(
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
     enabled_tools: List[str] = None,
+    skip_tool_search_assembly: bool = False,
+    tool_search_context_length: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -494,13 +510,20 @@ def _compute_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
-    return _finalize_tool_definitions(filtered_tools, quiet_mode=quiet_mode)
+    return _finalize_tool_definitions(
+        filtered_tools,
+        quiet_mode=quiet_mode,
+        skip_tool_search_assembly=skip_tool_search_assembly,
+        tool_search_context_length=tool_search_context_length,
+    )
 
 
 def _finalize_tool_definitions(
     filtered_tools: List[Dict[str, Any]],
     *,
     quiet_mode: bool = False,
+    skip_tool_search_assembly: bool = False,
+    tool_search_context_length: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Apply dynamic schema adjustments and bookkeeping after name filtering."""
 
@@ -579,9 +602,6 @@ def _finalize_tool_definitions(
         else:
             print("🛠️  No tools selected (all filtered out or unavailable)")
 
-    global _last_resolved_tool_names
-    _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
-
     # Sanitize schemas for broad backend compatibility. llama.cpp's
     # json-schema-to-grammar converter (used by its OAI server to build
     # GBNF tool-call parsers) rejects some shapes that cloud providers
@@ -594,7 +614,68 @@ def _finalize_tool_definitions(
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
 
+    # Progressive disclosure is deliberately the final schema transformation:
+    # filtering, dynamic schemas and sanitization must all see the real tools.
+    if not skip_tool_search_assembly:
+        try:
+            from tools.tool_search import assemble_tool_defs, load_config as _load_tool_search_config
+
+            tool_search_config = _load_tool_search_config()
+            if tool_search_config.enabled != "off":
+                context_length = _resolve_tool_search_context_length(tool_search_context_length)
+                assembly = assemble_tool_defs(
+                    filtered_tools,
+                    context_length=context_length,
+                    config=tool_search_config,
+                )
+                filtered_tools = assembly.tool_defs
+                if assembly.activated and not quiet_mode:
+                    print(
+                        f"🔎 Tool Search: {assembly.deferred_count} MCP/plugin tools deferred "
+                        f"(~{assembly.deferred_tokens} tokens) behind "
+                        "tool_search/tool_describe/tool_call."
+                    )
+        except Exception as exc:  # pragma: no cover - tool loading must survive
+            logger.warning("Tool Search assembly skipped: %s", exc)
+
+        global _last_resolved_tool_names
+        _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
+
     return filtered_tools
+
+
+def _resolve_tool_search_context_length(explicit: Optional[int]) -> int:
+    """Resolve a context window without probing a remote provider."""
+    try:
+        if explicit is not None and int(explicit) > 0:
+            return int(explicit)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        from hermes_cli.config import load_config
+        from agent.model_metadata import get_model_context_length
+
+        cfg = load_config() or {}
+        model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+        if not isinstance(model_cfg, dict):
+            return 0
+        model_id = str(model_cfg.get("model") or model_cfg.get("default") or "").strip()
+        if not model_id:
+            return 0
+        configured = model_cfg.get("context_length")
+        try:
+            configured = int(configured) if configured is not None else None
+        except (TypeError, ValueError):
+            configured = None
+        return int(get_model_context_length(
+            model_id,
+            config_context_length=configured,
+            allow_network_discovery=False,
+        ) or 0)
+    except Exception as exc:
+        logger.debug("Could not resolve Tool Search context length: %s", exc)
+        return 0
 
 
 # =============================================================================
@@ -861,6 +942,13 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
     parent_agent: Optional[Any] = None,
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
+    skip_tool_request_middleware: bool = False,
+    skip_tool_execution_middleware: bool = False,
+    tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    turn_id: str = "",
+    api_request_id: str = "",
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -874,6 +962,8 @@ def handle_function_call(
                        execute_code uses this list to determine which sandbox
                        tools to generate.  Falls back to the process-global
                        ``_last_resolved_tool_names`` for backward compat.
+        enabled_toolsets: Session/profile toolsets used to scope Tool Search.
+        disabled_toolsets: Session/profile toolsets subtracted from Tool Search.
 
     Returns:
         Function result as a JSON string.
@@ -881,9 +971,105 @@ def handle_function_call(
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 
+    # Tool Search bridges are resolved before hooks so every policy, approval,
+    # checkpoint and callback observes the underlying tool name. The catalog is
+    # rebuilt from this agent's exact profile/runtime scope; it never falls back
+    # to the process-global registry when a parent agent is available.
+    try:
+        from tools import tool_search as _tool_search
+    except Exception:
+        _tool_search = None
+
+    if _tool_search is not None and _tool_search.is_bridge_tool(function_name):
+        scope_enabled = enabled_toolsets
+        scope_disabled = disabled_toolsets
+        exact_filter = None
+        if parent_agent is not None:
+            if scope_enabled is None:
+                scope_enabled = getattr(parent_agent, "enabled_toolsets", None)
+            if scope_disabled is None:
+                scope_disabled = getattr(parent_agent, "disabled_toolsets", None)
+            exact_filter = getattr(parent_agent, "_enabled_tool_names_filter", None)
+
+        try:
+            current_defs = get_tool_definitions(
+                enabled_toolsets=scope_enabled,
+                disabled_toolsets=scope_disabled,
+                enabled_tools=list(exact_filter) if exact_filter is not None else None,
+                quiet_mode=True,
+                skip_tool_search_assembly=True,
+            ) or []
+        except Exception as exc:
+            logger.warning("Could not build scoped Tool Search catalog: %s", exc)
+            current_defs = []
+
+        if function_name == _tool_search.TOOL_SEARCH_NAME:
+            return _tool_search.dispatch_tool_search(
+                function_args or {},
+                current_tool_defs=current_defs,
+            )
+        if function_name == _tool_search.TOOL_DESCRIBE_NAME:
+            return _tool_search.dispatch_tool_describe(
+                function_args or {},
+                current_tool_defs=current_defs,
+            )
+
+        underlying_name, underlying_args, error = _tool_search.resolve_underlying_call(
+            function_args or {}
+        )
+        if error or not underlying_name:
+            return json.dumps({"error": error or "tool_call could not be resolved"}, ensure_ascii=False)
+        if underlying_name not in _tool_search.scoped_deferrable_names(current_defs):
+            return json.dumps({
+                "error": (
+                    f"'{underlying_name}' is not available in this session's runtime scope. "
+                    "Use tool_search to find tools you can call."
+                ),
+            }, ensure_ascii=False)
+        return handle_function_call(
+            function_name=underlying_name,
+            function_args=underlying_args,
+            task_id=task_id,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+            user_task=user_task,
+            enabled_tools=enabled_tools,
+            skip_pre_tool_call_hook=skip_pre_tool_call_hook,
+            parent_agent=parent_agent,
+            enabled_toolsets=scope_enabled,
+            disabled_toolsets=scope_disabled,
+            skip_tool_request_middleware=skip_tool_request_middleware,
+            skip_tool_execution_middleware=skip_tool_execution_middleware,
+            tool_request_middleware_trace=tool_request_middleware_trace,
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+        )
+
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
+
+        _middleware_trace = list(tool_request_middleware_trace or [])
+        _tool_original_args = function_args
+        if not skip_tool_request_middleware:
+            try:
+                from hermes_cli.middleware import apply_tool_request_middleware
+
+                request_result = apply_tool_request_middleware(
+                    function_name,
+                    function_args,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    turn_id=turn_id or "",
+                    api_request_id=api_request_id or "",
+                )
+                if isinstance(request_result.payload, dict):
+                    function_args = request_result.payload
+                _tool_original_args = request_result.original_payload
+                _middleware_trace = list(request_result.trace)
+            except Exception as _middleware_err:
+                logger.debug("tool_request middleware error: %s", _middleware_err)
 
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to
@@ -905,6 +1091,9 @@ def handle_function_call(
                     task_id=task_id or "",
                     session_id=session_id or "",
                     tool_call_id=tool_call_id or "",
+                    turn_id=turn_id or "",
+                    api_request_id=api_request_id or "",
+                    middleware_trace=_middleware_trace,
                 )
             except Exception as _hook_err:
                 logger.debug("pre_tool_call hook error: %s", _hook_err)
@@ -943,24 +1132,56 @@ def handle_function_call(
         # to wrap every tool manually.  We use monotonic() so the value is
         # unaffected by wall-clock adjustments during the call.
         _dispatch_start = time.monotonic()
-        if function_name == "execute_code":
-            # Prefer the caller-provided list so subagents can't overwrite
-            # the parent's tool set via the process-global.
-            sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-            result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                enabled_tools=sandbox_enabled,
-                parent_agent=parent_agent,
-            )
-        else:
-            result = registry.dispatch(
-                function_name, function_args,
+        _executed_args = function_args
+
+        def _dispatch(next_args: Dict[str, Any]) -> Any:
+            nonlocal _executed_args
+            _executed_args = next_args if isinstance(next_args, dict) else function_args
+            if function_name == "execute_code":
+                # Prefer the caller-provided list so subagents can't overwrite
+                # the parent's tool set via the process-global.
+                sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
+                return registry.dispatch(
+                    function_name,
+                    _executed_args,
+                    task_id=task_id,
+                    enabled_tools=sandbox_enabled,
+                    parent_agent=parent_agent,
+                )
+            return registry.dispatch(
+                function_name,
+                _executed_args,
                 task_id=task_id,
                 user_task=user_task,
+                session_id=session_id,
                 parent_agent=parent_agent,
             )
+
+        if skip_tool_execution_middleware:
+            result = _dispatch(function_args)
+        else:
+            from hermes_cli.middleware import run_tool_execution_middleware
+
+            result = run_tool_execution_middleware(
+                function_name,
+                function_args,
+                _dispatch,
+                original_args=_tool_original_args,
+                task_id=task_id or "",
+                session_id=session_id or "",
+                tool_call_id=tool_call_id or "",
+                turn_id=turn_id or "",
+                api_request_id=api_request_id or "",
+            )
+        function_args = _executed_args
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
+        _observer_context: Dict[str, Any] = {}
+        if turn_id:
+            _observer_context["turn_id"] = turn_id
+        if api_request_id:
+            _observer_context["api_request_id"] = api_request_id
+        if _middleware_trace:
+            _observer_context["middleware_trace"] = _middleware_trace
 
         try:
             from hermes_cli.plugins import invoke_hook
@@ -973,6 +1194,7 @@ def handle_function_call(
                 session_id=session_id or "",
                 tool_call_id=tool_call_id or "",
                 duration_ms=duration_ms,
+                **_observer_context,
             )
         except Exception as _hook_err:
             logger.debug("post_tool_call hook error: %s", _hook_err)
@@ -994,6 +1216,7 @@ def handle_function_call(
                 session_id=session_id or "",
                 tool_call_id=tool_call_id or "",
                 duration_ms=duration_ms,
+                **_observer_context,
             )
             for hook_result in hook_results:
                 if isinstance(hook_result, str):

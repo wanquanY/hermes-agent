@@ -374,10 +374,7 @@ def test_config_bridges_slack_free_response_channels(monkeypatch, tmp_path):
     slack_extra = config.platforms[Platform.SLACK].extra
     assert slack_extra.get("require_mention") is False
     assert slack_extra.get("free_response_channels") == ["C0AQWDLHY9M", "C9999999999"]
-    # Verify env vars were set by config bridging
-    import os as _os
-    assert _os.environ["SLACK_REQUIRE_MENTION"] == "false"
-    assert _os.environ["SLACK_FREE_RESPONSE_CHANNELS"] == "C0AQWDLHY9M,C9999999999"
+    # YAML remains profile-local; no process environment mutation is needed.
 
 
 def test_top_level_slack_settings_do_not_disable_env_token_setup(monkeypatch, tmp_path):
@@ -512,8 +509,7 @@ def test_config_bridges_slack_strict_mention(monkeypatch, tmp_path):
     config = load_gateway_config()
 
     assert config is not None
-    import os as _os
-    assert _os.environ["SLACK_STRICT_MENTION"] == "true"
+    assert config.platforms[Platform.SLACK].extra["strict_mention"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -661,10 +657,12 @@ def test_config_bridges_slack_allowed_channels(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("SLACK_ALLOWED_CHANNELS", raising=False)
 
-    load_gateway_config()
+    config = load_gateway_config()
 
-    import os as _os
-    assert _os.environ["SLACK_ALLOWED_CHANNELS"] == f"{CHANNEL_ID},{OTHER_CHANNEL_ID}"
+    assert config.platforms[Platform.SLACK].extra["allowed_channels"] == [
+        CHANNEL_ID,
+        OTHER_CHANNEL_ID,
+    ]
 
 
 def test_config_bridges_slack_allowed_channels_env_takes_precedence(monkeypatch, tmp_path):

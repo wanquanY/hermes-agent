@@ -15,7 +15,7 @@ class _Store:
         return self._entry
 
 
-def _preparation(*, history, entry):
+def _preparation(*, history, entry, turn_context_notes=None):
     runner = SimpleNamespace(
         session_store=_Store(entry),
         _pending_model_notes={},
@@ -39,6 +39,7 @@ def _preparation(*, history, entry):
         is_fresh_gateway_interruption=is_fresh,
         auto_continue_freshness_window=lambda: 1800,
         consume_native_image_paths=lambda _session_key: [],
+        turn_context_notes=turn_context_notes,
     )
 
 
@@ -82,3 +83,19 @@ def test_ordinary_blank_input_is_not_rewritten():
     result = preparation.prepare("")
 
     assert result.message == ""
+    assert result.persist_user_message is None
+
+
+def test_volatile_turn_notes_preserve_clean_transcript_content():
+    preparation = _preparation(
+        history=[],
+        entry=None,
+        turn_context_notes=["[Voice channel now: Design Room]"],
+    )
+
+    result = preparation.prepare("clean user request")
+
+    assert result.message == (
+        "[Voice channel now: Design Room]\n\nclean user request"
+    )
+    assert result.persist_user_message == "clean user request"

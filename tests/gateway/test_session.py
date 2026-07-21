@@ -84,6 +84,32 @@ class TestSessionSourceRoundtrip:
         assert restored.chat_id == "cli"
         assert restored.chat_type == "dm"  # default value preserved
 
+    def test_scope_alias_and_profile_roundtrip(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="channel-1",
+            scope_id="guild-1",
+            profile="coder",
+        )
+
+        payload = source.to_dict()
+        restored = SessionSource.from_dict(payload)
+
+        assert payload["scope_id"] == payload["guild_id"] == "guild-1"
+        assert restored.scope_id == restored.guild_id == "guild-1"
+        assert restored.profile == "coder"
+
+    def test_legacy_guild_id_populates_canonical_scope(self):
+        restored = SessionSource.from_dict(
+            {
+                "platform": "discord",
+                "chat_id": "channel-1",
+                "guild_id": "guild-1",
+            }
+        )
+
+        assert restored.scope_id == restored.guild_id == "guild-1"
+
     def test_chat_id_coerced_to_string(self):
         """from_dict should handle numeric chat_id (common from Telegram)."""
         restored = SessionSource.from_dict({
@@ -802,6 +828,44 @@ class TestWhatsAppSessionKeyConsistency:
         assert build_session_key(first) == "agent:main:telegram:dm:99"
         assert build_session_key(second) == "agent:main:telegram:dm:100"
         assert build_session_key(first) != build_session_key(second)
+
+    def test_named_profile_namespaces_session_key(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+            profile="coder",
+        )
+
+        assert (
+            build_session_key(source)
+            == "agent:coder:discord:group:guild-123:alice"
+        )
+        assert (
+            build_session_key(source, profile="reviewer")
+            == "agent:reviewer:discord:group:guild-123:alice"
+        )
+
+    def test_default_profile_preserves_legacy_namespace(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="99",
+            chat_type="dm",
+            profile="default",
+        )
+
+        assert build_session_key(source) == "agent:main:telegram:dm:99"
+
+    def test_dm_without_chat_id_falls_back_to_participant(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="",
+            chat_type="dm",
+            user_id="alice",
+        )
+
+        assert build_session_key(source) == "agent:main:discord:dm:alice"
 
     def test_discord_group_includes_chat_id(self):
         """Group/channel keys include chat_type and chat_id."""

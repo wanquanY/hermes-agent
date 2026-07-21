@@ -5,6 +5,7 @@ import { Fragment, memo, useMemo, useRef } from 'react'
 import { useGateway } from '../app/gatewayContext.js'
 import type { AppLayoutProps } from '../app/interfaces.js'
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
+import { usePet } from '../app/usePet.js'
 import { $uiState } from '../app/uiStore.js'
 import { INLINE_MODE, SHOW_FPS, TERMUX_TUI_MODE } from '../config/env.js'
 import { PLACEHOLDER } from '../content/placeholders.js'
@@ -23,10 +24,27 @@ import { FloatingOverlays, PromptZone } from './appOverlays.js'
 import { Banner, Panel, SessionPanel } from './branding.js'
 import { FpsOverlay } from './fpsOverlay.js'
 import { HelpHint } from './helpHint.js'
+import { Journey } from './journey.js'
 import { MessageLine } from './messageLine.js'
+import { PetPicker } from './petPicker.js'
+import { PetKitty, PetSprite } from './petSprite.js'
 import { QueuedMessages } from './queuedMessages.js'
 import { LiveTodoPanel, StreamingAssistant } from './streamingAssistant.js'
 import { TextInput, type TextInputMouseApi } from './textInput.js'
+
+export const PetPane = memo(function PetPane() {
+  const { enabled, grid, kitty } = usePet()
+  if (!enabled || (!grid && !kitty)) return null
+  return (
+    <NoSelect bottom={3} paddingLeft={2} paddingTop={1} position="absolute" right={1}>
+      {kitty ? (
+        <PetKitty color={kitty.color} placeholder={kitty.placeholder} />
+      ) : grid ? (
+        <PetSprite grid={grid} />
+      ) : null}
+    </NoSelect>
+  )
+})
 
 const PromptPrefix = memo(function PromptPrefix({
   bold = false,
@@ -169,7 +187,13 @@ const ComposerPane = memo(function ComposerPane({
   const ui = useStore($uiState)
   const isBlocked = useStore($isBlocked)
   const sh = (composer.inputBuf[0] ?? composer.input).startsWith('!')
-  const promptText = composerPromptText(ui.theme.brand.prompt, ui.info?.profile_name, sh, TERMUX_TUI_MODE, composer.cols)
+  const promptText = composerPromptText(
+    ui.theme.brand.prompt,
+    ui.info?.profile_name,
+    sh,
+    TERMUX_TUI_MODE,
+    composer.cols
+  )
   const promptWidth = composerPromptWidth(promptText)
   const promptBlank = ' '.repeat(promptWidth)
   const inputColumns = stableComposerColumns(composer.cols, promptWidth, TERMUX_TUI_MODE)
@@ -336,6 +360,19 @@ const AgentsOverlayPane = memo(function AgentsOverlayPane() {
   )
 })
 
+const JourneyPane = memo(function JourneyPane() {
+  const { gw } = useGateway()
+  const ui = useStore($uiState)
+
+  return <Journey gw={gw} onClose={() => patchOverlayState({ journey: false })} sessionId={ui.sid} t={ui.theme} />
+})
+
+const PetPickerPane = memo(function PetPickerPane() {
+  const { gw } = useGateway()
+  const ui = useStore($uiState)
+  return <PetPicker gw={gw} onClose={() => patchOverlayState({ petPicker: false })} sessionId={ui.sid} t={ui.theme} />
+})
+
 const StatusRulePane = memo(function StatusRulePane({
   at,
   composer,
@@ -357,6 +394,7 @@ const StatusRulePane = memo(function StatusRulePane({
         model={ui.info?.model ?? ''}
         modelFast={ui.info?.fast || ui.info?.service_tier === 'priority'}
         modelReasoningEffort={ui.info?.reasoning_effort}
+        notice={ui.notice}
         sessionStartedAt={status.sessionStartedAt}
         showCost={ui.showCost}
         status={ui.status}
@@ -391,7 +429,15 @@ export const AppLayout = memo(function AppLayout({
     <Shell {...shellProps}>
       <Box flexDirection="column" flexGrow={1}>
         <Box flexDirection="row" flexGrow={1}>
-          {overlay.agents ? (
+          {overlay.petPicker ? (
+            <PerfPane id="pet-picker">
+              <PetPickerPane />
+            </PerfPane>
+          ) : overlay.journey ? (
+            <PerfPane id="journey">
+              <JourneyPane />
+            </PerfPane>
+          ) : overlay.agents ? (
             <PerfPane id="agents">
               <AgentsOverlayPane />
             </PerfPane>
@@ -402,7 +448,7 @@ export const AppLayout = memo(function AppLayout({
           )}
         </Box>
 
-        {!overlay.agents && (
+        {!overlay.agents && !overlay.journey && !overlay.petPicker && (
           <>
             <PerfPane id="prompt">
               <PromptZone
@@ -425,6 +471,8 @@ export const AppLayout = memo(function AppLayout({
             )}
           </>
         )}
+
+        {!overlay.agents && !overlay.journey && !overlay.petPicker && <PetPane />}
       </Box>
     </Shell>
   )

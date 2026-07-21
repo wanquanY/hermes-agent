@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Iterable
 
 
@@ -126,6 +127,15 @@ class TurnMessageBuffer(list):
         self._hermes_current_input_message = message
         return message
 
+    def bind_current_input_message(
+        self,
+        message: dict[str, Any],
+    ) -> None:
+        """Bind an existing row after a whole-buffer rewrite."""
+        if not any(candidate is message for candidate in self):
+            raise ValueError("current input message must belong to this buffer")
+        self._hermes_current_input_message = message
+
     def _clamp_index(self, value: int | None) -> int:
         try:
             index = int(value if value is not None else len(self))
@@ -146,3 +156,49 @@ def message_persist_boundary(messages: Any) -> int | None:
         return max(0, min(int(value), len(messages)))
     except (TypeError, ValueError):
         return None
+
+
+def reanchor_current_input(
+    messages: list[Any],
+    *,
+    conversation_message_id: str = "",
+    content_candidates: tuple[Any, ...] = (),
+    restore_message: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Locate or restore the canonical current input after a list rewrite.
+
+    An arbitrary latest user row is not a valid fallback: it may be a
+    user-role compression summary or runtime scaffold, and treating it as the
+    current input lets API-only content overlay overwrite that history.
+    """
+    stable_message_id = str(conversation_message_id or "").strip()
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        metadata = (
+            message.get("metadata")
+            if isinstance(message.get("metadata"), dict)
+            else {}
+        )
+        candidate_id = str(
+            message.get("conversation_message_id")
+            or metadata.get("conversation_message_id")
+            or ""
+        ).strip()
+        if stable_message_id and candidate_id == stable_message_id:
+            if isinstance(messages, TurnMessageBuffer):
+                messages.bind_current_input_message(message)
+            return index, message
+        if any(message.get("content") == candidate for candidate in content_candidates):
+            if isinstance(messages, TurnMessageBuffer):
+                messages.bind_current_input_message(message)
+            return index, message
+    if isinstance(restore_message, dict) and restore_message.get("role") == "user":
+        restored = copy.deepcopy(restore_message)
+        restored.pop("_db_persisted", None)
+        messages.append(restored)
+        if isinstance(messages, TurnMessageBuffer):
+            messages.bind_current_input_message(restored)
+        return len(messages) - 1, restored
+    return -1, None

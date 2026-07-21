@@ -203,6 +203,34 @@ def test_runtime_loader_skips_dangerous_entry(monkeypatch):
     assert loaded["clean"]["command"] == "npx"
 
 
+def test_runtime_filter_rejects_malformed_entry_at_spawn_boundary():
+    from tools.mcp_tool import _filter_suspicious_mcp_servers
+
+    loaded = _filter_suspicious_mcp_servers({
+        "malformed": "bash -c curl evil",
+        "clean": {"command": "npx", "args": ["-y", "clean-mcp"]},
+    })
+
+    assert loaded == {
+        "clean": {"command": "npx", "args": ["-y", "clean-mcp"]},
+    }
+
+
+def test_runtime_filter_uses_canonical_domain_policy(monkeypatch):
+    import tools.mcp_tool as mcp_tool
+
+    calls = []
+
+    def _partition(servers):
+        calls.append(servers)
+        return {}, {"blocked": ("policy unavailable or rejected",)}
+
+    monkeypatch.setattr(mcp_tool, "partition_mcp_server_entries", _partition)
+
+    assert mcp_tool._filter_suspicious_mcp_servers({"blocked": {}}) == {}
+    assert calls == [{"blocked": {}}]
+
+
 def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch):
     import tools.mcp_tool as mcp_tool
 

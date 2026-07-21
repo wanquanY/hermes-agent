@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from channels.config import Platform
+from agent.secret_scope import get_profile_env
 from channels.platforms.base import (
     MessageEvent,
     MessageType,
@@ -29,6 +30,67 @@ logger = logging.getLogger(__name__)
 
 
 class SlackInboundMixin:
+    @staticmethod
+    def _scoped_env(name: str) -> str:
+        """Read the current profile without a process-global fallback."""
+        return str(get_profile_env(name, "") or "").strip()
+
+    def _is_interactive_user_authorized(
+        self,
+        user_id: str,
+        *,
+        channel_id: str = "",
+        user_name: str = "",
+        team_id: str = "",
+    ) -> bool:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        auth_fn = getattr(runner, "_is_user_authorized", None)
+        if callable(auth_fn):
+            try:
+                from channels.session_identity import SessionSource
+
+                return bool(
+                    auth_fn(
+                        SessionSource(
+                            platform=Platform.SLACK,
+                            chat_id=str(channel_id or normalized_user_id),
+                            chat_type=(
+                                "dm" if str(channel_id).startswith("D") else "group"
+                            ),
+                            user_id=normalized_user_id,
+                            user_name=user_name or None,
+                            scope_id=team_id or None,
+                        )
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "[Slack] Falling back to scoped allowlist auth for %s",
+                    normalized_user_id,
+                    exc_info=True,
+                )
+
+        allowed_ids: set[str] = set()
+        configured = getattr(self.config, "extra", {}).get("allow_from", [])
+        if isinstance(configured, str):
+            configured = configured.split(",")
+        allowed_ids.update(
+            str(part).strip() for part in configured if str(part).strip()
+        )
+        for name in ("SLACK_ALLOWED_USERS", "GATEWAY_ALLOWED_USERS"):
+            raw = self._scoped_env(name)
+            allowed_ids.update(part.strip() for part in raw.split(",") if part.strip())
+        if allowed_ids:
+            return "*" in allowed_ids or normalized_user_id in allowed_ids
+        return any(
+            self._scoped_env(name).lower() in {"true", "1", "yes"}
+            for name in ("SLACK_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS")
+        )
+
     def _assistant_thread_key(self, channel_id: str, thread_ts: str) -> Optional[Tuple[str, str]]:
         """Return a stable cache key for Slack assistant thread metadata."""
         if not channel_id or not thread_ts:
@@ -172,7 +234,7 @@ class SlackInboundMixin:
         if event.get("bot_id") or event.get("subtype") == "bot_message":
             allow_bots = self.config.extra.get("allow_bots", "")
             if not allow_bots:
-                allow_bots = os.getenv("SLACK_ALLOW_BOTS", "none")
+                allow_bots = get_profile_env("SLACK_ALLOW_BOTS", "none")
             allow_bots = str(allow_bots).lower().strip()
             if allow_bots == "none":
                 return
@@ -789,16 +851,19 @@ class SlackInboundMixin:
         user_name = body.get("user", {}).get("name", "unknown")
         user_id = body.get("user", {}).get("id", "")
 
-        # Authorization — reuse the exec-approval allowlist.
-        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
-        if allowed_csv:
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and user_id not in allowed_ids:
-                logger.warning(
-                    "[Slack] Unauthorized slash-confirm click by %s (%s) — ignoring",
-                    user_name, user_id,
-                )
-                return
+        team_id = str(body.get("team", {}).get("id", "") or body.get("team_id", ""))
+        if not self._is_interactive_user_authorized(
+            user_id,
+            channel_id=channel_id,
+            user_name=user_name,
+            team_id=team_id,
+        ):
+            logger.warning(
+                "[Slack] Unauthorized slash-confirm click by %s (%s) — ignoring",
+                user_name,
+                user_id,
+            )
+            return
 
         # Parse session_key|confirm_id back out
         if "|" not in value:
@@ -890,15 +955,19 @@ class SlackInboundMixin:
         # Only authorized users may click approval buttons.  Button clicks
         # bypass the normal message auth flow in gateway/run.py, so we must
         # check here as well.
-        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
-        if allowed_csv:
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and user_id not in allowed_ids:
-                logger.warning(
-                    "[Slack] Unauthorized approval click by %s (%s) — ignoring",
-                    user_name, user_id,
-                )
-                return
+        team_id = str(body.get("team", {}).get("id", "") or body.get("team_id", ""))
+        if not self._is_interactive_user_authorized(
+            user_id,
+            channel_id=channel_id,
+            user_name=user_name,
+            team_id=team_id,
+        ):
+            logger.warning(
+                "[Slack] Unauthorized approval click by %s (%s) — ignoring",
+                user_name,
+                user_id,
+            )
+            return
 
         # Map action_id to approval choice
         choice_map = {
@@ -1372,7 +1441,12 @@ class SlackInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
-        return os.getenv("SLACK_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
+        return get_profile_env("SLACK_REQUIRE_MENTION", "true").lower() not in {
+            "false",
+            "0",
+            "no",
+            "off",
+        }
 
     def _slack_strict_mention(self) -> bool:
         """When true, channel threads require an explicit @-mention on every
@@ -1384,13 +1458,18 @@ class SlackInboundMixin:
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("SLACK_STRICT_MENTION", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env("SLACK_STRICT_MENTION", "false").lower() in {
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
 
     def _slack_free_response_channels(self) -> set:
         """Return channel IDs where no @mention is required."""
         raw = self.config.extra.get("free_response_channels")
         if raw is None:
-            raw = os.getenv("SLACK_FREE_RESPONSE_CHANNELS", "")
+            raw = get_profile_env("SLACK_FREE_RESPONSE_CHANNELS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         # Coerce non-list scalars (str/int/float) to str before splitting.
@@ -1413,7 +1492,7 @@ class SlackInboundMixin:
         """
         raw = self.config.extra.get("allowed_channels")
         if raw is None:
-            raw = os.getenv("SLACK_ALLOWED_CHANNELS", "")
+            raw = get_profile_env("SLACK_ALLOWED_CHANNELS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         if isinstance(raw, str) and raw.strip():

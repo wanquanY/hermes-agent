@@ -44,3 +44,62 @@ class TestStreamingConfigNested:
         })
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "edit"
+
+    def test_mode_alias_enables_streaming(self):
+        cfg = _load_with_yaml_dict({"gateway": {"streaming": {"mode": "auto"}}})
+        assert cfg.streaming.enabled is True
+        assert cfg.streaming.transport == "auto"
+
+    def test_yaml_boolean_mode_off_disables_streaming(self):
+        cfg = _load_with_yaml_dict({"gateway": {"streaming": {"mode": False}}})
+        assert cfg.streaming.enabled is False
+        assert cfg.streaming.transport == "off"
+
+    def test_transport_alone_does_not_enable_streaming(self):
+        cfg = _load_with_yaml_dict({"gateway": {"streaming": {"transport": "draft"}}})
+        assert cfg.streaming.enabled is False
+        assert cfg.streaming.transport == "draft"
+
+    def test_scalar_gateway_block_is_ignored_safely(self):
+        cfg = _load_with_yaml_dict({"gateway": "disabled"})
+        assert cfg.streaming.enabled is False
+
+
+class TestNestedGatewayCompatibility:
+    def test_canonical_gateway_fields_reach_runtime_model(self):
+        cfg = _load_with_yaml_dict(
+            {
+                "gateway": {
+                    "quick_commands": {"ping": "pong"},
+                    "session_reset": {"mode": "none"},
+                    "group_sessions_per_user": False,
+                    "thread_sessions_per_user": True,
+                    "reset_triggers": ["/fresh"],
+                    "always_log_local": False,
+                    "unauthorized_dm_behavior": "ignore",
+                }
+            }
+        )
+
+        assert cfg.quick_commands == {"ping": "pong"}
+        assert cfg.default_reset_policy.mode == "none"
+        assert cfg.group_sessions_per_user is False
+        assert cfg.thread_sessions_per_user is True
+        assert cfg.reset_triggers == ["/fresh"]
+        assert cfg.always_log_local is False
+        assert cfg.unauthorized_dm_behavior == "ignore"
+
+    def test_top_level_key_presence_wins_even_when_empty(self):
+        cfg = _load_with_yaml_dict(
+            {
+                "session_reset": {},
+                "stt": {},
+                "gateway": {
+                    "session_reset": {"mode": "none"},
+                    "stt": {"enabled": False},
+                },
+            }
+        )
+
+        assert cfg.default_reset_policy.mode == "both"
+        assert cfg.stt_enabled is True

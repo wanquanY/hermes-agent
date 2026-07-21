@@ -73,32 +73,45 @@ class TestResolveGitUrl:
     """Shorthand and full-URL resolution."""
 
     def test_owner_repo_shorthand(self):
-        url = _resolve_git_url("owner/repo")
+        url, subdir = _resolve_git_url("owner/repo")
         assert url == "https://github.com/owner/repo.git"
+        assert subdir is None
 
     def test_https_url_passthrough(self):
-        url = _resolve_git_url("https://github.com/x/y.git")
+        url, subdir = _resolve_git_url("https://github.com/x/y.git")
         assert url == "https://github.com/x/y.git"
+        assert subdir is None
 
     def test_ssh_url_passthrough(self):
-        url = _resolve_git_url("git@github.com:x/y.git")
+        url, subdir = _resolve_git_url("git@github.com:x/y.git")
         assert url == "git@github.com:x/y.git"
+        assert subdir is None
 
     def test_http_url_passthrough(self):
-        url = _resolve_git_url("http://example.com/repo.git")
+        url, subdir = _resolve_git_url("http://example.com/repo.git")
         assert url == "http://example.com/repo.git"
+        assert subdir is None
 
     def test_file_url_passthrough(self):
-        url = _resolve_git_url("file:///tmp/repo")
+        url, subdir = _resolve_git_url("file:///tmp/repo")
         assert url == "file:///tmp/repo"
+        assert subdir is None
 
     def test_invalid_single_word_raises(self):
         with pytest.raises(ValueError, match="Invalid plugin identifier"):
             _resolve_git_url("justoneword")
 
-    def test_invalid_three_parts_raises(self):
-        with pytest.raises(ValueError, match="Invalid plugin identifier"):
-            _resolve_git_url("a/b/c")
+    def test_shorthand_can_target_plugin_subdirectory(self):
+        url, subdir = _resolve_git_url("owner/repo/plugins/figma")
+        assert url == "https://github.com/owner/repo.git"
+        assert subdir == "plugins/figma"
+
+    def test_github_tree_url_resolves_repository_and_subdirectory(self):
+        url, subdir = _resolve_git_url(
+            "https://github.com/owner/repo/tree/main/plugins/figma"
+        )
+        assert url == "https://github.com/owner/repo.git"
+        assert subdir == "plugins/figma"
 
 
 # ── _resolve_git_executable ─────────────────────────────────────────────────
@@ -432,7 +445,7 @@ class TestDiscoverAllPlugins:
         )
         monkeypatch.setattr(plugins_cmd, "_plugins_dir", lambda: user)
         return bundled, user, lambda: {
-            e[0]: e for e in plugins_cmd._discover_all_plugins()
+            e[5]: e for e in plugins_cmd._discover_all_plugins()
         }
 
     def test_flat_plugin_uses_manifest_name_as_key(self, tmp_path, monkeypatch):

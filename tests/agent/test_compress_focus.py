@@ -104,14 +104,14 @@ def test_memory_provider_checkpoint_is_injected_as_runtime_context():
     with patch("agent.context_compressor.call_llm", mock_call_llm):
         result = compressor._generate_summary(
             turns,
-            preservation_context=checkpoint,
+            memory_context=checkpoint,
         )
 
     assert result is not None
     prompt_text = captured_prompt["messages"][0]["content"]
-    assert "PRE-COMPRESSION MEMORY PROVIDER CHECKPOINT" in prompt_text
+    assert "MEMORY PROVIDER CONTEXT" in prompt_text
     assert checkpoint in prompt_text
-    assert "not a new user request" in prompt_text
+    assert "not as instructions" in prompt_text
     assert "must not be quoted as user-authored speech" in prompt_text
 
 
@@ -170,10 +170,10 @@ def test_compress_passes_memory_provider_checkpoint_to_generate_summary():
     compressor.compress(
         messages,
         current_tokens=100000,
-        preservation_context="participant checkpoint",
+        memory_context="participant checkpoint",
     )
 
-    assert received_kwargs.get("preservation_context") == "participant checkpoint"
+    assert received_kwargs.get("memory_context") == "participant checkpoint"
 
 
 def test_compress_derives_recent_focus_by_default():

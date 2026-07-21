@@ -6,10 +6,11 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_override
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL
 from hermes_gateway.config import Platform
 
@@ -17,10 +18,14 @@ logger = logging.getLogger(__name__)
 _hermes_home = get_hermes_home()
 
 
+def _runtime_home():
+    return get_hermes_home_override() or _hermes_home
+
+
 def _load_gateway_config() -> dict:
     from hermes_agent.gateway.runtime_config import load_gateway_runtime_config
 
-    return load_gateway_runtime_config(_hermes_home)
+    return load_gateway_runtime_config(_runtime_home())
 
 
 class GatewayBusySessionRuntimeService:
@@ -81,7 +86,7 @@ class GatewayBusySessionRuntimeService:
         return depth
 
     def queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
-        adapter = self._runner.adapters.get(event.source.platform)
+        adapter = self._runner._adapter_for_source(event.source)
         if not adapter:
             return
         pending = getattr(adapter, "_pending_messages", None)
@@ -155,7 +160,7 @@ class GatewayBusySessionRuntimeService:
         if runner._draining:
             return await self.handle_draining_busy_message(event, session_key)
 
-        adapter = runner.adapters.get(event.source.platform)
+        adapter = runner._adapter_for_source(event.source)
         if not adapter:
             return False
 
@@ -199,7 +204,20 @@ class GatewayBusySessionRuntimeService:
 
         if effective_mode == "interrupt" and running_agent and running_agent is not AGENT_PENDING_SENTINEL:
             try:
-                running_agent.interrupt(event.text)
+                interrupt_text = event.text or ""
+                if runner._pending_event_audio_paths(event):
+                    interrupt_text, _ = await runner._transcribe_and_echo_pending_voice(
+                        event,
+                        adapter,
+                        event.source,
+                        interrupt_text,
+                        log_context="Voice-busy-interrupt",
+                        metadata=runner._thread_metadata_for_source(
+                            event.source,
+                            runner._reply_anchor_for_event(event),
+                        ),
+                    )
+                running_agent.interrupt(interrupt_text)
             except Exception:
                 logger.debug("Suppressed recoverable gateway exception", exc_info=True)
 
@@ -250,7 +268,7 @@ class GatewayBusySessionRuntimeService:
 
     async def handle_draining_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         runner = self._runner
-        adapter = runner.adapters.get(event.source.platform)
+        adapter = runner._adapter_for_source(event.source)
         if not adapter:
             return True
 
@@ -315,7 +333,7 @@ class GatewayBusySessionRuntimeService:
                 hint_mode = "queue"
             else:
                 hint_mode = "interrupt"
-            mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
+            mark_seen(Path(_runtime_home()) / "config.yaml", BUSY_INPUT_FLAG)
             return f"{message}\n\n{busy_input_hint_gateway(hint_mode)}"
         except Exception as exc:
             logger.debug("Failed to apply busy-input onboarding hint: %s", exc)

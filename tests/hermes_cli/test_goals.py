@@ -545,6 +545,85 @@ class TestJudgeParseFailureAutoPause:
         assert reloaded.consecutive_parse_failures == 2
 
 
+class TestJudgeTransportFailureAutoPause:
+    def test_api_error_sets_typed_transport_signal(self):
+        from hermes_cli import goals
+
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("invalid API key"),
+        ):
+            outcome = goals.judge_goal("goal", "response")
+
+        verdict, _, parse_failed, _wait = outcome
+        assert verdict == "continue"
+        assert parse_failed is False
+        assert outcome.transport_failed is True
+
+    def test_auto_pause_after_five_transport_failures(self, hermes_home):
+        from hermes_cli import goals
+        from hermes_cli.goals import (
+            DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES,
+            GoalJudgeOutcome,
+            GoalManager,
+        )
+
+        assert DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES == 5
+        mgr = GoalManager(session_id="transport-fail-sid", default_max_turns=20)
+        mgr.set("complete a long task")
+        failed = GoalJudgeOutcome(
+            "continue",
+            "judge error: AuthenticationError",
+            False,
+            None,
+            transport_failed=True,
+        )
+
+        with patch.object(goals, "judge_goal", return_value=failed):
+            for turn in range(1, 5):
+                decision = mgr.evaluate_after_turn(f"step {turn}")
+                assert decision["should_continue"] is True
+                assert mgr.state.consecutive_transport_failures == turn
+
+            decision = mgr.evaluate_after_turn("step 5")
+
+        assert decision["status"] == "paused"
+        assert decision["should_continue"] is False
+        assert mgr.state.consecutive_transport_failures == 5
+        assert "credentials" in decision["message"]
+
+    def test_success_resets_transport_failure_counter(self, hermes_home):
+        from hermes_cli import goals
+        from hermes_cli.goals import GoalJudgeOutcome, GoalManager
+
+        mgr = GoalManager(session_id="transport-reset-sid", default_max_turns=20)
+        mgr.set("complete a task")
+        failed = GoalJudgeOutcome(
+            "continue", "judge error", False, None, transport_failed=True
+        )
+
+        with patch.object(goals, "judge_goal", return_value=failed):
+            mgr.evaluate_after_turn("step 1")
+            mgr.evaluate_after_turn("step 2")
+        with patch.object(
+            goals,
+            "judge_goal",
+            return_value=GoalJudgeOutcome("continue", "working", False, None),
+        ):
+            mgr.evaluate_after_turn("step 3")
+
+        assert mgr.state.consecutive_transport_failures == 0
+
+    def test_transport_failure_counter_roundtrips(self):
+        from hermes_cli.goals import GoalState
+
+        state = GoalState(goal="persist", consecutive_transport_failures=4)
+
+        restored = GoalState.from_json(state.to_json())
+
+        assert restored.consecutive_transport_failures == 4
+
+
 # ──────────────────────────────────────────────────────────────────────
 # /subgoal — user-added criteria
 # ──────────────────────────────────────────────────────────────────────

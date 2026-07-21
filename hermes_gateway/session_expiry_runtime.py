@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import nullcontext
 
 from hermes_agent.composition.async_sqlite import run_sqlite_io
 from hermes_gateway.agent_cache import AGENT_PENDING_SENTINEL, agent_cache_for
@@ -26,20 +27,31 @@ class GatewaySessionExpiryRuntimeService:
         while runner._running:
             try:
                 def _collect_expired_entries() -> list:
-                    runner.session_store._ensure_loaded()
-                    with runner.session_store._lock:
-                        return [
-                            (key, entry)
-                            for key, entry in runner.session_store._entries.items()
-                            if not entry.expiry_finalized
-                            and runner.session_store._is_session_expired(entry)
-                        ]
+                    from hermes_gateway.profile_storage import profile_storage_for
+
+                    storage = profile_storage_for(runner)
+                    stores = (
+                        storage.session_store_items()
+                        if storage is not None
+                        else ((None, runner.session_store),)
+                    )
+                    expired = []
+                    for profile_home, session_store in stores:
+                        session_store._ensure_loaded()
+                        with session_store._lock:
+                            expired.extend(
+                                (profile_home, session_store, key, entry)
+                                for key, entry in session_store._entries.items()
+                                if not entry.expiry_finalized
+                                and session_store._is_session_expired(entry)
+                            )
+                    return expired
 
                 expired_entries = await run_sqlite_io(_collect_expired_entries)
 
                 if expired_entries:
                     platforms: dict[str, int] = {}
-                    for key, _entry in expired_entries:
+                    for _home, _store, key, _entry in expired_entries:
                         parts = key.split(":")
                         platform = parts[2] if len(parts) > 2 else "unknown"
                         platforms[platform] = platforms.get(platform, 0) + 1
@@ -51,9 +63,14 @@ class GatewaySessionExpiryRuntimeService:
                         len(expired_entries), platform_summary,
                     )
 
-                for key, entry in expired_entries:
+                for profile_home, session_store, key, entry in expired_entries:
                     try:
-                        await self.finalize_expired_session(key, entry)
+                        await self.finalize_expired_session(
+                            key,
+                            entry,
+                            session_store=session_store,
+                            profile_home=profile_home,
+                        )
                         finalize_failures.pop(entry.session_id, None)
                     except Exception as exc:
                         failures = finalize_failures.get(entry.session_id, 0) + 1
@@ -65,10 +82,10 @@ class GatewaySessionExpiryRuntimeService:
                                 failures, entry.session_id, exc,
                             )
                             def _mark_finalized() -> None:
-                                with runner.session_store._lock:
+                                with session_store._lock:
                                     entry.expiry_finalized = True
-                                    snapshot = runner.session_store._snapshot_index_locked()
-                                runner.session_store._write_index_snapshot(*snapshot)
+                                    snapshot = session_store._snapshot_index_locked()
+                                session_store._write_index_snapshot(*snapshot)
 
                             await run_sqlite_io(_mark_finalized)
                             finalize_failures.pop(entry.session_id, None)
@@ -79,7 +96,11 @@ class GatewaySessionExpiryRuntimeService:
                             )
 
                 if expired_entries:
-                    done = sum(1 for _, entry in expired_entries if entry.expiry_finalized)
+                    done = sum(
+                        1
+                        for _home, _store, _key, entry in expired_entries
+                        if entry.expiry_finalized
+                    )
                     failed = len(expired_entries) - done
                     if failed:
                         logger.info(
@@ -98,8 +119,36 @@ class GatewaySessionExpiryRuntimeService:
                     break
                 await asyncio.sleep(1)
 
-    async def finalize_expired_session(self, key: str, entry) -> None:
+    async def finalize_expired_session(
+        self,
+        key: str,
+        entry,
+        *,
+        session_store=None,
+        profile_home=None,
+    ) -> None:
+        if profile_home is not None:
+            from hermes_gateway.profile_runtime import profile_runtime_scope
+
+            scope = profile_runtime_scope(profile_home)
+        else:
+            scope = nullcontext()
+        with scope:
+            await self._finalize_expired_session_scoped(
+                key,
+                entry,
+                session_store=session_store,
+            )
+
+    async def _finalize_expired_session_scoped(
+        self,
+        key: str,
+        entry,
+        *,
+        session_store=None,
+    ) -> None:
         runner = self._runner
+        session_store = session_store or runner.session_store
         def _invoke_finalize_hook() -> None:
             from hermes_cli.plugins import invoke_hook
 
@@ -140,21 +189,15 @@ class GatewaySessionExpiryRuntimeService:
                     exc_info=True,
                 )
 
-        runner._session_model_overrides.pop(key, None)
-        runtime_config_for(runner).set_session_reasoning_override(key, None)
-        if hasattr(runner, "_pending_model_notes"):
-            runner._pending_model_notes.pop(key, None)
-        pending_approvals = getattr(runner, "_pending_approvals", None)
-        if isinstance(pending_approvals, dict):
-            pending_approvals.pop(key, None)
-        update_prompt_pending = getattr(runner, "_update_prompt_pending", None)
-        if isinstance(update_prompt_pending, dict):
-            update_prompt_pending.pop(key, None)
+        session_runtime_state_for(runner).clear_conversation_scope(
+            key,
+            reason="expiry_finalized",
+        )
         def _persist_finalized() -> None:
-            with runner.session_store._lock:
+            with session_store._lock:
                 entry.expiry_finalized = True
-                snapshot = runner.session_store._snapshot_index_locked()
-            runner.session_store._write_index_snapshot(*snapshot)
+                snapshot = session_store._snapshot_index_locked()
+            session_store._write_index_snapshot(*snapshot)
 
         await run_sqlite_io(_persist_finalized)
         logger.debug("Session expiry finalized for %s", entry.session_id)
@@ -173,14 +216,34 @@ class GatewaySessionExpiryRuntimeService:
         if time.time() - last_prune_ts <= prune_interval:
             return
         try:
-            max_age = int(getattr(runner.config, "session_store_max_age_days", 0) or 0)
-            if max_age > 0:
+            from hermes_gateway.profile_storage import profile_storage_for
+
+            storage = profile_storage_for(runner)
+            stores = (
+                storage.all_session_stores()
+                if storage is not None
+                else (runner.session_store,)
+            )
+            for session_store in stores:
+                max_age = int(
+                    getattr(
+                        session_store.config,
+                        "session_store_max_age_days",
+                        0,
+                    )
+                    or 0
+                )
+                if max_age <= 0:
+                    continue
                 pruned = await run_sqlite_io(
-                    runner.session_store.prune_old_entries,
+                    session_store.prune_old_entries,
                     max_age,
                 )
                 if pruned:
-                    logger.info("SessionStore prune: dropped %d stale entries", pruned)
+                    logger.info(
+                        "SessionStore prune: dropped %d stale entries",
+                        pruned,
+                    )
         except Exception as exc:
             logger.debug("SessionStore prune failed: %s", exc)
         runner._last_session_store_prune_ts = time.time()

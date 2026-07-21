@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.secret_scope import get_profile_env
 try:
     import discord
 except ImportError:  # pragma: no cover - optional platform dependency
@@ -42,18 +44,33 @@ class DiscordDeliveryMixin:
     
     def _reactions_enabled(self) -> bool:
         """Check if message reactions are enabled via config/env."""
-        return os.getenv("DISCORD_REACTIONS", "true").lower() not in {"false", "0", "no"}
+        configured = self.config.extra.get("reactions")
+        raw = (
+            str(configured)
+            if configured is not None
+            else get_profile_env("DISCORD_REACTIONS", "true")
+        )
+        return raw.lower() not in {"false", "0", "no"}
     
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add an in-progress reaction for normal Discord message events."""
-        if not self._reactions_enabled():
-            return
+        """Add an in-progress reaction and record durable handling state."""
         message = event.raw_message
-        if hasattr(message, "add_reaction"):
-            await self._add_reaction(message, "👀")
+        acked = False
+        if self._reactions_enabled() and hasattr(message, "add_reaction"):
+            acked = await self._add_reaction(message, "👀")
+        await asyncio.to_thread(
+            self._record_discord_processing_start,
+            event,
+            emoji_ack=acked,
+        )
     
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Swap the in-progress reaction for a final success/failure reaction."""
+        """Record completion and swap the in-progress reaction."""
+        await asyncio.to_thread(
+            self._record_discord_processing_complete,
+            event,
+            outcome,
+        )
         if not self._reactions_enabled():
             return
         message = event.raw_message
@@ -105,7 +122,15 @@ class DiscordDeliveryMixin:
     
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
-                return await self._send_to_forum(channel, content)
+                result = await self._send_to_forum(channel, content)
+                await asyncio.to_thread(
+                    self._record_discord_response,
+                    reply_to=reply_to,
+                    result=result,
+                    content=content,
+                    final=bool(metadata and metadata.get("notify")),
+                )
+                return result
     
             # Format and split message if needed
             formatted = self.format_message(content)
@@ -166,15 +191,31 @@ class DiscordDeliveryMixin:
                 _target_id = thread_id or chat_id
                 self._last_self_message_id[_target_id] = message_ids[-1]
     
-            return SendResult(
+            result = SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
                 raw_response={"message_ids": message_ids}
             )
+            await asyncio.to_thread(
+                self._record_discord_response,
+                reply_to=reply_to,
+                result=result,
+                content=content,
+                final=bool(metadata and metadata.get("notify")),
+            )
+            return result
     
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+            result = SendResult(success=False, error=str(e))
+            await asyncio.to_thread(
+                self._record_discord_response,
+                reply_to=reply_to,
+                result=result,
+                content=content,
+                final=bool(metadata and metadata.get("notify")),
+            )
+            return result
     
     async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
@@ -297,8 +338,15 @@ class DiscordDeliveryMixin:
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Edit a previously sent Discord message."""
+        """Edit a Discord message without losing over-limit final content.
+
+        Streaming previews stay on the original message and saturate at one
+        Discord-sized chunk.  Final edits split across continuations and
+        return the last visible message id so the shared stream consumer can
+        preserve a single linear response.
+        """
         if not self._client:
             return SendResult(success=False, error="Not connected")
         try:
@@ -307,13 +355,203 @@ class DiscordDeliveryMixin:
                 channel = await self._client.fetch_channel(int(chat_id))
             msg = await channel.fetch_message(int(message_id))
             formatted = self.format_message(content)
+
+            preview_key = (str(chat_id), str(message_id))
+            saturated_preview = False
+            if finalize:
+                self._last_overflow_preview.pop(preview_key, None)
+
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
-                formatted = formatted[:self.MAX_MESSAGE_LENGTH - 3] + "..."
-            await msg.edit(content=formatted)
-            return SendResult(success=True, message_id=message_id)
+                if finalize:
+                    result = await self._edit_overflow_split(
+                        channel,
+                        msg,
+                        message_id,
+                        content,
+                    )
+                    await self._record_final_discord_edit(
+                        result=result,
+                        metadata=metadata,
+                        content=content,
+                    )
+                    return result
+                formatted = self.truncate_message(
+                    formatted,
+                    self.MAX_MESSAGE_LENGTH,
+                )[0]
+                saturated_preview = True
+                if self._last_overflow_preview.get(preview_key) == formatted:
+                    return SendResult(success=True, message_id=message_id)
+            elif not finalize:
+                self._last_overflow_preview.pop(preview_key, None)
+
+            try:
+                await msg.edit(content=formatted)
+                if saturated_preview:
+                    self._last_overflow_preview[preview_key] = formatted
+            except Exception as edit_error:
+                if not self._is_length_overflow_error(edit_error):
+                    raise
+                if finalize:
+                    result = await self._edit_overflow_split(
+                        channel,
+                        msg,
+                        message_id,
+                        content,
+                    )
+                    await self._record_final_discord_edit(
+                        result=result,
+                        metadata=metadata,
+                        content=content,
+                    )
+                    return result
+                truncated = self.truncate_message(
+                    formatted,
+                    self.MAX_MESSAGE_LENGTH,
+                )[0]
+                if self._last_overflow_preview.get(preview_key) == truncated:
+                    return SendResult(success=True, message_id=message_id)
+                await msg.edit(content=truncated)
+                self._last_overflow_preview[preview_key] = truncated
+
+            result = SendResult(success=True, message_id=message_id)
+            if finalize:
+                await self._record_final_discord_edit(
+                    result=result,
+                    metadata=metadata,
+                    content=content,
+                )
+            return result
         except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
+            logger.error(
+                "[%s] Failed to edit Discord message %s: %s",
+                self.name,
+                message_id,
+                e,
+            )
             return SendResult(success=False, error=str(e))
+
+    async def _record_final_discord_edit(
+        self,
+        *,
+        result: SendResult,
+        metadata: Optional[Dict[str, Any]],
+        content: str,
+    ) -> None:
+        """Persist final-delivery state without blocking the event loop."""
+        raw_response = result.raw_response
+        complete = not (
+            isinstance(raw_response, dict)
+            and raw_response.get("partial_overflow")
+        )
+        await asyncio.to_thread(
+            self._record_discord_response,
+            reply_to=(metadata or {}).get("reply_to_message_id"),
+            result=result,
+            content=content,
+            final=complete,
+        )
+
+    @staticmethod
+    def _is_length_overflow_error(error: Exception) -> bool:
+        """Return whether Discord rejected text specifically for length."""
+        text = str(error).lower()
+        return "error code: 50035" in text and (
+            "2000 or fewer" in text or "fewer in length" in text
+        )
+
+    async def _edit_overflow_split(
+        self,
+        channel: Any,
+        message: Any,
+        message_id: str,
+        content: str,
+    ) -> SendResult:
+        """Deliver an oversized final edit across the original and replies."""
+        formatted = self.format_message(content)
+        chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        if len(chunks) <= 1:
+            await message.edit(content=chunks[0] if chunks else formatted)
+            return SendResult(success=True, message_id=message_id)
+
+        try:
+            await message.edit(content=chunks[0])
+        except Exception as error:
+            logger.error(
+                "[%s] Overflow split first-chunk edit failed: %s",
+                self.name,
+                error,
+            )
+            return SendResult(success=False, error=str(error))
+
+        continuation_ids: list[str] = []
+        delivered_chunks = [chunks[0]]
+        previous_message = message
+        for chunk in chunks[1:]:
+            reference = None
+            if hasattr(previous_message, "to_reference"):
+                try:
+                    reference = previous_message.to_reference(
+                        fail_if_not_exists=False,
+                    )
+                except Exception:
+                    reference = None
+            try:
+                sent = await channel.send(content=chunk, reference=reference)
+            except Exception as anchored_error:
+                logger.warning(
+                    "[%s] Overflow continuation rejected its reply anchor "
+                    "(%s); retrying without one",
+                    self.name,
+                    anchored_error,
+                )
+                try:
+                    sent = await channel.send(content=chunk, reference=None)
+                except Exception as retry_error:
+                    delivered_prefix = "".join(
+                        re.sub(r" \(\d+/\d+\)$", "", delivered)
+                        for delivered in delivered_chunks
+                    )
+                    last_id = (
+                        continuation_ids[-1]
+                        if continuation_ids
+                        else message_id
+                    )
+                    logger.warning(
+                        "[%s] Overflow split stopped at %d/%d chunks: %s",
+                        self.name,
+                        len(delivered_chunks),
+                        len(chunks),
+                        retry_error,
+                    )
+                    return SendResult(
+                        success=False,
+                        message_id=last_id,
+                        error="overflow_continuation_failed",
+                        retryable=True,
+                        raw_response={
+                            "partial_overflow": True,
+                            "delivered_chunks": len(delivered_chunks),
+                            "total_chunks": len(chunks),
+                            "last_message_id": last_id,
+                            "delivered_prefix": delivered_prefix,
+                            "continuation_message_ids": tuple(
+                                continuation_ids
+                            ),
+                        },
+                        continuation_message_ids=tuple(continuation_ids),
+                    )
+            continuation_ids.append(str(sent.id))
+            delivered_chunks.append(chunk)
+            previous_message = sent
+
+        last_id = continuation_ids[-1]
+        self._last_self_message_id[str(channel.id)] = last_id
+        return SendResult(
+            success=True,
+            message_id=last_id,
+            continuation_message_ids=tuple(continuation_ids),
+        )
     
     async def _send_file_attachment(
         self,

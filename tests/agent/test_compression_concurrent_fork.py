@@ -39,6 +39,41 @@ import pytest
 from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 
 
+def test_restored_anchor_preserves_strict_role_alternation() -> None:
+    from agent.conversation_compression import _insert_real_user_anchor
+
+    compressed = [
+        {
+            "role": "user",
+            "content": "[Your active task list was preserved across context compression]",
+            "_todo_snapshot_synthetic": True,
+        }
+    ]
+    _insert_real_user_anchor(
+        compressed,
+        {"role": "user", "content": "REAL HUMAN ASK"},
+    )
+
+    assert len(compressed) == 1
+    assert compressed[0]["content"].startswith("REAL HUMAN ASK")
+    assert not compressed[0].get("_todo_snapshot_synthetic")
+
+
+def test_user_role_summary_is_not_a_human_anchor() -> None:
+    from agent.context_compressor import SUMMARY_PREFIX
+    from agent.conversation_compression import _is_real_user_message
+
+    summary = {
+        "role": "user",
+        "content": f"{SUMMARY_PREFIX}\n## Historical Task Snapshot\nUser asked: x",
+    }
+
+    assert not _is_real_user_message(summary)
+    assert _is_real_user_message(
+        {"role": "user", "content": "please continue"}
+    )
+
+
 def _build_agent_with_db(db: CliSessionStore, session_id: str):
     """Build an AIAgent that's wired to ``db`` and pinned to ``session_id``."""
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), patch(
@@ -206,6 +241,28 @@ def test_slow_compression_refreshes_lease_until_rotation_finishes(tmp_path: Path
     assert _count_children(db, parent_sid) == 1
     assert winner.session_id != parent_sid
     assert loser.session_id == parent_sid
+
+
+def test_delayed_contender_does_not_recompress_rotated_parent(tmp_path: Path) -> None:
+    """A lease acquired after the winner exits must still reject stale ownership."""
+    db = open_cli_session_store(db_path=tmp_path / "state.db")
+    parent_sid = "ALREADY_ROTATED_PARENT"
+    db.sessions.create(parent_sid, source="discord")
+    db.sessions.end(parent_sid, "compression")
+    agent = _build_agent_with_db(db, parent_sid)
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    compressed, _prompt = agent._compress_context(
+        messages,
+        "sys",
+        approx_tokens=120_000,
+    )
+
+    assert compressed is messages
+    assert agent.session_id == parent_sid
+    assert _count_children(db, parent_sid) == 0
+    agent.context_compressor.compress.assert_not_called()
+    assert db.compression_leases.holder(parent_sid) is None
 
 
 class _NoLeaseSubsystemDB:

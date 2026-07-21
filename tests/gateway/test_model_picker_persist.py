@@ -155,10 +155,10 @@ async def _drive_picker(runner, event):
     ],
     ids=["nested-dict", "flat-string"],
 )
-async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model):
-    """Tapping a model in the picker (bare /model) persists to config.yaml,
-    matching the typed ``/model`` default — this is the #49176 fix. The written
-    ``model:`` must always end up a nested dict regardless of the seed shape."""
+async def test_picker_tap_stays_session_scoped_by_default(
+    tmp_path, monkeypatch, seed_model
+):
+    """A bare picker selection follows the session-scoped text command default."""
     adapter = _FakePickerAdapter()
     cfg_path = _setup_isolated_home(tmp_path, monkeypatch, seed_model)
 
@@ -167,14 +167,7 @@ async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model)
     assert confirmation is not None
     assert "gpt-5.5" in confirmation
     written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    assert isinstance(written["model"], dict), (
-        "model: should be coerced to a dict, got %r" % (written["model"],)
-    )
-    assert written["model"]["default"] == "gpt-5.5"
-    assert written["model"]["provider"] == "openrouter"
-    assert written["model"]["base_url"] == "https://openrouter.ai/api/v1"
-    assert "api_key" not in written["model"]
-    assert "api_mode" not in written["model"]
+    assert written["model"] == seed_model
 
 
 @pytest.mark.asyncio

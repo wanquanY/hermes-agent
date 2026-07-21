@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from agent.verification_runtime import (
     completion_requirement_for_agent,
     hold_verification_stream,
+    plugin_verification_continue_message,
     record_codex_item_verification,
     record_tool_verification,
     release_verification_stream,
@@ -159,3 +160,40 @@ def test_stream_hold_discards_premature_text_and_releases_verified_text() -> Non
     assert release_verification_stream(agent, deliver=True) == "verified"
     assert delivered == ["verified"]
     assert agent._current_streamed_assistant_text == "verified"
+
+
+def test_pre_verify_plugin_uses_only_current_turn_changed_paths(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent, store, root = _agent(tmp_path)
+    agent._turn_verification_changed_paths = set()
+    record_tool_verification(
+        agent,
+        "write_file",
+        {"path": str(root / "src/app.ts")},
+        json.dumps({"bytes_written": 10}),
+        is_error=False,
+    )
+    seen = {}
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: name == "pre_verify")
+    monkeypatch.setattr("agent.verify_hooks.max_verify_nudges", lambda: 3)
+    monkeypatch.setattr("agent.coding_context.is_coding_context", lambda **kwargs: True)
+
+    def resolve(**kwargs):
+        seen.update(kwargs)
+        return "tidy the diff"
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_pre_verify_continue_message",
+        resolve,
+    )
+
+    assert plugin_verification_continue_message(
+        agent,
+        final_response="done",
+        attempt=0,
+    ) == "tidy the diff"
+    assert seen["changed_paths"] == [str(root / "src/app.ts")]
+    assert seen["final_response"] == "done"
+    store.close()

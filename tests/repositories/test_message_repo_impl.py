@@ -44,6 +44,7 @@ def _make_conn() -> sqlite3.Connection:
             conversation_message_id TEXT NOT NULL DEFAULT '',
             platform_message_id TEXT,
             metadata_json TEXT,
+            api_content TEXT,
             active INTEGER NOT NULL DEFAULT 1
         );
         """
@@ -119,6 +120,47 @@ def test_append_persists_message_and_returns_projection():
 
     row = conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
     assert row["n"] == 1
+
+
+def test_api_content_sidecar_round_trips_through_repository_pages():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+    inserted = repo.append(
+        "s1",
+        MessageSpec(
+            session_id="s1",
+            role="user",
+            content="clean",
+            api_content="provider wire bytes",
+        ),
+    )
+
+    assert inserted.content == "clean"
+    assert inserted.api_content == "provider wire bytes"
+    page = repo.get_page("s1", direction=PageDirection.HEAD, limit=10)
+    assert page.messages[0].api_content == "provider wire bytes"
+
+
+def test_repository_scrubs_lone_surrogates_from_raw_sqlite_bind_fields():
+    conn = _make_conn()
+    repo = MessageRepoImpl(conn)
+
+    inserted = repo.append(
+        "s1",
+        MessageSpec(
+            session_id="s1",
+            role="tool",
+            content="body\ud800",
+            tool_name="terminal\ud801",
+            api_content="wire\ud802",
+            metadata={"nested": ["value\ud803"]},
+        ),
+    )
+
+    assert inserted.content == "body\ufffd"
+    assert inserted.tool_name == "terminal\ufffd"
+    assert inserted.api_content == "wire\ufffd"
+    assert inserted.metadata == {"nested": ["value\ufffd"]}
 
 
 def test_tool_effect_disposition_round_trips_through_sqlite_metadata():
@@ -281,6 +323,7 @@ def test_copy_branch_prefix_materializes_ordered_messages_to_target_session():
             tool_name="search",
             reasoning="thinking",
             platform_message_id="platform-2",
+            api_content="provider-side assistant",
             timestamp=2.0,
         ),
     )
@@ -298,7 +341,7 @@ def test_copy_branch_prefix_materializes_ordered_messages_to_target_session():
     rows = conn.execute(
         """
         SELECT session_id, role, content, tool_calls, tool_name, reasoning,
-               platform_message_id, metadata_json, timestamp
+               platform_message_id, metadata_json, timestamp, api_content
           FROM messages
          WHERE session_id = 'branch'
          ORDER BY id
@@ -310,6 +353,7 @@ def test_copy_branch_prefix_materializes_ordered_messages_to_target_session():
     assert rows[1]["tool_name"] == "search"
     assert rows[1]["reasoning"] == "thinking"
     assert rows[1]["platform_message_id"] == "platform-2"
+    assert rows[1]["api_content"] == "provider-side assistant"
     assert [row["timestamp"] for row in rows] == [100.000001, 100.000002]
     assert first.id < second.id
 

@@ -6,9 +6,11 @@ import logging
 import mimetypes
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+from agent.secret_scope import get_profile_env
 
 try:
     from mautrix.types import (
@@ -73,9 +75,54 @@ class _MatrixApprovalPrompt:
         self.resolved = resolved
         self.bot_reaction_events: dict[str, str] = {}  # emoji -> event_id
 
-# Matrix message size limit (4000 chars practical, spec has no hard limit
-# but clients render poorly above this).
-MAX_MESSAGE_LENGTH = 4000
+
+@dataclass
+class _MatrixChoicePickerPrompt:
+    """Tracks a pending reaction-based finite-choice command prompt."""
+
+    chat_id: str
+    message_id: str
+    session_key: str
+    choices: dict[str, str]
+    on_choice_selected: Any
+    requester_user_id: str | None = None
+    expires_at: float | None = None
+    resolved: bool = False
+    bot_reaction_events: dict[str, str] = field(default_factory=dict)
+
+# Matrix permits large events, but very large bodies still render poorly in
+# some clients. 16K avoids needlessly splitting Markdown tables while staying
+# well below the event-size ceiling.
+DEFAULT_MAX_MESSAGE_LENGTH = 16_000
+MATRIX_MAX_MESSAGE_LENGTH_CEILING = 65_535
+
+
+def resolve_max_message_length(config: Any) -> int:
+    """Resolve the per-adapter outbound chunk limit with explicit precedence."""
+    extra = getattr(config, "extra", {}) or {}
+    raw = extra.get("max_message_length")
+    if raw is None:
+        raw = get_profile_env("MATRIX_MAX_MESSAGE_LENGTH", "") or None
+    if raw is None:
+        try:
+            from channels.platform_registry import platform_registry
+
+            entry = platform_registry.get("matrix")
+            if entry and entry.max_message_length:
+                raw = entry.max_message_length
+        except Exception:
+            logger.debug("Matrix platform registry limit unavailable", exc_info=True)
+    if raw is None:
+        return DEFAULT_MAX_MESSAGE_LENGTH
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_MESSAGE_LENGTH
+    return max(500, min(value, MATRIX_MAX_MESSAGE_LENGTH_CEILING))
+
+
+# Backwards-compatible alias for external callers.
+MAX_MESSAGE_LENGTH = DEFAULT_MAX_MESSAGE_LENGTH
 
 # Store directory for E2EE keys and sync state.
 # Uses get_hermes_home() so each profile gets its own Matrix store.
@@ -183,9 +230,9 @@ def check_matrix_requirements() -> bool:
     Lazy-installs mautrix via ``tools.lazy_deps.ensure("platform.matrix")``
     on first call if not present. Rebinds all module-level type globals on success.
     """
-    token = os.getenv("MATRIX_ACCESS_TOKEN", "")
-    password = os.getenv("MATRIX_PASSWORD", "")
-    homeserver = os.getenv("MATRIX_HOMESERVER", "")
+    token = get_profile_env("MATRIX_ACCESS_TOKEN", "")
+    password = get_profile_env("MATRIX_PASSWORD", "")
+    homeserver = get_profile_env("MATRIX_HOMESERVER", "")
 
     if not token and not password:
         logger.debug("Matrix: neither MATRIX_ACCESS_TOKEN nor MATRIX_PASSWORD set")
@@ -224,7 +271,7 @@ def check_matrix_requirements() -> bool:
 
     # If encryption is requested, verify E2EE deps are available at startup
     # rather than silently degrading to plaintext-only at connect time.
-    encryption_requested = os.getenv("MATRIX_ENCRYPTION", "").lower() in {
+    encryption_requested = get_profile_env("MATRIX_ENCRYPTION", "").lower() in {
         "true",
         "1",
         "yes",
@@ -266,5 +313,3 @@ class _CryptoStateStore:
     async def find_shared_rooms(self, user_id: str) -> list:
         # Return all joined rooms — simple but correct for a single-user bot.
         return list(self._joined_rooms)
-
-

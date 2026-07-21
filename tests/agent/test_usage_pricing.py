@@ -314,3 +314,35 @@ def test_deepseek_v4_pro_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
     assert float(result.amount_usd) == 3.48
+
+
+def test_sonnet_5_uses_current_intro_pricing():
+    from agent.usage_pricing import get_pricing_entry
+
+    entry = get_pricing_entry("claude-sonnet-5", provider="anthropic")
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 2.0
+    assert float(entry.output_cost_per_million) == 10.0
+    assert entry.pricing_version == "anthropic-pricing-2026-06-intro"
+
+
+def test_current_bedrock_claude_profiles_resolve_with_cache_pricing():
+    from agent.usage_pricing import get_pricing_entry
+
+    for bare in (
+        "anthropic.claude-opus-4-8",
+        "anthropic.claude-opus-4-7",
+        "anthropic.claude-opus-4-6",
+        "anthropic.claude-sonnet-5",
+    ):
+        reference = get_pricing_entry(bare, provider="bedrock")
+        assert reference is not None, bare
+        assert reference.cache_read_cost_per_million is not None, bare
+        assert reference.cache_write_cost_per_million is not None, bare
+        for prefix in ("global.", "us.", "eu.", "apac.", "au."):
+            scoped = get_pricing_entry(
+                f"{prefix}{bare}-20260701-v1:0",
+                provider="bedrock",
+            )
+            assert scoped == reference, f"{prefix}{bare}"

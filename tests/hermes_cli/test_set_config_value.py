@@ -132,6 +132,60 @@ class TestConfigYamlRouting:
         assert "vercel_runtime: python3.13" in config
         assert "TERMINAL_VERCEL_RUNTIME=python3.13" in env_content
 
+    @pytest.mark.parametrize("value", ["off", "on", "yes", "no", "true", "false", "01"])
+    def test_schema_string_values_are_not_coerced(self, value, _isolated_hermes_home):
+        set_config_value("approvals.mode", value)
+
+        import yaml
+        saved = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert saved["approvals"]["mode"] == value
+        assert isinstance(saved["approvals"]["mode"], str)
+
+    def test_non_string_default_keeps_scalar_coercion(self, _isolated_hermes_home):
+        set_config_value("approvals.timeout", "30")
+
+        import yaml
+        saved = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert saved["approvals"]["timeout"] == 30
+
+    def test_unknown_key_is_written_with_notice(self, _isolated_hermes_home, capsys):
+        set_config_value("totally_made_up_key", "value")
+
+        output = capsys.readouterr().out
+        assert "not a recognized config key" in output
+        assert "saved anyway" in output
+        assert "totally_made_up_key" in _read_config(_isolated_hermes_home)
+
+    def test_unknown_nested_key_suggests_known_sibling(self, _isolated_hermes_home, capsys):
+        set_config_value("approvals.timout", "30")
+
+        output = capsys.readouterr().out
+        assert "Did you mean: approvals.timeout" in output
+
+    def test_force_suppresses_notice_but_still_writes(self, _isolated_hermes_home, capsys):
+        set_config_value("custom_runtime.flag", "true", force=True)
+
+        output = capsys.readouterr().out
+        assert "not a recognized config key" not in output
+        assert "custom_runtime" in _read_config(_isolated_hermes_home)
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "providers.local.api_key",
+            "platforms.discord.enabled",
+            "gateway.platforms.custom.extra.token",
+            "discord.gateway_restart_notification",
+            "_test.shim_marker",
+        ],
+    )
+    def test_open_and_internal_paths_do_not_warn(
+        self, key, _isolated_hermes_home, capsys
+    ):
+        set_config_value(key, "value")
+
+        assert "not a recognized config key" not in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # Empty / falsy values — regression tests for #4277

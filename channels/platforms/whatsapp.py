@@ -29,6 +29,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
 
+from agent.secret_scope import build_profile_subprocess_env, get_profile_env
 from hermes_constants import get_hermes_dir
 
 logger = logging.getLogger(__name__)
@@ -260,9 +261,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
             get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")
         ))
         self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
-        self._dm_policy = str(config.extra.get("dm_policy") or os.getenv("WHATSAPP_DM_POLICY", "open")).strip().lower()
+        self._dm_policy = str(config.extra.get("dm_policy") or get_profile_env("WHATSAPP_DM_POLICY", "open")).strip().lower()
         self._allow_from = self._coerce_allow_list(config.extra.get("allow_from") or config.extra.get("allowFrom"))
-        self._group_policy = str(config.extra.get("group_policy") or os.getenv("WHATSAPP_GROUP_POLICY", "open")).strip().lower()
+        self._group_policy = str(config.extra.get("group_policy") or get_profile_env("WHATSAPP_GROUP_POLICY", "open")).strip().lower()
         self._group_allow_from = self._coerce_allow_list(config.extra.get("group_allow_from") or config.extra.get("groupAllowFrom"))
         self._mention_patterns = self._compile_mention_patterns()
         self._message_queue: asyncio.Queue = asyncio.Queue()
@@ -280,12 +281,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
 
     def _effective_reply_prefix(self) -> str:
         """Return the prefix the Node bridge will add in self-chat mode."""
-        whatsapp_mode = os.getenv("WHATSAPP_MODE", "self-chat")
+        whatsapp_mode = get_profile_env("WHATSAPP_MODE", "self-chat")
         if whatsapp_mode != "self-chat":
             return ""
         if self._reply_prefix is not None:
             return self._reply_prefix.replace("\\n", "\n")
-        env_prefix = os.getenv("WHATSAPP_REPLY_PREFIX")
+        env_prefix = get_profile_env("WHATSAPP_REPLY_PREFIX")
         if env_prefix is not None:
             return env_prefix.replace("\\n", "\n")
         return self.DEFAULT_REPLY_PREFIX
@@ -303,12 +304,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if isinstance(configured, str):
                 return configured.lower() in {"true", "1", "yes", "on"}
             return bool(configured)
-        return os.getenv("WHATSAPP_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
+        return get_profile_env("WHATSAPP_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
 
     def _whatsapp_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
         if raw is None:
-            raw = os.getenv("WHATSAPP_FREE_RESPONSE_CHATS", "")
+            raw = get_profile_env("WHATSAPP_FREE_RESPONSE_CHATS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
@@ -363,7 +364,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
     def _compile_mention_patterns(self):
         patterns = self.config.extra.get("mention_patterns")
         if patterns is None:
-            raw = os.getenv("WHATSAPP_MENTION_PATTERNS", "").strip()
+            raw = get_profile_env("WHATSAPP_MENTION_PATTERNS", "").strip()
             if raw:
                 try:
                     patterns = json.loads(raw)
@@ -555,7 +556,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 try:
                     # Read timeout from environment variable, default to 300 seconds (5 minutes)
                     # to accommodate slower systems like Unraid NAS
-                    npm_install_timeout = int(os.environ.get("WHATSAPP_NPM_INSTALL_TIMEOUT", "300"))
+                    npm_install_timeout = int(get_profile_env("WHATSAPP_NPM_INSTALL_TIMEOUT", "300"))
                     install_result = subprocess.run(
                         [_npm_bin, "install", "--silent"],
                         cwd=str(bridge_dir),
@@ -605,7 +606,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Start the bridge process in its own process group.
             # Route output to a log file so QR codes, errors, and reconnection
             # messages are preserved for troubleshooting.
-            whatsapp_mode = os.getenv("WHATSAPP_MODE", "self-chat")
+            whatsapp_mode = get_profile_env("WHATSAPP_MODE", "self-chat")
             self._bridge_log = self._session_path.parent / "bridge.log"
             bridge_log_fh = open(self._bridge_log, "a", encoding="utf-8")
             self._bridge_log_fh = bridge_log_fh
@@ -613,9 +614,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Build bridge subprocess environment.
             # Pass WHATSAPP_REPLY_PREFIX from config.yaml so the Node bridge
             # can use it without the user needing to set a separate env var.
-            bridge_env = os.environ.copy()
-            if self._reply_prefix is not None:
-                bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
+            bridge_env = build_profile_subprocess_env(
+                {
+                    "WHATSAPP_REPLY_PREFIX": self._reply_prefix,
+                }
+                if self._reply_prefix is not None
+                else None
+            )
 
             self._bridge_process = subprocess.Popen(
                 [

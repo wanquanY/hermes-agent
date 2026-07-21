@@ -268,6 +268,7 @@ def worker_frame_router() -> WorkerFrameRouter:
                         db = _server._db_for_stable_session(stable)
                     except Exception:
                         db = None
+                terminal_result = None
                 if db is not None:
                     kwargs["db"] = db
                     try:
@@ -276,12 +277,24 @@ def worker_frame_router() -> WorkerFrameRouter:
                     except Exception:
                         existing_status = ""
                     if existing_status in {"completed", "failed", "interrupted", "cancelled"}:
-                        return {}
+                        terminal_result = {}
                 # RunTerminalFrame is the main-process reconciliation barrier.
                 # If the preceding message.complete already committed, the
                 # terminal check above makes this a no-op; if the worker died
                 # before emitting it, terminate_run supplies the missing fact.
-                return run_control.terminate_run(**kwargs)
+                if terminal_result is None:
+                    terminal_result = run_control.terminate_run(**kwargs)
+                try:
+                    from tui_gateway.methods.run import schedule_pending_prompt_drain
+
+                    schedule_pending_prompt_drain(stable, db=db)
+                except Exception:
+                    logger.warning(
+                        "Pending prompt drain scheduling failed for session %s",
+                        stable,
+                        exc_info=True,
+                    )
+                return terminal_result
 
             _router_singleton = WorkerFrameRouter(
                 sender=_SupervisorSenderProxy(),
@@ -370,9 +383,19 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         return False
     scope = runtime_scope_from_request(req)
     if not scope.has_scope:
-        # Default profile / no scope → in-process path; nothing to
-        # route through worker.
-        return False
+        from tui_gateway.services.process_isolation import (
+            load_dashboard_process_isolation,
+        )
+
+        if not load_dashboard_process_isolation().turn_isolation:
+            # Default profile remains in-process unless the dashboard's
+            # compatibility switch explicitly opts into worker isolation.
+            return False
+        scope = RuntimeScope(
+            agent_profile_id="agent-default",
+            runtime_scope_key="profile:agent-default",
+            hermes_home="",
+        )
     return await _dispatch_prompt_submit(req, transport, scope, params)
 
 

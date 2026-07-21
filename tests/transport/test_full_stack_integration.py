@@ -142,7 +142,8 @@ def _full_stack():
             conversation_message_id TEXT NOT NULL DEFAULT '',
             platform_message_id TEXT,
             metadata_json TEXT,
-            active INTEGER NOT NULL DEFAULT 1
+            active INTEGER NOT NULL DEFAULT 1,
+            api_content TEXT
         );
         CREATE TABLE team_missions (
             mission_id TEXT PRIMARY KEY,
