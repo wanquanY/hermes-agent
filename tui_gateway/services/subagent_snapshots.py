@@ -69,6 +69,15 @@ def compact_subagent_detail_events(events: list[dict[str, Any]]) -> list[dict[st
         text = _event_text(event)
         if not text:
             continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        mode = str(payload.get("mode") or "append").strip().lower()
+        # Snapshot/replace frames are already compact. Concatenating successive
+        # cumulative snapshots repeats their shared prefix and destroys offset
+        # semantics, so only literal append frames may be coalesced.
+        if mode not in {"", "append"}:
+            flush_pending()
+            compacted.append(_minimal_text_delta_event(event, text))
+            continue
         if (
             pending_delta is None
             or str(pending_delta.get("type") or "") != event_type
@@ -83,7 +92,22 @@ def compact_subagent_detail_events(events: list[dict[str, Any]]) -> list[dict[st
         timestamp = event.get("timestamp") or pending_delta.get("timestamp")
         if timestamp is not None:
             pending_delta["timestamp"] = timestamp
-        for key in ("run_id", "turn_id", "runtime_scope_key", "runtimeScopeKey"):
+        # The compacted segment is sealed by the latest constituent frame. Its
+        # durable and live causal identities must advance together; otherwise
+        # clients mix small persistence cursors with timestamp-like runtime
+        # sequence values and reorder output around tool boundaries.
+        for key in (
+            "source_seq",
+            "sourceSeq",
+            "runtime_source_seq",
+            "runtimeSourceSeq",
+            "team_mission_event_seq",
+            "teamMissionEventSeq",
+            "run_id",
+            "turn_id",
+            "runtime_scope_key",
+            "runtimeScopeKey",
+        ):
             if event.get(key):
                 pending_delta[key] = event[key]
     flush_pending()
@@ -350,7 +374,12 @@ def _event_text(event: dict[str, Any]) -> str:
 
 def _minimal_text_delta_event(event: dict[str, Any], text: str) -> dict[str, Any]:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    minimal_payload: dict[str, Any] = {"text": text}
+    minimal_payload: dict[str, Any] = {
+        "text": text,
+        "mode": str(payload.get("mode") or "append").strip().lower() or "append",
+    }
+    if payload.get("offset") is not None:
+        minimal_payload["offset"] = payload["offset"]
     for key in (
         "subagent_id",
         "subagentId",
@@ -370,6 +399,8 @@ def _minimal_text_delta_event(event: dict[str, Any], text: str) -> dict[str, Any
         "toolCallId",
         "tool_count",
         "toolCount",
+        "stream_id",
+        "streamId",
     ):
         if payload.get(key) is not None:
             minimal_payload[key] = payload[key]
@@ -380,7 +411,18 @@ def _minimal_text_delta_event(event: dict[str, Any], text: str) -> dict[str, Any
     }
     if event.get("timestamp") is not None:
         minimal_event["timestamp"] = event["timestamp"]
-    for key in ("run_id", "turn_id", "runtime_scope_key", "runtimeScopeKey"):
+    for key in (
+        "source_seq",
+        "sourceSeq",
+        "runtime_source_seq",
+        "runtimeSourceSeq",
+        "team_mission_event_seq",
+        "teamMissionEventSeq",
+        "run_id",
+        "turn_id",
+        "runtime_scope_key",
+        "runtimeScopeKey",
+    ):
         if event.get(key):
             minimal_event[key] = event[key]
     return minimal_event

@@ -4,7 +4,10 @@ from hermes_agent.composition.cli_session_store import open_cli_session_store
 from tui_gateway.services import run_control
 from tui_gateway.services import run_control_events
 from tui_gateway.services import team_mission_activity_events
-from tui_gateway.services.subagent_snapshots import build_subagent_run_snapshots
+from tui_gateway.services.subagent_snapshots import (
+    build_subagent_run_snapshots,
+    compact_subagent_detail_events,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -715,3 +718,108 @@ def test_already_persisted_terminal_broadcast_remains_durable(tmp_path):
     )
     assert replay == []
     db.close()
+
+
+def test_subagent_detail_compaction_preserves_causal_order_and_stream_contract():
+    events = [
+        {
+            "type": "subagent.output_delta",
+            "seq": 11,
+            "runtime_source_seq": 1_000_011,
+            "run_id": "parent-run",
+            "payload": {
+                "subagent_id": "reviewer",
+                "mode": "append",
+                "offset": 0,
+                "text": "before",
+            },
+        },
+        {
+            "type": "subagent.output_delta",
+            "seq": 12,
+            "runtime_source_seq": 1_000_012,
+            "run_id": "parent-run",
+            "payload": {
+                "subagent_id": "reviewer",
+                "mode": "append",
+                "offset": 6,
+                "text": " tool",
+            },
+        },
+        {
+            "type": "subagent.tool",
+            "seq": 13,
+            "runtime_source_seq": 1_000_013,
+            "run_id": "parent-run",
+            "payload": {
+                "subagent_id": "reviewer",
+                "tool_call_id": "delegate-call",
+                "tool_id": "child-tool",
+                "tool_name": "terminal",
+            },
+        },
+        {
+            "type": "subagent.output_delta",
+            "seq": 14,
+            "runtime_source_seq": 1_000_014,
+            "run_id": "parent-run",
+            "payload": {
+                "subagent_id": "reviewer",
+                "mode": "append",
+                "offset": 11,
+                "text": "after",
+            },
+        },
+    ]
+
+    compacted = compact_subagent_detail_events(events)
+
+    assert [event["type"] for event in compacted] == [
+        "subagent.output_delta",
+        "subagent.tool",
+        "subagent.output_delta",
+    ]
+    assert [event["seq"] for event in compacted] == [12, 13, 14]
+    assert [event["runtime_source_seq"] for event in compacted] == [
+        1_000_012,
+        1_000_013,
+        1_000_014,
+    ]
+    assert compacted[0]["payload"] == {
+        "text": "before tool",
+        "mode": "append",
+        "offset": 0,
+        "subagent_id": "reviewer",
+    }
+
+
+def test_subagent_detail_compaction_does_not_concatenate_cumulative_snapshots():
+    events = [
+        {
+            "type": "subagent.output_delta",
+            "seq": 21,
+            "runtime_source_seq": 1_000_021,
+            "payload": {
+                "subagent_id": "reviewer",
+                "mode": "snapshot",
+                "offset": 0,
+                "text": "hello",
+            },
+        },
+        {
+            "type": "subagent.output_delta",
+            "seq": 22,
+            "runtime_source_seq": 1_000_022,
+            "payload": {
+                "subagent_id": "reviewer",
+                "mode": "snapshot",
+                "offset": 0,
+                "text": "hello world",
+            },
+        },
+    ]
+
+    compacted = compact_subagent_detail_events(events)
+
+    assert [event["payload"]["text"] for event in compacted] == ["hello", "hello world"]
+    assert [event["payload"]["mode"] for event in compacted] == ["snapshot", "snapshot"]
