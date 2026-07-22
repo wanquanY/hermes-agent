@@ -588,6 +588,82 @@ def test_future_team_mission_activity_subscription_receives_first_event_after_gr
     assert delivered[0]["payload"]["text_stream"]["delta"] == "first live event"
 
 
+def test_node_activity_subscription_streams_with_conversation_session_owner(
+    db: CliSessionStore,
+) -> None:
+    db.upsert_team_mission(
+        mission_id="mission-node-live",
+        conversation_id="conversation-aggregate-live",
+        title="Live node mission",
+        objective="stream the member node",
+        mode="supervised_mission",
+        status="running",
+        leader_session_id="team-session-live-owner",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-node-live",
+        node_id="worker-live",
+        kind="worker",
+        title="Stream worker",
+        objective="emit output",
+        status="running",
+    )
+    db.runs.upsert(
+        run_id="run-node-live",
+        session_id="team:mission-node-live:node:worker-live",
+        runtime_scope_key="team:mission-node-live:node:worker-live",
+        status="running",
+    )
+    db.bind_team_mission_run(
+        mission_id="mission-node-live",
+        node_id="worker-live",
+        run_id="run-node-live",
+        session_id="team:mission-node-live:node:worker-live",
+        runtime_scope_key="team:mission-node-live:node:worker-live",
+        role="worker",
+    )
+
+    activity_id = "act-node:mission-node-live:worker-live"
+    transport = _CaptureTransport()
+    _assert_ok(
+        _call(
+            "runtime.activity.subscribe",
+            {
+                "activity_id": activity_id,
+                "after_seq": 0,
+                "replay_mode": "replay_live",
+            },
+            transport=transport,
+        )
+    )
+    transport.frames.clear()
+
+    run_control.publish_recorded_event(
+        {
+            "type": "message.delta",
+            "session_id": "runtime-node-live",
+            "conversation_session_id": "team:mission-node-live:node:worker-live",
+            "run_id": "run-node-live",
+            "runtime_scope_key": "team:mission-node-live:node:worker-live",
+            "activity_id": activity_id,
+            "seq": 1,
+            "payload": {
+                "activity_id": activity_id,
+                "delta": "member output",
+            },
+        },
+        db=db,
+    )
+
+    delivered = _event_frames(transport)
+    assert len(delivered) == 1
+    assert delivered[0]["activity_id"] == activity_id
+    assert delivered[0]["conversation_session_id"] == "team-session-live-owner"
+    assert delivered[0]["session_id"] == "team-session-live-owner"
+    assert delivered[0]["payload"]["conversation_session_id"] == "team-session-live-owner"
+    assert delivered[0]["payload"]["text_stream"]["delta"] == "member output"
+
+
 def test_team_dispatch_raw_cursor_does_not_block_bound_mission_graph_event(
     db: CliSessionStore,
 ) -> None:

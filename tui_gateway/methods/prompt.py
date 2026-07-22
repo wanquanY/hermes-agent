@@ -611,6 +611,7 @@ def _run_prompt_submit(
     delta_normalizer = _MessageDeltaNormalizer()
     message_segment_index = 0
     reasoning_text_by_message_seq: dict[str, str] = {}
+    completed_reasoning_message_seqs: set[str] = set()
 
     def current_client_message_id() -> str:
         base = str(turn_id or turn_run_id or sid or "prompt-turn").strip()
@@ -650,6 +651,38 @@ def _run_prompt_submit(
             **identity,
         }
         _emit("reasoning.delta", sid, payload)
+
+    def _complete_current_reasoning_segment(reason: str) -> str:
+        identity = current_message_identity_payload()
+        message_seq = str(identity.get("message_seq_in_run") or "")
+        current_reasoning = reasoning_text_by_message_seq.get(message_seq, "")
+        if not current_reasoning or message_seq in completed_reasoning_message_seqs:
+            return current_reasoning
+        _log_prompt_stage(
+            session,
+            sid,
+            "stream-reasoning-segment-completed",
+            run_id=turn_run_id,
+            turn_id=turn_id,
+            reason=reason,
+            segment_index=message_segment_index,
+            accumulated_reasoning_len=len(current_reasoning),
+        )
+        _emit(
+            "reasoning.available",
+            sid,
+            {
+                "source": "provider_reasoning",
+                "mode": "replace",
+                "text": current_reasoning,
+                "delta": current_reasoning,
+                "offset": 0,
+                "snapshot": current_reasoning,
+                **identity,
+            },
+        )
+        completed_reasoning_message_seqs.add(message_seq)
+        return current_reasoning
 
     _log_prompt_stage(
         session,
@@ -767,21 +800,27 @@ def _run_prompt_submit(
                     )
             return stale
 
-    def close_current_text_segment(reason: str = "stream_boundary") -> None:
+    def close_current_assistant_segment(reason: str = "stream_boundary") -> None:
         nonlocal message_segment_index
         current_text = str(delta_normalizer.text or "")
-        if not current_text:
+        current_reasoning = _complete_current_reasoning_segment(reason)
+        # ``tool.generating`` and ``tool.start`` can describe the same
+        # boundary. Advance only while the current segment owns projected
+        # output: this closes reasoning-only segments and makes the duplicate
+        # boundary notification idempotent.
+        if not current_text and not current_reasoning:
             delta_normalizer.reset()
             return
         _log_prompt_stage(
             session,
             sid,
-            "stream-text-segment-closed",
+            "stream-assistant-segment-closed",
             run_id=turn_run_id,
             turn_id=turn_id,
             reason=reason,
             segment_index=message_segment_index,
             accumulated_text_len=len(current_text),
+            accumulated_reasoning_len=len(current_reasoning),
         )
         message_segment_index += 1
         delta_normalizer.reset()
@@ -1098,7 +1137,7 @@ def _run_prompt_submit(
                 if is_turn_interrupted():
                     return
                 if delta is None:
-                    close_current_text_segment("stream_callback_none")
+                    close_current_assistant_segment("stream_callback_none")
                     return
                 input_probe = _text_probe(delta)
                 payload = delta_normalizer.feed(delta)
@@ -1122,6 +1161,7 @@ def _run_prompt_submit(
                 )
                 if payload is None:
                     return
+                _complete_current_reasoning_segment("message_delta")
                 payload.update(current_message_identity_payload())
                 render_delta = payload.get("delta") or payload.get("text") or ""
                 if streamer and (r := streamer.feed(render_delta)) is not None:
@@ -1158,7 +1198,7 @@ def _run_prompt_submit(
                     "stream_text_boundary_callback",
                     active_context_missing,
                 )
-                session["stream_text_boundary_callback"] = close_current_text_segment
+                session["stream_text_boundary_callback"] = close_current_assistant_segment
                 previous_inject_tool_breaks = getattr(agent, "_stream_inject_tool_breaks", True)
                 agent._stream_inject_tool_breaks = False
                 agent._hermes_active_run_id = turn_run_id
@@ -1383,6 +1423,7 @@ def _run_prompt_submit(
                 # assistant message for the cancelled run and the agent
                 # answers as if the cancelled question was never asked.
                 partial_text = str(delta_normalizer.text or "")
+                _complete_current_reasoning_segment("message_cancelled")
                 interrupt_payload: dict[str, Any] = {
                     "usage": _get_usage(agent),
                     "status": "cancelled",
@@ -1526,6 +1567,7 @@ def _run_prompt_submit(
                 if should_emit_final_delta:
                     final_delta_payload = delta_normalizer.reconcile_final_text(raw_text)
                     if final_delta_payload is not None:
+                        _complete_current_reasoning_segment("final_response_reconciliation")
                         render_delta = (
                             final_delta_payload.get("delta")
                             or final_delta_payload.get("text")
@@ -1540,6 +1582,7 @@ def _run_prompt_submit(
                 elif current_stream_text and raw_text != current_stream_text:
                     final_delta_mismatch = True
 
+            _complete_current_reasoning_segment("message_complete")
             payload = {
                 "usage": _get_usage(agent),
                 "status": status,
@@ -1703,6 +1746,7 @@ def _run_prompt_submit(
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
+            _complete_current_reasoning_segment("turn_error")
             _emit("error", sid, {"message": str(e)})
             terminal_attempted = True
         finally:

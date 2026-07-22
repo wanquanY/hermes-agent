@@ -2,6 +2,7 @@ from pathlib import Path
 
 from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_approval_entry_dependencies
 
 
 def _create_conversation(db: CliSessionStore, conversation_id: str = "conv-1") -> dict:
@@ -124,6 +125,46 @@ def test_migration_is_idempotent(tmp_path: Path):
 
     rows = db.list_conversation_missions("conv-legacy")
     assert [row["mission_id"] for row in rows] == ["mission-legacy"]
+
+
+def test_migration_restores_root_to_approval_dependency_idempotently(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.upsert_team_mission(
+        mission_id="mission-legacy",
+        title="Legacy supervised mission",
+        objective="Approve before execution",
+        mode="supervised_mission",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-legacy",
+        node_id="team-mission:mission-legacy:root",
+        kind="root",
+        title="Plan mission",
+        status="completed",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-legacy",
+        node_id="team-mission:mission-legacy:approval-plan",
+        kind="approval_gate",
+        title="Approve mission graph",
+        status="waiting_approval",
+    )
+
+    cursor = db._conn.cursor()  # noqa: SLF001 - migration contract coverage.
+    migrate_team_mission_approval_entry_dependencies(cursor)
+    migrate_team_mission_approval_entry_dependencies(cursor)
+
+    edges = db.team_mission_graphs.get_team_mission_graph("mission-legacy")["edges"]
+    assert [
+        (edge["from_node_id"], edge["to_node_id"], edge["kind"])
+        for edge in edges
+    ] == [
+        (
+            "team-mission:mission-legacy:root",
+            "team-mission:mission-legacy:approval-plan",
+            "depends_on",
+        )
+    ]
 
 
 def test_upsert_conversation_projects_active_mission_from_join_table(tmp_path: Path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hermes_agent.composition.cli_session_store import CliSessionStore, open_cli_session_store
@@ -114,6 +115,31 @@ def test_submit_does_not_create_member_chat_runs_table(monkeypatch, tmp_path: Pa
     db, _captured, _response = _submit_member(monkeypatch, tmp_path)
 
     assert not _table_exists(db, "member_chat_runs")
+
+
+def test_submit_journals_member_entities_before_worker_events(monkeypatch, tmp_path: Path):
+    db, captured, _response = _submit_member(monkeypatch, tmp_path)
+
+    rows = db._conn.execute(  # noqa: SLF001 - causal journal assertion
+        "SELECT seq, event_type, event_json FROM run_events "
+        "WHERE session_id = ? ORDER BY seq",
+        (CONVERSATION_SESSION_ID,),
+    ).fetchall()
+    assert [row["event_type"] for row in rows[:2]] == [
+        "participant.upserted",
+        "activity.upserted",
+    ]
+    participant_event = json.loads(rows[0]["event_json"])
+    activity_event = json.loads(rows[1]["event_json"])
+    assert participant_event["payload"]["participant"]["participant_id"] == (
+        f"member:{TARGET_MEMBER_ID}"
+    )
+    expected_activity_id = (
+        f"act-member_chat:{CONVERSATION_SESSION_ID}:{TARGET_MEMBER_ID}"
+    )
+    assert activity_event["payload"]["activity"]["activity_id"] == expected_activity_id
+    assert captured["run_context_json"].find(expected_activity_id) >= 0
+    assert rows[0]["seq"] < rows[1]["seq"]
 
 
 def test_worker_spawn_uses_conversation_session_id(monkeypatch, tmp_path: Path):

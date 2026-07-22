@@ -105,6 +105,20 @@ def test_session_create_persists_owner_profile(monkeypatch, tmp_path: Path):
     assert item["runtime_scope_key"] == "profile:agent-7"
 
 
+def test_session_create_accepts_client_generated_canonical_conversation_id(monkeypatch, tmp_path: Path):
+    db, result = _create_control_plane_session(
+        monkeypatch,
+        tmp_path,
+        conversation_session_id="conversation-client-generated",
+        agentProfileId="agent-7",
+        runtime_scope_key="profile:agent-7",
+    )
+
+    assert result["conversation_session_id"] == "conversation-client-generated"
+    assert result["session_id"] == "conversation-client-generated"
+    assert db.session_index.get("conversation-client-generated") is not None
+
+
 def test_session_create_derives_profile_from_scope(monkeypatch, tmp_path: Path):
     db, result = _create_control_plane_session(
         monkeypatch,
@@ -156,6 +170,38 @@ def test_session_index_list_hides_empty_draft_but_keeps_live_and_content(monkeyp
     assert "empty-draft" not in ids
     assert "live-new" in ids
     assert "real" in ids
+
+
+def test_session_index_list_paginates_visible_conversations_before_limit(monkeypatch, tmp_path: Path):
+    """A page limit counts user-visible conversations, not raw placeholder rows."""
+    db = _setup(monkeypatch, tmp_path)
+    for index in range(1, 4):
+        db.session_index.upsert(
+            session_id=f"real-{index}",
+            title=f"Real {index}",
+            preview="content",
+            started_at=float(index),
+            updated_at=float(index),
+        )
+    for index in range(4, 7):
+        db.session_index.upsert(
+            session_id=f"empty-{index}",
+            source="tui",
+            started_at=float(index),
+            updated_at=float(index),
+        )
+
+    first = server._methods["session.index.list"](1, {"limit": 2})["result"]
+    assert [item["id"] for item in first["sessions"]] == ["real-3", "real-2"]
+    assert first["pageInfo"]["hasMore"] is True
+    assert first["pageInfo"]["nextCursor"]
+
+    second = server._methods["session.index.list"](
+        2,
+        {"limit": 2, "cursor": first["pageInfo"]["nextCursor"]},
+    )["result"]
+    assert [item["id"] for item in second["sessions"]] == ["real-1"]
+    assert second["pageInfo"]["hasMore"] is False
 
 
 def test_session_index_list_emits_team_display_context_for_team_rows(monkeypatch, tmp_path: Path):

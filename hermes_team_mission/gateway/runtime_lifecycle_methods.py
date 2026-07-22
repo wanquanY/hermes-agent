@@ -110,6 +110,11 @@ def _(rid, params: dict) -> dict:
         len(cancel_errors),
         rid,
     )
+    # Plan rejection is an owner-state transition, just like approval. Publish
+    # the terminal Mission/Node projection before acknowledging the command so
+    # every subscribed Conversation converges without a client-side refresh or
+    # optimistic hiding of the approval dock.
+    publish_team_mission_activity_entities(db, mission_id=mission_id)
     return _ok(
         rid,
         {
@@ -575,6 +580,7 @@ def _(rid, params: dict) -> dict:
             "status": str(response_result.get("status") or "cancelled"),
             "turn_id": str(response_result.get("turn_id") or ""),
         })
+    publish_team_mission_activity_entities(db, mission_id=mission_id)
     return _ok(
         rid,
         {
@@ -671,10 +677,14 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "mission_id required")
     if not node_id:
         return _err(rid, 4006, "node_id required")
-    node_activity_id = f"act-node:{mission_id}:{node_id}"
     node = db.get_team_mission_node(mission_id, node_id)
     if not node:
         return _err(rid, 4040, "team mission node not found")
+    from hermes_team_mission.read_models.conversation_activity_projection import (
+        mission_node_activity_id,
+    )
+
+    node_activity_id = mission_node_activity_id(mission_id, node)
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     metadata = dict(node.get("metadata") or {})
@@ -1081,6 +1091,7 @@ def _(rid, params: dict) -> dict:
             position_x=float(node.get("position_x") or 0),
             position_y=float(node.get("position_y") or 0),
         )
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
         return response
     result = response.get("result") if isinstance(response, dict) else {}
     result_run_id = str((result or {}).get("run_id") or run_id).strip()

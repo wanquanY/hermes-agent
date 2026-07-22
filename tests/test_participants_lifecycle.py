@@ -107,16 +107,16 @@ def test_ensure_leader_participant_uses_leader_prefix(tmp_path: Path) -> None:
 
     row = db.participants.ensure_leader_participant(
         "conv-1",
-        team_id="team-1",
+        conversation_id="conversation-1",
         leader_profile_id="leader-profile",
         display_name="Lead",
         avatar="avatar://lead",
     )
 
-    assert row["participant_id"] == "leader:team-1"
+    assert row["participant_id"] == "leader:conversation-1"
     assert row["role"] == "leader"
     assert row["agent_profile_id"] == "leader-profile"
-    assert row["runtime_scope_key"] == "team:team-1:leader-conversation"
+    assert row["runtime_scope_key"] == "team:conversation-1:leader-conversation"
     assert row["display_name"] == "Lead"
     assert row["avatar"] == "avatar://lead"
 
@@ -166,7 +166,11 @@ def test_get_participant_returns_none_when_missing(tmp_path: Path) -> None:
 def test_list_conversation_participants_returns_all(tmp_path: Path) -> None:
     db = _db(tmp_path)
     db.participants.ensure_member_participant("conv-1", member_id="m1", display_name="Alice")
-    db.participants.ensure_leader_participant("conv-1", team_id="team-1", display_name="Lead")
+    db.participants.ensure_leader_participant(
+        "conv-1",
+        conversation_id="conversation-1",
+        display_name="Lead",
+    )
     db.participants.ensure_user_participant("conv-1", user_id="u1")
     db.participants.ensure_agent_participant("conv-2", agent_profile_id="profile-2")
 
@@ -174,7 +178,7 @@ def test_list_conversation_participants_returns_all(tmp_path: Path) -> None:
 
     assert [row["participant_id"] for row in participants] == [
         "user:u1",
-        "leader:team-1",
+        "leader:conversation-1",
         "member:m1",
     ]
 

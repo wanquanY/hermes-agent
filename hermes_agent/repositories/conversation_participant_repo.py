@@ -30,11 +30,11 @@ def user_participant_id(user_id: str = "") -> str:
     return f"user:{normalized_user_id}"
 
 
-def leader_participant_id(team_id: str) -> str:
-    normalized_team_id = _text(team_id)
-    if not normalized_team_id:
-        raise ValueError("team_id required for leader participant")
-    return f"leader:{normalized_team_id}"
+def leader_participant_id(conversation_id: str) -> str:
+    normalized_conversation_id = _text(conversation_id)
+    if not normalized_conversation_id:
+        raise ValueError("conversation_id required for leader participant")
+    return f"leader:{normalized_conversation_id}"
 
 
 def member_participant_id(member_id: str) -> str:
@@ -288,23 +288,25 @@ class ConversationParticipantRepo:
         self,
         conversation_session_id: str,
         *,
-        team_id: str,
+        conversation_id: str,
+        member_id: str = "",
         leader_profile_id: str = "",
+        leader_profile_version_id: str = "",
+        runtime_scope_key: str = "",
         display_name: str = "",
         avatar: str = "",
     ) -> dict:
         """Ensure the leader participant row for a team conversation."""
-        normalized_team_id = _text(team_id)
+        normalized_conversation_id = _text(conversation_id)
         return self.ensure_participant(
             conversation_session_id,
-            participant_id=leader_participant_id(normalized_team_id),
+            participant_id=leader_participant_id(normalized_conversation_id),
             role="leader",
+            member_id=member_id,
             agent_profile_id=leader_profile_id,
-            runtime_scope_key=(
-                f"team:{normalized_team_id}:leader-conversation"
-                if normalized_team_id
-                else ""
-            ),
+            agent_profile_version_id=leader_profile_version_id,
+            runtime_scope_key=_text(runtime_scope_key)
+            or f"team:{normalized_conversation_id}:leader-conversation",
             display_name=display_name,
             avatar=avatar,
         )

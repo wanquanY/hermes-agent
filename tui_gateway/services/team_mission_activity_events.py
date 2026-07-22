@@ -331,6 +331,23 @@ def mission_status_for_activity(activity_id: str, db: Any = None) -> str:
         return ""
 
 
+def owner_conversation_session_id_for_mission(mission_id_value: str, db: Any = None) -> str:
+    """Resolve the Conversation owner from the Team Mission aggregate.
+
+    Mission journal subjects intentionally describe the execution fact that
+    produced an event.  Structural events may therefore contain a mission id,
+    a node runtime session, or no Conversation identity at all.  The aggregate
+    is the only authoritative source for the Conversation projection owner.
+    """
+    normalized_mission_id = text(mission_id_value)
+    if not normalized_mission_id or db is None:
+        return ""
+    try:
+        return text(db.team_missions.conversation_session_id(normalized_mission_id))
+    except Exception:
+        return ""
+
+
 def is_terminal_activity(activity_id: str, db: Any = None) -> bool:
     return mission_status_for_activity(activity_id, db=db) in TERMINAL_MISSION_STATUSES
 
@@ -340,9 +357,10 @@ def activity_last_seq(activity_id: str, db: Any = None) -> int:
     if not normalized_activity_id:
         return 0
     if uses_mission_activity_journal(normalized_activity_id, db=db):
-        events = _list_mission_activity_run_events(
+        normalized_mission_id = mission_id_for_activity(normalized_activity_id, db=db)
+        events = _list_mission_run_events(
             db,
-            normalized_activity_id,
+            normalized_mission_id,
             after_seq=0,
             limit=1,
             reverse=True,
@@ -413,6 +431,29 @@ def _source_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(nested, dict):
             return nested
     return {}
+
+
+def _source_participant_id(
+    event: dict[str, Any],
+    payload: dict[str, Any],
+    source_payload: dict[str, Any],
+) -> str:
+    source_event = payload.get("source_event") or payload.get("sourceEvent")
+    source_event = source_event if isinstance(source_event, dict) else {}
+    run_context = source_payload.get("run_context") or source_payload.get("runContext")
+    run_context = run_context if isinstance(run_context, dict) else {}
+    return text(
+        event.get("participant_id")
+        or event.get("participantId")
+        or payload.get("participant_id")
+        or payload.get("participantId")
+        or source_event.get("participant_id")
+        or source_event.get("participantId")
+        or source_payload.get("participant_id")
+        or source_payload.get("participantId")
+        or run_context.get("participant_id")
+        or run_context.get("participantId")
+    )
 
 
 def _copy_structural_payload_fields(
@@ -502,7 +543,12 @@ def _copy_reasoning_payload_fields(
             target[key] = text_stream[key]
 
 
-def transport_event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str, Any]:
+def transport_event_for_subscription(
+    event: dict[str, Any],
+    activity_id: str,
+    *,
+    owner_conversation_session_id: str = "",
+) -> dict[str, Any]:
     """Project a persisted Team Mission audit event to the live activity ABI.
 
     ``team_mission_events`` is an audit log and may retain the full source
@@ -513,7 +559,12 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
     source = dict(event or {})
     payload = source.get("payload") if isinstance(source.get("payload"), dict) else {}
     source_payload = _source_payload(payload)
+    participant_id = _source_participant_id(source, payload, source_payload)
     subject = event_subject(source)
+    resolved_owner_conversation_session_id = text(owner_conversation_session_id) or text(
+        subject.get("conversation_session_id")
+        or subject.get("conversationSessionId")
+    )
     text_stream = event_text_stream(source)
     source_event_type = text(
         payload.get("source_event_type")
@@ -537,6 +588,8 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
         compact_payload["subject"] = subject
     if text_stream:
         compact_payload["text_stream"] = text_stream
+    if participant_id:
+        compact_payload["participant_id"] = participant_id
     _copy_structural_payload_fields(
         compact_payload,
         payload=payload,
@@ -567,7 +620,7 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
             ("conversation_session_id", ("conversationSessionId",)),
-            ("conversation_session_id", ("conversationSessionId",)),
+            ("participant_id", ("participantId",)),
             ("execution_session_id", ("executionSessionId",)),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
@@ -604,6 +657,8 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
     }
     if subject:
         compact["subject"] = subject
+    if participant_id:
+        compact["participant_id"] = participant_id
     _copy_compact_payload_fields(
         compact,
         event=source,
@@ -612,6 +667,7 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
             ("mission_id", ("missionId",)),
             ("conversation_id", ("conversationId",)),
             ("conversation_session_id", ("conversationSessionId", "conversation_session_id", "conversationSessionId")),
+            ("participant_id", ("participantId",)),
             ("session_id", ("sessionId", "execution_session_id", "executionSessionId")),
             ("runtime_scope_key", ("runtimeScopeKey",)),
             ("run_id", ("runId",)),
@@ -625,6 +681,17 @@ def transport_event_for_subscription(event: dict[str, Any], activity_id: str) ->
             ("name", ("tool_name", "toolName")),
         ),
     )
+    # Activity transport projects a node-runtime fact into its owning
+    # Conversation.  The persisted mission journal and the nested runtime each
+    # have their own session identity; neither is the transcript destination.
+    # Keep those execution identities in ``subject`` and stamp the envelope
+    # with the canonical owner Conversation so live and replay delivery share
+    # one strict identity contract.
+    if resolved_owner_conversation_session_id:
+        compact["session_id"] = resolved_owner_conversation_session_id
+        compact["conversation_session_id"] = resolved_owner_conversation_session_id
+        compact_payload["session_id"] = resolved_owner_conversation_session_id
+        compact_payload["conversation_session_id"] = resolved_owner_conversation_session_id
     return compact
 
 
@@ -681,8 +748,17 @@ def event_matches_activity(
     return selector in event_node_selectors(event)
 
 
-def event_for_subscription(event: dict[str, Any], activity_id: str) -> dict[str, Any]:
-    projected = transport_event_for_subscription(event, activity_id)
+def event_for_subscription(
+    event: dict[str, Any],
+    activity_id: str,
+    *,
+    owner_conversation_session_id: str = "",
+) -> dict[str, Any]:
+    projected = transport_event_for_subscription(
+        event,
+        activity_id,
+        owner_conversation_session_id=owner_conversation_session_id,
+    )
     projected_payload = projected.get("payload") if isinstance(projected.get("payload"), dict) else {}
     projected_payload = dict(projected_payload)
     projected["activity_id"] = activity_id
@@ -732,10 +808,15 @@ def _project_run_event_for_subscription(
     activity_id: str,
     *,
     mission_id_value: str,
+    owner_conversation_session_id: str = "",
 ) -> dict[str, Any]:
     event_type = text(event.get("type"))
     if event_type.startswith("team_mission."):
-        return event_for_subscription(event, activity_id)
+        return event_for_subscription(
+            event,
+            activity_id,
+            owner_conversation_session_id=owner_conversation_session_id,
+        )
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     try:
         source_seq = int(
@@ -761,7 +842,11 @@ def _project_run_event_for_subscription(
         source_seq=source_seq,
         mission_seq=activity_seq,
     )
-    return event_for_subscription(projected, activity_id)
+    return event_for_subscription(
+        projected,
+        activity_id,
+        owner_conversation_session_id=owner_conversation_session_id,
+    )
 
 
 def project_run_event_for_subscription(
@@ -769,6 +854,7 @@ def project_run_event_for_subscription(
     activity_id: str,
     *,
     mission_id_value: str,
+    owner_conversation_session_id: str = "",
 ) -> dict[str, Any]:
     if event.get("transient") is True:
         raise ValueError(
@@ -778,6 +864,7 @@ def project_run_event_for_subscription(
         event,
         activity_id,
         mission_id_value=mission_id_value,
+        owner_conversation_session_id=owner_conversation_session_id,
     )
 
 
@@ -792,19 +879,30 @@ def _list_mission_activity_run_events(
     normalized_mission_id = mission_id_for_activity(activity_id, db=db)
     if not normalized_mission_id:
         return []
-    if str(activity_id or "").strip().startswith("act-node:"):
-        if db is None:
-            return []
-        events = _list_activity_run_events(db, activity_id, after_seq=after_seq, limit=limit)
-    else:
-        events = _list_mission_run_events(
-            db,
-            normalized_mission_id,
-            after_seq=after_seq,
-            limit=limit,
-            reverse=reverse,
+    events = _list_mission_run_events(
+        db,
+        normalized_mission_id,
+        after_seq=after_seq,
+        limit=limit,
+        reverse=reverse,
+    )
+    durable_events = [event for event in events if isinstance(event, dict)]
+    if not str(activity_id or "").strip().startswith("act-node:"):
+        return durable_events
+    # Node execution rows and Conversation status rows live in independent
+    # session-local sequence domains.  Querying their shared ``activity_id``
+    # index therefore cannot define an Activity cursor.  The canonical mission
+    # run-event journal is the sole ordered stream; select the requested node
+    # from that journal without changing its mission-global sequence.
+    return [
+        event
+        for event in durable_events
+        if event_matches_activity(
+            event,
+            activity_id,
+            resolved_mission_id=normalized_mission_id,
         )
-    return [event for event in events if isinstance(event, dict)]
+    ]
 
 
 def list_activity_events(
@@ -839,6 +937,22 @@ def list_activity_events(
                 mission_id=normalized_mission_id,
             )
             return []
+        owner_conversation_session_id = owner_conversation_session_id_for_mission(
+            normalized_mission_id,
+            db=db,
+        )
+        if not owner_conversation_session_id:
+            _emit_activity_diagnostic(
+                "list-activity-events-drop-no-conversation-owner",
+                activity_id=activity_id,
+                mission_id=normalized_mission_id,
+            )
+            _terminal_activity_log(
+                "list-drop-no-conversation-owner",
+                activity_id=activity_id,
+                mission_id=normalized_mission_id,
+            )
+            return []
         try:
             events = _list_mission_activity_run_events(
                 db,
@@ -869,6 +983,7 @@ def list_activity_events(
                 event,
                 activity_id,
                 mission_id_value=normalized_mission_id,
+                owner_conversation_session_id=owner_conversation_session_id,
             )
             for event in events
             if isinstance(event, dict)
@@ -1005,10 +1120,31 @@ def deliver_appended_event(
         transport = subscription.get("transport")
         if transport is None:
             continue
+        owner_conversation_session_id = owner_conversation_session_id_for_mission(
+            normalized_mission_id,
+            db=subscription.get("db"),
+        )
+        if not owner_conversation_session_id:
+            _emit_activity_diagnostic(
+                "deliver-appended-event-drop-no-conversation-owner",
+                mission_id=normalized_mission_id,
+                activity_id=activity_id,
+                subscription_id=text(subscription.get("id")),
+                event=_event_summary(event),
+            )
+            _terminal_activity_log(
+                "deliver-drop-no-conversation-owner",
+                mission_id=normalized_mission_id,
+                activity_id=activity_id,
+                subscription_id=text(subscription.get("id")),
+                event=_event_summary(event),
+            )
+            continue
         event_for_transport = project_run_event_for_subscription(
             event,
             activity_id,
             mission_id_value=normalized_mission_id,
+            owner_conversation_session_id=owner_conversation_session_id,
         )
         event_for_transport = live_status_event_for_subscription(subscription, event_for_transport)
         subscription_id = text(subscription.get("id"))

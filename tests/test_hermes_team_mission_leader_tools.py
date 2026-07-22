@@ -95,6 +95,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
                 "team_mission_start_task",
                 {
                     "task_id": "task-1",
+                    "mission_id": "conversation-1",
                     "title": "简单测试任务",
                     "objective": "创建一个简单测试任务并先规划",
                     "execution_mode": "autonomous_mission",
@@ -108,6 +109,7 @@ def test_start_task_does_not_inherit_non_planning_conversation_mode(monkeypatch,
             var.set(session_context._UNSET)
 
     assert result["success"] is True
+    assert result["mission_id"] != "conversation-1"
     assert result["task_status"] == "planning"
     assert submitted["enabled_toolsets"] == ["team_mission_read", "team_mission_planning", "clarify", "file_readonly"]
     assert submitted["dovie_product_context"]["team_mission"]["node_phase"] == "planning"

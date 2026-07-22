@@ -26,6 +26,13 @@ def is_replaceable_team_mission_conversation_title(title: Any, display_title_sou
 
 
 def team_mission_conversation_history_sql(table_name: str = "team_mission_conversations") -> str:
+    """Return the discoverability predicate for conversation history lists.
+
+    Empty conversation shells created by ``conversation.ensure`` deliberately
+    stay out of history until they own a mission, message, or active run.  This
+    predicate must not be used for direct identity resolution: an ensured shell
+    is already canonical and addressable even before its first message.
+    """
     table_name = _text(table_name) or "team_mission_conversations"
     return (
         f"(EXISTS (SELECT 1 FROM conversation_missions cm WHERE cm.conversation_id = {table_name}.conversation_id AND cm.status = 'active' LIMIT 1) "
@@ -33,24 +40,6 @@ def team_mission_conversation_history_sql(table_name: str = "team_mission_conver
         f"OR EXISTS (SELECT 1 FROM sessions hist_s WHERE hist_s.id = {table_name}.conversation_session_id AND COALESCE(hist_s.message_count, 0) > 0 LIMIT 1) "
         f"OR EXISTS (SELECT 1 FROM runs hist_r WHERE hist_r.session_id = {table_name}.conversation_session_id AND hist_r.status IN ({_ACTIVE_RUN_STATUS_SQL}) LIMIT 1))"
     )
-
-
-def is_routeable_team_mission_conversation(db: Any, conversation_id: str) -> bool:
-    conversation_id = _text(conversation_id)
-    if not conversation_id:
-        return False
-    with db._lock:
-        row = db._conn.execute(
-            f"""
-            SELECT 1
-            FROM team_mission_conversations
-            WHERE conversation_id = ?
-              AND {team_mission_conversation_history_sql()}
-            LIMIT 1
-            """,
-            (conversation_id,),
-        ).fetchone()
-    return row is not None
 
 
 def _row_value(row: sqlite3.Row | None, key: str, default: Any = None) -> Any:

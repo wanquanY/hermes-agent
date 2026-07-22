@@ -761,7 +761,7 @@ def test_upsert_team_mission_conversation_materializes_canonical_session(tmp_pat
     db.messages.append("team-session-1", role="user", content="直接 upsert 后可写消息")
 
 
-def test_empty_team_mission_conversation_shells_are_hidden_but_preserved(tmp_path: Path):
+def test_empty_team_mission_conversation_shells_are_hidden_but_addressable(tmp_path: Path):
     db_path = tmp_path / "state.db"
     db = open_cli_session_store(db_path)
     db.ensure_team_mission_conversation(
@@ -793,14 +793,20 @@ def test_empty_team_mission_conversation_shells_are_hidden_but_preserved(tmp_pat
         "mission-conversation",
     ]
     assert db.get_team_mission_conversation("empty-conversation")["conversation_id"] == "empty-conversation"
-    assert db.resolve_team_mission_conversation("empty-conversation") == {}
+    resolved = db.resolve_team_mission_conversation("empty-conversation")
+    assert resolved["conversation"]["conversation_id"] == "empty-conversation"
+    assert resolved["conversation"]["conversation_session_id"] == "empty-team-session"
+    assert resolved["messages"] == []
     db.close()
 
     reopened = open_cli_session_store(db_path)
 
     assert reopened.get_team_mission_conversation("empty-conversation")["conversation_id"] == "empty-conversation"
     assert reopened.sessions.get("empty-team-session") is not None
-    assert reopened.resolve_team_mission_conversation("empty-conversation") == {}
+    reopened_resolved = reopened.resolve_team_mission_conversation("empty-conversation")
+    assert reopened_resolved["conversation"]["conversation_id"] == "empty-conversation"
+    assert reopened_resolved["conversation"]["conversation_session_id"] == "empty-team-session"
+    assert reopened_resolved["messages"] == []
     assert [item["conversation_id"] for item in reopened.list_team_mission_conversations()] == [
         "mission-conversation",
     ]
@@ -2483,6 +2489,48 @@ def test_team_mission_failed_complete_with_deliverable_text_completes_node_and_r
     assert event["payload"]["status"] == "complete"
     assert event["payload"]["team_mission_terminal_status_recovered"] == "failed"
     assert event["payload"]["nonfatal_error"] == "tool subprocess reported a nonfatal error"
+
+
+def test_leader_report_completion_carries_conversation_artifact_entities(tmp_path: Path):
+    from tui_gateway.services import run_control
+
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.upsert_team_mission(mission_id="mission-report", title="Mission", mode="autonomous_mission")
+    db.bind_team_mission_run(
+        mission_id="mission-report",
+        node_id="",
+        run_id="run-report",
+        session_id="team-session-1",
+        runtime_scope_key="team:conversation-1:leader-conversation",
+        role="leader",
+        metadata={
+            "kind": "leader_report",
+            "artifact_refs": [{
+                "id": "artifact:result",
+                "path": "/workspace/result.md",
+                "title": "result.md",
+                "mime_type": "text/markdown",
+            }],
+        },
+    )
+
+    normalized = run_control._normalize_team_mission_deliverable_terminal_event(
+        {
+            "type": "message.complete",
+            "run_id": "run-report",
+            "payload": {"status": "complete", "text": "任务完成。"},
+        },
+        run_id="run-report",
+        db=db,
+    )
+
+    assert normalized["payload"]["artifacts"] == [{
+        "id": "artifact:result",
+        "path": "/workspace/result.md",
+        "title": "result.md",
+        "mime_type": "text/markdown",
+    }]
+    assert normalized["payload"]["artifact_refs"] == normalized["payload"]["artifacts"]
 
 
 def test_team_mission_late_success_clears_stale_run_error(tmp_path: Path):

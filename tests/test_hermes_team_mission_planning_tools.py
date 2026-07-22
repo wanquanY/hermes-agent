@@ -208,6 +208,14 @@ def test_team_mission_planning_tools_mutate_graph_from_bound_leader_run(tmp_path
     approval = next(node for node in final_graph["nodes"] if node["kind"] == "approval_gate")
     assert approval["assignee_member_id"] == "leader"
     assert approval["assignee_profile_id"] == "profile-leader"
+    assert (
+        "team-mission:mission-1:root",
+        "team-mission:mission-1:approval-plan",
+    ) in {
+        (item["from_node_id"], item["to_node_id"])
+        for item in final_graph["edges"]
+        if item["metadata"].get("approval_gate")
+    }
     assert ("team-mission:mission-1:approval-plan", "node-worker") in {
         (item["from_node_id"], item["to_node_id"])
         for item in final_graph["edges"]

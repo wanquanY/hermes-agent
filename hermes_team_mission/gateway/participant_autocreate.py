@@ -106,14 +106,16 @@ def ensure_team_conversation_participants(
     db: Any,
     *,
     conversation_session_id: str,
+    conversation_id: str,
     team_id: str,
     members: Iterable[dict[str, Any]] | None = None,
     leader_profile_params: dict[str, Any] | None = None,
     source: str,
 ) -> None:
     conversation_session_id = _text(conversation_session_id)
+    conversation_id = _text(conversation_id)
     team_id = _text(team_id)
-    if not conversation_session_id:
+    if not conversation_session_id or not conversation_id:
         return
     try:
         resolved_members = _team_members(db, team_id, members)
@@ -141,13 +143,19 @@ def ensure_team_conversation_participants(
             leader_profile = _profile(db, leader_profile_id)
             db.participants.ensure_leader_participant(
                 conversation_session_id,
-                team_id=team_id,
+                conversation_id=conversation_id,
+                member_id=_member_id(leader),
                 leader_profile_id=leader_profile_id,
+                leader_profile_version_id=_text(
+                    leader.get("agent_profile_version_id")
+                    or leader.get("agentProfileVersionId")
+                ),
+                runtime_scope_key=f"team:{conversation_id}:leader-conversation",
                 display_name=_display_name_with_profile(leader, leader_profile),
                 avatar=_avatar_with_profile(leader, leader_profile),
             )
         except Exception as exc:
-            _warn(source, conversation_session_id, f"leader:{team_id}", exc)
+            _warn(source, conversation_session_id, f"leader:{conversation_id}", exc)
 
     for member in resolved_members:
         if _role(member) in {"lead", "leader"}:

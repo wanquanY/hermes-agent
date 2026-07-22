@@ -5,8 +5,10 @@ import json
 import logging
 from typing import Any
 
+from hermes_team_mission.runtime.history import get_team_mission_node_runtime_history
 from hermes_team_mission.runtime.team_transcript_writer import main_transcript_message_decision
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services import team_mission_activity_events
 from tui_gateway.services.message_owner_projection import (
     MessageOwnerResolutionError,
     project_render_message_owners,
@@ -138,7 +140,7 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
     if _payload_byte_size(result) <= max_bytes:
         return result
     truncated = False
-    for key in ("runEvents", "toolEvents", "messages"):
+    for key in ("runEvents", "toolEvents", "messages", "activityMessages"):
         truncated = _cap_list_tail(result, result, key, max_bytes=max_bytes) or truncated
         if _payload_byte_size(result) <= max_bytes:
             break
@@ -158,6 +160,7 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
                 (result, "runEvents"),
                 (result, "toolEvents"),
                 (result, "messages"),
+                (result, "activityMessages"),
                 (graph, "recent_messages") if isinstance(graph, dict) else ({}, ""),
                 (graph, "task_frames") if isinstance(graph, dict) else ({}, ""),
             ):
@@ -385,6 +388,28 @@ def _mission_activities_for_session(session_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _activities_for_session(session_id: str) -> list[dict[str, Any]]:
+    session_id = _text(session_id)
+    if not session_id:
+        return []
+    try:
+        db = _get_db()
+        if db is None:
+            return []
+        from hermes_team_mission.read_models.conversation_activity_projection import (
+            project_conversation_activities,
+        )
+
+        return project_conversation_activities(db, session_id)
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot activities hydrate skipped session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        return []
+
+
 def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
     activity_id = _text(activity_id)
     if not activity_id:
@@ -395,7 +420,10 @@ def _run_event_activity_last_seq(db: Any, activity_id: str) -> int:
         parts = activity_id.split(":")
         if len(parts) >= 2:
             return _run_event_session_last_seq(db, parts[1])
-    return 0
+    try:
+        return team_mission_activity_events.activity_last_seq(activity_id, db=db)
+    except Exception:
+        return 0
 
 
 def _run_event_session_last_seq(db: Any, session_id: str) -> int:
@@ -511,6 +539,7 @@ def _team_activity_watermarks(
     team: dict[str, Any],
     participants: list[dict[str, Any]],
     mission_activities: list[dict[str, Any]],
+    activities: list[dict[str, Any]],
     is_running: bool,
 ) -> list[dict[str, Any]]:
     db = _get_db()
@@ -574,12 +603,120 @@ def _team_activity_watermarks(
             source="run_events",
         ))
 
+    for activity in activities:
+        if not isinstance(activity, dict):
+            continue
+        activity_id = _text(activity.get("activity_id") or activity.get("activityId"))
+        if not activity_id.startswith("act-node:"):
+            continue
+        activity_status = _text(activity.get("status") or activity.get("state")).lower() or "pending"
+        activity_terminal = activity_status in _TERMINAL_MISSION_STATUSES
+        watermarks.append(_activity_watermark(
+            activity_id=activity_id,
+            last_seq=_run_event_activity_last_seq(db, activity_id),
+            status=activity_status,
+            terminal=activity_terminal,
+            replay_policy="cursor_only" if activity_terminal else "replay_live",
+            source="run_events",
+        ))
+
     deduped: dict[str, dict[str, Any]] = {}
     for watermark in watermarks:
         activity_id = _text(watermark.get("activity_id"))
         if activity_id:
             deduped[activity_id] = watermark
     return list(deduped.values())
+
+
+def _team_activity_messages(
+    *,
+    session_id: str,
+    activities: list[dict[str, Any]],
+    limit_per_activity: int = 50,
+) -> list[dict[str, Any]]:
+    """Project node transcripts beside, but never into, the group-chat feed.
+
+    ``messages`` remains the owning conversation transcript.  Activity
+    transcripts are a separate snapshot lane so the unified Conversation
+    aggregate can hydrate graph-node details without making execution output a
+    group-chat message.  Live continuation is delivered by the corresponding
+    ``runtime.activity.subscribe`` stream.
+    """
+
+    db = _get_db()
+    if db is None:
+        return []
+    projected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for activity in activities:
+        if not isinstance(activity, dict):
+            continue
+        activity_id = _text(activity.get("activity_id") or activity.get("activityId"))
+        node_id = _text(activity.get("graph_node_id") or activity.get("graphNodeId"))
+        mission_id = _text(
+            activity.get("target_mission_id")
+            or activity.get("targetMissionId")
+            or activity.get("mission_id")
+            or activity.get("missionId")
+        )
+        kind = _text(activity.get("kind") or activity.get("activity_kind")).lower()
+        if not activity_id or kind not in {"mission", "agent_dispatch"}:
+            continue
+        try:
+            result = get_team_mission_node_runtime_history(db, {
+                "mission_id": mission_id,
+                "node_id": node_id,
+                "activity_id": activity_id,
+                "limit": limit_per_activity,
+            })
+        except Exception as exc:
+            logger.warning(
+                "conversation.render_snapshot activity transcript hydrate skipped "
+                "session_id=%s activity_id=%s: %s",
+                session_id,
+                activity_id,
+                exc,
+            )
+            continue
+        messages = result.get("messages") if isinstance(result, dict) else []
+        if not isinstance(messages, list):
+            continue
+        owner_participant_id = _text(
+            activity.get("owner_participant_id") or activity.get("ownerParticipantId")
+        )
+        for raw_message in messages:
+            if not isinstance(raw_message, dict):
+                continue
+            message = dict(raw_message)
+            source_message_id = _message_id(message)
+            dedupe_key = (activity_id, source_message_id)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            metadata = dict(_message_metadata(message))
+            metadata["activity_id"] = activity_id
+            metadata["activity_kind"] = kind
+            if node_id:
+                metadata.setdefault("node_id", node_id)
+            if mission_id:
+                metadata.setdefault("mission_id", mission_id)
+            message["metadata"] = metadata
+            role = _text(message.get("role")).lower()
+            if role == "user":
+                message["participant_id"] = "user"
+            elif owner_participant_id and role in {"assistant", "tool"}:
+                message["participant_id"] = owner_participant_id
+            if source_message_id:
+                message["source_message_id"] = source_message_id
+                message["message_id"] = f"{activity_id}:{source_message_id}"
+            projected.append(message)
+    return sorted(
+        projected,
+        key=lambda message: (
+            float(message.get("timestamp") or message.get("created_at") or 0),
+            _text(message.get("message_id") or message.get("id")),
+        ),
+    )
 
 
 def _record(value: Any) -> dict[str, Any]:
@@ -1061,6 +1198,7 @@ def _team_conversation_snapshot(
         status_projection=status_projection,
     )
     mission_activities = _mission_activities_for_session(session_id)
+    activities = _activities_for_session(session_id)
     activity_watermarks = _team_activity_watermarks(
         session_id=session_id,
         conversation=conversation,
@@ -1068,7 +1206,12 @@ def _team_conversation_snapshot(
         team=team,
         participants=participants,
         mission_activities=mission_activities,
+        activities=activities,
         is_running=is_running,
+    )
+    activity_messages = _team_activity_messages(
+        session_id=session_id,
+        activities=activities,
     )
     _emit_team_render_diagnostic(
         "team-conversation-snapshot-filter",
@@ -1104,12 +1247,14 @@ def _team_conversation_snapshot(
             "conversation": conversation,
             "mission": mission,
             "missions": mission_activities,
+            "activities": activities,
             "missionPresent": mission_present,
             "mission_present": mission_present,
             "team": team,
             "graph": graph,
             "participants": participants,
             "messages": messages,
+            "activityMessages": activity_messages,
             "toolEvents": tool_events,
             "runEvents": run_events,
             "last_event_seq": last_event_seq,

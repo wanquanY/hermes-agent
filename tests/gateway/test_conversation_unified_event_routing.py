@@ -477,8 +477,13 @@ def test_memberchat_session_is_not_the_visible_event_truth(monkeypatch, tmp_path
     assert _memberchat_run_events(db) == []
     conv_events = _events_for_session(db, CONV_SESSION)
     # Terminal retention archives stream deltas after message.complete has
-    # projected the durable transcript. The surviving fact must still belong
-    # to the canonical conversation, never the internal memberchat session.
-    assert [event["type"] for event in conv_events] == ["message.complete"]
+    # projected the durable transcript. Entity prerequisites and the surviving
+    # message fact all belong to the canonical conversation, never the internal
+    # memberchat session.
+    assert [event["type"] for event in conv_events] == [
+        "participant.upserted",
+        "activity.upserted",
+        "message.complete",
+    ]
     assert {event["frame"]["conversation_session_id"] for event in conv_events} == {CONV_SESSION}
     assert conv_events[-1]["payload"]["text"] == "member reply from PR-C path"

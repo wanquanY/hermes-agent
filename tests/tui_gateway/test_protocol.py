@@ -610,13 +610,25 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(server, "_make_agent", make_agent)
 
-    resp = server.handle_request(
-        {
-            "id": "r1",
-            "method": "session.recall_turn",
-            "params": {"session_id": "stored-1", "turn_id": "turn-1"},
-        }
-    )
+    delivered = []
+
+    class _RecordingTransport:
+        def write(self, frame):
+            delivered.append(frame)
+            return True
+
+    transport_token = server.bind_transport(_RecordingTransport())
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r1",
+                "method": "session.recall_turn",
+                "params": {"session_id": "stored-1", "turn_id": "turn-1"},
+            }
+        )
+    finally:
+        server.reset_transport(transport_token)
 
     assert "error" not in resp
     make_agent.assert_not_called()
@@ -641,6 +653,45 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
             "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
         },
     ]
+
+    recalled_events = db.runs.list_events(
+        "stored-1",
+        event_types=("session.recalled",),
+        limit=10,
+    )
+    assert len(recalled_events) == 1
+    recalled_event = recalled_events[0]
+    assert recalled_event["type"] == "session.recalled"
+    assert recalled_event["conversation_session_id"] == "stored-1"
+    assert recalled_event["turn_id"] == "turn-1"
+    assert recalled_event["run_id"] == ""
+    assert recalled_event["seq"] > 0
+    assert recalled_event["runtime_source_seq"] > 0
+    assert recalled_event.get("transient") is not True
+
+    live_recalled = [
+        frame["params"]
+        for frame in delivered
+        if frame.get("method") == "event"
+        and (frame.get("params") or {}).get("type") == "session.recalled"
+    ]
+    assert len(live_recalled) == 1
+    assert live_recalled[0]["seq"] == recalled_event["seq"]
+    assert live_recalled[0]["runtime_source_seq"] == recalled_event["runtime_source_seq"]
+    assert live_recalled[0].get("transient") is not True
+
+    replay = server.handle_request(
+        {
+            "id": "recall-replay",
+            "method": "run.events",
+            "params": {
+                "conversation_session_id": "stored-1",
+                "after_seq": recalled_event["seq"] - 1,
+            },
+        }
+    )
+    assert "error" not in replay
+    assert replay["result"]["events"] == [recalled_event]
 
 
 def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatch, tmp_path):

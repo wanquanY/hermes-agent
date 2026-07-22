@@ -140,10 +140,11 @@ def test_team_mission_create_inserts_user_leader_and_members(monkeypatch, tmp_pa
 
     assert "error" not in response
     participants = _participants_by_id(db, "team-session-1")
-    assert {"user", "leader:team-1", "member:member-builder"} <= set(participants)
-    assert participants["leader:team-1"]["role"] == "leader"
-    assert participants["leader:team-1"]["agent_profile_id"] == "profile-leader"
-    assert participants["leader:team-1"]["display_name"] == "Leader"
+    assert {"user", "leader:conversation-1", "member:member-builder"} <= set(participants)
+    assert participants["leader:conversation-1"]["role"] == "leader"
+    assert participants["leader:conversation-1"]["member_id"] == "member-leader"
+    assert participants["leader:conversation-1"]["agent_profile_id"] == "profile-leader"
+    assert participants["leader:conversation-1"]["display_name"] == "Leader"
     assert participants["member:member-builder"]["role"] == "member"
     assert participants["member:member-builder"]["display_name"] == "Builder"
     assert participants["member:member-builder"]["avatar"] == "avatar://builder"
@@ -275,8 +276,67 @@ def test_one_shot_migration_backfills_existing_conversations(tmp_path: Path) -> 
     direct = _participants_by_id(db, "legacy-direct")
     team = _participants_by_id(db, "team-session-1")
     assert {"user", "agent:profile-builder"} <= set(direct)
-    assert {"user", "leader:team-1", "member:member-builder"} <= set(team)
-    assert team["leader:team-1"]["runtime_scope_key"] == "team:team-1:leader-conversation"
+    assert {"user", "leader:conversation-1", "member:member-builder"} <= set(team)
+    assert (
+        team["leader:conversation-1"]["runtime_scope_key"]
+        == "team:conversation-1:leader-conversation"
+    )
+
+
+def test_reconcile_merges_erroneous_team_scoped_leader_identity(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed_team(db, tmp_path)
+    db.sessions.create("team-session-1", source="team_mission")
+    db.upsert_team_mission_conversation(
+        conversation_id="conversation-1",
+        conversation_session_id="team-session-1",
+        team_id="team-1",
+        title="Team",
+    )
+    db.participants.ensure_participant(
+        "team-session-1",
+        participant_id="leader:conversation-1",
+        role="leader",
+        runtime_scope_key="team:conversation-1:leader-conversation",
+        display_name="Leader",
+    )
+    db.participants.ensure_participant(
+        "team-session-1",
+        participant_id="leader:team-1",
+        role="leader",
+        member_id="member-leader",
+        agent_profile_id="profile-leader",
+        agent_profile_version_id="version-leader",
+        runtime_scope_key="team:team-1:leader-conversation",
+        avatar="avatar://leader",
+    )
+    db.messages.append(
+        "team-session-1",
+        role="assistant",
+        content="Legacy leader message",
+        participant_id="leader:team-1",
+    )
+    db._conn.execute(  # noqa: SLF001
+        "DELETE FROM state_meta WHERE key = ?",
+        ("conversation_leader_identity_repair_cr_p1_3",),
+    )
+
+    result = db.participants.reconcile()
+
+    participants = _participants_by_id(db, "team-session-1")
+    assert result["leader_ids_repaired"] == 1
+    assert "leader:team-1" not in participants
+    assert set(participants) >= {"leader:conversation-1"}
+    leader = participants["leader:conversation-1"]
+    assert leader["member_id"] == "member-leader"
+    assert leader["agent_profile_id"] == "profile-leader"
+    assert leader["agent_profile_version_id"] == "version-leader"
+    assert leader["avatar"] == "avatar://leader"
+    message = db.messages.list("team-session-1")[0]
+    assert message["participant_id"] == "leader:conversation-1"
+
+    second = db.participants.reconcile()
+    assert second["leader_ids_repaired"] == 0
 
 
 def test_one_shot_migration_idempotent(tmp_path: Path) -> None:

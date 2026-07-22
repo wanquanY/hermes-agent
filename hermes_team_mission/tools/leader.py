@@ -240,7 +240,12 @@ def _handle_start_task(args: dict[str, Any], parent_agent=None, **_kwargs) -> st
         return tool_error("objective is required.")
     title = _text(args.get("title")) or objective[:80] or "Team task"
     task_id = _text(args.get("task_id") or args.get("taskId")) or f"task-{uuid.uuid4().hex[:12]}"
-    mission_id = _text(args.get("mission_id") or args.get("missionId")) or f"mission-{uuid.uuid4().hex[:16]}"
+    # Mission identity is infrastructure-owned.  Accepting an undeclared model
+    # argument here allowed a Leader to reuse an old terminal mission id, which
+    # overwrote the graph while its immutable Activity still described the
+    # previous task.  Idempotency is carried by task/run identity below; every
+    # genuinely new task therefore receives a fresh Mission instance id.
+    mission_id = f"mission-{uuid.uuid4().hex[:16]}"
     conversation_id = _text(team_context.get("conversation_id") or team_context.get("conversationId"))
     conversation_session_id = _text(team_context.get("conversation_session_id") or team_context.get("conversationSessionId"))
     if not conversation_id:

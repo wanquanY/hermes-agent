@@ -328,6 +328,11 @@ class TeamMissionEventMixin:
             ).fetchone() if binding is not None else None
         if binding is None:
             return {}
+        from hermes_team_mission.gateway.conversation_owner_entities import (
+            publish_team_mission_activity_entities,
+        )
+
+        publish_team_mission_activity_entities(self, mission_id=mission_id)
         mission = self.team_mission_rows.mission_from_row(mission_row) or {"mission_id": mission_id}
         node = self.team_mission_rows.node_from_row(node_row) or {}
         binding_value = self.team_mission_rows.run_binding_from_row(binding) or {}

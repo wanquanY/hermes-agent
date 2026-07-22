@@ -117,6 +117,126 @@ def test_team_mission_create_inserts_mission_activity_row(monkeypatch, tmp_path:
     assert activity["status"] == "running"
 
 
+def test_team_mission_create_publishes_root_activity_to_visible_conversation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    _seed_team(db, tmp_path)
+
+    _create_mission_via_gateway(db, monkeypatch, tmp_path)
+
+    upserts = [
+        event
+        for event in db.runs.list_events("team-session-1")
+        if event.get("type") == "activity.upserted"
+    ]
+    assert upserts
+    assert {
+        event["payload"]["activity"]["activity_id"] for event in upserts
+    } == {"mission:mission-1"}
+    activity = upserts[-1]["payload"]["activity"]
+    assert activity["activity_id"] == "mission:mission-1"
+    assert activity["kind"] == "mission"
+    assert activity["status"] == "pending"
+    assert activity["title"] == "Ship the plan"
+
+
+def test_team_mission_nodes_share_one_activity_projection_for_live_and_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from hermes_team_mission.gateway.conversation_owner_entities import (
+        publish_team_mission_activity_entities,
+    )
+    from hermes_team_mission.read_models.conversation_activity_projection import (
+        project_conversation_activities,
+    )
+
+    db = _db(tmp_path)
+    _seed_team(db, tmp_path)
+    _create_mission_via_gateway(db, monkeypatch, tmp_path)
+    worker = db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="worker-1",
+        kind="worker",
+        title="Write the file",
+        objective="Create result.txt.",
+        status="ready",
+        assignee_profile_id="profile-leader",
+    )
+    root = next(
+        node
+        for node in db.team_mission_graphs.get_team_mission_graph("mission-1")["nodes"]
+        if node["kind"] == "root"
+    )
+    db.upsert_team_mission_edge(
+        mission_id="mission-1",
+        from_node_id=root["node_id"],
+        to_node_id=worker["node_id"],
+    )
+
+    live = publish_team_mission_activity_entities(db, mission_id="mission-1")
+    event_count = len(db.runs.list_events("team-session-1"))
+    repeated = publish_team_mission_activity_entities(db, mission_id="mission-1")
+    snapshot = project_conversation_activities(db, "team-session-1")
+
+    expected_ids = {"mission:mission-1", "act-node:mission-1:worker-1"}
+    assert {item["activity_id"] for item in live} == expected_ids
+    assert repeated == live
+    assert len(db.runs.list_events("team-session-1")) == event_count
+    assert {item["activity_id"] for item in snapshot} == expected_ids
+    worker_activity = next(
+        item for item in live if item["activity_id"] == "act-node:mission-1:worker-1"
+    )
+    assert worker_activity["parent_activity_id"] == "mission:mission-1"
+    assert worker_activity["dependency_activity_ids"] == ["mission:mission-1"]
+    assert worker_activity["status"] == "pending"
+
+
+def test_team_mission_activity_projection_keeps_owner_states_monotonic(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from hermes_team_mission.read_models.conversation_activity_projection import (
+        project_team_mission_activities,
+    )
+
+    db = _db(tmp_path)
+    _seed_team(db, tmp_path)
+    _create_mission_via_gateway(db, monkeypatch, tmp_path)
+    db.upsert_team_mission(
+        mission_id="mission-1",
+        status="ready",
+        leader_session_id="team-session-1",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="worker-blocked",
+        kind="worker",
+        title="Wait for approval",
+        status="blocked_waiting_dependency",
+        assignee_profile_id="profile-leader",
+    )
+    db.upsert_team_mission_node(
+        mission_id="mission-1",
+        node_id="worker-future",
+        kind="worker",
+        title="Future state",
+        status="future_owner_state",
+        assignee_profile_id="profile-leader",
+    )
+
+    activities = {
+        activity["activity_id"]: activity
+        for activity in project_team_mission_activities(db, "mission-1")
+    }
+
+    assert activities["mission:mission-1"]["status"] == "running"
+    assert activities["act-node:mission-1:worker-blocked"]["status"] == "pending"
+    assert activities["act-node:mission-1:worker-future"]["status"] == "pending"
+
+
 def test_team_mission_cancel_marks_mission_activity_cancelled(monkeypatch, tmp_path: Path) -> None:
     from tui_gateway import server
 
@@ -225,6 +345,15 @@ def test_render_snapshot_includes_missions_top_level_list(monkeypatch, tmp_path:
         status="running",
         leader_session_id="team-session-1",
     )
+    db.activities.create(
+        activity_id="act-member_chat:team-session-1:writer",
+        conversation_id="team-session-1",
+        kind="member_chat",
+        target_profile_id="profile-writer",
+        status="running",
+        prompt_summary="Writer chat",
+        notify_parent=False,
+    )
     monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
     monkeypatch.setattr(team_mission, "_get_db", lambda: db)
 
@@ -238,6 +367,10 @@ def test_render_snapshot_includes_missions_top_level_list(monkeypatch, tmp_path:
     missions = response["result"]["missions"]
     assert [row["target_mission_id"] for row in missions] == ["mission-1"]
     assert missions[0]["kind"] == "mission"
+    assert {row["kind"] for row in response["result"]["activities"]} == {
+        "member_chat",
+        "mission",
+    }
 
 
 def test_existing_activities_table_migrates_kind_mission_check(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .common import *
 from .participant_autocreate import ensure_team_conversation_participants
+from .conversation_owner_entities import publish_team_mission_activity_entities
 from .public_conversation_identity import (
     public_team_conversation,
     public_team_conversation_list,
@@ -361,6 +362,7 @@ def _(rid, params: dict) -> dict:
         ensure_team_conversation_participants(
             db,
             conversation_session_id=conversation_session_id,
+            conversation_id=conversation_id,
             team_id=team_id,
             members=None,
             source="team_mission.create",
@@ -447,6 +449,7 @@ def _(rid, params: dict) -> dict:
     ensure_team_conversation_participants(
         db,
         conversation_session_id=conversation_session_id,
+        conversation_id=conversation_id,
         team_id=team_id,
         members=members,
         leader_profile_params=_leader_profile_params(params, graph if isinstance(graph, dict) else {}),
@@ -518,6 +521,14 @@ def _(rid, params: dict) -> dict:
         )
         graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
         mission = graph.get("mission") if isinstance(graph, dict) else {}
+    try:
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
+    except Exception as exc:
+        return _err(
+            rid,
+            5008,
+            f"team mission Activity projection publish failed: {exc}",
+        )
     if (
         isinstance(mission, dict)
         and mission

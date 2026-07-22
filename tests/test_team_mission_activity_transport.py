@@ -99,3 +99,44 @@ def test_transport_preserves_clarify_request_fields_without_source_payload_blob(
     assert payload["choices"] == ["A", "B"]
     assert "source_event" not in payload
     assert "source_payload" not in payload
+
+
+def test_transport_preserves_node_speaker_identity_from_nested_source_event() -> None:
+    projected = transport_event_for_subscription(
+        {
+            "type": "team_mission.runtime.event",
+            "seq": 14,
+            "payload": {
+                "kind": "node.completed",
+                "source_event_type": "message.complete",
+                "source_event": {
+                    "type": "message.complete",
+                    "participant_id": "member:verifier",
+                    "run_id": "run-verifier",
+                    "payload": {
+                        "text": "Verification passed.",
+                        "run_context": {
+                            "participant_id": "member:verifier",
+                        },
+                    },
+                },
+                "subject": {
+                    "type": "node",
+                    "id": "verify-output",
+                    "mission_id": "mission-1",
+                    "conversation_session_id": "team-conversation-1",
+                },
+            },
+        },
+        "act-node:mission-1:verify-output",
+    )
+
+    assert projected["participant_id"] == "member:verifier"
+    assert projected["payload"]["participant_id"] == "member:verifier"
+    assert projected["conversation_session_id"] == "team-conversation-1"
+    assert projected["session_id"] == "team-conversation-1"
+    assert projected["payload"]["conversation_session_id"] == "team-conversation-1"
+    assert (
+        projected["payload"]["subject"]["conversation_session_id"]
+        == "team-conversation-1"
+    )

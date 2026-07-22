@@ -37,6 +37,7 @@ from hermes_agent.composition.migrations.support.session_lineage_reconcile impor
 from hermes_agent.storage.session_store_health import set_last_init_error
 from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
 from hermes_team_mission.state.schema import migrate_active_mission_id_to_conversation_missions
+from hermes_team_mission.state.schema import migrate_team_mission_approval_entry_dependencies
 from hermes_team_mission.state.schema import migrate_team_mission_runtime_session_columns
 from hermes_team_mission.state.schema import migrate_team_mission_conversation_session_id
 from hermes_team_mission.state.schema import reconcile_team_mission_node_primary_key
@@ -393,6 +394,7 @@ def ensure_session_index_read_side_schema(conn: sqlite3.Connection) -> None:
     migrate_team_mission_conversation_session_id(cursor)
     reconcile_team_mission_node_primary_key(cursor)
     migrate_active_mission_id_to_conversation_missions(cursor)
+    migrate_team_mission_approval_entry_dependencies(cursor)
     try:
         cursor.executescript(team_mission_deferred_index_sql())
     except sqlite3.OperationalError:

@@ -105,6 +105,7 @@ _STREAM_TRACE_EVENT_TYPES = {
     "message.delta",
     "message.complete",
     "reasoning.delta",
+    "reasoning.available",
     "thinking.delta",
     "subagent.output_delta",
     "subagent.reasoning_delta",
@@ -113,6 +114,7 @@ _STREAM_TRACE_EVENT_TYPES = {
 }
 _STREAM_CHECKPOINT_BOUNDARY_TYPES = {
     "message.complete",
+    "reasoning.available",
     "error",
     "session.interrupted",
     "session.recalled",
@@ -816,22 +818,44 @@ def _normalize_team_mission_deliverable_terminal_event(
     if str(frame.get("type") or "").strip() != "message.complete":
         return frame
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    normalized_payload = dict(payload)
+    changed = False
+    binding = None
+    binding_getter = _db_method(db, "get_team_mission_run_binding")
+    if binding_getter is not None and run_id:
+        try:
+            candidate = binding_getter(run_id)
+        except Exception:
+            candidate = None
+        binding = candidate if isinstance(candidate, dict) else None
+    binding_metadata = (
+        binding.get("metadata")
+        if isinstance(binding, dict) and isinstance(binding.get("metadata"), dict)
+        else {}
+    )
+    if str(binding_metadata.get("kind") or "").strip() == "leader_report":
+        artifact_refs = [
+            dict(item)
+            for item in (
+                binding_metadata.get("artifact_refs")
+                or binding_metadata.get("artifactRefs")
+                or []
+            )
+            if isinstance(item, dict) and str(item.get("id") or item.get("path") or "").strip()
+        ]
+        if artifact_refs:
+            normalized_payload["artifacts"] = artifact_refs
+            normalized_payload["artifact_refs"] = artifact_refs
+            normalized_payload["artifactRefs"] = artifact_refs
+            changed = True
     status = str(payload.get("status") or "").strip().lower()
     if status not in {"failed", "error"}:
-        return frame
+        return {**frame, "payload": normalized_payload} if changed else frame
     deliverable_text = primary_deliverable_text(payload)
     if not deliverable_text or not run_id:
-        return frame
-    binding_getter = _db_method(db, "get_team_mission_run_binding")
-    if binding_getter is None:
-        return frame
-    try:
-        binding = binding_getter(run_id)
-    except Exception:
-        binding = None
+        return {**frame, "payload": normalized_payload} if changed else frame
     if not isinstance(binding, dict) or not binding:
-        return frame
-    normalized_payload = dict(payload)
+        return {**frame, "payload": normalized_payload} if changed else frame
     original_status = str(normalized_payload.get("status") or "").strip()
     original_error = str(normalized_payload.get("message") or normalized_payload.get("error") or "").strip()
     normalized_payload["text"] = deliverable_text
@@ -1824,6 +1848,12 @@ def record_event(
     turn_id = _event_turn_id(frame)
     frame = _normalize_team_mission_deliverable_terminal_event(frame, run_id=run_id, db=db)
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    # Delivery and replay must expose the same owner-normalized payload.  The
+    # database RunService applies the same normalizer while persisting, but the
+    # websocket publishes the caller-owned params object after this function
+    # returns; keep that envelope in sync before assigning its canonical seq.
+    if isinstance(params, dict):
+        params["payload"] = dict(payload)
     event_type = str(frame.get("type") or "").strip()
     execution_session_id = str(frame.get("execution_session_id") or "").strip()
     owner_metadata = frame.get("owner_metadata")
@@ -2222,6 +2252,15 @@ def record_event(
                     if not scheduler_mission_id:
                         scheduler_mission_id = str(binding.get("mission_id") or "").strip()
                 if scheduler_mission_id:
+                    if isinstance(reduced_node, dict) and reduced_node:
+                        from hermes_team_mission.gateway.conversation_owner_entities import (
+                            publish_team_mission_activity_entities,
+                        )
+
+                        publish_team_mission_activity_entities(
+                            db,
+                            mission_id=scheduler_mission_id,
+                        )
                     if (
                         mission_event
                         and _team_mission_runtime_event_allows_conversation_status(

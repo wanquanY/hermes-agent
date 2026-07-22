@@ -114,14 +114,16 @@ def test_synthesis_stream_does_not_mirror_and_summary_writer_requests_leader_rep
         run_control.unsubscribe_session(subscription_id=subscription_id)
 
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
 
     streamed = [
         frame.get("params") or {}
         for frame in transport.frames
         if frame.get("method") == "event"
     ]
-    assert streamed == []
+    assert streamed
+    assert {event["type"] for event in streamed} == {"activity.upserted"}
     assert db.messages.list("team-session-1") == []
 
     summary = MissionSummaryWriter.emit_mission_summary(
@@ -344,10 +346,12 @@ def test_synthesis_append_deltas_are_not_mirrored_to_conversation_stream(tmp_pat
         for frame in transport.frames
         if frame.get("method") == "event"
     ]
-    assert streamed == []
+    assert streamed
+    assert {event["type"] for event in streamed} == {"activity.upserted"}
 
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
     assert db.messages.list("team-session-1") == []
 
 

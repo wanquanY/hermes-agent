@@ -101,6 +101,7 @@ class SessionIndexService:
         cursor: dict[str, Any] | None = None,
         include_transient: bool = False,
         conversation_kind: str | None = None,
+        visible_only: bool = False,
     ) -> dict[str, Any]:
         return self._read_model.list(
             SessionIndexQuery(
@@ -108,6 +109,7 @@ class SessionIndexService:
                 cursor=cursor,
                 include_transient=include_transient,
                 conversation_kind=conversation_kind,
+                visible_only=visible_only,
             )
         )
 

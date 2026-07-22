@@ -565,7 +565,13 @@ class SupervisedMissionStrategy(TeamMissionModeStrategy):
             (edge.from_node_id, edge.to_node_id, edge.kind)
             for edge in planned_edges
         }
-        approval_edges = tuple(
+        root_to_approval = TeamMissionEdgeSpec(
+            from_node_id=_node_id(mission_id, "root"),
+            to_node_id=approval.node_id,
+            kind="depends_on",
+            metadata={"approval_gate": True, "approval_scope": "whole_graph"},
+        )
+        approval_edges = (root_to_approval,) + tuple(
             TeamMissionEdgeSpec(
                 from_node_id=approval.node_id,
                 to_node_id=node.node_id,

@@ -3351,6 +3351,7 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(
         node for node in completed_nodes if node["kind"] == "approval_gate"
     )
     assert approval_node["metadata"]["task_id"] == "task-2"
+    visible_event_count_before_reject = len(db.runs.list_events("team-session-1"))
     rejected = server._methods["team_mission.plan.reject"](
         2,
         {
@@ -3373,6 +3374,22 @@ def test_team_mission_leader_start_task_tool_starts_planning_node(
     ]
     assert rejected_task_nodes
     assert {node["status"] for node in rejected_task_nodes} == {"cancelled"}
+    rejection_events = db.runs.list_events("team-session-1")[
+        visible_event_count_before_reject:
+    ]
+    assert rejection_events
+    assert {event["type"] for event in rejection_events} == {"activity.upserted"}
+    rejected_activities = [
+        event["payload"]["activity"]
+        for event in rejection_events
+        if isinstance(event.get("payload"), dict)
+        and isinstance(event["payload"].get("activity"), dict)
+    ]
+    assert any(
+        activity.get("kind") == "mission"
+        and activity.get("status") == "cancelled"
+        for activity in rejected_activities
+    )
 
 
 def test_team_mission_plan_approve_uses_requested_mission_native_graph(
@@ -3608,6 +3625,29 @@ def test_team_mission_plan_approve_starts_ready_worker_with_runtime_projection(
     assert latest_status["running"] is True
     assert latest_status["run_state"] == "running"
 
+    visible_activity_events = [
+        event["payload"]["activity"]
+        for event in db.runs.list_events("team-session-1")
+        if event.get("type") == "activity.upserted"
+        and isinstance(event.get("payload"), dict)
+        and isinstance(event["payload"].get("activity"), dict)
+    ]
+    status_history: dict[str, list[str]] = {}
+    for activity in visible_activity_events:
+        status_history.setdefault(activity["activity_id"], []).append(activity["status"])
+
+    assert status_history[
+        "act-node:mission-current:team-mission:mission-current:approval-plan"
+    ][-1] == "completed"
+    assert status_history["mission:mission-current"][-2:] == [
+        "waiting_approval",
+        "running",
+    ]
+    assert status_history["act-node:mission-current:node-worker"][-2:] == [
+        "pending",
+        "running",
+    ]
+
 
 def test_team_mission_direct_root_task_activation_replaces_draft_objective(
     monkeypatch, tmp_path: Path
@@ -3730,7 +3770,9 @@ def test_team_mission_runtime_output_stays_inside_node_session(tmp_path: Path):
         db=db,
     )
 
-    assert db.runs.list_events("team-session-1") == []
+    visible_events = db.runs.list_events("team-session-1")
+    assert visible_events
+    assert {event["type"] for event in visible_events} == {"activity.upserted"}
     assert db.messages.list("team-session-1") == []
 
     node_events = db.runs.list_events("node-session-1")
@@ -3840,7 +3882,8 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
         db=db,
     )
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
     assert db.messages.list("team-session-1") == []
 
     run_control.record_event(
@@ -3857,7 +3900,8 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
         db=db,
     )
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
 
     run_control.record_event(
         {
@@ -3874,7 +3918,8 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
     )
 
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
     messages = db.messages.list("team-session-1")
     assert messages == []
     assert (
@@ -3889,14 +3934,28 @@ def test_team_mission_synthesis_output_is_not_mirrored_as_conversation_stream(
 
 def test_submit_mission_leader_report_run_queues_leader_without_user_message(
     tmp_path: Path,
+    monkeypatch,
 ):
     from hermes_agent.composition.cli_session_store import open_cli_session_store
-    from hermes_team_mission.gateway.leader_report_runtime import (
-        submit_mission_leader_report_run,
-    )
+    from hermes_team_mission.gateway import leader_report_runtime
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    report_path = workspace / "market-report.md"
+    report_path.write_text("# Market report", encoding="utf-8")
+    registered_artifacts: list[dict] = []
+
+    def fake_register_artifact(**kwargs):
+        registered_artifacts.append(dict(kwargs))
+        return {
+            "id": "artifact:market-report",
+            "path": str(report_path),
+            "title": "market-report.md",
+            "mime_type": "text/markdown",
+            "origin": dict(kwargs.get("origin") or {}),
+        }
+
+    monkeypatch.setattr(leader_report_runtime, "register_artifact", fake_register_artifact)
     db = open_cli_session_store(tmp_path / "state.db")
     db.upsert_team_mission_conversation(
         conversation_id="conversation-1",
@@ -3930,7 +3989,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(
         ],
         artifact_refs=[
             {
-                "path": "/tmp/market-report.md",
+                "path": str(report_path),
                 "title": "market-report.md",
                 "kind": "file",
             }
@@ -3943,7 +4002,7 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(
         captured["params"] = params
         return {"result": {"status": "queued", "session_id": params["session_id"]}}
 
-    response = submit_mission_leader_report_run(
+    response = leader_report_runtime.submit_mission_leader_report_run(
         db=db,
         run_submitter=fake_run_submitter,
         mission_id="mission-report",
@@ -3979,6 +4038,9 @@ def test_submit_mission_leader_report_run_queues_leader_without_user_message(
     assert run_context["activity_kind"] == "chat"
     binding = db.get_team_mission_run_binding(response["run_id"])
     assert binding["metadata"]["kind"] == "leader_report"
+    assert binding["metadata"]["artifact_refs"][0]["id"] == "artifact:market-report"
+    assert registered_artifacts[0]["session_id"] == "team-session-1"
+    assert registered_artifacts[0]["origin"]["run_id"] == response["run_id"]
     saved_result = db.get_team_mission_result("mission-report")
     assert saved_result["leader_report_run_id"] == response["run_id"]
     assert db.messages.list("team-session-1") == []
@@ -4278,7 +4340,8 @@ def test_team_mission_synthesis_failed_complete_with_text_does_not_mirror_delive
     )
 
     mirrored_events = db.runs.list_events("team-session-1")
-    assert mirrored_events == []
+    assert mirrored_events
+    assert {event["type"] for event in mirrored_events} == {"activity.upserted"}
     assert db.messages.list("team-session-1") == []
     assert (
         db.get_team_mission_node("mission-1", "team-mission:mission-1:synthesis")[
@@ -5109,7 +5172,11 @@ def test_team_mission_plan_approval_event_is_projected_to_mission_event_log(
     )
 
     assert completed["result"]["mission_status"] == "waiting_approval"
-    assert [event["type"] for event in db.runs.list_events("team-session-1")] == []
+    visible_event_types = [
+        event["type"] for event in db.runs.list_events("team-session-1")
+    ]
+    assert visible_event_types
+    assert set(visible_event_types) == {"activity.upserted"}
     source_event_types = [
         event["payload"]["source_event_type"]
         for event in db.list_team_mission_run_events("mission-1")

@@ -512,6 +512,41 @@ def migrate_active_mission_id_to_conversation_missions(cursor: sqlite3.Cursor) -
         )
 
 
+def migrate_team_mission_approval_entry_dependencies(cursor: sqlite3.Cursor) -> None:
+    """Restore the durable root -> approval dependency for legacy mission graphs."""
+
+    try:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO team_mission_edges (
+                edge_id, mission_id, from_node_id, to_node_id, kind, metadata_json, created_at
+            )
+            SELECT
+                root.mission_id || ':' || root.node_id || ':' || approval.node_id || ':depends_on',
+                root.mission_id,
+                root.node_id,
+                approval.node_id,
+                'depends_on',
+                '{"approval_gate":true,"approval_scope":"whole_graph"}',
+                approval.created_at
+            FROM team_mission_nodes AS root
+            JOIN team_mission_nodes AS approval
+              ON approval.mission_id = root.mission_id
+             AND approval.kind = 'approval_gate'
+            WHERE root.kind = 'root'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM team_mission_edges AS existing
+                  WHERE existing.mission_id = root.mission_id
+                    AND existing.from_node_id = root.node_id
+                    AND existing.to_node_id = approval.node_id
+              )
+            """
+        )
+    except sqlite3.OperationalError:
+        return
+
+
 def compact_team_mission_event_json_storage(cursor: sqlite3.Cursor, logger: Any) -> None:
     """Compact legacy duplicate JSON storage in team_mission_events."""
 

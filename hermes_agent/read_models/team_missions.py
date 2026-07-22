@@ -37,6 +37,35 @@ class TeamMissionReadModel:
             ).fetchone()
         return str(row["status"] or "").strip().lower() if row is not None else ""
 
+    def conversation_session_id(self, mission_id: str) -> str:
+        """Return the routable Conversation session that owns a Team Mission.
+
+        Runtime and journal sessions are execution identities.  Consumers
+        projecting mission events into Conversation-owned UI surfaces must use
+        the canonical Conversation mapping instead of inferring ownership from
+        an individual event subject.  ``team_missions.conversation_id`` is the
+        aggregate id; ``team_mission_conversations.conversation_session_id`` is
+        the transport identity and may differ for migrated conversations.
+        """
+        stable = str(mission_id or "").strip()
+        if not stable:
+            return ""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(
+                           NULLIF(conversation.conversation_session_id, ''),
+                           mission.conversation_id
+                       ) AS conversation_session_id
+                  FROM team_missions mission
+                  LEFT JOIN team_mission_conversations conversation
+                    ON conversation.conversation_id = mission.conversation_id
+                 WHERE mission.mission_id = ?
+                """,
+                (stable,),
+            ).fetchone()
+        return str(row["conversation_session_id"] or "").strip() if row is not None else ""
+
     def mission_id_for_run(self, run_id: str) -> str:
         stable = str(run_id or "").strip()
         if not stable:

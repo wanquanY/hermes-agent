@@ -842,7 +842,13 @@ def _live_session_payload(
 @method("session.create")
 def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
-    key = _new_session_key()
+    key = str(
+        params.get("conversation_session_id")
+        or params.get("conversationSessionId")
+        or params.get("stored_session_id")
+        or params.get("storedSessionId")
+        or ""
+    ).strip() or _new_session_key()
     cols = int(params.get("cols", 80))
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
     control_plane_only = bool(
@@ -1206,30 +1212,6 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5006, str(e))
 
 
-def _is_hidden_empty_index_draft(row: dict) -> bool:
-    """A composer-paint placeholder the sidebar must NOT show.
-
-    Control-plane ``session.create`` projects a session_index row for every new
-    chat the moment the composer opens — before the user has typed anything — so
-    the row appears with an empty title (rendered as "新会话"), zero messages,
-    and no preview. These accumulate and re-appear on every launch (deleting them
-    is futile; the next new-chat route re-creates one). ``session.list`` already
-    hides such rows via ``_is_empty_stored_conversation``; mirror that here so the
-    single-query ``session.index.list`` sidebar read is consistent. Keep the row
-    when it is live (running / has an active run or runtime session) — that is a
-    brand-new chat mid-first-turn whose content has not been persisted yet.
-    """
-    if not _is_empty_stored_conversation(row):
-        return False
-    if (
-        row.get("running")
-        or str(row.get("active_run_id") or "").strip()
-        or str(row.get("active_execution_session_id") or "").strip()
-    ):
-        return False
-    return True
-
-
 def _session_index_list_item(row: dict) -> dict:
     """Map a control-plane session_index row to the desktop session list shape.
 
@@ -1488,6 +1470,7 @@ def _(rid, params: dict) -> dict:
             cursor=cursor or None,
             include_transient=include_transient,
             conversation_kind=requested_conversation_kind or None,
+            visible_only=True,
         )
         rows = [
             _session_index_row_with_active_mission_running(db, row)
@@ -1495,14 +1478,9 @@ def _(rid, params: dict) -> dict:
             if not requested_conversation_kind
             or _normalized_conversation_kind(row) == requested_conversation_kind
         ]
-        visible_rows = [
-            row
-            for row in rows
-            if not _is_hidden_empty_index_draft(row)
-        ]
-        workspace_bindings = _session_index_workspace_bindings_for_rows(visible_rows)
+        workspace_bindings = _session_index_workspace_bindings_for_rows(rows)
         enriched_rows = []
-        for row in visible_rows:
+        for row in rows:
             item = dict(row)
             session_id = str(item.get("session_id") or item.get("id") or "").strip()
             item["workspace_binding"] = workspace_bindings.get(session_id)

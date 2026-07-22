@@ -252,6 +252,65 @@ def test_nested_text_stream_identity_keeps_message_segments_independent():
     ) == second_segment_checkpoint
 
 
+def test_reasoning_available_seals_reasoning_after_its_durable_checkpoint(tmp_path):
+    db = open_cli_session_store(tmp_path / "reasoning-complete.db")
+    session_id = "reasoning-complete-session"
+    run_id = "reasoning-complete-run"
+    client_message_id = "reasoning-complete-turn:assistant-segment:0"
+    common = {
+        "conversation_session_id": session_id,
+        "session_id": "reasoning-complete-runtime",
+        "run_id": run_id,
+        "turn_id": "reasoning-complete-turn",
+        "runtime_scope_key": "profile:agent-default",
+    }
+    run_control.record_event(
+        {
+            **common,
+            "type": "reasoning.delta",
+            "seq": 1,
+            "payload": {
+                "mode": "append",
+                "delta": "先分析问题。",
+                "offset": 0,
+                "client_message_id": client_message_id,
+            },
+        },
+        db=db,
+    )
+
+    assert db.runs.list_events(session_id, run_id=run_id) == []
+
+    run_control.record_event(
+        {
+            **common,
+            "type": "reasoning.available",
+            "seq": 2,
+            "payload": {
+                "mode": "replace",
+                "text": "先分析问题。",
+                "client_message_id": client_message_id,
+            },
+        },
+        db=db,
+    )
+
+    events = db.runs.list_events(session_id, run_id=run_id)
+    assert [event["type"] for event in events] == [
+        "reasoning.delta",
+        "reasoning.available",
+    ]
+    assert events[0]["payload"]["stream_checkpoint"] is True
+    assert events[0]["payload"]["text"] == "先分析问题。"
+    assert events[1]["payload"]["mode"] == "replace"
+    assert events[1]["payload"]["text"] == "先分析问题。"
+    assert all(
+        event["payload"]["client_message_id"] == client_message_id
+        for event in events
+    )
+    db.close()
+
+
 def test_checkpoint_race_delivers_only_unseen_utf16_suffix():
     subscription = {}
     common = {

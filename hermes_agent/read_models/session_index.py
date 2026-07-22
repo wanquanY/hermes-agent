@@ -13,6 +13,7 @@ class SessionIndexQuery:
     cursor: dict[str, Any] | None = None
     include_transient: bool = False
     conversation_kind: str | None = None
+    visible_only: bool = False
 
 
 class SessionIndexReadModel:
@@ -39,6 +40,18 @@ class SessionIndexReadModel:
         where.append("si.conversation_kind IN ('direct', 'team')")
         if not query.include_transient:
             where.append("si.transient = 0")
+        if query.visible_only:
+            # Pagination is a public visible-conversation contract. Filtering
+            # placeholder composer rows after LIMIT under-fills the page and
+            # advances the cursor past real conversations/workspaces.
+            where.append(
+                "NOT (COALESCE(si.message_count, 0) <= 0 "
+                "AND TRIM(COALESCE(si.title, '')) = '' "
+                "AND TRIM(COALESCE(si.preview, '')) = '' "
+                "AND COALESCE(si.running, 0) = 0 "
+                "AND TRIM(COALESCE(si.active_run_id, '')) = '' "
+                "AND TRIM(COALESCE(si.active_execution_session_id, '')) = '')"
+            )
         normalized_conversation_kind = str(query.conversation_kind or "").strip().lower()
         if normalized_conversation_kind in {"direct", "team"}:
             where.append("si.conversation_kind = ?")

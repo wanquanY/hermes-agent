@@ -15,6 +15,22 @@ TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
     }
 )
 
+# Conversation-owner facts remain durable even when they are not attached to
+# an active run.  In particular, recalling a completed turn has no live
+# ``run_id`` by design, but it still rewrites the authoritative transcript and
+# must occupy the same monotonic conversation cursor as run events.  Keep this
+# policy beside the transient-event taxonomy so transport code never infers
+# durability from incidental identity fields.
+DURABLE_CONVERSATION_EVENT_TYPES = frozenset(
+    {
+        "activity.upserted",
+        "participant.upserted",
+        "session.branched",
+        "session.info",
+        "session.recalled",
+    }
+)
+
 TERMINAL_EVENT_DOMAIN = "terminal"
 
 
@@ -35,6 +51,16 @@ def is_transient_platform_event(frame: dict[str, Any]) -> bool:
     namespace.
     """
     return str(frame.get("type") or "").strip() in TRANSIENT_PLATFORM_EVENT_TYPES
+
+
+def is_durable_conversation_event(event_type: str) -> bool:
+    """Return whether an event is a durable fact without requiring a run.
+
+    Run-scoped frames are journaled through their run identity.  This function
+    covers conversation-level mutations whose durability is intrinsic to the
+    event type and therefore must not depend on whether a run is active.
+    """
+    return str(event_type or "").strip() in DURABLE_CONVERSATION_EVENT_TYPES
 
 
 class RuntimeSourceSequencer:
@@ -121,10 +147,12 @@ def _positive_int(value: Any) -> int:
 
 
 __all__ = [
+    "DURABLE_CONVERSATION_EVENT_TYPES",
     "RuntimeSourceSequencer",
     "TERMINAL_EVENT_DOMAIN",
     "TRANSIENT_PLATFORM_EVENT_TYPES",
     "event_domain_for_type",
+    "is_durable_conversation_event",
     "is_transient_platform_event",
     "mark_transient",
     "reset_for_tests",

@@ -13,6 +13,9 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from hermes_team_mission.context.artifact_refs import artifact_refs_from_event
+from hermes_team_mission.context.artifact_refs import dedupe_artifact_refs
+from hermes_team_mission.context.artifact_refs import normalize_artifact_ref
 from hermes_team_mission.context.worker_context import TOOL_ARGS_BUDGET_CHARS
 from hermes_team_mission.runtime.node_handoff import record_team_mission_node_handoff
 from tools.registry import registry, tool_error, tool_result
@@ -40,6 +43,40 @@ def _list_records(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
+def _canonical_run_artifact_refs(
+    db: Any,
+    *,
+    binding: Mapping[str, Any],
+    run_id: str,
+    submitted_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve handoff artifacts from owner events, not model-shaped JSON alone.
+
+    ``artifact.created`` is the durable runtime fact.  The model may still add
+    descriptive references, but empty or malformed objects cannot erase files
+    that the run actually produced.
+    """
+    observed: list[dict[str, Any]] = []
+    session_id = _text(binding.get("session_id") or binding.get("sessionId"))
+    event_lister = getattr(getattr(db, "runs", None), "list_events", None)
+    if session_id and run_id and callable(event_lister):
+        try:
+            for event in event_lister(session_id, run_id=run_id, limit=5000) or []:
+                if isinstance(event, dict):
+                    observed.extend(artifact_refs_from_event(event))
+        except Exception:
+            logger.exception(
+                "Failed to read produced artifacts for Team Mission handoff run_id=%s",
+                run_id,
+            )
+    submitted = [
+        normalized
+        for ref in submitted_refs
+        if (normalized := normalize_artifact_ref(ref, default_kind="file"))
+    ]
+    return dedupe_artifact_refs([*observed, *submitted])
+
+
 def _json_size(value: Any) -> int:
     try:
         return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
@@ -56,7 +93,11 @@ def _confidence(value: Any) -> float:
 
 
 def _task_id_from_metadata(metadata: Mapping[str, Any]) -> str:
-    active_task = metadata.get("active_task") if isinstance(metadata.get("active_task"), Mapping) else {}
+    active_task = (
+        metadata.get("active_task")
+        if isinstance(metadata.get("active_task"), Mapping)
+        else {}
+    )
     return _text(
         metadata.get("task_id")
         or metadata.get("taskId")
@@ -67,7 +108,9 @@ def _task_id_from_metadata(metadata: Mapping[str, Any]) -> str:
     )
 
 
-def _task_id_for_node(mission: Mapping[str, Any], node: Mapping[str, Any], binding: Mapping[str, Any]) -> str:
+def _task_id_for_node(
+    mission: Mapping[str, Any], node: Mapping[str, Any], binding: Mapping[str, Any]
+) -> str:
     node_metadata = _metadata(node.get("metadata"))
     binding_metadata = _metadata(binding.get("metadata"))
     mission_metadata = _metadata(mission.get("metadata"))
@@ -81,12 +124,20 @@ def _task_id_for_node(mission: Mapping[str, Any], node: Mapping[str, Any], bindi
 
 def _node_by_id(graph: Mapping[str, Any], node_id: str) -> dict[str, Any]:
     for node in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
-        if isinstance(node, Mapping) and _text(node.get("node_id") or node.get("id")) == node_id:
+        if (
+            isinstance(node, Mapping)
+            and _text(node.get("node_id") or node.get("id")) == node_id
+        ):
             return dict(node)
     return {}
 
 
-def _run_context(args: Mapping[str, Any], parent_agent=None) -> tuple[Any, str, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]] | str:
+def _run_context(
+    args: Mapping[str, Any], parent_agent=None
+) -> (
+    tuple[Any, str, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]
+    | str
+):
     db = _get_db(parent_agent)
     if db is None:
         return "Session database is not available."
@@ -108,7 +159,9 @@ def _run_context(args: Mapping[str, Any], parent_agent=None) -> tuple[Any, str, 
     return db, run_id, binding, mission, graph, node
 
 
-def _normalize_payload(args: Mapping[str, Any], *, node_id: str, status: str, result: str, summary: str) -> dict[str, Any]:
+def _normalize_payload(
+    args: Mapping[str, Any], *, node_id: str, status: str, result: str, summary: str
+) -> dict[str, Any]:
     payload = _metadata(args.get("deliverable") or args.get("payload"))
     if not payload:
         payload = {
@@ -175,7 +228,9 @@ def _mark_event_emit_failed(
     )
 
 
-def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwargs) -> str:
+def _handle_submit_deliverable(
+    args: dict[str, Any], parent_agent=None, **_kwargs
+) -> str:
     args = args if isinstance(args, dict) else {}
     if _json_size(args) > TOOL_ARGS_BUDGET_CHARS:
         return tool_error(
@@ -191,26 +246,46 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
         return tool_error("This run is not bound to a Team Mission node.")
     status = _text(args.get("status")) or _text(args.get("state")) or "completed"
     result = _text(args.get("result") or args.get("outcome"))
-    summary = _text(args.get("summary") or args.get("final_summary") or args.get("finalSummary"))
-    payload = _normalize_payload(args, node_id=node_id, status=status, result=result, summary=summary)
+    summary = _text(
+        args.get("summary") or args.get("final_summary") or args.get("finalSummary")
+    )
+    payload = _normalize_payload(
+        args, node_id=node_id, status=status, result=result, summary=summary
+    )
     if _json_size(payload) > _MAX_DELIVERABLE_PAYLOAD_CHARS:
         return tool_error(
             f"handoff deliverable payload is too large ({_json_size(payload)} chars). "
             f"Keep structured payload under {_MAX_DELIVERABLE_PAYLOAD_CHARS} chars and put large content in files/artifact_refs."
         )
     if not summary:
-        summary = _text(payload.get("summary") or payload.get("finalSummary") or payload.get("description"))
+        summary = _text(
+            payload.get("summary")
+            or payload.get("finalSummary")
+            or payload.get("description")
+        )
     if not summary:
-        return tool_error("summary is required. Provide a concise handoff summary for the Team Leader and downstream nodes.")
-    artifact_refs = _list_records(
-        args.get("artifact_refs")
-        or args.get("artifactRefs")
-        or args.get("artifacts")
-        or payload.get("artifact_refs")
-        or payload.get("artifactRefs")
-        or payload.get("artifacts")
+        return tool_error(
+            "summary is required. Provide a concise handoff summary for the Team Leader and downstream nodes."
+        )
+    artifact_refs = _canonical_run_artifact_refs(
+        db,
+        binding=binding,
+        run_id=run_id,
+        submitted_refs=_list_records(
+            args.get("artifact_refs")
+            or args.get("artifactRefs")
+            or args.get("artifacts")
+            or payload.get("artifact_refs")
+            or payload.get("artifactRefs")
+            or payload.get("artifacts")
+        ),
     )
-    next_context = _metadata(args.get("next_context") or args.get("nextContext") or payload.get("next_context") or payload.get("nextContext"))
+    next_context = _metadata(
+        args.get("next_context")
+        or args.get("nextContext")
+        or payload.get("next_context")
+        or payload.get("nextContext")
+    )
     output_contract = _metadata(node.get("output_contract"))
     handoff = record_team_mission_node_handoff(
         db=db,
@@ -232,7 +307,9 @@ def _handle_submit_deliverable(args: dict[str, Any], parent_agent=None, **_kwarg
     if not deliverable:
         return tool_error("Failed to persist Team Mission handoff deliverable.")
     mission_id = _text(binding.get("mission_id"))
-    task_id = _text(handoff.get("task_id") if isinstance(handoff, Mapping) else "") or _task_id_for_node(mission, node, binding)
+    task_id = _text(
+        handoff.get("task_id") if isinstance(handoff, Mapping) else ""
+    ) or _task_id_for_node(mission, node, binding)
     event_errors = handoff.get("event_errors") if isinstance(handoff, Mapping) else []
     if event_errors:
         exc = event_errors[0]

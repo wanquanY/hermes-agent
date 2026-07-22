@@ -15,8 +15,11 @@ from .public_conversation_identity import (
 _log = logging.getLogger(__name__)
 from .dovie_context import persist_mission_dovie_product_context_from_submit
 from .participant_autocreate import (
-    ensure_member_chat_participant,
     resolve_participant_display_identity,
+)
+from .conversation_owner_entities import (
+    ensure_member_chat_owner_entities,
+    publish_team_mission_activity_entities,
 )
 from hermes_profile_dir import resolve_default_agent_dir
 from hermes_agent.domain.participants import (
@@ -563,21 +566,14 @@ def _submit_message_to_member(
         return _err(rid, 5008, f"team conversation session unavailable: {exc}")
 
     # 3. Materialize the member only after its canonical conversation exists.
-    # The request-side member payload is allowed to be sparse; the durable
-    # participant registry and profile repository own visible identity.
+    # Participant and Activity are published into the same monotonic journal
+    # before any run event is allowed to reference them.
     participant_id = member_participant_id(target_member_id)
-    ensure_member_chat_participant(
-        db,
-        conversation_session_id=conversation_session_id,
-        member=member,
-        member_id=target_member_id,
-        source="team_mission.member_chat.start",
-    )
     try:
-        db.participants.upsert_conversation_participant(
+        _participant, member_chat_activity = ensure_member_chat_owner_entities(
+            db,
             conversation_session_id=conversation_session_id,
             participant_id=participant_id,
-            role="member",
             member_id=target_member_id,
             agent_profile_id=agent_profile_id,
             agent_profile_version_id=str(
@@ -586,13 +582,13 @@ def _submit_message_to_member(
             runtime_scope_key=member_scope,
             display_name=display_name,
             avatar=display_avatar,
+            prompt_summary=text,
         )
     except Exception as exc:
-        _log.warning(
-            "team_mission.member_chat.start participant enrichment skipped conversation_session_id=%s member_id=%s: %s",
-            conversation_session_id,
-            target_member_id,
-            exc,
+        return _err(
+            rid,
+            5008,
+            f"member-chat owner entities unavailable: {exc}",
         )
     display_name, display_avatar = resolve_participant_display_identity(
         db,
@@ -655,14 +651,14 @@ def _submit_message_to_member(
         actor_participant_id=member_participant_id(target_member_id),
         actor_role="member",
         profile_id=agent_profile_id,
-        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
+        activity_id=str(member_chat_activity["activity_id"]),
     )
     member_actor_fields = _actor_context_snapshot_fields(
         db,
         conversation_session_id=conversation_session_id,
         participant_id=member_participant_id(target_member_id),
         execution_scope_key=member_scope,
-        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
+        activity_id=str(member_chat_activity["activity_id"]),
         activity_kind="member_chat",
         profile_id=agent_profile_id,
         profile_version_id=str(profile_params.get("agent_profile_version_id") or ""),
@@ -671,7 +667,7 @@ def _submit_message_to_member(
     run_context = RunContext(
         conversation_session_id=conversation_session_id,
         participant_id=member_participant_id(target_member_id),
-        activity_id=f"act-member_chat:{conversation_session_id}:{target_member_id}",
+        activity_id=str(member_chat_activity["activity_id"]),
         activity_kind="member_chat",
         execution_scope_key=member_scope,
         control_home=control_home,
@@ -1512,6 +1508,8 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.node.created", "payload": {"node": node}},
         )
+    else:
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
     graph = db.team_mission_graphs.get_team_mission_graph(mission_id)
     mission = graph.get("mission") if isinstance(graph, dict) else {}
     node_metadata = (
@@ -1588,6 +1586,8 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.edge.created", "payload": {"edge": edge}},
         )
+    else:
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
     return _ok(
         rid,
         {
@@ -1682,6 +1682,8 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.node.updated", "payload": {"node": node}},
         )
+    else:
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
     schedule_result = {}
     if str(node.get("status") or "") in {"completed", "verified"}:
         schedule_result = _schedule_ready_nodes(
@@ -1898,6 +1900,8 @@ def _(rid, params: dict) -> dict:
             run_id=run_id,
             event={"type": "mission.plan.approved", "payload": {"node": approved_node}},
         )
+    else:
+        publish_team_mission_activity_entities(db, mission_id=mission_id)
     schedule_result = _schedule_ready_nodes(
         db=db,
         rid=rid,

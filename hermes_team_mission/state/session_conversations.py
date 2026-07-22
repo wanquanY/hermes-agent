@@ -868,7 +868,7 @@ class TeamMissionConversationMixin:
             agent_profile_id = str(member.get("agent_profile_id") or "").strip()
             display_name = str(member.get("name") or member.get("profile_name") or "").strip()
             avatar = str(member.get("avatar") or member.get("profile_avatar") or "").strip()
-            if role == "lead":
+            if role in {"lead", "leader"}:
                 self.participants.upsert_conversation_participant(
                     conversation_session_id=conversation_session_id,
                     participant_id=leader_id,
@@ -941,9 +941,13 @@ class TeamMissionConversationMixin:
         identifier = _text(identifier)
         if not identifier:
             return {}
+        # Direct resolution is the addressability boundary.  A canonical row
+        # returned by either identity lookup remains resolvable immediately
+        # after conversation.ensure, even before it has a mission, message, or
+        # active run.  History discovery applies _conversation_history_sql in
+        # list_team_mission_conversations instead; conflating the two makes the
+        # first pre-submit render of a newly ensured conversation return 404.
         conversation = self.get_team_mission_conversation(identifier) or self.get_team_mission_conversation_by_session(identifier)
-        if conversation and not _conversation_routeable(self, conversation.get("conversation_id")):
-            conversation = {}
         if not conversation:
             with self._lock:
                 mission = self.team_mission_rows.mission_from_row(self._conn.execute(

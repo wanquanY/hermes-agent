@@ -59,6 +59,7 @@ from tui_gateway.services.profile_context import (
 from tui_gateway.services import run_control
 from tui_gateway.services.runtime_event_protocol import (
     event_domain_for_type as _event_domain_for_type,
+    is_durable_conversation_event as _is_durable_conversation_event,
 )
 from tui_gateway.services.session_store import (
     db_unavailable_detail as _db_unavailable_detail,
@@ -1002,7 +1003,9 @@ def _emit(event: str, sid: str, payload: dict | None = None):
         session_transport = session.get("transport")
         context_transport = current_transport()
         direct_transport = session_transport or context_transport
-        if conversation_session_id and (run_id or event == "session.info"):
+        if conversation_session_id and (
+            run_id or _is_durable_conversation_event(event)
+        ):
             event_db = _db_for_stable_session(conversation_session_id)
             frame = {
                 "type": event,
@@ -1108,6 +1111,7 @@ def _is_terminal_run_event(event: str) -> bool:
         "message.complete",
         "error",
         "session.interrupted",
+        "session.recalled",
     }
 
 

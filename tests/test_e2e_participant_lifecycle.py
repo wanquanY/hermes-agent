@@ -264,10 +264,9 @@ def test_e2e_team_mission_create_full_flow(
     _install_team_resolver(monkeypatch, server, seeded_team)
 
     participants = _participants_by_id(db, seeded_team["conversation_session_id"])
-    leader_participant_id = f"leader:{seeded_team['team_id']}"
+    leader_participant_id = f"leader:{seeded_team['conversation_id']}"
     assert set(participants) == {
         "user",
-        f"leader:{seeded_team['conversation_id']}",
         leader_participant_id,
         "member:member-alpha",
         "member:member-beta",
@@ -276,7 +275,7 @@ def test_e2e_team_mission_create_full_flow(
 
     snapshot = _team_render_response(server, seeded_team)
     assert "error" not in snapshot
-    assert len(snapshot["result"]["participants"]) == 6
+    assert len(snapshot["result"]["participants"]) == 5
     for member_id in ("member-alpha", "member-beta", "member-gamma"):
         row = participants[f"member:{member_id}"]
         assert row["member_id"] == member_id
@@ -293,6 +292,12 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
 ) -> None:
     _server, team_mission = gateway_modules
     _create_team_conversation(team_mission, seeded_team)
+    transport = _CaptureTransport()
+    run_control.subscribe_session(
+        conversation_session_id=seeded_team["conversation_session_id"],
+        transport=transport,
+        db=db,
+    )
     captured_submit: dict[str, Any] = {}
     monkeypatch.setattr(
         runtime_methods,
@@ -323,13 +328,10 @@ async def test_e2e_member_chat_emits_participant_id_in_message(
         text="@Alpha please review.",
     )
     assert "error" not in response
-
-    transport = _CaptureTransport()
-    run_control.subscribe_session(
-        conversation_session_id=seeded_team["conversation_session_id"],
-        transport=transport,
-        db=db,
-    )
+    assert [payload["type"] for payload in _published_payloads(transport)] == [
+        "participant.upserted",
+        "activity.upserted",
+    ]
     router = WorkerFrameRouter(
         sender=_FakeSender(),
         publish_event=lambda params, **kwargs: run_control.publish_recorded_event(
@@ -423,7 +425,7 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
             "seq": 2,
             "payload": {"text": "Leader will coordinate."},
         },
-        participant_id=f"leader:{seeded_team['team_id']}",
+        participant_id=f"leader:{seeded_team['conversation_id']}",
     )
     db.messages.append(
         session_id,
@@ -458,7 +460,9 @@ def test_e2e_render_snapshot_messages_have_participant_id_per_message(
         }
     }
     assert _participant_id(messages_by_text["Please coordinate."]) == "user"
-    assert _participant_id(messages_by_text["Leader will coordinate."]) == f"leader:{seeded_team['team_id']}"
+    assert _participant_id(messages_by_text["Leader will coordinate."]) == (
+        f"leader:{seeded_team['conversation_id']}"
+    )
     assert _participant_id(messages_by_text["Alpha has the build."]) == "member:member-alpha"
 
 
@@ -492,7 +496,7 @@ def test_e2e_backfill_migration_creates_rows_for_existing_conversations(
     assert set(team) == {
         "agent",
         "user",
-        "leader:team-1",
+        "leader:conversation-1",
         "member:member-alpha",
         "member:member-beta",
         "member:member-gamma",

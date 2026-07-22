@@ -18,10 +18,11 @@ def user_participant_id(user_id: str = "") -> str:
     return f"user:{stable}"
 
 
-def leader_participant_id(team_id: str) -> str:
-    stable = _text(team_id)
+def leader_participant_id(conversation_id: str) -> str:
+    """Return the leader identity owned by one visible team conversation."""
+    stable = _text(conversation_id)
     if not stable:
-        raise ValueError("team_id required for leader participant")
+        raise ValueError("conversation_id required for leader participant")
     if stable.startswith("leader:"):
         return stable
     return f"leader:{stable}"

@@ -134,6 +134,14 @@ def test_supervised_strategy_waits_for_whole_graph_approval_after_planning():
     assert actions.auto_start_ready_nodes is False
     assert actions.approval_requests[0]["scope"] == "whole_graph"
     assert any(node.kind == "approval_gate" for node in actions.nodes)
+    assert (
+        "team-mission:mission-1:root",
+        "team-mission:mission-1:approval-plan",
+    ) in {
+        (edge.from_node_id, edge.to_node_id)
+        for edge in actions.edges
+        if edge.metadata.get("approval_gate")
+    }
     assert ("team-mission:mission-1:approval-plan", "node-worker") in {
         (edge.from_node_id, edge.to_node_id)
         for edge in actions.edges
