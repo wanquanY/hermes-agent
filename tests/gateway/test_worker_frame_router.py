@@ -21,6 +21,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Any
 
@@ -238,6 +239,41 @@ async def test_on_interactive_request_records_pending_only() -> None:
             "conversationSessionId": "sess-1",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_read_request_routes_back_to_owning_worker() -> None:
+    router, supervisor, events, _ = _make_router()
+    await router.on_interactive_request(
+        "profile:agent-default",
+        "conversation-1",
+        InteractiveRequestFrame(
+            kind="terminal_read",
+            request_id="terminal-read-1",
+            payload={"start": 0, "count": 20},
+            conversation_session_id="conversation-1",
+        ),
+    )
+
+    assert await router.respond(
+        "terminal-read-1",
+        '{"text":"terminal output"}',
+        expected_kind="terminal_read",
+    ) is True
+    assert supervisor.sent == [
+        (
+            "profile:agent-default",
+            "conversation-1",
+            InteractiveResponseFrame(
+                kind="terminal_read",
+                request_id="terminal-read-1",
+                answer='{"text":"terminal output"}',
+                conversation_session_id="conversation-1",
+            ),
+        )
+    ]
+    assert not router.has_pending_request("terminal-read-1")
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -623,6 +659,38 @@ async def test_on_log_uses_main_logger(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="hermes_agent.orchestration.worker_frame_router"):
         await router.on_log("profile:x", LogFrame(level="warn", text="hello"))
     assert any("hello" in m for m in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_on_log_preserves_worker_source_metadata(caplog) -> None:
+    router, _sup, _events, _ = _make_router()
+    frame = LogFrame(
+        level="error",
+        text="worker failure",
+        logger="agent.worker-test",
+        created=123.25,
+        process_id=4321,
+        thread_name="agent-thread",
+        session_tag=" [session-worker]",
+        pathname="/tmp/agent_worker.py",
+        line_no=91,
+        exception="ValueError: boom",
+    )
+    with caplog.at_level(logging.ERROR):
+        await router.on_log("profile:x", "conversation-1", frame)
+
+    record = next(
+        record for record in caplog.records
+        if "worker failure" in record.getMessage()
+    )
+    assert record.name == "agent.worker-test"
+    assert record.pathname == "/tmp/agent_worker.py"
+    assert record.lineno == 91
+    assert record.process == 4321
+    assert record.threadName == "agent-thread"
+    assert record.session_tag == " [session-worker]"
+    assert "[run-worker:profile:x:conversation-1]" in record.getMessage()
+    assert "ValueError: boom" in record.getMessage()
 
 
 def test_pending_snapshot_shape() -> None:

@@ -42,6 +42,7 @@ from tui_gateway.run_worker import (
     EventFrame,
     InteractiveRequestFrame,
     OutgoingFrame,
+    WORKER_INTERACTIVE_KINDS,
 )
 from tui_gateway.services.run_control_events import stamp_session_identity
 
@@ -61,15 +62,17 @@ _active_run_context: Any = None
 
 # Map ``server._block`` event types to the ``InteractiveRequestFrame``
 # kind the main router tracks pending responses under. Mirrors
-# ``WorkerInteractiveResponder._BUILTINS`` / the kinds the router
-# accepts in ``_INTERACTIVE_KINDS``.
+# ``WorkerInteractiveResponder`` / the canonical kinds declared by the worker
+# wire protocol.
 _BLOCK_EVENT_KINDS = {
     "clarify.request": "clarify",
     "approval.request": "approval",
     "secret.request": "secret",
     "sudo.request": "sudo",
+    "terminal.list.request": "terminal_list",
+    "terminal.read.request": "terminal_read",
+    "terminal.write.request": "terminal_write",
 }
-_INTERACTIVE_KINDS = frozenset(_BLOCK_EVENT_KINDS.values())
 
 # Process-active bridge. Approval notify callbacks registered via
 # ``register_gateway_notify`` outlive a single run (they live for the
@@ -303,7 +306,7 @@ class WorkerPublishBridge:
         """
         rid = str(request_id or "").strip()
         normalized_kind = str(kind or "").strip()
-        if normalized_kind not in _INTERACTIVE_KINDS:
+        if normalized_kind not in WORKER_INTERACTIVE_KINDS:
             _log.warning(
                 "[worker-publish-bridge] refusing interactive request with "
                 "unknown kind=%r request_id=%r", normalized_kind, rid,
@@ -428,14 +431,6 @@ class WorkerPublishBridge:
                 event_params = dict(params)
                 if isinstance(event_params.get("payload"), dict):
                     event_params["payload"] = dict(event_params["payload"])
-                bridge.emit_threadsafe(
-                    EventFrame(
-                        params=stamp_session_identity(
-                            event_params,
-                            conversation_id=bridge._conversation_session_id,
-                        )
-                    )
-                )
                 # The Dovie-native blocking primitive (``server._block``)
                 # bypasses ``tools/clarify_gateway.register`` /
                 # ``tools/approval.submit_pending`` (where the dedicated
@@ -443,11 +438,11 @@ class WorkerPublishBridge:
                 # the worker process's own ``server._pending`` dict
                 # instead, then publishes a regular
                 # ``clarify.request`` / ``approval.request`` /
-                # ``secret.request`` / ``sudo.request`` event. The main
-                # sidecar has no way to look up that rid (the dict
-                # lives in the worker process) so the frontend's
-                # ``clarify.respond`` errors with
-                # ``4009 no pending answer request``. Mirror the
+                # ``secret.request`` / ``sudo.request`` /
+                # ``terminal.read.request`` event. The main sidecar has no
+                # way to look up that rid (the dict lives in the worker
+                # process), so a frontend response otherwise fails as an
+                # unknown request. Mirror the
                 # ``InteractiveRequestFrame`` emission the
                 # clarify/approval hooks already do — same plumbing,
                 # routes the request_id → scope_key map into the main
@@ -467,8 +462,8 @@ class WorkerPublishBridge:
                     if request_id:
                         stored = str(
                             params.get("conversation_session_id")
-                            or params.get("session_id")
                             or bridge._conversation_session_id
+                            or params.get("session_id")
                             or ""
                         ).strip()
                         bridge.register_interactive_request(
@@ -496,6 +491,18 @@ class WorkerPublishBridge:
                             bool(str(payload_dict.get("question") or "").strip()),
                             _choices_count(payload_dict.get("choices")),
                         )
+                # Ownership metadata must enter the worker pipe before the
+                # frontend-visible request. A fast renderer can answer on the
+                # same event-loop turn; reversing this order races the response
+                # against the main router's request-id registration.
+                bridge.emit_threadsafe(
+                    EventFrame(
+                        params=stamp_session_identity(
+                            event_params,
+                            conversation_id=bridge._conversation_session_id,
+                        )
+                    )
+                )
             # R1: the single-writer invariant is enforced at
             # ``record_event`` via ``tui_gateway.process_role``. This
             # wrapper does not need to defensively strip ``persist``

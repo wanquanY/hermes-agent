@@ -47,14 +47,24 @@ def _resolve_timezone_name() -> str:
 
     # 2. config.yaml ``timezone`` key
     try:
-        import yaml
-        config_path = get_config_path()
-        if config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            tz_cfg = cfg.get("timezone", "")
-            if isinstance(tz_cfg, str) and tz_cfg.strip():
-                return tz_cfg.strip()
+        try:
+            # Shared mtime/size-keyed cache avoids reparsing config.yaml while
+            # the first system prompt is being assembled.
+            from hermes_cli.config import read_raw_config
+
+            cfg = read_raw_config() or {}
+        except Exception:
+            import yaml
+
+            config_path = get_config_path()
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                cfg = {}
+        tz_cfg = cfg.get("timezone", "")
+        if isinstance(tz_cfg, str) and tz_cfg.strip():
+            return tz_cfg.strip()
     except Exception:
         pass
 
@@ -100,5 +110,4 @@ def now() -> datetime:
         return datetime.now(tz)
     # No timezone configured — use server-local (still tz-aware)
     return datetime.now().astimezone()
-
 

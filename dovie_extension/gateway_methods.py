@@ -24,6 +24,7 @@ MODULES = (
     "tui_gateway.methods.model",
     "tui_gateway.methods.prompt",
     "tui_gateway.methods.integrations",
+    "tui_gateway.methods.dovie_capabilities",
     "tui_gateway.methods.workspace_artifacts",
 )
 

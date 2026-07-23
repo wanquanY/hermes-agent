@@ -65,6 +65,7 @@ class _LeaseState:
     created_at: float
     last_acquired_at: float
     profile_env_fingerprint: _EnvFingerprint = field(default_factory=tuple)
+    capability_generation: int = 0
     idle_since: Optional[float] = None
     inflight: dict[str, _RunRecord] = field(default_factory=dict)
 
@@ -76,6 +77,7 @@ class _LeaseState:
 class _WarmState:
     worker: RunWorker
     profile_env_fingerprint: _EnvFingerprint
+    capability_generation: int
     ready_at: float
 
 
@@ -102,6 +104,11 @@ class WorkerLeaseManager:
         self._warm_states: dict[str, _WarmState] = {}
         self._warm_locks: dict[str, asyncio.Lock] = {}
         self._warm_tasks: set[asyncio.Task[Any]] = set()
+        # Capability configuration is persisted by the control plane, while
+        # executable tool registries live inside isolated worker processes.
+        # A generation bump makes that ownership boundary explicit: workers
+        # from an older generation are never reused for a later turn.
+        self._scope_capability_generations: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._closing = False
         self._last_reap_at = 0.0
@@ -121,31 +128,41 @@ class WorkerLeaseManager:
         """Return live worker for conversation/scope; spawn if none."""
 
         conv = self._normalize_conversation_id(conversation_id)
-        key = self._state_key(conv, scope_key)
+        scope = self._scope_for(conv, profile_context, scope_key=scope_key)
+        key = self._state_key(conv, scope.runtime_scope_key)
         self._ensure_reap_task()
         lease_lock = await self._lock_for(key)
         async with lease_lock:
             profile_env = self._profile_env_overrides(profile_context)
             profile_env_fingerprint = self._env_fingerprint(profile_env)
+            capability_generation = self._capability_generation(key[1])
             state = self._states.get(key)
             if state is not None and state.worker.running():
-                if state.profile_env_fingerprint != profile_env_fingerprint:
+                runtime_changed = (
+                    state.profile_env_fingerprint != profile_env_fingerprint
+                    or state.capability_generation != capability_generation
+                )
+                if runtime_changed:
                     if state.has_inflight():
                         _log.warning(
-                            "[worker-pool] reusing worker with stale profile env while runs are active conv_id=%s scope_key=%s pid=%s",
+                            "[worker-pool] reusing stale worker only for its active run conv_id=%s scope_key=%s pid=%s worker_generation=%s current_generation=%s",
                             state.conversation_id,
                             state.worker.scope_key,
                             state.worker.process.pid if state.worker.process else None,
+                            state.capability_generation,
+                            capability_generation,
                         )
                     else:
                         _worker_pool_log(
-                            "pool-lease-env-respawn",
+                            "pool-lease-runtime-respawn",
                             conversation_id=conv,
                             scope_key=state.worker.scope_key,
                             worker_conversation_id=state.worker.conversation_id,
                             pid=state.worker.process.pid if state.worker.process else None,
                             old_env_keys=[env_key for env_key, _value in state.profile_env_fingerprint],
                             new_env_keys=sorted(profile_env),
+                            old_capability_generation=state.capability_generation,
+                            new_capability_generation=capability_generation,
                         )
                         self._states.pop(key, None)
                         await self._supervisor.shutdown(
@@ -171,7 +188,6 @@ class WorkerLeaseManager:
             if state is not None:
                 await self._handle_dead_worker(key, state, reason="worker exited before acquire")
 
-            scope = self._scope_for(conv, profile_context, scope_key=scope_key)
             worker = await self._claim_warm_worker(
                 scope,
                 profile_env_fingerprint,
@@ -186,6 +202,7 @@ class WorkerLeaseManager:
                 created_at=now,
                 last_acquired_at=now,
                 profile_env_fingerprint=profile_env_fingerprint,
+                capability_generation=capability_generation,
             )
             self._states[key] = state
             _worker_pool_log(
@@ -221,11 +238,13 @@ class WorkerLeaseManager:
         fingerprint = self._env_fingerprint(env)
         warm_lock = await self._warm_lock_for(normalized_scope_key)
         async with warm_lock:
+            capability_generation = self._capability_generation(normalized_scope_key)
             current = self._warm_states.get(normalized_scope_key)
             if (
                 current is not None
                 and current.worker.running()
                 and current.profile_env_fingerprint == fingerprint
+                and current.capability_generation == capability_generation
             ):
                 return current.worker
             if current is not None:
@@ -238,6 +257,7 @@ class WorkerLeaseManager:
             self._warm_states[normalized_scope_key] = _WarmState(
                 worker=worker,
                 profile_env_fingerprint=fingerprint,
+                capability_generation=capability_generation,
                 ready_at=time.time(),
             )
             _worker_pool_log(
@@ -247,8 +267,79 @@ class WorkerLeaseManager:
                 bootstrap_ms=worker.bootstrap_ms,
                 bootstrap_stages_ms=worker.bootstrap_stages_ms,
                 profile_env_keys=sorted(env),
+                capability_generation=capability_generation,
             )
             return worker
+
+    async def invalidate_capability_scope(self, scope_key: str) -> dict[str, int]:
+        """Retire workers whose executable capability registry is stale.
+
+        MCP and Plugin configuration is profile-scoped, so invalidation must
+        cover the warm worker and every conversation worker for that scope.
+        Idle workers are terminated immediately. Active workers are allowed to
+        finish their current run, but their old generation prevents reuse on
+        the next turn.
+        """
+
+        normalized_scope_key = str(scope_key or "").strip()
+        if not normalized_scope_key:
+            raise ValueError("runtime scope key required for capability invalidation")
+
+        warm_lock = await self._warm_lock_for(normalized_scope_key)
+        async with warm_lock:
+            async with self._lock:
+                next_generation = (
+                    self._scope_capability_generations.get(normalized_scope_key, 0) + 1
+                )
+                self._scope_capability_generations[normalized_scope_key] = next_generation
+                state_keys = [
+                    key for key in self._states if key[1] == normalized_scope_key
+                ]
+            warm_state = self._warm_states.pop(normalized_scope_key, None)
+            retired_warm = 0
+            if warm_state is not None:
+                retired_warm = int(
+                    await self._supervisor.shutdown(
+                        warm_state.worker.scope_key,
+                        warm_state.worker.conversation_id,
+                    )
+                )
+
+        retired_idle = 0
+        deferred_active = 0
+        for key in state_keys:
+            lease_lock = await self._lock_for(key)
+            removed = False
+            async with lease_lock:
+                state = self._states.get(key)
+                if state is None:
+                    continue
+                if state.has_inflight():
+                    deferred_active += 1
+                    continue
+                self._states.pop(key, None)
+                retired_idle += int(
+                    await self._supervisor.shutdown(
+                        state.worker.scope_key,
+                        state.worker.conversation_id,
+                    )
+                )
+                removed = True
+            if removed:
+                await self._drop_lock(key)
+
+        result = {
+            "generation": next_generation,
+            "retired_warm_workers": retired_warm,
+            "retired_idle_workers": retired_idle,
+            "deferred_active_workers": deferred_active,
+        }
+        _worker_pool_log(
+            "pool-capability-scope-invalidated",
+            scope_key=normalized_scope_key,
+            **result,
+        )
+        return result
 
     async def release(self, conversation_id: str, scope_key: str | None = None) -> None:
         """Mark worker idle. In-flight runs still block idle reaping.
@@ -318,6 +409,7 @@ class WorkerLeaseManager:
             self._run_to_state_key.clear()
             self._warm_states.clear()
             self._warm_locks.clear()
+            self._scope_capability_generations.clear()
 
     def stats(self) -> dict:
         """Return worker counts and reap timing diagnostics."""
@@ -344,6 +436,7 @@ class WorkerLeaseManager:
                     "running": state.worker.running(),
                     "readyAt": state.ready_at,
                     "bootstrapMs": state.worker.bootstrap_ms,
+                    "capabilityGeneration": state.capability_generation,
                 }
                 for scope_key, state in sorted(self._warm_states.items())
             ],
@@ -362,6 +455,7 @@ class WorkerLeaseManager:
                     "lastAcquiredAt": s.last_acquired_at,
                     "idleSince": s.idle_since,
                     "returncode": s.worker.process.returncode,
+                    "capabilityGeneration": s.capability_generation,
                 }
                 for s in sorted(states, key=lambda item: item.conversation_id)
             ],
@@ -694,7 +788,11 @@ class WorkerLeaseManager:
             state = self._warm_states.get(scope_key)
             if state is None:
                 return None
-            if not state.worker.running() or state.profile_env_fingerprint != fingerprint:
+            if (
+                not state.worker.running()
+                or state.profile_env_fingerprint != fingerprint
+                or state.capability_generation != self._capability_generation(scope_key)
+            ):
                 self._warm_states.pop(scope_key, None)
                 await self._supervisor.shutdown(
                     state.worker.scope_key,
@@ -854,3 +952,6 @@ class WorkerLeaseManager:
     @staticmethod
     def _env_fingerprint(env: dict[str, str]) -> _EnvFingerprint:
         return tuple(sorted((str(key), str(value)) for key, value in env.items()))
+
+    def _capability_generation(self, scope_key: str) -> int:
+        return self._scope_capability_generations.get(str(scope_key or "").strip(), 0)

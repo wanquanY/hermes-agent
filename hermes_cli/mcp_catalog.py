@@ -33,7 +33,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
@@ -577,28 +577,67 @@ def _probe_tools(name: str) -> Optional[List[tuple]]:
 
 
 def _write_tools_include(name: str, include: Optional[List[str]]) -> None:
-    """Persist or clear ``mcp_servers.<name>.tools.include``."""
+    """Persist an explicit allow-list or an explicit all-tools policy."""
     cfg = load_config()
     servers = cfg.setdefault("mcp_servers", {})
     server_entry = servers.get(name) or {}
+    tools_block = server_entry.get("tools") or {}
+    if not isinstance(tools_block, dict):
+        tools_block = {}
     if include is None:
-        # No filter — drop any existing tools block.
-        server_entry.pop("tools", None)
+        # Absence used to mean both "legacy/unreviewed" and "the user chose
+        # all", which made a safe migration impossible. Persist intent.
+        tools_block.pop("include", None)
+        tools_block.pop("exclude", None)
+        tools_block["policy"] = "all"
     else:
-        tools_block = server_entry.get("tools") or {}
-        if not isinstance(tools_block, dict):
-            tools_block = {}
         tools_block["include"] = list(include)
         tools_block.pop("exclude", None)
-        server_entry["tools"] = tools_block
+        tools_block.pop("policy", None)
+    server_entry["tools"] = tools_block
     servers[name] = server_entry
     cfg["mcp_servers"] = servers
     save_config(cfg)
 
 
+def reconcile_installed_tool_policies() -> list[str]:
+    """Migrate legacy catalog installs to their reviewed default allow-list.
+
+    Older installers removed ``tools.include`` when discovery returned zero
+    tools. That made a late-starting server implicitly publish every tool. A
+    missing policy is now treated as legacy/unreviewed; explicit ``policy:
+    all`` continues to represent a user's deliberate all-tools selection.
+    """
+    cfg = load_config()
+    servers = cfg.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    migrated: list[str] = []
+    for entry in list_catalog():
+        defaults = list(entry.tools.default_enabled or [])
+        server = servers.get(entry.name)
+        if not defaults or not isinstance(server, dict):
+            continue
+        tools = server.get("tools")
+        if not isinstance(tools, dict):
+            tools = {}
+        if "include" in tools or "exclude" in tools or tools.get("policy") == "all":
+            continue
+        tools["include"] = defaults
+        server["tools"] = tools
+        migrated.append(entry.name)
+    if migrated:
+        cfg["mcp_servers"] = servers
+        save_config(cfg)
+    return migrated
+
+
 def _apply_tool_selection(
-    entry: CatalogEntry, *, prior_selection: Optional[List[str]]
-) -> None:
+    entry: CatalogEntry,
+    *,
+    prior_selection: Optional[List[str]],
+    progress: Optional[Callable[..., None]] = None,
+) -> dict[str, Any]:
     """Probe the server and let the user pick which tools to enable.
 
     Probe-success path:
@@ -617,6 +656,8 @@ def _apply_tool_selection(
     """
     print()
     print(color(f"  Probing '{entry.name}' for available tools...", Colors.CYAN))
+    if progress:
+        progress(phase="discovering", progress=60, message="Discovering MCP capabilities")
     probed = _probe_tools(entry.name)
 
     # Probe failure path
@@ -640,13 +681,30 @@ def _apply_tool_selection(
                 "connect to prune.",
                 Colors.YELLOW,
             ))
-        return
+        return {
+            "probe_status": "unreachable",
+            "tool_count": 0,
+            "enabled_tools": list(manifest_default or []),
+        }
 
     if not probed:
-        # Probe succeeded but server reported zero tools. Nothing to filter.
-        _write_tools_include(entry.name, None)
-        print(color("  Server reported no tools.", Colors.YELLOW))
-        return
+        # A successful initialize with an empty tools/list response does not
+        # prove that the server is usable. Preserve the reviewed manifest
+        # policy so a late-starting external app cannot silently expand from a
+        # read-first allow-list to all tools when it later becomes available.
+        manifest_default = list(entry.tools.default_enabled or [])
+        _write_tools_include(entry.name, manifest_default or None)
+        suffix = (
+            f" Preserved manifest default ({len(manifest_default)} tools)."
+            if manifest_default
+            else ""
+        )
+        print(color(f"  Server reported no tools.{suffix}", Colors.YELLOW))
+        return {
+            "probe_status": "empty",
+            "tool_count": 0,
+            "enabled_tools": manifest_default,
+        }
 
     tool_names = [t[0] for t in probed]
 
@@ -672,7 +730,18 @@ def _apply_tool_selection(
             _write_tools_include(entry.name, include)
         else:
             _write_tools_include(entry.name, None)
-        return
+            include = list(tool_names)
+        if progress:
+            progress(phase="applying_permissions", progress=82, message="Applying tool permissions")
+        return {
+            "probe_status": "ready",
+            "tool_count": len(probed),
+            "enabled_tools": list(include),
+            "tools": [
+                {"name": name, "description": description}
+                for name, description in probed
+            ],
+        }
 
     print(color(
         f"  Found {len(probed)} tool(s). "
@@ -701,7 +770,15 @@ def _apply_tool_selection(
             "to change.",
             Colors.YELLOW,
         ))
-        return
+        return {
+            "probe_status": "ready",
+            "tool_count": len(probed),
+            "enabled_tools": [],
+            "tools": [
+                {"name": name, "description": description}
+                for name, description in probed
+            ],
+        }
 
     if len(chosen_indices) == len(probed):
         # Everything selected — clear filter for the cleanest config shape.
@@ -715,7 +792,15 @@ def _apply_tool_selection(
             "the server adds later will be auto-enabled).",
             Colors.GREEN,
         ))
-        return
+        return {
+            "probe_status": "ready",
+            "tool_count": len(probed),
+            "enabled_tools": list(tool_names),
+            "tools": [
+                {"name": name, "description": description}
+                for name, description in probed
+            ],
+        }
 
     chosen_names = [tool_names[i] for i in sorted(chosen_indices)]
     _write_tools_include(entry.name, chosen_names)
@@ -723,9 +808,23 @@ def _apply_tool_selection(
         f"  ✓ {len(chosen_names)}/{len(probed)} tools enabled.",
         Colors.GREEN,
     ))
+    return {
+        "probe_status": "ready",
+        "tool_count": len(probed),
+        "enabled_tools": chosen_names,
+        "tools": [
+            {"name": name, "description": description}
+            for name, description in probed
+        ],
+    }
 
 
-def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
+def install_entry(
+    entry: CatalogEntry,
+    *,
+    enable: bool = True,
+    progress: Optional[Callable[..., None]] = None,
+) -> dict[str, Any]:
     """Install a catalog entry end-to-end.
 
     Steps:
@@ -744,6 +843,8 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     """
     print()
     print(color(f"  Installing MCP '{entry.name}'", Colors.CYAN + Colors.BOLD))
+    if progress:
+        progress(phase="resolving", progress=8, message="Resolving MCP catalog entry")
     if entry.description:
         print(color(f"  {entry.description}", Colors.DIM))
     if entry.source:
@@ -752,6 +853,8 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     install_dir: Optional[Path] = None
     if entry.install is not None:
+        if progress:
+            progress(phase="installing", progress=24, message="Installing MCP runtime")
         install_dir = _do_git_install(entry)
 
     # Auth
@@ -760,6 +863,12 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         print(color("  Configure credentials:", Colors.CYAN))
         _prompt_env_vars(entry.auth.env)
     elif entry.auth.type == "oauth":
+        if progress:
+            progress(
+                phase="awaiting_auth",
+                progress=38,
+                message="Waiting for browser authorization",
+            )
         if entry.auth.provider:
             # Case 2: provider-mediated (Google, GitHub, etc.). We rely on
             # the existing `hermes auth <provider>` flow. Surface guidance
@@ -788,6 +897,8 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     # _apply_tool_selection() finalizes it below).
     server_cfg = _build_server_config(entry, install_dir)
     server_cfg["enabled"] = enable
+    if progress:
+        progress(phase="configuring", progress=48, message="Saving MCP configuration")
 
     from hermes_cli.mcp_config import _save_mcp_server
 
@@ -797,7 +908,11 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         )
 
     # ── Probe + tool selection ──────────────────────────────────────────
-    _apply_tool_selection(entry, prior_selection=prior_selection)
+    selection = _apply_tool_selection(
+        entry,
+        prior_selection=prior_selection,
+        progress=progress,
+    )
 
     print()
     print(color(
@@ -811,6 +926,12 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         for line in entry.post_install.strip().splitlines():
             print(color(f"  {line}", Colors.DIM))
     print()
+    return {
+        "ok": True,
+        "name": entry.name,
+        "auth_type": entry.auth.type,
+        **selection,
+    }
 
 
 def uninstall_entry(name: str, *, purge_install_dir: bool = True) -> bool:

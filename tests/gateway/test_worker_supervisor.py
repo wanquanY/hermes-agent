@@ -144,6 +144,11 @@ async def test_spawn_send_run_start_receive_terminal(tmp_path) -> None:
         # The startup log is also emitted.
         log_texts = [f.text for _, f in collector.logs]
         assert any("run_worker: started" in t for t in log_texts)
+        # The real AIAgent initialization path called setup_logging inside the
+        # worker, but the worker process must remain fileless. The sidecar is
+        # the sole rotating-log owner for this shared profile directory.
+        assert not (tmp_path / "logs" / "agent.log").exists()
+        assert not (tmp_path / "logs" / "errors.log").exists()
     finally:
         await sup.shutdown_all()
 

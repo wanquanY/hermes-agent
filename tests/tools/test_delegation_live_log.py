@@ -111,6 +111,33 @@ def test_attach_callbacks_is_idempotent_and_preserves_inner_callbacks(tmp_path):
     ]
 
 
+def test_attach_callbacks_preserves_execution_identity_binders(tmp_path):
+    writer = _writer(tmp_path, "deleg_identity")
+    bindings = []
+
+    def callback(*_args, **_kwargs):
+        return None
+
+    callback._bind_execution_identity = lambda **identity: bindings.append(identity)
+    child = SimpleNamespace(
+        tool_progress_callback=callback,
+        stream_delta_callback=callback,
+        reasoning_callback=callback,
+    )
+
+    attach_live_transcript_callbacks(child, writer)
+    expected = {
+        "activity_id": "activity-child",
+        "delegation_activity_id": "activity-dispatch",
+        "owner_activity_id": "activity-parent",
+    }
+    child.tool_progress_callback._bind_execution_identity(**expected)
+    child.stream_delta_callback._bind_execution_identity(**expected)
+    child.reasoning_callback._bind_execution_identity(**expected)
+
+    assert bindings == [expected, expected, expected]
+
+
 def test_create_manifest_and_update_incrementally(monkeypatch, tmp_path):
     monkeypatch.setattr(live_log, "live_transcript_root", lambda: tmp_path)
     delegation_id, writers, paths = create_live_transcripts(

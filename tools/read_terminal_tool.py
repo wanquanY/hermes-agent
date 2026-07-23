@@ -16,6 +16,7 @@ from utils import env_var_enabled
 
 
 def read_terminal_tool(
+    terminal_id: Optional[str] = None,
     start_line: Optional[int] = None,
     count: Optional[int] = None,
     callback: Optional[Callable] = None,
@@ -33,8 +34,12 @@ def read_terminal_tool(
     except (TypeError, ValueError):
         return tool_error("start_line and count must be integers.")
 
+    request = dict(window)
+    target_terminal_id = (terminal_id or "").strip()
+    if target_terminal_id:
+        request["terminal_id"] = target_terminal_id
     try:
-        raw = callback(**window)
+        raw = callback(**request)
     except Exception as exc:
         return tool_error(f"Failed to read terminal: {exc}")
 
@@ -58,7 +63,9 @@ READ_TERMINAL_SCHEMA = {
     "description": (
         "Read what's currently shown in the in-app terminal pane of the Hermes "
         "desktop GUI (the embedded shell beside this chat). Call with no arguments "
-        "to get the visible screen plus the total line count (`total_lines`). To "
+        "to get the active tab's visible screen plus the total line count "
+        "(`total_lines`). Pass terminal_id from list_terminals to target a specific tab. "
+        "Without terminal_id, this reads the currently selected visible tab. To "
         "page through scrollback, pass `start_line` (0 = oldest line) and `count`; "
         "valid lines are [0, total_lines). Returns JSON: "
         "{process_id, total_lines, start, end, viewport_rows, cursor_row, text}."
@@ -66,6 +73,10 @@ READ_TERMINAL_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "terminal_id": {
+                "type": "string",
+                "description": "Opaque terminal_id from list_terminals. Omit for the currently selected tab.",
+            },
             "start_line": {
                 "type": "integer",
                 "description": "0-indexed first line (0 = oldest). Omit for the visible screen.",
@@ -84,6 +95,7 @@ registry.register(
     toolset="terminal",
     schema=READ_TERMINAL_SCHEMA,
     handler=lambda args, **kw: read_terminal_tool(
+        terminal_id=args.get("terminal_id"),
         start_line=args.get("start_line"),
         count=args.get("count"),
         callback=kw.get("callback"),

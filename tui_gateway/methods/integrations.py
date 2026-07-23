@@ -817,6 +817,20 @@ def _plugin_market_rows() -> list[dict]:
             if canonical_key in enabled or name in enabled
             else "inactive"
         )
+        skill_rows = manifest.get("skills") or []
+        skill_names = [
+            str(item.get("name") or item.get("path") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in skill_rows
+        ]
+        mcp_rows = manifest.get("mcp_catalog") or []
+        mcp_entries = [
+            str(item.get("name") or item.get("path") or "").strip()
+            if isinstance(item, dict)
+            else str(item).strip()
+            for item in mcp_rows
+        ]
         rows.append(
             {
                 # Desktop mutations use the canonical loader key.  The manifest
@@ -844,6 +858,8 @@ def _plugin_market_rows() -> list[dict]:
                 "enabled": runtime_status == "enabled",
                 "hooks": [str(item) for item in manifest.get("hooks") or []],
                 "provides_tools": [str(item) for item in manifest.get("provides_tools") or []],
+                "skills": [item for item in skill_names if item],
+                "mcp_catalog": [item for item in mcp_entries if item],
                 "requires_env": requirement_rows,
                 "missing_env": _missing_requires_env_names(manifest),
                 "can_remove": source in {"user", "git"} and user_owned,
@@ -923,21 +939,37 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5033, str(e))
 
 
-def _mcp_server_row(name: str, config: dict) -> dict:
-    transport = "http" if config.get("url") else "stdio" if config.get("command") else "unknown"
-    tools = config.get("tools") if isinstance(config.get("tools"), dict) else {}
-    return {
-        "name": name,
-        "transport": transport,
-        "url": str(config.get("url") or ""),
-        "command": str(config.get("command") or ""),
-        "args": [str(item) for item in config.get("args") or []],
-        "auth_type": str(config.get("auth") or ("header" if config.get("headers") else "none")),
-        "enabled": config.get("enabled", True) is not False,
-        "env_keys": sorted(str(key) for key in (config.get("env") or {}).keys()),
-        "tool_filter_configured": "include" in tools,
-        "enabled_tools": [str(item) for item in tools.get("include") or []],
-    }
+def _start_capability_operation(params: dict) -> dict:
+    from tui_gateway.services.capability_runtime import start_capability_operation
+
+    return start_capability_operation(
+        params,
+        emit=lambda snapshot: _emit("capability.operation.updated", "", snapshot),
+        sessions=_sessions,
+        enabled_toolsets_loader=_load_enabled_toolsets,
+    )
+
+
+@method("capability.operation.start")
+def _(rid, params: dict) -> dict:
+    try:
+        return _ok(rid, _start_capability_operation(params))
+    except Exception as exc:
+        return _err(rid, 5037, str(exc))
+
+
+@method("capability.operation.get")
+def _(rid, params: dict) -> dict:
+    try:
+        from tui_gateway.services.capability_operations import capability_operations
+
+        operation_id = str(params.get("operation_id") or params.get("operationId") or "").strip()
+        operation = capability_operations.get(operation_id)
+        if operation is None:
+            return _err(rid, 5037, f"capability operation not found: {operation_id}")
+        return _ok(rid, operation)
+    except Exception as exc:
+        return _err(rid, 5037, str(exc))
 
 
 @method("mcp.catalog.list")
@@ -1030,11 +1062,23 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.mcp_config import _get_mcp_servers
+        from tools.mcp_tool import get_mcp_status
+        from tui_gateway.services.capability_runtime import mcp_server_row
 
         servers = _get_mcp_servers()
+        runtime_by_name = {
+            str(item.get("name") or ""): item
+            for item in get_mcp_status()
+            if isinstance(item, dict) and item.get("name")
+        }
         return _ok(
             rid,
-            {"servers": [_mcp_server_row(name, config) for name, config in sorted(servers.items())]},
+            {
+                "servers": [
+                    mcp_server_row(name, config, runtime_by_name.get(name))
+                    for name, config in sorted(servers.items())
+                ]
+            },
         )
     except Exception as e:
         return _err(rid, 5035, str(e))
@@ -1047,10 +1091,10 @@ def _(rid, params: dict) -> dict:
         from hermes_cli.config import get_env_value, load_config, save_config, save_env_value
         from hermes_cli.mcp_config import (
             _get_mcp_servers,
-            _probe_single_server,
             _remove_mcp_server,
             _save_mcp_server,
         )
+        from tui_gateway.services.capability_runtime import probe_mcp_capabilities
 
         action = str(params.get("action") or "").strip().lower()
         name = str(params.get("name") or "").strip()
@@ -1076,8 +1120,11 @@ def _(rid, params: dict) -> dict:
             ]
             if missing:
                 return _ok(rid, {"ok": False, "name": name, "missing_env": missing})
-            mcp_catalog.install_entry(entry, enable=bool(params.get("enabled", True)))
-            return _ok(rid, {"ok": True, "name": name, "reload_required": True})
+            install_result = mcp_catalog.install_entry(
+                entry,
+                enable=bool(params.get("enabled", True)),
+            )
+            return _ok(rid, {**install_result, "reload_required": True})
         if action == "add":
             server = params.get("server") if isinstance(params.get("server"), dict) else {}
             if not name or not server:
@@ -1133,18 +1180,7 @@ def _(rid, params: dict) -> dict:
             server = _get_mcp_servers().get(name)
             if not server:
                 return _err(rid, 5036, f"MCP server not found: {name}")
-            tools = _probe_single_server(name, server)
-            return _ok(
-                rid,
-                {
-                    "ok": True,
-                    "name": name,
-                    "tools": [
-                        {"name": tool_name, "description": description}
-                        for tool_name, description in tools
-                    ],
-                },
-            )
+            return _ok(rid, probe_mcp_capabilities(name, server))
         return _err(rid, 5036, f"unsupported MCP action: {action or '(empty)'}")
     except Exception as e:
         return _err(rid, 5036, str(e))

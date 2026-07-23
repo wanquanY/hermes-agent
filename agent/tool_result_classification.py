@@ -26,6 +26,7 @@ NO_EFFECT_TOOL_NAMES = frozenset({
     "browser_snapshot",
     "browser_get_images",
     "browser_console",
+    "list_terminals",
     "read_terminal",
 })
 

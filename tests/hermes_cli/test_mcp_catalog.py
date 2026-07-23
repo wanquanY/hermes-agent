@@ -437,7 +437,7 @@ class TestToolSelection:
         """Return a list of (tool_name, description) tuples for mocking."""
         return [(n, f"description of {n}") for n in names]
 
-    def test_probe_fail_no_default_writes_no_filter(self, catalog_dir):
+    def test_probe_fail_no_default_records_explicit_all_policy(self, catalog_dir):
         body = _basic_manifest()
         _write_manifest(catalog_dir, "demo", body)
         from hermes_cli.mcp_catalog import install_entry
@@ -445,8 +445,7 @@ class TestToolSelection:
 
         install_entry(_entry("demo"), enable=True)
         server = load_config()["mcp_servers"]["demo"]
-        # No tools.include => all tools active when reachable
-        assert "tools" not in server, server
+        assert server["tools"] == {"policy": "all"}
 
     def test_probe_fail_with_default_applies_directly(self, catalog_dir):
         body = _basic_manifest(
@@ -459,6 +458,24 @@ class TestToolSelection:
         install_entry(_entry("demo"), enable=True)
         server = load_config()["mcp_servers"]["demo"]
         assert server["tools"]["include"] == ["a", "b", "c"]
+
+    def test_connected_empty_preserves_manifest_default(self, catalog_dir, monkeypatch):
+        body = _basic_manifest(
+            tools={"default_enabled": ["safe_read", "safe_metadata"]},
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        import hermes_cli.mcp_catalog as mc
+
+        monkeypatch.setattr(mc, "_probe_tools", lambda name: [])
+
+        result = mc.install_entry(_entry("demo"), enable=True)
+
+        from hermes_cli.config import load_config
+
+        server = load_config()["mcp_servers"]["demo"]
+        assert server["tools"]["include"] == ["safe_read", "safe_metadata"]
+        assert result["probe_status"] == "empty"
+        assert result["enabled_tools"] == ["safe_read", "safe_metadata"]
 
     def test_probe_success_non_tty_with_default_filters_to_default(
         self, catalog_dir, monkeypatch
@@ -498,7 +515,49 @@ class TestToolSelection:
 
         install_entry(_entry("demo"), enable=True)
         server = load_config()["mcp_servers"]["demo"]
-        assert "tools" not in server
+        assert server["tools"] == {"policy": "all"}
+
+    def test_reconciles_legacy_missing_policy_to_manifest_default(
+        self, catalog_dir
+    ):
+        body = _basic_manifest(
+            tools={"default_enabled": ["safe_read", "safe_metadata"]},
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli.mcp_catalog import reconcile_installed_tool_policies
+
+        cfg = load_config()
+        cfg["mcp_servers"] = {
+            "demo": {"command": "npx", "args": ["-y", "demo-mcp"], "enabled": True}
+        }
+        save_config(cfg)
+
+        assert reconcile_installed_tool_policies() == ["demo"]
+        assert load_config()["mcp_servers"]["demo"]["tools"]["include"] == [
+            "safe_read",
+            "safe_metadata",
+        ]
+
+    def test_reconcile_preserves_explicit_all_tools_policy(self, catalog_dir):
+        body = _basic_manifest(tools={"default_enabled": ["safe_read"]})
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli.mcp_catalog import reconcile_installed_tool_policies
+
+        cfg = load_config()
+        cfg["mcp_servers"] = {
+            "demo": {
+                "command": "npx",
+                "args": ["-y", "demo-mcp"],
+                "enabled": True,
+                "tools": {"policy": "all"},
+            }
+        }
+        save_config(cfg)
+
+        assert reconcile_installed_tool_policies() == []
+        assert load_config()["mcp_servers"]["demo"]["tools"] == {"policy": "all"}
 
     def test_default_enabled_filters_out_unknown_tool_names(
         self, catalog_dir, monkeypatch

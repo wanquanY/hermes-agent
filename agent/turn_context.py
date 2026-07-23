@@ -127,9 +127,16 @@ def build_turn_context(
     # name and leaves the snapshot untouched on no-change).
     try:
         if not getattr(agent, "_skip_mcp_refresh", False):
-            from tools.mcp_tool import has_registered_mcp_tools, refresh_agent_mcp_tools
-            if has_registered_mcp_tools():
-                refresh_agent_mcp_tools(agent, quiet_mode=True)
+            # MCP registration itself imports this module. If it has never
+            # loaded, there is nothing to refresh and importing it here only
+            # adds the entire MCP dependency tree to a no-MCP first turn.
+            import sys as _sys
+
+            if "tools.mcp_tool" in _sys.modules:
+                from tools.mcp_tool import has_registered_mcp_tools, refresh_agent_mcp_tools
+
+                if has_registered_mcp_tools():
+                    refresh_agent_mcp_tools(agent, quiet_mode=True)
     except Exception:
         logger.debug("between-turns MCP tool refresh skipped", exc_info=True)
 

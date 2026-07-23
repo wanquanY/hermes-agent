@@ -114,6 +114,11 @@ def _desktop_terminal_processes(session: dict) -> list:
         process = process_registry.get(entry["session_id"])
         if process is None or str(getattr(process, "session_key", "") or "") != owner_key:
             continue
+        # Closing a desktop tab is both a PTY termination and a workspace
+        # dismissal. Keep naturally exited shells restorable, but never
+        # resurrect tabs the user explicitly closed.
+        if str(getattr(process, "termination_source", "") or "") == "terminal.session.close":
+            continue
         result.append(_desktop_terminal_entry(process))
     return sorted(result, key=lambda item: float(item.get("started_at") or 0))
 
@@ -291,6 +296,11 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.process_registry import process_registry
 
+        process = process_registry.get(process_id)
+        if process is not None and process.exited:
+            # An already-exited shell still represents a visible restorable
+            # tab. Mark explicit dismissal so list() does not resurrect it.
+            process.termination_source = "terminal.session.close"
         return _ok(
             rid,
             process_registry.kill_process(process_id, source="terminal.session.close"),

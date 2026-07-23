@@ -6,6 +6,8 @@ import contextlib
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from tui_gateway import server as _server  # noqa: F401 - initialize composition root first.
 from tui_gateway.core import session_config
 from tui_gateway.methods import prompt_respond
@@ -147,7 +149,14 @@ def test_inprocess_interaction_timeout_publishes_expired_lifecycle(monkeypatch):
     assert expired == [emitted[0][2]["request_id"]]
 
 
-def test_terminal_read_block_does_not_project_human_approval_state(monkeypatch):
+@pytest.mark.parametrize(
+    "event_type",
+    ["terminal.list.request", "terminal.read.request", "terminal.write.request"],
+)
+def test_terminal_side_channel_block_does_not_project_human_approval_state(
+    monkeypatch,
+    event_type,
+):
     projected: list[bool] = []
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(
@@ -166,6 +175,6 @@ def test_terminal_read_block_does_not_project_human_approval_state(monkeypatch):
         lambda _sid, *, present: projected.append(present),
     )
 
-    assert session_config._block("terminal.read.request", "runtime-1", {}, timeout=0) == ""
-    assert emitted[0][0:2] == ("terminal.read.request", "runtime-1")
+    assert session_config._block(event_type, "runtime-1", {}, timeout=0) == ""
+    assert emitted[0][0:2] == (event_type, "runtime-1")
     assert projected == []

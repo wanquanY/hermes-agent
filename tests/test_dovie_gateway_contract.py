@@ -1367,6 +1367,89 @@ def test_clearing_model_descriptor_restores_shadowed_request_override():
     }
 
 
+def test_model_descriptor_selects_responses_transport_and_restores_chat_mode():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+    compressor = SimpleNamespace(api_mode="chat_completions")
+    agent = SimpleNamespace(
+        api_mode="chat_completions",
+        reasoning_config=None,
+        request_overrides={},
+        context_compressor=compressor,
+        _transport_cache={"chat_completions": object()},
+        _primary_runtime={"api_mode": "chat_completions"},
+    )
+    session = {"agent": agent}
+
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "gpt-responses",
+            "api_format": "openai_responses",
+        },
+    )
+
+    assert agent.api_mode == "codex_responses"
+    assert agent.context_compressor.api_mode == "codex_responses"
+    assert agent._primary_runtime["api_mode"] == "codex_responses"
+    assert agent._transport_cache == {}
+
+    set_session_model_descriptor(session, {}, clear_if_empty=True)
+
+    assert agent.api_mode == "chat_completions"
+    assert agent.context_compressor.api_mode == "chat_completions"
+    assert agent._primary_runtime["api_mode"] == "chat_completions"
+
+
+def test_model_descriptor_can_downgrade_responses_model_to_chat_compatibility():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+    agent = SimpleNamespace(
+        api_mode="chat_completions",
+        reasoning_config=None,
+        request_overrides={},
+        _transport_cache={},
+        _primary_runtime={"api_mode": "chat_completions"},
+    )
+    session = {"agent": agent}
+
+    set_session_model_descriptor(
+        session,
+        {"id": "gpt-new", "api_format": "codex_responses"},
+    )
+    set_session_model_descriptor(
+        session,
+        {"id": "gpt-legacy", "api_format": "openai"},
+    )
+
+    assert agent.api_mode == "chat_completions"
+    assert agent._primary_runtime["api_mode"] == "chat_completions"
+
+
+def test_model_descriptor_never_replaces_codex_executor_transport():
+    from types import SimpleNamespace
+
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+    agent = SimpleNamespace(
+        api_mode="codex_app_server",
+        reasoning_config=None,
+        request_overrides={},
+    )
+    session = {"agent": agent}
+
+    set_session_model_descriptor(
+        session,
+        {"id": "gpt-codex", "api_format": "openai_responses"},
+    )
+
+    assert agent.api_mode == "codex_app_server"
+
+
 def test_model_set_clears_previous_reasoning_override_for_model_default(monkeypatch):
     from types import SimpleNamespace
 

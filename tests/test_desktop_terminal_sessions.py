@@ -57,6 +57,9 @@ class FakeProcessRegistry:
 
     def kill_process(self, process_id: str, *, source: str = "process.kill"):
         self.kill_calls.append((process_id, source))
+        process = self.processes[process_id]
+        process.exited = True
+        process.termination_source = source
         return {"status": "killed", "session_id": process_id}
 
 
@@ -164,6 +167,13 @@ def test_write_resize_and_close_require_terminal_ownership(terminal_runtime):
     assert closed["status"] == "killed"
     assert registry.write_calls == [("proc_terminal", "pwd\r")]
     assert registry.kill_calls == [("proc_terminal", "terminal.session.close")]
+    listed = result(
+        server._methods["terminal.session.list"](
+            "list-after-close",
+            {"session_id": "runtime-session"},
+        )
+    )
+    assert listed["terminals"] == []
 
     denied = server._methods["terminal.session.write"](
         "write-other",

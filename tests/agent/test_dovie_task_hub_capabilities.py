@@ -54,6 +54,39 @@ def test_capability_credentials_reject_unsafe_origin_and_expired_token():
         _configure(registry, expires_at=time.time() - 1)
 
 
+def test_capability_configuration_rolls_back_when_tool_surface_refresh_fails():
+    registry = CapabilityCredentialRegistry()
+
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        _configure(
+            registry,
+            on_change=lambda: (_ for _ in ()).throw(RuntimeError("refresh failed")),
+        )
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        registry.resolve(
+            capability="dovie.task_hub_assistant@1",
+            conversation_id="conversation-1",
+        )
+
+
+def test_capability_clear_rolls_back_when_tool_surface_refresh_fails():
+    registry = CapabilityCredentialRegistry()
+    configured = _configure(registry)
+
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        registry.clear(
+            capability=configured.capability,
+            conversation_id=configured.conversation_id,
+            on_change=lambda: (_ for _ in ()).throw(RuntimeError("refresh failed")),
+        )
+
+    assert registry.resolve(
+        capability=configured.capability,
+        conversation_id=configured.conversation_id,
+    ) == configured
+
+
 def test_cloud_transport_uses_allowlisted_path_and_injects_runtime_context(monkeypatch):
     credential = _configure(CapabilityCredentialRegistry())
     captured = {}

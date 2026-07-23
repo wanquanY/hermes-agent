@@ -280,7 +280,7 @@ async def test_idle_worker_reaped_after_threshold() -> None:
     try:
         await pool.get_or_spawn("conv-1", _profile())
         await pool.release("conv-1")
-        pool._states[("conv-1", "")].idle_since = time.time() - 10
+        pool._states[("conv-1", "profile:profile-1")].idle_since = time.time() - 10
 
         await pool._reap_once()
 
@@ -303,7 +303,7 @@ async def test_active_worker_not_reaped_while_run_inflight() -> None:
             turn_id="turn-1",
         )
         await pool.release("conv-1")
-        pool._states[("conv-1", "")].idle_since = time.time() - 10
+        pool._states[("conv-1", "profile:profile-1")].idle_since = time.time() - 10
 
         await pool._reap_once()
 
@@ -403,3 +403,55 @@ async def test_shutdown_kills_all_workers_and_cancels_reap_task() -> None:
     assert task is not None
     assert task.done()
     assert pool.stats()["workerCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_scope_invalidation_retires_idle_and_warm_workers() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
+    try:
+        old_lease = await pool.get_or_spawn("conv-1", _profile())
+        old_warm = await pool.ensure_warm(_profile())
+        await pool.release("conv-1")
+
+        result = await pool.invalidate_capability_scope("profile:profile-1")
+
+        assert result == {
+            "generation": 1,
+            "retired_warm_workers": 1,
+            "retired_idle_workers": 1,
+            "deferred_active_workers": 0,
+        }
+        assert not old_warm.running()
+        assert not old_lease.running()
+        fresh = await pool.ensure_warm(_profile())
+        assert fresh is not old_warm
+        assert pool.stats()["warmWorkers"][0]["capabilityGeneration"] == 1
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_capability_scope_invalidation_defers_active_worker_then_replaces_it() -> None:
+    supervisor = _FakeSupervisor()
+    pool = WorkerLeaseManager(supervisor, reap_tick_s=60)
+    try:
+        old_lease = await pool.get_or_spawn("conv-1", _profile())
+        await pool.record_run_start(
+            conversation_id="conv-1",
+            scope_key="profile:profile-1",
+            run_id="run-1",
+            conversation_session_id="conv-1",
+        )
+
+        result = await pool.invalidate_capability_scope("profile:profile-1")
+        assert result["deferred_active_workers"] == 1
+        assert old_lease.running()
+
+        await pool.forget_run("run-1")
+        new_lease = await pool.get_or_spawn("conv-1", _profile())
+        assert new_lease.worker is not old_lease.worker
+        assert not old_lease.running()
+        assert pool.stats()["workers"][0]["capabilityGeneration"] == 1
+    finally:
+        await pool.shutdown()

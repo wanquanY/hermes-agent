@@ -370,6 +370,44 @@ class TestBuildAssistantMessageDeepSeekReasoningContent:
         assert msg["reasoning_content"] == " "
         assert msg["tool_calls"][0]["id"] == "call_1"
 
+    def test_streamed_responses_reasoning_is_persisted_when_terminal_item_omits_it(
+        self,
+    ) -> None:
+        agent = _make_agent(provider="custom", model="deepseek-v4-pro")
+        agent._current_streamed_reasoning_text = "stream-only reasoning"
+        assistant_message = SimpleNamespace(
+            content="final answer",
+            reasoning=None,
+            reasoning_content=None,
+            reasoning_details=None,
+            codex_reasoning_items=None,
+            codex_message_items=None,
+            tool_calls=None,
+        )
+
+        msg = agent._build_assistant_message(assistant_message, "stop")
+
+        assert msg["reasoning"] == "stream-only reasoning"
+        assert msg["reasoning_content"] == "stream-only reasoning"
+
+    def test_terminal_structured_reasoning_wins_over_stream_fallback(self) -> None:
+        agent = _make_agent(provider="custom", model="deepseek-v4-pro")
+        agent._current_streamed_reasoning_text = "stream fallback"
+        assistant_message = SimpleNamespace(
+            content="final answer",
+            reasoning="terminal reasoning",
+            reasoning_content=None,
+            reasoning_details=None,
+            codex_reasoning_items=None,
+            codex_message_items=None,
+            tool_calls=None,
+        )
+
+        msg = agent._build_assistant_message(assistant_message, "stop")
+
+        assert msg["reasoning"] == "terminal reasoning"
+        assert msg["reasoning_content"] == "terminal reasoning"
+
 
 class TestBuildAssistantMessagePadsStrictProviders:
     """Regression for #17400: _build_assistant_message must pin reasoning_content

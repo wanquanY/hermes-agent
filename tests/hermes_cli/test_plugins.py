@@ -101,6 +101,41 @@ class TestPluginDiscovery:
         assert "hello_plugin" in mgr._plugins
         assert mgr._plugins["hello_plugin"].enabled
 
+    def test_dovie_runtime_skips_bundled_but_preserves_user_plugins(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Dovie's catalog boundary must not disable user-owned Plugins."""
+        import hermes_cli.plugins as plugins_module
+
+        hermes_home = tmp_path / "hermes_home"
+        bundled_dir = tmp_path / "bundled_plugins"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DOVIE_MANAGED_HERMES_GATEWAY", "1")
+        _make_plugin_dir(
+            bundled_dir,
+            "bundled-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        _make_plugin_dir(hermes_home / "plugins", "user-plugin")
+        monkeypatch.setattr(
+            plugins_module,
+            "get_bundled_plugins_dir",
+            lambda: bundled_dir,
+        )
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert mgr._plugins["bundled-capability"].enabled is False
+        assert (
+            mgr._plugins["bundled-capability"].error
+            == "retired from the Dovie capability catalog"
+        )
+        assert mgr._plugins["user-plugin"].enabled is True
+
     def test_discover_project_plugins(self, tmp_path, monkeypatch):
         """Plugins in ./.hermes/plugins/ are discovered."""
         project_dir = tmp_path / "project"

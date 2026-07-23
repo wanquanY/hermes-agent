@@ -304,6 +304,9 @@ def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
             inner_flush()
 
     _cb._flush = _flush
+    identity_binder = getattr(inner_cb, "_bind_execution_identity", None)
+    if callable(identity_binder):
+        _cb._bind_execution_identity = identity_binder
     return _cb
 
 
@@ -326,6 +329,9 @@ def wrap_stream_callback(inner_cb, writer: LiveTranscriptWriter):
         if inner_cb is not None:
             inner_cb(delta)
 
+    identity_binder = getattr(inner_cb, "_bind_execution_identity", None)
+    if callable(identity_binder):
+        _cb._bind_execution_identity = identity_binder
     return _cb
 
 
@@ -341,6 +347,9 @@ def wrap_reasoning_callback(inner_cb, writer: LiveTranscriptWriter):
         if inner_cb is not None:
             inner_cb(delta)
 
+    identity_binder = getattr(inner_cb, "_bind_execution_identity", None)
+    if callable(identity_binder):
+        _cb._bind_execution_identity = identity_binder
     return _cb
 
 

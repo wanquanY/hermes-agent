@@ -26,7 +26,8 @@ Phase 4c (this file) implements the router. Phase 5 ``prompt.submit``
 populates ``record_run_start`` so terminal/event lookups can cross-fill
 ``conversation_session_id`` if the worker omits it. Phase 6 rewires the
 ``clarify.respond`` / ``approval.respond`` / ``secret.respond`` /
-``sudo.respond`` handlers to call ``router.respond`` instead of the
+``sudo.respond`` / ``terminal.read.respond`` handlers to call
+``router.respond`` instead of the
 legacy in-worker registry.
 """
 
@@ -49,13 +50,13 @@ from tui_gateway.run_worker import (
     InteractiveResponseFrame,
     LogFrame,
     RunTerminalFrame,
+    WORKER_INTERACTIVE_KINDS,
 )
 from tui_gateway.services.message_history import load_conversation_history
 
 _log = logging.getLogger(__name__)
 
 
-_INTERACTIVE_KINDS = frozenset({"clarify", "approval", "secret", "sudo"})
 _CLARIFY_APPROVAL_EVENT_STATES: dict[str, tuple[str, bool]] = {
     "clarify.request": ("clarify", True),
     "clarify.resolved": ("clarify", False),
@@ -686,7 +687,7 @@ class WorkerFrameRouter:
             return
         conversation = str(conversation_id or "")
         request_id = str(frame.request_id or "").strip()
-        if frame.kind not in _INTERACTIVE_KINDS:
+        if frame.kind not in WORKER_INTERACTIVE_KINDS:
             _log.warning(
                 "[worker-router] dropping interactive.request kind=%r request_id=%r",
                 frame.kind, request_id,
@@ -819,9 +820,10 @@ class WorkerFrameRouter:
             conversation_id = ""
         if frame is None:
             return
-        _log.log(
-            _level_for(frame.level),
-            "[run-worker:%s:%s] %s", scope_key, conversation_id, frame.text,
+        _reemit_worker_log(
+            scope_key=scope_key,
+            conversation_id=str(conversation_id or ""),
+            frame=frame,
         )
 
     # ── main→worker response routing ────────────────────────────────
@@ -1102,6 +1104,53 @@ def _level_for(name: str) -> int:
         "warning": logging.WARNING,
         "error": logging.ERROR,
     }.get(str(name or "").lower(), logging.INFO)
+
+
+def _reemit_worker_log(
+    *,
+    scope_key: str,
+    conversation_id: str,
+    frame: LogFrame,
+) -> None:
+    """Recreate one worker record and hand it to main-process handlers.
+
+    The main sidecar is deliberately the only rotating-file owner.  Calling
+    the root handler directly preserves the original logger name/source and
+    guarantees delivery even when the corresponding child logger is disabled
+    or has ``propagate=False`` in the sidecar process.
+    """
+    logger_name = frame.logger or _log.name
+    worker_context = f"[run-worker:{scope_key}:{conversation_id}]"
+    message = f"{worker_context} {frame.text}"
+    if frame.exception:
+        message = f"{message}\n{frame.exception}"
+
+    source_path = frame.pathname or "<run-worker>"
+    record = logging.getLogger(logger_name).makeRecord(
+        logger_name,
+        _level_for(frame.level),
+        source_path,
+        frame.line_no,
+        message,
+        (),
+        None,
+        extra={
+            "worker_scope_key": scope_key,
+            "worker_conversation_id": conversation_id,
+            "worker_process_id": frame.process_id,
+        },
+    )
+    if frame.created > 0:
+        record.created = frame.created
+        record.msecs = (frame.created - int(frame.created)) * 1000
+    if frame.process_id > 0:
+        record.process = frame.process_id
+    if frame.thread_name:
+        record.threadName = frame.thread_name
+    # The global Hermes LogRecord factory populates this field for the main
+    # thread; overwrite it with the worker-side session context.
+    record.session_tag = frame.session_tag
+    logging.getLogger().handle(record)
 
 
 def _activity_status(status: str) -> str:

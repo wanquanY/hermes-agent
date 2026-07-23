@@ -36,12 +36,41 @@ from tui_gateway.run_worker import (
     WorkerReadyFrame,
     WorkerRunBackend,
     _build_default_handler,
+    _prepare_worker_runtime,
     _StubBackend,
     decode_incoming,
     decode_outgoing,
     encode_incoming,
     encode_outgoing,
 )
+
+
+def test_prepare_worker_runtime_discovers_mcp_before_tool_snapshot(monkeypatch) -> None:
+    import run_agent
+    from tui_gateway.services import agent_runner, capability_runtime
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        agent_runner,
+        "setup_worker_environment",
+        lambda: calls.append("environment"),
+    )
+    monkeypatch.setattr(
+        capability_runtime,
+        "bootstrap_profile_mcp_runtime",
+        lambda: calls.append("mcp") or ["mcp__figma__get_design_context"],
+    )
+    monkeypatch.setattr(
+        run_agent,
+        "get_tool_definitions",
+        lambda **_kwargs: calls.append("schemas") or [],
+    )
+
+    stages = _prepare_worker_runtime()
+
+    assert calls == ["environment", "mcp", "schemas"]
+    assert "mcp_tool_discovery" in stages
+    assert "default_tool_catalog" in stages
 
 
 # ── decode_incoming ──────────────────────────────────────────────────
@@ -90,7 +119,15 @@ def test_decode_run_cancel() -> None:
 
 
 def test_decode_interactive_response_each_kind() -> None:
-    for kind in ("clarify", "approval", "secret", "sudo"):
+    for kind in (
+        "clarify",
+        "approval",
+        "secret",
+        "sudo",
+        "terminal_list",
+        "terminal_read",
+        "terminal_write",
+    ):
         frame = decode_incoming(
             json.dumps(
                 {
@@ -181,6 +218,22 @@ def test_encode_log() -> None:
     assert out == {"op": "log", "level": "warn", "text": "something"}
 
 
+def test_encode_structured_log_roundtrip() -> None:
+    frame = LogFrame(
+        level="error",
+        text="failed",
+        logger="agent.runtime",
+        created=123.25,
+        process_id=42,
+        thread_name="agent-thread",
+        session_tag=" [session-1]",
+        pathname="/tmp/runtime.py",
+        line_no=77,
+        exception="ValueError: failed",
+    )
+    assert decode_outgoing(encode_outgoing(frame)) == frame
+
+
 def test_encode_worker_ready() -> None:
     frame = WorkerReadyFrame(
         ready=True,
@@ -253,6 +306,8 @@ def test_outgoing_encode_decode_roundtrip(frame) -> None:
         ('{"op":"unknown"}', "unknown outbound op"),
         ('{"op":"run.terminal", "run_id":"r"}', "must be a string"),  # missing status
         ('{"op":"log", "level":"info"}', "must be a string"),  # missing text
+        ('{"op":"log", "level":"info", "text":"x", "line_no":"1"}', "integer"),
+        ('{"op":"log", "level":"info", "text":"x", "created":true}', "number"),
     ],
 )
 def test_decode_outgoing_validation(raw: str, match) -> None:
@@ -624,6 +679,43 @@ async def test_handler_emits_resolved_event_only_after_worker_unblocks() -> None
 
 
 @pytest.mark.asyncio
+async def test_handler_terminal_read_response_is_transient() -> None:
+    responder = _RecordingResponder(resolved=True)
+    handler = _build_default_handler(_RecordingBackend(), responder, set())
+    sink = _Sink()
+    proto = WorkerProtocol(
+        lines_in=_lines_from(
+            [
+                json.dumps(
+                    {
+                        "op": "interactive.response",
+                        "kind": "terminal_read",
+                        "request_id": "terminal-read-1",
+                        "answer": '{"text":"terminal output"}',
+                        "conversation_session_id": "conversation-1",
+                    }
+                ),
+                json.dumps({"op": "shutdown"}),
+            ]
+        ),
+        emit=sink.write,
+        handler=handler,
+    )
+
+    await proto.run()
+
+    assert responder.calls == [
+        InteractiveResponseFrame(
+            kind="terminal_read",
+            request_id="terminal-read-1",
+            answer='{"text":"terminal output"}',
+            conversation_session_id="conversation-1",
+        )
+    ]
+    assert [frame for frame in sink.decoded() if frame.get("op") == "event"] == []
+
+
+@pytest.mark.asyncio
 async def test_handler_never_emits_secret_answer_in_resolved_event() -> None:
     responder = _RecordingResponder(resolved=True)
     handler = _build_default_handler(_RecordingBackend(), responder, set())
@@ -775,7 +867,19 @@ async def test_real_responder_unknown_kind_returns_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_responder_secret_routes_to_prompt_pending(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("kind", "request_id", "answer"),
+    [
+        ("secret", "req-secret", "abc"),
+        ("terminal_read", "req-terminal", '{"text":"terminal output"}'),
+    ],
+)
+async def test_real_responder_generic_requests_route_to_prompt_pending(
+    monkeypatch,
+    kind: str,
+    request_id: str,
+    answer: str,
+) -> None:
     import threading
     # Build a minimal stand-in for tui_gateway.methods.prompt that has
     # the registry shape the responder reads from.
@@ -786,7 +890,7 @@ async def test_real_responder_secret_routes_to_prompt_pending(monkeypatch) -> No
 
     fake_mod = _FakePromptMod()
     ev = threading.Event()
-    fake_mod._pending["req-secret"] = (object(), ev)
+    fake_mod._pending[request_id] = (object(), ev)
     # ``from tui_gateway.methods import prompt`` (used in
     # ``_resolve_generic_pending``) consults the parent package
     # attribute first and the sys.modules entry second. If any earlier
@@ -799,10 +903,10 @@ async def test_real_responder_secret_routes_to_prompt_pending(monkeypatch) -> No
 
     responder = RealInteractiveResponder()
     ok = await responder.resolve(
-        InteractiveResponseFrame(kind="secret", request_id="req-secret", answer="abc")
+        InteractiveResponseFrame(kind=kind, request_id=request_id, answer=answer)
     )
     assert ok is True
-    assert fake_mod._answers["req-secret"] == "abc"
+    assert fake_mod._answers[request_id] == answer
     assert ev.is_set()
 
 

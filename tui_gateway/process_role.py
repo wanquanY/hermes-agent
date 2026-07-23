@@ -1,4 +1,4 @@
-"""R1: architecture-level single-writer guard for ``run_events``.
+"""Architecture-level single-writer guards for worker-owned output.
 
 Phase 8b unified the control-plane state.db across main and worker
 processes: both open the same physical file. Historically the worker
@@ -14,6 +14,11 @@ The correct architectural invariant is:
     Worker = event source (produces frames, ships them over stdout).
     Main   = single writer (receives stdout frames, persists ONCE via
              ``WorkerFrameRouter._publish_event_with_db``).
+
+The same role boundary applies to rotating logs. Workers ship structured
+``LogFrame`` records over stdout; only the main sidecar owns ``agent.log`` /
+``errors.log`` / ``gateway.log`` file handlers. This prevents sibling workers
+from racing stdlib ``RotatingFileHandler`` renames on one profile directory.
 
 This module carries the process-role bit that lets ``record_event``
 enforce that invariant at the write site, so no ad-hoc monkey-patches

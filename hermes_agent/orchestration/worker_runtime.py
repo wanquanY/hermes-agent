@@ -41,6 +41,7 @@ from agent.dovie_diagnostics import emit_dovie_runtime_diagnostic
 from tui_gateway.run_worker import (
     RunCancelFrame,
     RunStartFrame,
+    WORKER_INTERACTIVE_KINDS,
     dovie_product_context_from_params,
 )
 from tui_gateway.services.runtime_scope import (
@@ -375,6 +376,8 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
         return await _dispatch_runtime_ensure(req, transport, params)
     if method == "runtime.cloud_proxy.update":
         return await _dispatch_runtime_cloud_proxy_update(req, transport, params)
+    if method == "reload.mcp":
+        return await _dispatch_profile_capability_reload(req, transport, params)
     if method == "run.cancel":
         return await _dispatch_run_cancel(req, transport, params)
     if method in _INTERACTIVE_RESPONSE_METHODS:
@@ -397,6 +400,83 @@ async def primary_dispatch(req: Any, transport: Any) -> bool:
             hermes_home="",
         )
     return await _dispatch_prompt_submit(req, transport, scope, params)
+
+
+async def _dispatch_profile_capability_reload(
+    req: dict,
+    transport: Any,
+    params: dict,
+) -> bool:
+    """Rebuild the profile's process-local capability runtime.
+
+    MCP configuration is written by the control plane, while MCP tool
+    handlers and model schemas live in isolated workers. Reload is therefore a
+    worker-generation replacement, not an in-process session-cache refresh.
+    Unconfirmed or unscoped calls fall through to the legacy method so its CLI
+    confirmation contract remains intact.
+    """
+
+    if not bool(params.get("confirm", False)):
+        return False
+    scope = runtime_scope_from_request(req)
+    if not scope.has_scope or not scope.runtime_scope_key:
+        return False
+
+    rid = req.get("id")
+    started = time.perf_counter()
+    pool = worker_pool()
+    try:
+        invalidation = await pool.invalidate_capability_scope(
+            scope.runtime_scope_key,
+        )
+        worker = await pool.ensure_warm(
+            _profile_context_for_worker_pool(scope, params),
+            scope_key=scope.runtime_scope_key,
+        )
+    except Exception as exc:
+        _worker_run_log(
+            "capability-reload-error",
+            request_id=rid,
+            scope_key=scope.runtime_scope_key,
+            agent_profile_id=scope.agent_profile_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _ack_error(
+            transport,
+            rid,
+            code=5015,
+            message=f"profile capability reload failed: {exc}",
+        )
+        return True
+
+    reload_ms = round((time.perf_counter() - started) * 1000, 3)
+    result = {
+        "status": "reloaded",
+        "runtime_scope_key": scope.runtime_scope_key,
+        "agent_profile_id": scope.agent_profile_id,
+        "runtime_generation": invalidation["generation"],
+        "retired_warm_workers": invalidation["retired_warm_workers"],
+        "retired_idle_workers": invalidation["retired_idle_workers"],
+        "deferred_active_workers": invalidation["deferred_active_workers"],
+        "worker": {
+            "pid": worker.process.pid if worker.process else None,
+            "bootstrap_ms": worker.bootstrap_ms,
+            "bootstrap_stages_ms": dict(worker.bootstrap_stages_ms),
+            "reload_ms": reload_ms,
+            "warm": True,
+        },
+    }
+    _worker_run_log(
+        "capability-reload-ready",
+        request_id=rid,
+        scope_key=scope.runtime_scope_key,
+        agent_profile_id=scope.agent_profile_id,
+        worker_pid=worker.process.pid if worker.process else None,
+        reload_ms=reload_ms,
+        **invalidation,
+    )
+    await _ack_ok(transport, rid, result=result)
+    return True
 
 
 async def _dispatch_runtime_ensure(
@@ -501,7 +581,17 @@ _INTERACTIVE_RESPONSE_METHODS: dict[str, tuple[str, str]] = {
     "approval.respond": ("approval", "choice"),
     "secret.respond": ("secret", "value"),
     "sudo.respond": ("sudo", "password"),
+    # Renderer-owned terminal workspace side channels. They share request-id
+    # owner routing with interactive prompts without creating durable
+    # conversation events.
+    "terminal.list.respond": ("terminal_list", "text"),
+    "terminal.read.respond": ("terminal_read", "text"),
+    "terminal.write.respond": ("terminal_write", "text"),
 }
+
+assert {
+    kind for kind, _answer_field in _INTERACTIVE_RESPONSE_METHODS.values()
+}.issubset(WORKER_INTERACTIVE_KINDS)
 
 
 async def _dispatch_interactive_response(
@@ -533,7 +623,8 @@ async def _dispatch_interactive_response(
     # ``approval.respond`` ships ``session_id`` (the publish bridge uses
     # the session_key as the request_id for approval — single-slot per
     # session — see worker_publish_bridge._install_approval_hooks).
-    # The other three (clarify/secret/sudo) ship ``request_id`` directly.
+    # The remaining responses (clarify/secret/sudo/terminal-read) ship
+    # ``request_id`` directly.
     # Try both so this dispatcher matches the frontend's actual payload
     # shape (see runtime.ts:respondCommandApproval / respondInputApproval).
     request_id = str(
@@ -793,6 +884,19 @@ async def _dispatch_prompt_submit(
     if scope.agent_profile_id:
         frame_params.setdefault("agent_profile_id", scope.agent_profile_id)
         frame_params.setdefault("agentProfileId", scope.agent_profile_id)
+
+    # Capability credentials are owned by the sidecar control plane, while
+    # model execution happens in an isolated worker process. Transfer only the
+    # current conversation's active credentials over the private worker pipe.
+    # The worker removes this envelope before calling prompt.submit and clears
+    # the imported credentials when the run terminates.
+    from agent_capabilities.credentials import capability_credentials
+
+    capability_envelope = capability_credentials.export_for_worker(
+        conversation_id=conversation_session_id,
+    )
+    if capability_envelope:
+        frame_params["_runtime_capability_credentials"] = capability_envelope
 
     _worker_run_log(
         "supervisor-send-start",

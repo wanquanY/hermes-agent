@@ -217,6 +217,41 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[9]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
+def test_subagent_events_preserve_persisted_activity_graph_identity():
+    events = []
+    bridge = _bridge(events)
+
+    bridge.on_tool_progress(
+        "sid",
+        "subagent.start",
+        None,
+        "inspect repository",
+        None,
+        subagent_id="child-1",
+        delegate_call_id="delegate-1",
+        activity_id="activity-child",
+        delegation_activity_id="activity-dispatch",
+        owner_activity_id="activity-parent",
+    )
+
+    assert events == [
+        {
+            "type": "subagent.start",
+            "session_id": "sid",
+            "payload": {
+                "task_count": 1,
+                "task_index": 0,
+                "activity_id": "activity-child",
+                "delegation_activity_id": "activity-dispatch",
+                "owner_activity_id": "activity-parent",
+                "subagent_id": "child-1",
+                "delegate_call_id": "delegate-1",
+                "text": "inspect repository",
+            },
+        }
+    ]
+
+
 def test_interrupted_session_still_emits_subagent_terminal_fact():
     events = []
     sessions = {

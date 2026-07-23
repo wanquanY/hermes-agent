@@ -479,6 +479,10 @@ class GatewayToolEventBridge:
                 ),
                 "runtime_scope_key": str(kwargs.get("runtime_scope_key") or ""),
                 "activity_id": str(kwargs.get("activity_id") or ""),
+                "delegation_activity_id": str(
+                    kwargs.get("delegation_activity_id") or ""
+                ),
+                "owner_activity_id": str(kwargs.get("owner_activity_id") or ""),
             }.items()
             if value != ""
         }
@@ -636,13 +640,33 @@ class GatewayToolEventBridge:
                 sid, str(kind), None if text is None else str(text)
             ),
             "clarify_callback": lambda q, c: block("clarify.request", sid, {"question": q, "choices": c}),
-            "read_terminal_callback": lambda start=None, count=None: block(
+            "list_terminals_callback": lambda: block(
+                "terminal.list.request",
+                sid,
+                {},
+                timeout=30,
+            ),
+            "read_terminal_callback": lambda terminal_id="", start=None, count=None: block(
                 "terminal.read.request",
                 sid,
                 {
                     key: value
-                    for key, value in (("start", start), ("count", count))
-                    if value is not None
+                    for key, value in (
+                        ("terminal_id", terminal_id),
+                        ("start", start),
+                        ("count", count),
+                    )
+                    if value not in (None, "")
+                },
+                timeout=30,
+            ),
+            "write_terminal_callback": lambda terminal_id, data, reveal=True: block(
+                "terminal.write.request",
+                sid,
+                {
+                    "terminal_id": terminal_id,
+                    "data": data,
+                    "reveal": bool(reveal),
                 },
                 timeout=30,
             ),

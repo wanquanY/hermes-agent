@@ -415,21 +415,33 @@ class TestRespondThreeStateContract:
 
 
 class TestEphemeralTerminalRespondContract:
-    def test_terminal_read_response_unblocks_without_durable_interaction(self):
+    @pytest.mark.parametrize(
+        "method,request_id",
+        [
+            ("terminal.list.respond", "terminal-list-rid"),
+            ("terminal.read.respond", "terminal-read-rid"),
+            ("terminal.write.respond", "terminal-write-rid"),
+        ],
+    )
+    def test_terminal_response_unblocks_without_durable_interaction(
+        self,
+        method,
+        request_id,
+    ):
         from tui_gateway import server
 
         ev = threading.Event()
         with server._prompt_lock:
-            server._pending["terminal-rid"] = ("runtime-1", ev)
+            server._pending[request_id] = ("runtime-1", ev)
 
-        handler = _get_method("terminal.read.respond")
-        result = handler(1, {"request_id": "terminal-rid", "text": '{"text":"ok"}'})
+        handler = _get_method(method)
+        result = handler(1, {"request_id": request_id, "text": '{"text":"ok"}'})
 
         assert result["result"] == {"status": "resolved", "resolved": 1}
         assert ev.is_set()
-        assert server._answers["terminal-rid"] == '{"text":"ok"}'
+        assert server._answers[request_id] == '{"text":"ok"}'
         registry = getattr(server, "_interactive_registry", None)
-        assert registry is None or registry.lookup("terminal-rid") is None
+        assert registry is None or registry.lookup(request_id) is None
 
 
 class TestRespondExpiredState:

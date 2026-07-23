@@ -518,6 +518,18 @@ def _make_agent(
     if synthetic is not None:
         return synthetic
 
+    # Profile workers have their own HERMES_HOME. Reconcile at the last safe
+    # boundary before MCP discovery and plugin skill discovery so every new
+    # Dovie session sees only the Dovie-owned capability catalog.
+    try:
+        from dovie_extension.capability_policy import (
+            reconcile_managed_dovie_runtime,
+        )
+
+        reconcile_managed_dovie_runtime()
+    except Exception:
+        logger.warning("Dovie profile capability reconciliation failed", exc_info=True)
+
     # Let fast MCP servers land before AIAgent snapshots the tool registry.
     # This is bounded by config; slow servers are handled by late refresh.
     try:

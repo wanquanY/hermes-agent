@@ -272,7 +272,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
         "interrupt_seq": 0,
         "recalled_turn_ids": set(),
         "session_key": frame.conversation_session_id,
-        "show_reasoning": False,
+        "show_reasoning": _server._load_show_reasoning(),
         "slash_worker": None,
         "tool_progress_mode": None,
         "tool_started_at": {},
@@ -470,7 +470,12 @@ def run_agent(frame: RunStartFrame, cancel_event: threading.Event) -> None:
     )
     watcher.start()
 
-    base_params = frame.params if isinstance(frame.params, dict) else {}
+    base_params = dict(frame.params) if isinstance(frame.params, dict) else {}
+    capability_envelope = base_params.pop("_runtime_capability_credentials", [])
+    imported_capabilities = _import_runtime_capabilities(
+        capability_envelope,
+        conversation_session_id=frame.conversation_session_id,
+    )
     # The main side's ``primary_dispatch`` already stripped the keys
     # it lifted into named ``RunStartFrame`` fields; re-merge them now.
     prompt_params: dict[str, Any] = {
@@ -490,22 +495,82 @@ def run_agent(frame: RunStartFrame, cancel_event: threading.Event) -> None:
     # ``rid`` is the JSON-RPC request id used by ``_ok`` / ``_err``
     # envelope builders only; the agent code never reads it.
     rid = f"worker-{frame.run_id}"
-    resp = _execute_prompt_submit(rid, prompt_params)
-    if isinstance(resp, dict) and resp.get("error"):
-        err = resp["error"]
-        raise RuntimeError(
-            f"_execute_prompt_submit returned error code={err.get('code')} "
-            f"message={err.get('message')!r}"
+    try:
+        resp = _execute_prompt_submit(rid, prompt_params)
+        if isinstance(resp, dict) and resp.get("error"):
+            err = resp["error"]
+            raise RuntimeError(
+                f"_execute_prompt_submit returned error code={err.get('code')} "
+                f"message={err.get('message')!r}"
+            )
+
+        # CRITICAL: ``_execute_prompt_submit`` spawns its own background
+        # thread for the agent run and returns immediately. We must NOT
+        # return from ``run_agent`` until the agent stops; otherwise the
+        # ``AgentRunBackend`` will uninstall ``WorkerPublishBridge`` and
+        # subsequent ``publish_recorded_event`` calls — including the
+        # agent's terminal ``message.complete`` — will go through the
+        # restored original publish path (DB only, no stdout EventFrame).
+        _block_until_run_finished(session, frame, cancel_event)
+    finally:
+        _clear_runtime_capabilities(
+            imported_capabilities,
+            conversation_session_id=frame.conversation_session_id,
         )
 
-    # CRITICAL: ``_execute_prompt_submit`` spawns its own background
-    # thread for the agent run and returns immediately. We must NOT
-    # return from ``run_agent`` until the agent stops; otherwise the
-    # ``AgentRunBackend`` will uninstall ``WorkerPublishBridge`` and
-    # subsequent ``publish_recorded_event`` calls — including the
-    # agent's terminal ``message.complete`` — will go through the
-    # restored original publish path (DB only, no stdout EventFrame).
-    _block_until_run_finished(session, frame, cancel_event)
+
+def _import_runtime_capabilities(
+    envelope: Any,
+    *,
+    conversation_session_id: str,
+) -> list[str]:
+    if not isinstance(envelope, list):
+        return []
+    from agent_capabilities.credentials import capability_credentials
+    from tui_gateway.methods.runtime_capabilities import _invalidate_tool_surface
+
+    imported: list[str] = []
+    try:
+        for raw in envelope:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("conversation_id") or "").strip() != conversation_session_id:
+                continue
+            credential = capability_credentials.configure(
+                capability=str(raw.get("capability") or ""),
+                token=str(raw.get("token") or ""),
+                api_origin=str(raw.get("api_origin") or ""),
+                conversation_id=conversation_session_id,
+                execution_participant_id=str(raw.get("execution_participant_id") or ""),
+                expires_at=float(raw.get("expires_at") or 0),
+                on_change=_invalidate_tool_surface,
+            )
+            imported.append(credential.capability)
+    except Exception:
+        _clear_runtime_capabilities(
+            imported,
+            conversation_session_id=conversation_session_id,
+        )
+        raise
+    return imported
+
+
+def _clear_runtime_capabilities(
+    capabilities: list[str],
+    *,
+    conversation_session_id: str,
+) -> None:
+    if not capabilities:
+        return
+    from agent_capabilities.credentials import capability_credentials
+    from tui_gateway.methods.runtime_capabilities import _invalidate_tool_surface
+
+    for capability in capabilities:
+        capability_credentials.clear(
+            capability=capability,
+            conversation_id=conversation_session_id,
+            on_change=_invalidate_tool_surface,
+        )
 
 
 def _block_until_run_finished(

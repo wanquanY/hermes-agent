@@ -50,7 +50,7 @@ import webbrowser
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 from hermes_constants import secure_parent_dir
 
@@ -113,6 +113,16 @@ _oauth_interactive_enabled: "contextvars.ContextVar[bool]" = contextvars.Context
 # discovery must never start a browser flow.
 _oauth_interactive_forced: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
     "_oauth_interactive_forced", default=False
+)
+
+# GUI control planes need the authorization URL so their native shell can own
+# browser opening and present a reliable fallback link.  ContextVars preserve
+# profile/operation ownership across the dedicated MCP event-loop thread.
+_oauth_authorization_observer: "contextvars.ContextVar[Callable[[str], None] | None]" = (
+    contextvars.ContextVar("_oauth_authorization_observer", default=None)
+)
+_oauth_external_browser_owned: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "_oauth_external_browser_owned", default=False
 )
 
 
@@ -288,6 +298,27 @@ def force_interactive_oauth():
         yield
     finally:
         _oauth_interactive_forced.reset(token)
+
+
+@contextmanager
+def observe_oauth_authorization(
+    callback: Callable[[str], None],
+    *,
+    external_browser: bool = False,
+):
+    """Publish native MCP OAuth URLs to a GUI-owned lifecycle operation.
+
+    When ``external_browser`` is true Hermes keeps the loopback callback flow
+    but leaves browser opening to the desktop shell.  The URL is still printed
+    as a terminal fallback.
+    """
+    observer_token = _oauth_authorization_observer.set(callback)
+    browser_token = _oauth_external_browser_owned.set(bool(external_browser))
+    try:
+        yield
+    finally:
+        _oauth_external_browser_owned.reset(browser_token)
+        _oauth_authorization_observer.reset(observer_token)
 
 
 @contextmanager
@@ -665,6 +696,10 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
             await dashboard_flow.publish_authorization_url(authorization_url)
             return
 
+        observer = _oauth_authorization_observer.get()
+        if observer is not None:
+            observer(authorization_url)
+
         # Fail fast at the authorization boundary in non-interactive contexts
         # (systemd gateway, cron, background MCP discovery). A cached-but-unusable
         # token (expired/revoked, refresh rejected) makes the SDK fall through to
@@ -722,7 +757,9 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
                 file=sys.stderr,
             )
 
-        if _can_open_browser():
+        if _oauth_external_browser_owned.get():
+            print("  (Authorization URL sent to the desktop client.)\n", file=sys.stderr)
+        elif _can_open_browser():
             try:
                 opened = webbrowser.open(authorization_url)
                 if opened:

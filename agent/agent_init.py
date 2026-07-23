@@ -183,7 +183,9 @@ def init_agent(
     thinking_callback: callable = None,
     reasoning_callback: callable = None,
     clarify_callback: callable = None,
+    list_terminals_callback: callable = None,
     read_terminal_callback: callable = None,
+    write_terminal_callback: callable = None,
     step_callback: callable = None,
     stream_delta_callback: callable = None,
     interim_assistant_callback: callable = None,
@@ -257,6 +259,9 @@ def init_agent(
         tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
         clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
             Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
+        list_terminals_callback (callable): Desktop callback that lists the conversation terminal workspace.
+        read_terminal_callback (callable): Desktop callback that snapshots one interactive terminal tab.
+        write_terminal_callback (callable): Desktop callback that writes to one exact interactive terminal tab.
         max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
         reasoning_config (Dict): OpenRouter reasoning configuration override (e.g. {"effort": "none"} to disable thinking).
             If None, defaults to {"enabled": True, "effort": "medium"} for OpenRouter. Set to disable/customize reasoning.
@@ -409,7 +414,9 @@ def init_agent(
     agent.thinking_callback = thinking_callback
     agent.reasoning_callback = reasoning_callback
     agent.clarify_callback = clarify_callback
+    agent.list_terminals_callback = list_terminals_callback
     agent.read_terminal_callback = read_terminal_callback
+    agent.write_terminal_callback = write_terminal_callback
     agent.step_callback = step_callback
     agent.stream_delta_callback = stream_delta_callback
     agent.interim_assistant_callback = interim_assistant_callback
@@ -553,9 +560,9 @@ def init_agent(
     # X-OpenRouter-Cache-Status: HIT is seen in streaming response headers.
     agent._or_cache_hits: int = 0
 
-    # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
-    # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
-    # (which creates a new AIAgent per message) won't duplicate handlers.
+    # Centralized logging. Standalone/main modes own agent.log + errors.log;
+    # Dovie run workers are fileless and forward records to the sidecar.
+    # setup_logging remains idempotent within either process role.
     from hermes_logging import setup_logging, setup_verbose_logging
     setup_logging(hermes_home=_ra()._hermes_home)
 

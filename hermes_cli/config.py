@@ -1267,7 +1267,9 @@ DEFAULT_CONFIG = {
         # users aren't surprised.  HERMES_TUI_RESUME=<id> always wins.
         "tui_auto_resume_recent": False,
         "bell_on_complete": False,
-        "show_reasoning": False,
+        # Show live reasoning by default so thinking-model output becomes
+        # visible as soon as tokens arrive. Users can opt out explicitly.
+        "show_reasoning": True,
         # Keep post-response reasoning recaps compact by default.  Interactive
         # users can opt into the complete text with `/reasoning full`.
         "reasoning_full": False,
@@ -5903,7 +5905,7 @@ def show_config():
     print(color("◆ Display", Colors.CYAN, Colors.BOLD))
     display = config.get('display', {})
     print(f"  Personality:  {display.get('personality', 'kawaii')}")
-    print(f"  Reasoning:    {'on' if display.get('show_reasoning', False) else 'off'}")
+    print(f"  Reasoning:    {'on' if display.get('show_reasoning', True) else 'off'}")
     print(f"  Bell:         {'on' if display.get('bell_on_complete', False) else 'off'}")
     ump = display.get('user_message_preview', {}) if isinstance(display.get('user_message_preview', {}), dict) else {}
     ump_first = ump.get('first_lines', 2)

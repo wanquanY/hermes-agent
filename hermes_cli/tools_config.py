@@ -3235,13 +3235,15 @@ def _configure_mcp_tools_interactive(config: dict):
         tools_cfg = srv_cfg.setdefault("tools", {})
 
         if len(chosen) == len(tools):
-            # All tools enabled — clear filters
+            # Preserve deliberate all-tools intent for catalog-policy migration.
             tools_cfg.pop("exclude", None)
             tools_cfg.pop("include", None)
+            tools_cfg["policy"] = "all"
         else:
             # An empty list intentionally disables every discovered tool.
             tools_cfg["include"] = chosen_names
             tools_cfg.pop("exclude", None)
+            tools_cfg.pop("policy", None)
 
         enabled_count = len(chosen)
         disabled_count = len(tools) - enabled_count

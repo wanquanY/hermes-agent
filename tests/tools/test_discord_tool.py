@@ -17,11 +17,14 @@ from tools.discord_tool import (
     _build_schema,
     _channel_type_name,
     _detect_capabilities,
+    _detect_capabilities_nonblocking,
     _discord_request,
     _enrich_403,
     _get_bot_token,
+    _load_caps_from_disk,
     _load_allowed_actions_config,
     _reset_capability_cache,
+    _save_caps_to_disk,
     check_discord_tool_requirements,
     discord_admin_handler,
     discord_core,
@@ -746,6 +749,87 @@ class TestCapabilityDetection:
         assert mock_req.call_count == 2
 
 
+class TestNonBlockingCapabilityDetection:
+    def setup_method(self):
+        _reset_capability_cache()
+
+    def teardown_method(self):
+        _reset_capability_cache()
+
+    def test_memory_cache_returns_without_network(self):
+        with patch(
+            "tools.discord_tool._discord_request",
+            return_value={"flags": 0},
+        ):
+            known = _detect_capabilities("token")
+
+        with patch("tools.discord_tool._discord_request") as request:
+            assert _detect_capabilities_nonblocking("token") is known
+
+        request.assert_not_called()
+
+    def test_cold_start_is_permissive_and_starts_one_background_fetch(self):
+        with patch("tools.discord_tool._load_caps_from_disk", return_value=None), \
+             patch("tools.discord_tool.threading.Thread") as thread:
+            first = _detect_capabilities_nonblocking("token")
+            second = _detect_capabilities_nonblocking("token")
+
+        assert first is second
+        assert first == {
+            "has_members_intent": True,
+            "has_message_content": True,
+            "detected": False,
+        }
+        thread.assert_called_once()
+        thread.return_value.start.assert_called_once_with()
+
+    def test_disk_cache_returns_without_background_fetch(self):
+        cached = {
+            "has_members_intent": False,
+            "has_message_content": True,
+            "detected": True,
+        }
+        with patch("tools.discord_tool._load_caps_from_disk", return_value=cached), \
+             patch("tools.discord_tool.threading.Thread") as thread:
+            assert _detect_capabilities_nonblocking("token") is cached
+
+        thread.assert_not_called()
+
+    def test_disk_cache_roundtrip_is_token_scoped(self, tmp_path):
+        cache_path = tmp_path / "discord_capabilities.json"
+        caps = {
+            "has_members_intent": False,
+            "has_message_content": True,
+            "detected": True,
+        }
+        with patch(
+            "tools.discord_tool._capability_disk_cache_path",
+            return_value=cache_path,
+        ):
+            _save_caps_to_disk("token-a", caps)
+            assert _load_caps_from_disk("token-a") == caps
+            assert _load_caps_from_disk("token-b") is None
+
+        assert "token-a" not in cache_path.read_text(encoding="utf-8")
+
+    def test_schema_build_never_calls_blocking_http(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": ""}},
+        )
+        with patch("tools.discord_tool._load_caps_from_disk", return_value=None), \
+             patch("tools.discord_tool.threading.Thread"), \
+             patch("tools.discord_tool._discord_request") as request:
+            schema = get_dynamic_schema_core()
+
+        request.assert_not_called()
+        assert schema is not None
+        assert set(schema["parameters"]["properties"]["action"]["enum"]) == set(
+            _CORE_ACTIONS,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Config allowlist
 # ---------------------------------------------------------------------------
@@ -934,6 +1018,7 @@ class TestDynamicSchema:
             lambda: {"discord": {"server_actions": ""}},
         )
         mock_req.return_value = {"flags": 1 << 18}  # only MESSAGE_CONTENT
+        _detect_capabilities("tok")
         schema = get_dynamic_schema_admin()
         actions = schema["parameters"]["properties"]["action"]["enum"]
         assert "member_info" not in actions
@@ -950,6 +1035,7 @@ class TestDynamicSchema:
             lambda: {"discord": {"server_actions": ""}},
         )
         mock_req.return_value = {"flags": 1 << 18}  # only MESSAGE_CONTENT
+        _detect_capabilities("tok")
         schema = get_dynamic_schema_core()
         actions = schema["parameters"]["properties"]["action"]["enum"]
         assert "search_members" not in actions
@@ -962,6 +1048,7 @@ class TestDynamicSchema:
             lambda: {"discord": {"server_actions": ""}},
         )
         mock_req.return_value = {"flags": 1 << 14}  # only GUILD_MEMBERS
+        _detect_capabilities("tok")
         schema = get_dynamic_schema_core()
         assert "MESSAGE_CONTENT" in schema["description"]
         # But fetch_messages is still available

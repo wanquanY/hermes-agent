@@ -3348,6 +3348,19 @@ class TestMCPSelectiveToolLoading:
         )
         assert registered == ["mcp__ink__create_service"]
 
+    def test_explicit_empty_include_registers_no_server_tools(self):
+        config = {
+            "url": "https://mcp.example.com",
+            "tools": {"include": []},
+        }
+        registered, _ = self._run_discover(
+            "ink_none",
+            ["create_service", "delete_service"],
+            config,
+            session=SimpleNamespace(),
+        )
+        assert registered == []
+
     def test_exclude_filter_registers_all_except_listed_tools(self):
         config = {
             "url": "https://mcp.example.com",

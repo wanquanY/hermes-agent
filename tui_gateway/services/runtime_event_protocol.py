@@ -11,7 +11,9 @@ TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
     {
         "agent.terminal.output",
         "terminal.close",
+        "terminal.list.request",
         "terminal.read.request",
+        "terminal.write.request",
     }
 )
 

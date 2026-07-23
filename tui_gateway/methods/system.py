@@ -65,16 +65,22 @@ def _(rid, params: dict) -> dict:
     """Normalize the Dovie profile runtime scope before a worker is used.
 
     Dovie owns profile metadata and filesystem preparation. Hermes owns the
-    stable Gateway ABI for profile-scoped runtime identity. This control-plane
-    method gives clients a side-effect-light contract check that does not build
-    an agent or touch model/tool state.
+    stable Gateway ABI for profile-scoped runtime identity. Capability catalog
+    ownership is reconciled here, before a worker loads plugins or MCP tools,
+    so retired Hermes product entries can never leak into a new Dovie session.
     """
+    from dovie_extension.capability_policy import (
+        reconcile_dovie_capability_ownership,
+    )
+
     scope = _profile_runtime_scope_from_params(params or {})
+    capability_reconciliation = reconcile_dovie_capability_ownership()
     return _ok(
         rid,
         {
             "status": "prepared",
             "prepared": True,
+            "capability_reconciliation": capability_reconciliation,
             **scope,
         },
     )
@@ -303,7 +309,6 @@ def _(rid, params: dict) -> dict:
 
 @method("reload.mcp")
 def _(rid, params: dict) -> dict:
-    session = _sessions.get(params.get("session_id", ""))
     try:
         # Gate: /reload-mcp invalidates the prompt cache for this session.
         # Respect the ``approvals.mcp_reload_confirm`` config toggle — if
@@ -343,32 +348,22 @@ def _(rid, params: dict) -> dict:
                     },
                 )
 
-        from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools
+        from tui_gateway.services.capability_runtime import reload_profile_mcp_runtime
 
-        shutdown_mcp_servers()
-        discover_mcp_tools()
-        if session:
-            agent = session["agent"]
-            # Rebuild the cached agent's tool snapshot so the current session
-            # picks up added/removed MCP tools without `/new`. The agent
-            # snapshots tools once at build and never re-reads the registry, so
-            # an explicit rebuild — re-resolving enabled toolsets so a server
-            # the user just enabled this session is actually picked up — is
-            # required. Mirrors gateway/run.py::_execute_mcp_reload.
-            try:
-                from tools.mcp_tool import refresh_agent_mcp_tools
-
-                refresh_agent_mcp_tools(
-                    agent,
-                    enabled_override=_load_enabled_toolsets(),
-                    quiet_mode=True,
-                )
-            except Exception as _exc:
-                logger.warning(
-                    "Failed to refresh cached agent tools after /reload-mcp: %s",
-                    _exc,
-                )
-            _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
+        # MCP registry state belongs to the profile worker, not to one chat.
+        # A Plugin can be enabled from the market without a session_id, so a
+        # profile-scoped reload must rebuild every cached agent snapshot owned
+        # by this worker. Otherwise the connection page reports healthy while
+        # already-open conversations keep their stale pre-Plugin tool schema.
+        refreshed_session_ids = reload_profile_mcp_runtime(
+            _sessions,
+            _load_enabled_toolsets,
+        )
+        for session_id in refreshed_session_ids:
+            session = _sessions.get(session_id)
+            agent = session.get("agent") if isinstance(session, dict) else None
+            if agent is not None:
+                _emit("session.info", session_id, _session_info(agent, session))
 
         # Honor `always=true` by persisting the opt-out to config.
         if bool(params.get("always", False)):
@@ -379,7 +374,14 @@ def _(rid, params: dict) -> dict:
             except Exception as _exc:
                 logger.warning("Failed to persist mcp_reload_confirm=false: %s", _exc)
 
-        return _ok(rid, {"status": "reloaded"})
+        return _ok(
+            rid,
+            {
+                "status": "reloaded",
+                "refreshed_session_ids": refreshed_session_ids,
+                "refreshed_session_count": len(refreshed_session_ids),
+            },
+        )
     except Exception as e:
         return _err(rid, 5015, str(e))
 

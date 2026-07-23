@@ -185,8 +185,8 @@ async def main_async(args: argparse.Namespace) -> None:
     # 排查审批弹二次时,加的所有 [team_mission.plan.reject] / [dispatch-trace]
     # INFO 日志都消失了,盲飞好几轮才发现是这个 root handler 缺失。
     #
-    # 只跑 setup_logging(mode="gateway"),让 gateway 进程的日志与 workers
-    # (它们自己在 run_agent 里 setup_logging) 都汇聚到同一 agent.log。
+    # 只跑 setup_logging(mode="gateway")：gateway 是旋转日志的唯一写入者；
+    # run workers 通过结构化 LogFrame 回传，由 gateway 统一写 agent.log。
     try:
         from hermes_logging import setup_logging as _setup_logging
         _setup_logging(mode="gateway")

@@ -32,7 +32,7 @@ _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
     # Terminal + process management
-    "terminal", "process", "read_terminal", "close_terminal",
+    "terminal", "process", "list_terminals", "read_terminal", "write_terminal", "close_terminal",
     # File manipulation
     "read_file", "parse_document", "write_file", "patch", "search_files",
     # Vision + image generation
@@ -108,6 +108,7 @@ TOOLSETS = {
         "tools": [
             "task_hub_search",
             "task_hub_get_details",
+            "task_hub_prepare_changes",
             "task_hub_list_my_tasks",
             "task_hub_open_source",
         ],
@@ -432,7 +433,7 @@ TOOLSETS = {
         "description": "Coding-focused toolset: files, terminal, search, web docs, skills, todo, delegate, vision, browser",
         "tools": [
             "web_search", "web_extract",
-            "terminal", "process", "read_terminal", "close_terminal",
+            "terminal", "process", "list_terminals", "read_terminal", "write_terminal", "close_terminal",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
             "skills_list", "skill_view", "skill_manage",

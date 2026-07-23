@@ -146,6 +146,50 @@ def test_profile_scoped_runtime_read_methods_are_proxied_to_runtime_worker(metho
     )
 
 
+def test_profile_capability_reload_is_owned_by_runtime_worker():
+    """Executable registries reload in the selected profile worker."""
+    assert runtime_scope.should_route_to_worker(
+        {
+            "id": "capability-1",
+            "method": "reload.mcp",
+            "params": {
+                "agent_profile_id": "agent-a",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+                "dovie_profile": {
+                    "id": "agent-a",
+                    "runtimeScopeKey": "profile:agent-a:version:v1",
+                    "agentProfileVersionId": "v1",
+                    "hermesHomePath": "/tmp/hermes-agent-a/.dovie/versions/v1",
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "capability.operation.start",
+        "capability.operation.get",
+        "dovie.capabilities.reconcile",
+        "mcp.manage",
+        "mcp.servers.list",
+    ],
+)
+def test_profile_capability_configuration_stays_on_control_plane(method):
+    """Configuration and probes remain control-plane responsibilities."""
+    assert not runtime_scope.should_route_to_worker(
+        {
+            "id": "capability-1",
+            "method": method,
+            "params": {
+                "agent_profile_id": "agent-a",
+                "runtime_scope_key": "profile:agent-a:version:v1",
+            },
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "method",
     [

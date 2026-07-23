@@ -80,7 +80,13 @@ def test_primary_chat_streams_are_transient_until_full_terminal_message(
 
 @pytest.mark.parametrize(
     "event_type",
-    ["agent.terminal.output", "terminal.close", "terminal.read.request"],
+    [
+        "agent.terminal.output",
+        "terminal.close",
+        "terminal.list.request",
+        "terminal.read.request",
+        "terminal.write.request",
+    ],
 )
 def test_renderer_platform_events_never_enter_conversation_ledger(tmp_path, event_type):
     db = open_cli_session_store(tmp_path / "platform-events.db")

@@ -27,10 +27,15 @@ _CONTROL_PLANE_METHODS = frozenset(
         "artifacts.list",
         "conversation.activity.list",
         "conversation.render_snapshot",
+        "capability.operation.get",
+        "capability.operation.start",
+        "dovie.capabilities.reconcile",
         "events.compact",
         "events.prune",
         "events.subscribe",
         "events.unsubscribe",
+        "mcp.manage",
+        "mcp.servers.list",
         "profile.archive",
         "profile.draft.discard",
         "profile.draft.get",
@@ -114,6 +119,7 @@ _RUNTIME_MUTATION_METHODS = frozenset(
 
 _RUNTIME_REGISTRY_METHODS = frozenset(
     {
+        "reload.mcp",
         "skills.reload",
         "toolsets.list",
         "tools.configure",
@@ -132,7 +138,9 @@ _INTERACTIVE_RESPONSE_METHODS = frozenset(
         "clarify.respond",
         "secret.respond",
         "sudo.respond",
+        "terminal.list.respond",
         "terminal.read.respond",
+        "terminal.write.respond",
     }
 )
 

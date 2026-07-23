@@ -373,7 +373,7 @@ def load_cli_config() -> Dict[str, Any]:
         "display": {
             "compact": False,
             "resume_display": "full",
-            "show_reasoning": False,
+            "show_reasoning": True,
             "streaming": True,
             "busy_input_mode": "interrupt",
             "persistent_output": True,
@@ -2769,7 +2769,7 @@ class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
         # bell_on_complete: play terminal bell (\a) when agent finishes a response
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
-        self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", True)
         # reasoning_full: print the complete post-response reasoning recap
         # instead of clamping it to the first ten lines.
         self.reasoning_full = CLI_CONFIG["display"].get("reasoning_full", False)
@@ -4439,6 +4439,26 @@ class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
             if self.final_response_markdown == "strip":
                 line = _strip_markdown_syntax(line)
             _emit_one(line)
+
+        # Paint long partial lines before the first newline arrives. Table
+        # partials stay buffered because alignment needs the complete block.
+        if (
+            self._stream_buf
+            and not self._in_stream_table
+            and not self._stream_buf.lstrip().startswith("|")
+        ):
+            wrap_w = max(40, _terminal_width_for_streaming())
+            while len(self._stream_buf) >= wrap_w:
+                cut = self._stream_buf.rfind(" ", 0, wrap_w)
+                if cut <= 0:
+                    cut = wrap_w
+                chunk, self._stream_buf = (
+                    self._stream_buf[:cut],
+                    self._stream_buf[cut:].lstrip(" "),
+                )
+                if self.final_response_markdown == "strip":
+                    chunk = _strip_markdown_syntax(chunk)
+                _emit_one(chunk)
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -12698,6 +12718,10 @@ class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
             _welcome_text = "Welcome to Hermes Agent! Type your message or /help for commands."
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
+
+        from hermes_cli.startup_prewarm import prewarm_agent_runtime_async
+
+        prewarm_agent_runtime_async()
 
         # Redaction opt-out warning (#17691): ON by default, loud when off.
         # The redactor snapshots its state at import time so any toggle now

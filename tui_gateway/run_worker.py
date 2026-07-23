@@ -19,7 +19,7 @@ Protocol (one JSON object per line, UTF-8, ``\\n``-terminated):
       {"op":"event", "params": {...}}
       {"op":"interactive.request", "kind", "request_id", "payload"}
       {"op":"run.terminal", "run_id", "status"}
-      {"op":"log", "level", "text"}
+      {"op":"log", "level", "text", ...source metadata}
 
 This module owns the frame codec and the subprocess run loop used by the
 worker/supervisor protocol.
@@ -66,7 +66,26 @@ class RunCancelFrame:
     run_id: str
 
 
-_INTERACTIVE_KINDS = frozenset({"clarify", "approval", "secret", "sudo"})
+# Canonical worker-wire interactive kinds. Keep this in the protocol module so
+# the decoder, publish bridge, main-process router, and responder cannot grow
+# independent allowlists.
+WORKER_INTERACTIVE_KINDS = frozenset(
+    {
+        "clarify",
+        "approval",
+        "secret",
+        "sudo",
+        "terminal_list",
+        "terminal_read",
+        "terminal_write",
+    }
+)
+
+# Renderer-owned side-channel reads are request/response handshakes, but they
+# are not durable human-interaction lifecycle facts.
+TRANSIENT_WORKER_INTERACTIVE_KINDS = frozenset(
+    {"terminal_list", "terminal_read", "terminal_write"}
+)
 
 
 @dataclass(frozen=True)
@@ -147,6 +166,14 @@ class RunTerminalFrame:
 class LogFrame:
     level: str
     text: str
+    logger: str = ""
+    created: float = 0.0
+    process_id: int = 0
+    thread_name: str = ""
+    session_tag: str = ""
+    pathname: str = ""
+    line_no: int = 0
+    exception: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,6 +239,24 @@ def _optional_mapping(obj: dict, key: str) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise FrameDecodeError(f"field {key!r} must be an object")
+    return value
+
+
+def _optional_float(obj: dict, key: str, default: float = 0.0) -> float:
+    value = obj.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FrameDecodeError(f"field {key!r} must be a number or null")
+    return float(value)
+
+
+def _optional_int(obj: dict, key: str, default: int = 0) -> int:
+    value = obj.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FrameDecodeError(f"field {key!r} must be an integer or null")
     return value
 
 
@@ -296,9 +341,9 @@ def decode_incoming(line: str) -> IncomingFrame:
         return RunCancelFrame(run_id=_require_str(obj, "run_id", op=op))
     if op == "interactive.response":
         kind = _require_str(obj, "kind", op=op)
-        if kind not in _INTERACTIVE_KINDS:
+        if kind not in WORKER_INTERACTIVE_KINDS:
             raise FrameDecodeError(
-                f"interactive.response: kind={kind!r} not in {sorted(_INTERACTIVE_KINDS)}"
+                f"interactive.response: kind={kind!r} not in {sorted(WORKER_INTERACTIVE_KINDS)}"
             )
         return InteractiveResponseFrame(
             kind=kind,
@@ -414,6 +459,14 @@ def decode_outgoing(line: str) -> OutgoingFrame:
         return LogFrame(
             level=_require_str(obj, "level", op=op),
             text=_require_str(obj, "text", op=op),
+            logger=_optional_str(obj, "logger"),
+            created=_optional_float(obj, "created"),
+            process_id=_optional_int(obj, "process_id"),
+            thread_name=_optional_str(obj, "thread_name"),
+            session_tag=_optional_str(obj, "session_tag"),
+            pathname=_optional_str(obj, "pathname"),
+            line_no=_optional_int(obj, "line_no"),
+            exception=_optional_str(obj, "exception"),
         )
     if op == "worker.ready":
         ready = obj.get("ready")
@@ -441,6 +494,7 @@ def decode_outgoing(line: str) -> OutgoingFrame:
 
 def encode_outgoing(frame: OutgoingFrame) -> str:
     """Serialize one outbound frame to a single line (no trailing newline)."""
+    body: dict[str, Any]
     if isinstance(frame, EventFrame):
         body = {"op": "event", "params": frame.params}
     elif isinstance(frame, InteractiveRequestFrame):
@@ -466,6 +520,17 @@ def encode_outgoing(frame: OutgoingFrame) -> str:
             body["message"] = frame.message
     elif isinstance(frame, LogFrame):
         body = {"op": "log", "level": frame.level, "text": frame.text}
+        optional_log_fields = {
+            "logger": frame.logger,
+            "created": frame.created,
+            "process_id": frame.process_id,
+            "thread_name": frame.thread_name,
+            "session_tag": frame.session_tag,
+            "pathname": frame.pathname,
+            "line_no": frame.line_no,
+            "exception": frame.exception,
+        }
+        body.update({key: value for key, value in optional_log_fields.items() if value})
     elif isinstance(frame, DBRpcRequestFrame):
         body = {
             "jsonrpc": "2.0",
@@ -707,12 +772,15 @@ class RealInteractiveResponder(WorkerInteractiveResponder):
                      (keyed by ``clarify_id``)
         approval  → ``tools.approval.resolve_gateway_approval``
                      (keyed by ``session_key`` — caller's ``request_id``)
-        secret/sudo → ``tui_gateway.methods.prompt._pending``
+        secret/sudo/terminal_list/terminal_read/terminal_write
+            → ``tui_gateway.methods.prompt._pending``
                      (keyed by ``request_id`` — same dict, different
                       answer-field name in the original handler)
     """
 
     async def resolve(self, frame: InteractiveResponseFrame) -> bool:
+        if frame.kind not in WORKER_INTERACTIVE_KINDS:
+            return False
         # Try the kind-specific registry FIRST (legacy/tools-driven
         # flows: ``tools.clarify_gateway.register`` /
         # ``tools.approval.submit_pending``). Fall through to the
@@ -755,7 +823,7 @@ def _stringify_answer(answer: Any) -> str:
 
 
 def _resolve_generic_pending(request_id: str, answer: str) -> bool:
-    """Unblock a secret/sudo waiter parked in
+    """Unblock a secret/sudo/terminal-read waiter parked in
     ``tui_gateway.methods.prompt._pending``. Returns True iff a pending
     entry existed."""
     try:
@@ -879,7 +947,7 @@ def _build_default_handler(
             await backend.cancel(frame.run_id)
         elif isinstance(frame, InteractiveResponseFrame):
             resolved = await responder.resolve(frame)
-            if resolved:
+            if resolved and frame.kind not in TRANSIENT_WORKER_INTERACTIVE_KINDS:
                 payload: dict[str, Any] = {"request_id": frame.request_id}
                 # Never copy credentials into the event stream.  Clarification
                 # and approval choices are safe, useful lifecycle context;
@@ -978,9 +1046,21 @@ def _prepare_worker_runtime() -> dict[str, float]:
     stages["agent_modules"] = round((time.perf_counter() - started) * 1000, 3)
 
     started = time.perf_counter()
+    from tui_gateway.services.capability_runtime import (
+        bootstrap_profile_mcp_runtime,
+    )
+
+    bootstrap_profile_mcp_runtime()
+    stages["mcp_tool_discovery"] = round(
+        (time.perf_counter() - started) * 1000,
+        3,
+    )
+
+    started = time.perf_counter()
     # Materialize the default tool-schema snapshot once.  Profile/turn-specific
-    # filters still receive their own cache key later; plugin discovery and the
-    # common schema assembly no longer sit on the first user turn.
+    # filters still receive their own cache key later. MCP discovery above must
+    # complete first because the registry is process-local; probing it in the
+    # control plane cannot make those tools visible to this worker.
     run_agent.get_tool_definitions(quiet_mode=True)
     stages["default_tool_catalog"] = round(
         (time.perf_counter() - started) * 1000,
@@ -998,6 +1078,43 @@ async def _main_async() -> int:
     # process_role.py for the rationale.
     from tui_gateway.process_role import mark_as_worker_process
     mark_as_worker_process()
+
+    # The sidecar is the sole file writer.  Worker records are buffered in a
+    # bounded thread-safe queue and serialized through the same locked stdout
+    # writer as all other worker frames.
+    emit_raw = _stdout_writer()
+    from tui_gateway.worker_logging import WorkerLogBridge, WorkerLogEnvelope
+
+    async def _emit_worker_log(envelope: WorkerLogEnvelope) -> None:
+        await emit_raw(
+            encode_outgoing(
+                LogFrame(
+                    level=envelope.level,
+                    text=envelope.text,
+                    logger=envelope.logger,
+                    created=envelope.created,
+                    process_id=envelope.process_id,
+                    thread_name=envelope.thread_name,
+                    session_tag=envelope.session_tag,
+                    pathname=envelope.pathname,
+                    line_no=envelope.line_no,
+                    exception=envelope.exception,
+                )
+            )
+            + "\n"
+        )
+
+    log_bridge = WorkerLogBridge(_emit_worker_log)
+    log_bridge.start()
+    try:
+        return await _run_worker_async(emit_raw)
+    finally:
+        await log_bridge.close()
+
+
+async def _run_worker_async(
+    emit_raw: Callable[[str], Awaitable[None]],
+) -> int:
 
     from agent.activity_event_bus import (
         ActivityEventBus,
@@ -1046,7 +1163,7 @@ async def _main_async() -> int:
 
     proto = WorkerProtocol(
         lines_in=_stdin_lines(),
-        emit=_stdout_writer(),
+        emit=emit_raw,
         handler=_build_default_handler(
             backend,
             responder,

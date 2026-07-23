@@ -348,6 +348,16 @@ def _(rid, params: dict) -> dict:
     return _respond_ephemeral(rid, params, "text")
 
 
+@method("terminal.list.respond")
+def _(rid, params: dict) -> dict:
+    return _respond_ephemeral(rid, params, "text")
+
+
+@method("terminal.write.respond")
+def _(rid, params: dict) -> dict:
+    return _respond_ephemeral(rid, params, "text")
+
+
 @method("secret.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "value")

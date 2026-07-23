@@ -139,7 +139,7 @@ def _load_service_tier() -> str | None:
 
 
 def _load_show_reasoning() -> bool:
-    return bool((_server._load_cfg().get("display") or {}).get("show_reasoning", False))
+    return bool((_server._load_cfg().get("display") or {}).get("show_reasoning", True))
 
 
 def _load_interim_assistant_messages() -> bool:

@@ -93,8 +93,8 @@ def test_disabling_tool_writes_include_list(capsys):
     assert "exclude" not in tools_cfg
 
 
-def test_enabling_all_clears_filters(capsys):
-    """Checking all tools clears both include and exclude lists."""
+def test_enabling_all_records_explicit_policy(capsys):
+    """Checking all tools clears filters and records deliberate all-tools intent."""
     config = {
         "mcp_servers": {
             "github": {
@@ -116,6 +116,7 @@ def test_enabling_all_clears_filters(capsys):
     tools_cfg = config["mcp_servers"]["github"]["tools"]
     assert "exclude" not in tools_cfg
     assert "include" not in tools_cfg
+    assert tools_cfg["policy"] == "all"
 
 
 def test_pre_selection_respects_existing_exclude(capsys):

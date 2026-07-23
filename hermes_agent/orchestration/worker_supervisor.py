@@ -573,9 +573,10 @@ class WorkerSupervisor:
             env["DOVIE_CONVERSATION_ID"] = scope.conversation_id
         if scope.agent_profile_id:
             env["DOVIE_AGENT_PROFILE_ID"] = scope.agent_profile_id
-        # stderr inherits the main sidecar's stderr so tracebacks land
-        # in the same agent.log as the legacy worker. Phase 5 may rewire
-        # this to a per-scope file once we have the file-rotation policy.
+        # stderr inherits the main sidecar's stderr as an emergency channel
+        # for bootstrap crashes and worker-log queue overload. Normal Python
+        # records travel as LogFrame over stdout; workers never open the
+        # profile's rotating files themselves.
         # Use ``-c "from ... import main; main()"`` instead of ``-m
         # tui_gateway.run_worker`` to avoid Python's double-import
         # trap: ``python -m foo.bar`` loads ``foo/bar.py`` AS ``__main__``,

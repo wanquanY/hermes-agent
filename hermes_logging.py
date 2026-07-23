@@ -107,7 +107,7 @@ def _install_session_record_factory() -> None:
     def _session_record_factory(*args, **kwargs):
         record = current_factory(*args, **kwargs)
         sid = getattr(_session_context, "session_id", None)
-        record.session_tag = f" [{sid}]" if sid else ""  # type: ignore[attr-defined]
+        record.session_tag = f" [{sid}]" if sid else ""
         return record
 
     _session_record_factory._hermes_session_injector = True  # type: ignore[attr-defined]
@@ -197,7 +197,6 @@ def setup_logging(
     global _logging_initialized
     home = hermes_home or get_hermes_home()
     log_dir = home / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Read config defaults (best-effort — config may not be loaded yet).
     cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
@@ -211,6 +210,22 @@ def setup_logging(
     from agent.redact import RedactingFormatter
 
     root = logging.getLogger()
+
+    # Dovie run workers are event/log producers, never filesystem writers.
+    # Multiple workers share one profile HERMES_HOME, and stdlib rotating file
+    # handlers cannot safely coordinate renames across processes.  The worker
+    # protocol installs a forwarding handler; the main sidecar is the sole
+    # owner of agent.log/errors.log/gateway.log.
+    if _is_dovie_run_worker():
+        _configure_worker_logging(
+            root,
+            level=level,
+            formatter=RedactingFormatter(_LOG_FORMAT),
+        )
+        _logging_initialized = True
+        return log_dir
+
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # --- agent.log (INFO+) — the main activity log -------------------------
     _add_rotating_handler(
@@ -268,6 +283,20 @@ def setup_verbose_logging() -> None:
 
     root = logging.getLogger()
 
+    if _is_dovie_run_worker():
+        # Verbose worker logs still travel through the structured stdout
+        # protocol.  Adding a console handler here would duplicate every line
+        # on inherited stderr and bypass the single-writer log pipeline.
+        for handler in root.handlers:
+            if getattr(handler, "_hermes_worker_forwarder", False):
+                handler.setLevel(logging.DEBUG)
+        if root.level > logging.DEBUG:
+            root.setLevel(logging.DEBUG)
+        for name in _NOISY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
+        logging.getLogger("rex-deploy").setLevel(logging.INFO)
+        return
+
     # Avoid adding duplicate stream handlers.
     for h in root.handlers:
         if isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler):
@@ -294,6 +323,57 @@ def setup_verbose_logging() -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _is_dovie_run_worker() -> bool:
+    """Return the canonical process-role bit without coupling other modes.
+
+    ``tui_gateway`` is optional for non-desktop Hermes deployments, so import
+    the role lazily and fail closed to the traditional file-backed setup.
+    """
+    try:
+        from tui_gateway.process_role import is_worker_process
+        return is_worker_process()
+    except Exception:
+        return False
+
+
+def _configure_worker_logging(
+    root: logging.Logger,
+    *,
+    level: int,
+    formatter: logging.Formatter,
+) -> None:
+    forwarding_handlers = [
+        handler
+        for handler in root.handlers
+        if getattr(handler, "_hermes_worker_forwarder", False)
+    ]
+    for handler in forwarding_handlers:
+        handler.setLevel(level)
+
+    if not forwarding_handlers:
+        # A directly invoked/misconfigured worker must remain observable but
+        # still must not open shared rotating files.  stderr is inherited by
+        # the supervisor and is safe as an emergency-only fallback.
+        fallback = next(
+            (
+                handler
+                for handler in root.handlers
+                if getattr(handler, "_hermes_worker_fallback", False)
+            ),
+            None,
+        )
+        if fallback is None:
+            fallback = logging.StreamHandler()
+            fallback._hermes_worker_fallback = True  # type: ignore[attr-defined]
+            fallback.setFormatter(formatter)
+            root.addHandler(fallback)
+        fallback.setLevel(level)
+
+    if root.level == logging.NOTSET or root.level > level:
+        root.setLevel(level)
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 class _ManagedRotatingFileHandler(RotatingFileHandler):
     """RotatingFileHandler that ensures group-writable perms in managed mode.

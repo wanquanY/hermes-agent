@@ -829,6 +829,19 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     reasoning_text = agent._extract_reasoning(assistant_message)
     _from_structured = bool(reasoning_text)
 
+    # Responses-compatible providers can emit human-readable reasoning only
+    # through streaming events and omit it from the terminal response.output
+    # items.  The live surface has already received those deltas through
+    # ``_fire_reasoning_delta``; carry the same per-response accumulator into
+    # the canonical assistant message so the durable transcript is identical
+    # to what the user saw while the response was running.  The accumulator is
+    # reset before every model call, and a provider-owned structured value
+    # above always wins.
+    if not reasoning_text:
+        streamed_reasoning = getattr(agent, "_current_streamed_reasoning_text", "")
+        if isinstance(streamed_reasoning, str) and streamed_reasoning.strip():
+            reasoning_text = streamed_reasoning
+
     # Fallback: extract inline <think> blocks from content when no structured
     # reasoning fields are present (some models/providers embed thinking
     # directly in the content rather than returning separate API fields).

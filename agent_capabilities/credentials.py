@@ -6,6 +6,7 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass
+from typing import Callable
 from urllib.parse import urlsplit
 
 
@@ -41,6 +42,7 @@ class CapabilityCredentialRegistry:
         conversation_id: str,
         execution_participant_id: str,
         expires_at: float,
+        on_change: Callable[[], None] | None = None,
     ) -> CapabilityCredential:
         normalized_origin = str(api_origin or "").strip().rstrip("/")
         parsed = urlsplit(normalized_origin)
@@ -61,8 +63,19 @@ class CapabilityCredentialRegistry:
             expires_at=float(expires_at),
             **values,
         )
+        key = (credential.capability, credential.conversation_id)
         with self._lock:
-            self._by_conversation[(credential.capability, credential.conversation_id)] = credential
+            previous = self._by_conversation.get(key)
+            self._by_conversation[key] = credential
+            try:
+                if on_change is not None:
+                    on_change()
+            except Exception:
+                if previous is None:
+                    self._by_conversation.pop(key, None)
+                else:
+                    self._by_conversation[key] = previous
+                raise
         return credential
 
     def resolve(self, *, capability: str, conversation_id: str) -> CapabilityCredential:
@@ -76,10 +89,25 @@ class CapabilityCredentialRegistry:
                 raise RuntimeError("capability credential has expired")
             return credential
 
-    def clear(self, *, capability: str, conversation_id: str) -> bool:
+    def clear(
+        self,
+        *,
+        capability: str,
+        conversation_id: str,
+        on_change: Callable[[], None] | None = None,
+    ) -> bool:
         key = (str(capability or "").strip(), str(conversation_id or "").strip())
         with self._lock:
-            return self._by_conversation.pop(key, None) is not None
+            previous = self._by_conversation.pop(key, None)
+            if previous is None:
+                return False
+            try:
+                if on_change is not None:
+                    on_change()
+            except Exception:
+                self._by_conversation[key] = previous
+                raise
+            return True
 
     def clear_all(self) -> None:
         with self._lock:
@@ -97,6 +125,36 @@ class CapabilityCredentialRegistry:
             for key in expired:
                 self._by_conversation.pop(key, None)
             return any(key[0] == normalized for key in self._by_conversation)
+
+    def export_for_worker(self, *, conversation_id: str) -> list[dict[str, object]]:
+        """Return active credentials for one isolated execution worker.
+
+        Credentials remain memory-only: the sidecar places this envelope on the
+        private worker pipe for the duration of a run.  It must never be stored
+        in session metadata or diagnostic output.
+        """
+        normalized = str(conversation_id or "").strip()
+        now = time.time()
+        with self._lock:
+            expired = [
+                key
+                for key, credential in self._by_conversation.items()
+                if credential.expires_at <= now
+            ]
+            for key in expired:
+                self._by_conversation.pop(key, None)
+            return [
+                {
+                    "capability": credential.capability,
+                    "token": credential.token,
+                    "api_origin": credential.api_origin,
+                    "conversation_id": credential.conversation_id,
+                    "execution_participant_id": credential.execution_participant_id,
+                    "expires_at": credential.expires_at,
+                }
+                for credential in self._by_conversation.values()
+                if credential.conversation_id == normalized
+            ]
 
 
 capability_credentials = CapabilityCredentialRegistry()

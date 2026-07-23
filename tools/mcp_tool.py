@@ -104,6 +104,10 @@ from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional
 from urllib.parse import urlparse
 
+from dovie_extension.capability_policy import (
+    filter_managed_dovie_mcp_servers,
+    is_managed_dovie_runtime,
+)
 from tools.mcp_identity import (
     MCP_TOOL_PREFIX,
     canonical_mcp_tool_name,
@@ -3907,6 +3911,14 @@ def _load_mcp_config() -> Dict[str, dict]:
         except Exception:
             pass
         safe_servers = _filter_suspicious_mcp_servers(servers)
+        try:
+            safe_servers = filter_managed_dovie_mcp_servers(safe_servers)
+        except Exception:
+            logger.exception("Failed to enforce Dovie MCP catalog ownership")
+            if is_managed_dovie_runtime():
+                # A Dovie-managed runtime must not silently fall back to
+                # loading an unfiltered Hermes product catalog.
+                return {}
         return {
             name: _interpolate_env_vars(cfg)
             for name, cfg in safe_servers.items()
@@ -4856,11 +4868,12 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     #   include takes precedence over exclude
     #   Neither set → register all tools (backward-compatible default)
     tools_filter = config.get("tools") or {}
+    include_configured = "include" in tools_filter
     include_set = _normalize_name_filter(tools_filter.get("include"), f"mcp_servers.{name}.tools.include")
     exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
 
     def _should_register(tool_name: str) -> bool:
-        if include_set:
+        if include_configured:
             return tool_name in include_set
         if exclude_set:
             return tool_name not in exclude_set
@@ -5147,6 +5160,18 @@ def discover_mcp_tools() -> List[str]:
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []
+
+    try:
+        from hermes_cli.mcp_catalog import reconcile_installed_tool_policies
+
+        migrated = reconcile_installed_tool_policies()
+        if migrated:
+            logger.info(
+                "Applied reviewed default tool policies to legacy MCP installs: %s",
+                ", ".join(migrated),
+            )
+    except Exception:
+        logger.debug("MCP tool-policy migration failed", exc_info=True)
 
     servers = _load_mcp_config()
     if not servers:

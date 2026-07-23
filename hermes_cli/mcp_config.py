@@ -1024,13 +1024,22 @@ def cmd_mcp_configure(args):
     server_entry = cfg_get(config, "mcp_servers", name, default={})
 
     if len(chosen) == total:
-        # All selected → remove include/exclude (register all)
-        server_entry.pop("tools", None)
+        # Persist deliberate all-tools intent. A missing filter is reserved
+        # for legacy/unreviewed catalog installs and may be migrated to the
+        # catalog's reviewed default allow-list during runtime discovery.
+        tools_block = server_entry.get("tools")
+        if not isinstance(tools_block, dict):
+            tools_block = {}
+        tools_block.pop("include", None)
+        tools_block.pop("exclude", None)
+        tools_block["policy"] = "all"
+        server_entry["tools"] = tools_block
     else:
         chosen_names = [tool_names[i] for i in sorted(chosen)]
         server_entry.setdefault("tools", {})
         server_entry["tools"]["include"] = chosen_names
         server_entry["tools"].pop("exclude", None)
+        server_entry["tools"].pop("policy", None)
 
     config.setdefault("mcp_servers", {})[name] = server_entry
     save_config(config)

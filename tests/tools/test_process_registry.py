@@ -1650,6 +1650,62 @@ def test_read_terminal_tool_passes_window_to_callback():
     assert result["text"] == "a\nb\nc"
 
 
+def test_read_terminal_tool_passes_exact_terminal_id_to_callback():
+    from tools.read_terminal_tool import read_terminal_tool
+
+    seen = {}
+
+    def callback(**request):
+        seen.update(request)
+        return json.dumps({"process_id": "proc-b", "text": "ready"})
+
+    result = json.loads(read_terminal_tool(terminal_id="proc-b", callback=callback))
+    assert seen == {"terminal_id": "proc-b"}
+    assert result["process_id"] == "proc-b"
+
+
+def test_list_terminals_tool_normalizes_desktop_json():
+    from tools.list_terminals_tool import list_terminals_tool
+
+    result = json.loads(list_terminals_tool(callback=lambda: json.dumps({
+        "selected_terminal_id": "proc-a",
+        "terminals": [
+            {"terminal_id": "proc-a", "status": "running", "selected": True},
+            {"terminal_id": "proc-b", "status": "running", "selected": False},
+        ],
+    })))
+    assert result["selected_terminal_id"] == "proc-a"
+    assert [terminal["status"] for terminal in result["terminals"]] == ["running", "running"]
+    assert [terminal["selected"] for terminal in result["terminals"]] == [True, False]
+
+
+def test_write_terminal_tool_submits_to_exact_terminal():
+    from tools.write_terminal_tool import write_terminal_tool
+
+    seen = {}
+
+    def callback(terminal_id, data, reveal):
+        seen.update(terminal_id=terminal_id, data=data, reveal=reveal)
+        return json.dumps({"ok": True, "terminal_id": terminal_id})
+
+    result = json.loads(write_terminal_tool(
+        "proc-a", "pwd", submit=True, reveal=False, callback=callback,
+    ))
+    assert seen == {"terminal_id": "proc-a", "data": "pwd\r", "reveal": False}
+    assert result == {"ok": True, "terminal_id": "proc-a"}
+
+
+def test_write_terminal_tool_surfaces_renderer_rejection():
+    from tools.write_terminal_tool import write_terminal_tool
+
+    result = json.loads(write_terminal_tool(
+        "proc-a",
+        "pwd",
+        callback=lambda *_args: json.dumps({"ok": False, "error": "user is typing"}),
+    ))
+    assert result["error"] == "user is typing"
+
+
 def test_reader_loop_streams_incremental_chunks(registry, monkeypatch):
     class FakeBuffer:
         def __init__(self):

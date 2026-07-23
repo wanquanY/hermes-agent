@@ -90,6 +90,43 @@ class TestSetupLogging:
         assert len(error_handlers) == 1
         assert error_handlers[0].level == logging.WARNING
 
+    def test_run_worker_never_opens_shared_rotating_logs(self, hermes_home):
+        """Run workers forward records; only the sidecar owns log files."""
+        with patch("tui_gateway.process_role.IS_WORKER_PROCESS", True):
+            log_dir = hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        assert log_dir == hermes_home / "logs"
+        assert not log_dir.exists()
+        assert not any(
+            isinstance(handler, RotatingFileHandler)
+            for handler in logging.getLogger().handlers
+        )
+        assert any(
+            getattr(handler, "_hermes_worker_fallback", False)
+            for handler in logging.getLogger().handlers
+        )
+
+    def test_run_worker_uses_forwarder_without_stderr_fallback(self, hermes_home):
+        forwarder = logging.NullHandler()
+        forwarder._hermes_worker_forwarder = True
+        logging.getLogger().addHandler(forwarder)
+
+        with patch("tui_gateway.process_role.IS_WORKER_PROCESS", True):
+            hermes_logging.setup_logging(
+                hermes_home=hermes_home,
+                log_level="DEBUG",
+            )
+
+        assert forwarder.level == logging.DEBUG
+        assert not any(
+            getattr(handler, "_hermes_worker_fallback", False)
+            for handler in logging.getLogger().handlers
+        )
+        assert not any(
+            isinstance(handler, RotatingFileHandler)
+            for handler in logging.getLogger().handlers
+        )
+
     def test_idempotent_no_duplicate_handlers(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
         hermes_logging.setup_logging(hermes_home=hermes_home)  # second call — should be no-op

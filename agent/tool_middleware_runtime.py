@@ -221,13 +221,30 @@ def _dispatch_agent_tool(
             choices=function_args.get("choices"),
             callback=agent.clarify_callback,
         )
+    if function_name == "list_terminals":
+        from tools.list_terminals_tool import list_terminals_tool
+
+        return list_terminals_tool(
+            callback=getattr(agent, "list_terminals_callback", None),
+        )
     if function_name == "read_terminal":
         from tools.read_terminal_tool import read_terminal_tool
 
         return read_terminal_tool(
+            terminal_id=function_args.get("terminal_id"),
             start_line=function_args.get("start_line"),
             count=function_args.get("count"),
             callback=getattr(agent, "read_terminal_callback", None),
+        )
+    if function_name == "write_terminal":
+        from tools.write_terminal_tool import write_terminal_tool
+
+        return write_terminal_tool(
+            terminal_id=function_args.get("terminal_id", ""),
+            input_text=function_args.get("input", ""),
+            submit=function_args.get("submit", True) is not False,
+            reveal=function_args.get("reveal", True) is not False,
+            callback=getattr(agent, "write_terminal_callback", None),
         )
     if function_name == "delegate_task":
         return agent._dispatch_delegate_task(function_args, tool_call_id=tool_call_id)

@@ -174,6 +174,93 @@ async def test_publish_hook_emits_event_and_preserves_original(fake_run_control)
 
 
 @pytest.mark.asyncio
+async def test_terminal_read_event_registers_transient_worker_owner(fake_run_control) -> None:
+    mod, original_calls = fake_run_control
+    sink = _Sink()
+    loop = asyncio.get_running_loop()
+    bridge = WorkerPublishBridge(emit=sink.emit, loop=loop)
+    bridge.install(conversation_session_id="conversation-1")
+    try:
+        mod.publish_recorded_event(
+            {
+                "type": "terminal.read.request",
+                "session_id": "runtime-1",
+                "payload": {"request_id": "terminal-read-1", "start": 2, "count": 8},
+            }
+        )
+        await asyncio.sleep(0.05)
+    finally:
+        bridge.uninstall()
+
+    assert original_calls == [
+        {
+            "type": "terminal.read.request",
+            "session_id": "runtime-1",
+            "payload": {"request_id": "terminal-read-1", "start": 2, "count": 8},
+        }
+    ]
+    routes = [frame for frame in sink.frames if isinstance(frame, InteractiveRequestFrame)]
+    assert len(routes) == 1
+    assert routes[0].kind == "terminal_read"
+    assert routes[0].request_id == "terminal-read-1"
+    assert routes[0].conversation_session_id == "conversation-1"
+    assert routes[0].payload["start"] == 2
+    assert routes[0].payload["count"] == 8
+    terminal_events = [
+        frame for frame in sink.frames
+        if isinstance(frame, EventFrame) and frame.params.get("type") == "terminal.read.request"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].params["conversation_session_id"] == "conversation-1"
+    assert sink.frames.index(routes[0]) < sink.frames.index(terminal_events[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type,expected_kind,payload",
+    [
+        ("terminal.list.request", "terminal_list", {"request_id": "terminal-list-1"}),
+        (
+            "terminal.write.request",
+            "terminal_write",
+            {"request_id": "terminal-write-1", "terminal_id": "proc-a", "data": "pwd\r"},
+        ),
+    ],
+)
+async def test_terminal_workspace_event_registers_transient_worker_owner(
+    fake_run_control,
+    event_type,
+    expected_kind,
+    payload,
+) -> None:
+    mod, _original_calls = fake_run_control
+    sink = _Sink()
+    bridge = WorkerPublishBridge(emit=sink.emit, loop=asyncio.get_running_loop())
+    bridge.install(conversation_session_id="conversation-1")
+    try:
+        mod.publish_recorded_event({
+            "type": event_type,
+            "session_id": "runtime-1",
+            "payload": payload,
+        })
+        await asyncio.sleep(0.05)
+    finally:
+        bridge.uninstall()
+
+    routes = [frame for frame in sink.frames if isinstance(frame, InteractiveRequestFrame)]
+    assert len(routes) == 1
+    assert routes[0].kind == expected_kind
+    assert routes[0].request_id == payload["request_id"]
+    assert routes[0].conversation_session_id == "conversation-1"
+    events = [
+        frame for frame in sink.frames
+        if isinstance(frame, EventFrame) and frame.params.get("type") == event_type
+    ]
+    assert len(events) == 1
+    assert sink.frames.index(routes[0]) < sink.frames.index(events[0])
+
+
+@pytest.mark.asyncio
 async def test_publish_hook_stamps_canonical_conversation_and_execution_identity(fake_run_control) -> None:
     mod, original_calls = fake_run_control
     sink = _Sink()

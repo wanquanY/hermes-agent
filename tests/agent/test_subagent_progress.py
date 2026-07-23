@@ -74,6 +74,39 @@ class TestPrintAbove:
 class TestBuildChildProgressCallback:
     """Tests for child progress callback builder."""
 
+    def test_persisted_execution_identity_overrides_parent_turn_origin(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent._hermes_active_run_id = "run-parent"
+        parent._hermes_active_turn_id = "turn-parent"
+        parent._hermes_active_activity_id = "activity-parent"
+        parent.tool_progress_callback = MagicMock()
+
+        callback = _build_child_progress_callback(
+            0,
+            "inspect repository",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+        callback._bind_execution_identity(
+            activity_id="activity-child",
+            delegation_activity_id="activity-dispatch",
+            owner_activity_id="activity-parent",
+        )
+        callback("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        event = parent.tool_progress_callback.call_args
+        assert event.args[:4] == (
+            "subagent.tool",
+            "terminal",
+            "pwd",
+            {"command": "pwd"},
+        )
+        assert event.kwargs["activity_id"] == "activity-child"
+        assert event.kwargs["delegation_activity_id"] == "activity-dispatch"
+        assert event.kwargs["owner_activity_id"] == "activity-parent"
+
     def test_returns_none_when_no_display(self):
         """Should return None when parent has no spinner or callback."""
         parent = MagicMock()
@@ -173,7 +206,7 @@ class TestBuildChildProgressCallback:
             subagent_id="subagent-1",
             delegate_call_id="delegate-1",
         )
-        with caplog.at_level(logging.INFO, logger="tools.delegate_tool"):
+        with caplog.at_level(logging.INFO, logger="tools.delegation_tracing"):
             cb("tool.started", "terminal", "pwd", {"command": "pwd"})
 
         parent.tool_progress_callback.assert_called_once()

@@ -47,6 +47,9 @@ from utils import base_url_host_matches, base_url_hostname, env_var_enabled, ato
 logger = logging.getLogger(__name__)
 
 
+_OPENAI_WIRE_API_MODES = frozenset({"chat_completions", "codex_responses"})
+
+
 def _ra():
     """Lazy ``run_agent`` reference for test-patch routing."""
     import run_agent
@@ -78,6 +81,55 @@ def refresh_reasoning_config(agent, model: str | None = None) -> bool:
         )
         return False
 
+
+def switch_openai_wire_api_mode(agent, api_mode: str) -> bool:
+    """Rebind an OpenAI-compatible agent between Chat and Responses.
+
+    Both modes use the same OpenAI SDK client and credentials; their transport
+    owns the request/stream/tool shape.  Rebuilding the whole agent (or calling
+    ``switch_model`` with the same model) would also reset unrelated model and
+    fallback state, so protocol selection has a deliberately smaller owner.
+
+    Native Anthropic/Bedrock and Codex app-server runtimes are different
+    execution families and must never be crossed by a catalog wire-format
+    descriptor.
+    """
+    target = str(api_mode or "").strip().lower()
+    if target not in _OPENAI_WIRE_API_MODES:
+        raise ValueError(f"unsupported OpenAI wire api_mode: {api_mode}")
+
+    current = str(getattr(agent, "api_mode", "") or "").strip().lower()
+    if current == target:
+        return False
+    if current not in _OPENAI_WIRE_API_MODES:
+        raise ValueError(
+            "model api_format cannot replace non-OpenAI runtime "
+            f"api_mode {current or '<unset>'} with {target}"
+        )
+
+    agent.api_mode = target
+    transport_cache = getattr(agent, "_transport_cache", None)
+    if hasattr(transport_cache, "clear"):
+        transport_cache.clear()
+
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is not None and hasattr(compressor, "api_mode"):
+        compressor.api_mode = target
+
+    primary_runtime = getattr(agent, "_primary_runtime", None)
+    if isinstance(primary_runtime, dict):
+        primary_runtime["api_mode"] = target
+
+    # Responses-only replay state must not leak into a later Chat turn, while
+    # re-entering Responses should start from the safe default policy.
+    if target == "chat_completions":
+        if hasattr(agent, "_codex_incomplete_retries"):
+            agent._codex_incomplete_retries = 0
+    else:
+        agent._codex_reasoning_replay_enabled = True
+        if hasattr(agent, "_codex_incomplete_retries"):
+            agent._codex_incomplete_retries = 0
+    return True
 
 
 def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:

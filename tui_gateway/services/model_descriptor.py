@@ -14,6 +14,76 @@ _RESERVED_REQUEST_PARAM_KEYS = {
     "tools",
 }
 
+_MODEL_API_FORMAT_TO_HERMES_API_MODE = {
+    "openai": "chat_completions",
+    "openai_responses": "codex_responses",
+    "codex_responses": "codex_responses",
+}
+_EXECUTOR_OWNED_API_MODES = frozenset({"codex_app_server"})
+
+
+def model_descriptor_api_mode(raw: object) -> str:
+    """Resolve a catalog wire format to Hermes' transport name.
+
+    The catalog owns protocol selection. Unknown/native formats intentionally
+    return an empty value so their provider runtime keeps authority until a
+    dedicated Hermes transport exists for that protocol.
+    """
+    if not isinstance(raw, dict):
+        return ""
+    api_format = str(raw.get("api_format") or "").strip().lower()
+    return _MODEL_API_FORMAT_TO_HERMES_API_MODE.get(api_format, "")
+
+
+def _clear_descriptor_api_mode_tracking(agent: Any) -> None:
+    setattr(agent, "_model_descriptor_api_mode_base", "")
+    setattr(agent, "_model_descriptor_api_mode_applied", "")
+
+
+def _restore_descriptor_api_mode(agent: Any) -> None:
+    """Restore the provider runtime mode shadowed by the last descriptor."""
+    applied = str(
+        getattr(agent, "_model_descriptor_api_mode_applied", "") or ""
+    ).strip()
+    base = str(
+        getattr(agent, "_model_descriptor_api_mode_base", "") or ""
+    ).strip()
+    current = str(getattr(agent, "api_mode", "") or "").strip()
+    _clear_descriptor_api_mode_tracking(agent)
+    if not applied or not base or current != applied or current == base:
+        return
+    from agent.agent_runtime_helpers import switch_openai_wire_api_mode
+
+    switch_openai_wire_api_mode(agent, base)
+
+
+def _apply_descriptor_api_mode(agent: Any, descriptor: dict[str, Any]) -> None:
+    if agent is None:
+        return
+    target = model_descriptor_api_mode(descriptor)
+    current = str(getattr(agent, "api_mode", "") or "").strip().lower()
+    if current in _EXECUTOR_OWNED_API_MODES:
+        return
+
+    applied = str(
+        getattr(agent, "_model_descriptor_api_mode_applied", "") or ""
+    ).strip()
+    if target and current == target and applied == target:
+        return
+
+    _restore_descriptor_api_mode(agent)
+    if not target:
+        return
+
+    current = str(getattr(agent, "api_mode", "") or "").strip().lower()
+    if current == target:
+        return
+    from agent.agent_runtime_helpers import switch_openai_wire_api_mode
+
+    switch_openai_wire_api_mode(agent, target)
+    setattr(agent, "_model_descriptor_api_mode_base", current)
+    setattr(agent, "_model_descriptor_api_mode_applied", target)
+
 
 def _apply_descriptor_context_window(agent: Any, context_window: Any) -> None:
     """Calibrate the context compressor to the model's admin-configured window.
@@ -102,19 +172,32 @@ def _restore_descriptor_request_overrides(agent: Any) -> dict[str, Any]:
     return overrides
 
 
-def _descriptor_request_overrides(descriptor: dict[str, Any]) -> dict[str, Any]:
+def _descriptor_request_overrides(
+    descriptor: dict[str, Any],
+    *,
+    api_mode: str = "",
+) -> dict[str, Any]:
     """Build the trusted per-model request layer for the active selection.
 
     Dovie's LLM proxy accepts ``reasoning_effort`` as a stable product-level
-    selector and converts it to the resolved provider's native request shape.
+    selector on the Chat Completions route.  Responses requests instead get
+    their canonical ``reasoning.effort`` object from ``agent.reasoning_config``;
+    forwarding the Chat alias as well creates an invalid mixed-protocol body.
     The catalog's ``request_params`` contains other registry-approved top-level
-    parameters.  Core chat identity fields remain owned by Hermes and are never
+    parameters. Core chat identity fields remain owned by Hermes and are never
     accepted from the descriptor.
     """
     request_params = descriptor.get("request_params")
     overrides = dict(request_params) if isinstance(request_params, dict) else {}
     for key in _RESERVED_REQUEST_PARAM_KEYS:
         overrides.pop(key, None)
+
+    resolved_api_mode = (
+        str(api_mode or model_descriptor_api_mode(descriptor)).strip().lower()
+    )
+    if resolved_api_mode == "codex_responses":
+        overrides.pop("reasoning_effort", None)
+        return overrides
 
     effort = str(descriptor.get("reasoning_effort") or "").strip().lower()
     supported = descriptor.get("reasoning_efforts")
@@ -137,11 +220,24 @@ def _apply_descriptor_request_overrides(agent: Any, descriptor: dict[str, Any]) 
     if agent is None:
         return
     overrides = _restore_descriptor_request_overrides(agent)
-    descriptor_overrides = _descriptor_request_overrides(descriptor)
+    api_mode = str(getattr(agent, "api_mode", "") or "").strip().lower()
+    descriptor_overrides = _descriptor_request_overrides(
+        descriptor,
+        api_mode=api_mode,
+    )
+    masked_keys: set[str] = set()
+    if api_mode == "codex_responses":
+        # A previous Chat model or session setting may have left the alias in
+        # request_overrides. Shadow it while Responses owns the wire contract,
+        # then restore it if the descriptor is later cleared or switched back.
+        masked_keys.add("reasoning_effort")
     shadowed: dict[str, tuple[bool, Any]] = {}
-    for key, value in descriptor_overrides.items():
+    for key in descriptor_overrides.keys() | masked_keys:
         shadowed[key] = (key in overrides, overrides.get(key))
-        overrides[key] = value
+        if key in descriptor_overrides:
+            overrides[key] = descriptor_overrides[key]
+        else:
+            overrides.pop(key, None)
     setattr(agent, "request_overrides", overrides)
     setattr(agent, "_model_descriptor_request_override_shadow", shadowed)
 
@@ -228,6 +324,7 @@ def set_session_model_descriptor(
         session["model_descriptor"] = normalized
         if agent is not None:
             setattr(agent, "model_descriptor", normalized)
+            _apply_descriptor_api_mode(agent, normalized)
             _apply_descriptor_context_window(agent, normalized.get("context_window"))
             _apply_descriptor_reasoning_config(agent, normalized)
             _apply_descriptor_request_overrides(agent, normalized)
@@ -239,6 +336,7 @@ def set_session_model_descriptor(
     if clear_if_empty:
         session.pop("model_descriptor", None)
         if agent is not None:
+            _restore_descriptor_api_mode(agent)
             if hasattr(agent, "model_descriptor"):
                 setattr(agent, "model_descriptor", {})
             setattr(

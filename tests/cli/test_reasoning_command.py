@@ -551,7 +551,7 @@ class TestConfigDefault(unittest.TestCase):
         from hermes_cli.config import DEFAULT_CONFIG
         display = DEFAULT_CONFIG.get("display", {})
         self.assertIn("show_reasoning", display)
-        self.assertFalse(display["show_reasoning"])
+        self.assertTrue(display["show_reasoning"])
 
 
 class TestCommandRegistered(unittest.TestCase):

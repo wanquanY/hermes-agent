@@ -130,6 +130,18 @@ class TestGetTimezone:
         assert tz is None
 
 
+def test_timezone_resolution_uses_shared_raw_config_cache(monkeypatch):
+    monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+
+    with patch(
+        "hermes_cli.config.read_raw_config",
+        return_value={"timezone": "Asia/Tokyo"},
+    ) as read_raw_config:
+        assert hermes_time._resolve_timezone_name() == "Asia/Tokyo"
+
+    read_raw_config.assert_called_once_with()
+
+
 
 # =========================================================================
 # execute_code child env — TZ injection

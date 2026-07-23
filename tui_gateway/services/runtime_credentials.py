@@ -55,10 +55,19 @@ def ensure_agent_runtime_current(
         requested=requested_provider,
         target_model=model or None,
     )
+    from tui_gateway.services.model_descriptor import model_descriptor_api_mode
+
     next_provider = runtime.get("provider")
     next_base_url = runtime.get("base_url")
     next_api_key = runtime.get("api_key")
-    next_api_mode = runtime.get("api_mode")
+    # Credentials remain provider-owned, but the authenticated model catalog
+    # owns the wire protocol for the selected model. This prevents a token
+    # refresh from silently downgrading a Responses model back to the
+    # provider's compatibility default (usually chat_completions).
+    next_api_mode = (
+        model_descriptor_api_mode(session.get("model_descriptor"))
+        or runtime.get("api_mode")
+    )
     changed = (
         getattr(agent, "provider", None) != next_provider
         or getattr(agent, "base_url", None) != next_base_url
@@ -87,5 +96,12 @@ def ensure_agent_runtime_current(
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     if runtime.get("credential_pool") is not None:
         agent._credential_pool = runtime.get("credential_pool")
+    descriptor = session.get("model_descriptor")
+    if isinstance(descriptor, dict) and descriptor:
+        # switch_model refreshes model-derived defaults; replay the descriptor
+        # so registry reasoning/request settings remain authoritative too.
+        from tui_gateway.services.model_descriptor import set_session_model_descriptor
+
+        set_session_model_descriptor(session, descriptor)
     emit_session_info(sid, agent)
     return True

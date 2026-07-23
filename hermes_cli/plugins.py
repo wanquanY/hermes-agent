@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
+from dovie_extension.capability_policy import is_managed_dovie_runtime
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled
 from hermes_cli.config import cfg_get
@@ -955,6 +956,17 @@ class PluginManager:
                 loaded.error = "disabled via config"
                 self._plugins[lookup_key] = loaded
                 logger.debug("Skipping disabled plugin '%s'", lookup_key)
+                continue
+
+            # Dovie owns its desktop Plugin catalog. Hermes bundled Plugins
+            # remain available to Hermes CLI users, but are never imported in
+            # a Dovie-managed gateway/profile process even if old config still
+            # contains an enable token.
+            if manifest.source == "bundled" and is_managed_dovie_runtime():
+                loaded = LoadedPlugin(manifest=manifest, enabled=False)
+                loaded.error = "retired from the Dovie capability catalog"
+                self._plugins[lookup_key] = loaded
+                logger.debug("Skipping Hermes bundled plugin for Dovie: '%s'", lookup_key)
                 continue
 
             # Exclusive plugins (memory providers) have their own

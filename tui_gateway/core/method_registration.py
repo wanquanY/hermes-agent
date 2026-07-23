@@ -51,6 +51,7 @@ MODULES = (
     "voice",
     "insights_rollback",
     "integrations",
+    "dovie_capabilities",
     "shell",
     "workspace_artifacts",
 )

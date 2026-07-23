@@ -554,7 +554,7 @@ def _(rid, params: dict) -> dict:
             effort = "none" if raw_effort is False else str(raw_effort or "medium")
         display = (
             "show"
-            if bool((cfg.get("display") or {}).get("show_reasoning", False))
+            if bool((cfg.get("display") or {}).get("show_reasoning", True))
             else "hide"
         )
         return _ok(rid, {"value": effort, "display": display})

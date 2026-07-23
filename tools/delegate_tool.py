@@ -687,6 +687,35 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return _strip_blocked_toolsets(toolsets)
 
 
+def _bind_child_execution_identity(
+    child: Any,
+    *,
+    activity_id: str,
+    delegation_activity_id: str,
+    owner_activity_id: str,
+) -> None:
+    """Bind persisted execution identity to every child event producer.
+
+    Child callbacks are constructed before ``SubagentExecutionService`` creates
+    the authoritative Activity graph.  Keeping this explicit binding seam makes
+    the later stream events converge on that graph instead of inheriting the
+    parent's mutable turn identity.
+    """
+    for attribute in (
+        "tool_progress_callback",
+        "stream_delta_callback",
+        "reasoning_callback",
+    ):
+        callback = getattr(child, attribute, None)
+        binder = getattr(callback, "_bind_execution_identity", None)
+        if callable(binder):
+            binder(
+                activity_id=activity_id,
+                delegation_activity_id=delegation_activity_id,
+                owner_activity_id=owner_activity_id,
+            )
+
+
 def _build_child_progress_callback(
     task_index: int,
     goal: str,
@@ -743,6 +772,7 @@ def _build_child_progress_callback(
         else ""
     )
     parent_event_origin = _capture_parent_event_origin(parent_agent)
+    execution_identity: Dict[str, str] = {}
 
     # Gateway: batch tool names, flush periodically
     _BATCH_SIZE = 5
@@ -754,6 +784,7 @@ def _build_child_progress_callback(
     def _identity_kwargs(*, include_descriptor: bool = False) -> Dict[str, Any]:
         kw: Dict[str, Any] = {
             **parent_event_origin,
+            **execution_identity,
             "task_index": task_index,
             "task_count": task_count,
         }
@@ -968,7 +999,20 @@ def _build_child_progress_callback(
             _relay("subagent.progress", preview=f"🔀 {prefix}{summary}")
             _batch.clear()
 
+    def _bind_execution_identity(**identity: Any) -> None:
+        execution_identity.clear()
+        execution_identity.update({
+            key: str(identity.get(key) or "").strip()
+            for key in (
+                "activity_id",
+                "delegation_activity_id",
+                "owner_activity_id",
+            )
+            if str(identity.get(key) or "").strip()
+        })
+
     _callback._flush = _flush
+    _callback._bind_execution_identity = _bind_execution_identity
     return _callback
 
 
@@ -1005,10 +1049,12 @@ def _build_child_output_delta_callback(
     raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
     tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
     parent_event_origin = _capture_parent_event_origin(parent_agent)
+    execution_identity: Dict[str, str] = {}
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
             **parent_event_origin,
+            **execution_identity,
             "task_index": task_index,
             "task_count": task_count,
             "tool_count": 0,
@@ -1064,6 +1110,19 @@ def _build_child_output_delta_callback(
         except Exception as exc:
             logger.debug("Parent output-delta callback failed: %s", exc)
 
+    def _bind_execution_identity(**identity: Any) -> None:
+        execution_identity.clear()
+        execution_identity.update({
+            key: str(identity.get(key) or "").strip()
+            for key in (
+                "activity_id",
+                "delegation_activity_id",
+                "owner_activity_id",
+            )
+            if str(identity.get(key) or "").strip()
+        })
+
+    _callback._bind_execution_identity = _bind_execution_identity
     return _callback
 
 
@@ -1097,10 +1156,12 @@ def _build_child_reasoning_delta_callback(
     raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
     tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
     parent_event_origin = _capture_parent_event_origin(parent_agent)
+    execution_identity: Dict[str, str] = {}
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
             **parent_event_origin,
+            **execution_identity,
             "task_index": task_index,
             "task_count": task_count,
             "tool_count": 0,
@@ -1157,6 +1218,19 @@ def _build_child_reasoning_delta_callback(
         except Exception as exc:
             logger.debug("Parent reasoning-delta callback failed: %s", exc)
 
+    def _bind_execution_identity(**identity: Any) -> None:
+        execution_identity.clear()
+        execution_identity.update({
+            key: str(identity.get(key) or "").strip()
+            for key in (
+                "activity_id",
+                "delegation_activity_id",
+                "owner_activity_id",
+            )
+            if str(identity.get(key) or "").strip()
+        })
+
+    _callback._bind_execution_identity = _bind_execution_identity
     return _callback
 
 
@@ -1820,6 +1894,14 @@ def delegate_task(
         finalize_unstarted_transcripts("rejected", str(exc))
         return tool_error(str(exc))
 
+    for execution, (_index, _task, child) in zip(plan.children, children):
+        _bind_child_execution_identity(
+            child,
+            activity_id=execution.activity_id,
+            delegation_activity_id=plan.activity_id,
+            owner_activity_id=plan.parent_activity_id,
+        )
+
     if parent_context is not None:
         try:
             from dataclasses import replace as dataclass_replace
@@ -1876,7 +1958,8 @@ def delegate_task(
     if resolved_mode is ExecutionMode.SYNC:
         service.start(plan)
         combined = execute_and_finalize(async_mode=False)
-        service.complete(plan, combined)
+        terminal_status = service.complete(plan, combined)
+        combined.update(plan.handle(status=terminal_status))
         return json.dumps(combined, ensure_ascii=False)
 
     _detach_async_children(parent_agent, children)

@@ -1224,6 +1224,26 @@ def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
     assert function_output["call_id"] == "call_1"
 
 
+def test_run_conversation_persists_stream_only_responses_reasoning(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    def _fake_api_call(api_kwargs):
+        agent._fire_reasoning_delta("reasoning emitted only by the stream")
+        return _codex_message_response("done")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+
+    result = agent.run_conversation("answer with reasoning")
+
+    assistant = next(
+        message
+        for message in result["messages"]
+        if message.get("role") == "assistant" and message.get("content") == "done"
+    )
+    assert assistant["reasoning"] == "reasoning emitted only by the stream"
+    assert assistant["reasoning_content"] == "reasoning emitted only by the stream"
+
+
 def test_run_conversation_codex_continues_after_incomplete_interim_message(monkeypatch):
     agent = _build_agent(monkeypatch)
     responses = [

@@ -265,6 +265,18 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
 def main():
     _install_sidecar_publisher()
 
+    # Dovie owns the desktop capability catalog. Retire legacy Hermes product
+    # entries before MCP discovery reads config, otherwise removed servers can
+    # still leak their tools into the first agent snapshot for this process.
+    try:
+        from dovie_extension.capability_policy import (
+            reconcile_managed_dovie_runtime,
+        )
+
+        reconcile_managed_dovie_runtime()
+    except Exception:
+        logger.warning("Dovie capability ownership reconciliation failed", exc_info=True)
+
     # Discovery is process-wide, non-blocking, and OAuth-noninteractive. The
     # first agent build performs a bounded rendezvous; slower servers are
     # incorporated by the late-refresh path without delaying gateway.ready.

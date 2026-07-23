@@ -335,6 +335,17 @@ def _clear_tool_defs_cache() -> None:
     _tool_defs_cache.clear()
 
 
+def invalidate_tool_definitions_cache() -> None:
+    """Invalidate the public tool-definition cache after runtime policy changes.
+
+    Runtime capabilities can change a tool ``check_fn`` result without changing
+    the registry generation or the on-disk config fingerprint.  Gateway owners
+    must call this stable public API together with the registry check cache so
+    the next model turn observes the new tool surface immediately.
+    """
+    _clear_tool_defs_cache()
+
+
 def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,

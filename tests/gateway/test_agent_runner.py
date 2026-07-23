@@ -25,7 +25,9 @@ import pytest
 from tui_gateway.run_worker import RunStartFrame
 from tui_gateway.services.agent_runner import (
     _NoopTransport,
+    _clear_runtime_capabilities,
     _ensure_worker_session,
+    _import_runtime_capabilities,
     setup_worker_environment,
 )
 from hermes_team_mission.domain.run_context import RunContext
@@ -84,6 +86,56 @@ def test_run_start_frame_carries_all_fields_for_runner() -> None:
     assert frame.run_id
     assert frame.turn_id
     assert isinstance(frame.params, dict)
+
+
+def test_worker_imports_and_clears_runtime_capability() -> None:
+    from agent_capabilities.credentials import capability_credentials
+
+    conversation_id = "20260721_120000_taskhub"
+    imported = _import_runtime_capabilities(
+        [{
+            "capability": "dovie.task_hub_assistant@1",
+            "token": "worker-secret",
+            "api_origin": "https://api.example.com",
+            "conversation_id": conversation_id,
+            "execution_participant_id": "agent-default",
+            "expires_at": 4_000_000_000.0,
+        }],
+        conversation_session_id=conversation_id,
+    )
+    try:
+        credential = capability_credentials.resolve(
+            capability="dovie.task_hub_assistant@1",
+            conversation_id=conversation_id,
+        )
+        assert credential.token == "worker-secret"
+        assert imported == ["dovie.task_hub_assistant@1"]
+        from model_tools import get_tool_definitions
+
+        names = {
+            tool["function"]["name"]
+            for tool in get_tool_definitions(
+                enabled_toolsets=["dovie_task_hub"],
+                quiet_mode=True,
+            )
+        }
+        assert names == {
+            "task_hub_search",
+            "task_hub_get_details",
+            "task_hub_prepare_changes",
+            "task_hub_list_my_tasks",
+            "task_hub_open_source",
+        }
+    finally:
+        _clear_runtime_capabilities(
+            imported,
+            conversation_session_id=conversation_id,
+        )
+    with pytest.raises(RuntimeError, match="not configured"):
+        capability_credentials.resolve(
+            capability="dovie.task_hub_assistant@1",
+            conversation_id=conversation_id,
+        )
 
 
 def test_worker_session_defers_agent_build_until_prompt_submit(monkeypatch: pytest.MonkeyPatch) -> None:

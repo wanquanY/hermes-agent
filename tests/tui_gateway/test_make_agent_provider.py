@@ -253,6 +253,107 @@ def test_ensure_agent_runtime_current_keeps_current_session_credentials():
     agent.switch_model.assert_not_called()
 
 
+def test_runtime_credential_refresh_preserves_catalog_responses_protocol():
+    from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
+
+    class _Agent:
+        model = "gpt-5.5"
+        provider = "custom"
+        base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+        api_key = "token-a"
+        api_mode = "codex_responses"
+        _gateway_runtime_requested_provider = "dovie-cloud"
+
+    agent = _Agent()
+    session = {
+        "agent": agent,
+        "model_descriptor": {
+            "id": "gpt-5.5",
+            "api_format": "openai_responses",
+        },
+    }
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        "api_key": "token-a",
+        "api_mode": "chat_completions",
+        "requested_provider": "dovie-cloud",
+    }
+
+    with patch(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        return_value=fake_runtime,
+    ):
+        changed = ensure_agent_runtime_current(
+            sid="sid-responses",
+            session=session,
+            resolve_model=lambda: "gpt-5.5",
+            emit_session_info=lambda *_args: None,
+        )
+
+    assert changed is False
+    assert agent.api_mode == "codex_responses"
+
+
+def test_runtime_token_refresh_rebinds_credentials_without_downgrading_responses():
+    from tui_gateway.services.model_descriptor import set_session_model_descriptor
+    from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
+
+    class _Agent:
+        def __init__(self):
+            self.model = "gpt-5.5"
+            self.provider = "custom"
+            self.base_url = "http://127.0.0.1:8011/api/v1/llm-proxy/v1"
+            self.api_key = "token-a"
+            self.api_mode = "chat_completions"
+            self.reasoning_config = None
+            self.request_overrides = {}
+            self._transport_cache = {}
+            self._primary_runtime = {"api_mode": "chat_completions"}
+            self._gateway_runtime_requested_provider = "dovie-cloud"
+            self.switch_calls = []
+
+        def switch_model(self, **kwargs):
+            self.switch_calls.append(kwargs)
+            self.model = kwargs["new_model"]
+            self.provider = kwargs["new_provider"]
+            self.base_url = kwargs["base_url"]
+            self.api_key = kwargs["api_key"]
+            self.api_mode = kwargs["api_mode"]
+            self._primary_runtime["api_mode"] = self.api_mode
+
+    agent = _Agent()
+    session = {"agent": agent}
+    descriptor = {"id": "gpt-5.5", "api_format": "openai_responses"}
+    set_session_model_descriptor(session, descriptor)
+    fake_runtime = {
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8011/api/v1/llm-proxy/v1",
+        "api_key": "token-b",
+        "api_mode": "chat_completions",
+        "requested_provider": "dovie-cloud",
+    }
+
+    with patch(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        return_value=fake_runtime,
+    ):
+        changed = ensure_agent_runtime_current(
+            sid="sid-responses-refresh",
+            session=session,
+            resolve_model=lambda: "gpt-5.5",
+            emit_session_info=lambda *_args: None,
+        )
+
+    assert changed is True
+    assert agent.api_key == "token-b"
+    assert agent.api_mode == "codex_responses"
+    assert agent.switch_calls[0]["api_mode"] == "codex_responses"
+
+    set_session_model_descriptor(session, {}, clear_if_empty=True)
+    assert agent.api_mode == "chat_completions"
+
+
 def test_make_agent_ignores_display_personality_without_system_prompt():
     """The TUI matches the classic CLI: personality only becomes active once
     it has been saved to agent.system_prompt."""

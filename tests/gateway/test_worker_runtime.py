@@ -172,6 +172,76 @@ async def test_primary_dispatch_skips_non_submit_methods() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,request_id,answer,expected_kind",
+    [
+        (
+            "terminal.list.respond",
+            "terminal-list-1",
+            '{"terminals":[]}',
+            "terminal_list",
+        ),
+        (
+            "terminal.read.respond",
+            "terminal-read-1",
+            '{"text":"terminal output"}',
+            "terminal_read",
+        ),
+        (
+            "terminal.write.respond",
+            "terminal-write-1",
+            '{"ok":true}',
+            "terminal_write",
+        ),
+    ],
+)
+async def test_primary_dispatch_routes_terminal_response_to_owner(
+    monkeypatch,
+    method,
+    request_id,
+    answer,
+    expected_kind,
+) -> None:
+    transport = _RecordingTransport()
+    responded: list[tuple[str, str, str]] = []
+
+    class _Router:
+        def has_pending_request(self, request_id: str) -> bool:
+            return request_id == request_id_value
+
+        async def respond(self, request_id: str, answer: str, *, expected_kind: str) -> bool:
+            responded.append((request_id, answer, expected_kind))
+            return True
+
+    monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _Router())
+    request_id_value = request_id
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "respond-1",
+            "method": method,
+            "params": {
+                "request_id": request_id,
+                "text": answer,
+                "runtimeScopeKey": "profile:agent-default",
+                "agentProfileId": "agent-default",
+            },
+        },
+        transport,
+    )
+
+    assert handled is True
+    assert responded == [(request_id, answer, expected_kind)]
+    assert transport.written == [
+        {
+            "jsonrpc": "2.0",
+            "id": "respond-1",
+            "result": {"status": "ok", "source": "primary-run-worker"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_ensure_waits_for_real_warm_worker(monkeypatch) -> None:
     transport = _RecordingTransport()
     scope = RuntimeScope(
@@ -214,6 +284,82 @@ async def test_runtime_ensure_waits_for_real_warm_worker(monkeypatch) -> None:
     assert result["worker"]["warm"] is True
     assert result["worker"]["conversation_bound"] is False
     assert result["worker"]["bootstrap_ms"] == 321.0
+
+
+@pytest.mark.asyncio
+async def test_profile_mcp_reload_rebuilds_scoped_worker_generation(monkeypatch) -> None:
+    transport = _RecordingTransport()
+    scope = RuntimeScope(
+        agent_profile_id="test",
+        runtime_scope_key="profile:test",
+        hermes_home="/tmp/test-hermes-home",
+    )
+    worker = _fake_worker(scope)
+    worker.bootstrap_ms = 12.0
+    worker.bootstrap_stages_ms = {"mcp_tool_discovery": 8.0}
+    calls: list[tuple[str, object]] = []
+
+    class _FakePool:
+        async def invalidate_capability_scope(self, scope_key):
+            calls.append(("invalidate", scope_key))
+            return {
+                "generation": 3,
+                "retired_warm_workers": 1,
+                "retired_idle_workers": 2,
+                "deferred_active_workers": 0,
+            }
+
+        async def ensure_warm(self, profile_context, *, scope_key=None):
+            calls.append(("warm", (scope_key, profile_context["agent_profile_id"])))
+            return worker
+
+    monkeypatch.setattr(worker_runtime, "worker_pool", lambda: _FakePool())
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "reload-1",
+            "method": "reload.mcp",
+            "params": {
+                "confirm": True,
+                "agent_profile_id": "test",
+                "runtime_scope_key": "profile:test",
+                "dovie_profile": {
+                    "id": "test",
+                    "hermesHomePath": "/tmp/test-hermes-home",
+                },
+            },
+        },
+        transport,
+    )
+
+    assert handled is True
+    assert calls == [
+        ("invalidate", "profile:test"),
+        ("warm", ("profile:test", "test")),
+    ]
+    result = transport.written[0]["result"]
+    assert result["status"] == "reloaded"
+    assert result["runtime_generation"] == 3
+    assert result["worker"]["bootstrap_stages_ms"]["mcp_tool_discovery"] == 8.0
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_profile_mcp_reload_uses_confirmation_handler() -> None:
+    transport = _RecordingTransport()
+    handled = await worker_runtime.primary_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": "reload-1",
+            "method": "reload.mcp",
+            "params": {
+                "agent_profile_id": "test",
+                "runtime_scope_key": "profile:test",
+            },
+        },
+        transport,
+    )
+    assert handled is False
+    assert transport.written == []
 
 
 @pytest.mark.asyncio
@@ -348,6 +494,49 @@ async def test_primary_dispatch_sends_run_start_and_acks(monkeypatch) -> None:
     assert fake_router.starts[0]["conversation_session_id"] == "sess-1"
     # ack returned
     assert len(transport.written) == 1
+
+
+@pytest.mark.asyncio
+async def test_primary_dispatch_transfers_conversation_capabilities(monkeypatch) -> None:
+    from agent_capabilities.credentials import capability_credentials
+
+    transport = _RecordingTransport()
+    sent_frames: list = []
+
+    class _FakeSupervisor:
+        async def ensure(self, scope, env_overrides=None):
+            return _fake_worker(scope)
+
+        async def send(self, scope_key, conversation_id, frame):
+            sent_frames.append(frame)
+            return True
+
+    class _FakeRouter:
+        def record_run_start(self, **kwargs):
+            return None
+
+        def forget_run(self, run_id):
+            return None
+
+    monkeypatch.setattr(worker_runtime, "worker_supervisor", lambda: _FakeSupervisor())
+    monkeypatch.setattr(worker_runtime, "worker_frame_router", lambda: _FakeRouter())
+    monkeypatch.setattr(
+        capability_credentials,
+        "export_for_worker",
+        lambda *, conversation_id: [{
+            "capability": "dovie.task_hub_assistant@1",
+            "token": "secret",
+            "api_origin": "https://api.example.com",
+            "conversation_id": conversation_id,
+            "execution_participant_id": "agent-default",
+            "expires_at": 4_000_000_000.0,
+        }],
+    )
+
+    assert await worker_runtime.primary_dispatch(_scoped_prompt_submit(), transport) is True
+    envelope = sent_frames[0].params["_runtime_capability_credentials"]
+    assert envelope[0]["conversation_id"] == "sess-1"
+    assert envelope[0]["token"] == "secret"
     result = transport.written[0]["result"]
     assert result["status"] == "queued"
     assert result["source"] == "primary-run-worker"

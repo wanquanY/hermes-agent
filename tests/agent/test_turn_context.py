@@ -8,6 +8,7 @@ confirm the prologue produces the right ``TurnContext`` and applies the
 
 from __future__ import annotations
 
+import sys
 import types
 from unittest.mock import patch
 
@@ -228,6 +229,15 @@ def test_no_review_when_memory_disabled():
 # turn's cached request prefix. The prologue is exactly that boundary, so the
 # refresh hook lives here. These assert the contract (R1/R2/R6 in the spec),
 # not timing permutations.
+
+
+def test_no_mcp_turn_does_not_import_mcp_dependency_tree(monkeypatch):
+    agent = _FakeAgent()
+    monkeypatch.delitem(sys.modules, "tools.mcp_tool", raising=False)
+
+    _build(agent)
+
+    assert "tools.mcp_tool" not in sys.modules
 
 
 def test_between_turns_refresh_adds_late_tool_when_servers_registered():
