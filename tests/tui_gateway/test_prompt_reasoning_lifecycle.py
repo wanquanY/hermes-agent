@@ -167,6 +167,100 @@ def test_reasoning_segments_complete_in_order_across_tool_boundaries(monkeypatch
     assert complete_events[-1]["message_seq_in_run"] == 3
 
 
+def test_whitespace_only_reasoning_never_emits_or_owns_a_segment(monkeypatch):
+    class _Agent:
+        session_id = "session-key"
+        reasoning_callback = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            **_kwargs,
+        ):
+            callbacks = server._agent_cbs("sid")
+            self.reasoning_callback(" ")
+            self.reasoning_callback("\n\t")
+            callbacks["tool_gen_callback"]("terminal")
+            callbacks["tool_start_callback"]("tool-blank", "terminal", {"command": "pwd"})
+            stream_callback("当前工作目录已确认。")
+            return {
+                "final_response": "当前工作目录已确认。",
+                "messages": [
+                    {"role": "user", "content": "检查目录"},
+                    {"role": "assistant", "content": "当前工作目录已确认。"},
+                ],
+            }
+
+    emitted = _submit_prompt(
+        monkeypatch,
+        _Agent(),
+        run_id="run-blank-reasoning",
+        turn_id="turn-blank-reasoning",
+    )
+
+    assert [
+        args for args in emitted if args[0] in {"reasoning.delta", "reasoning.available"}
+    ] == []
+    message_deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    assert message_deltas[-1]["client_message_id"] == (
+        "turn-blank-reasoning:assistant-segment:0"
+    )
+    assert message_deltas[-1]["message_seq_in_run"] == 1
+
+
+def test_reasoning_buffers_leading_whitespace_and_drops_blank_followup_segment(monkeypatch):
+    class _Agent:
+        session_id = "session-key"
+        reasoning_callback = None
+
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            **_kwargs,
+        ):
+            callbacks = server._agent_cbs("sid")
+            self.reasoning_callback(" ")
+            self.reasoning_callback("plan")
+            self.reasoning_callback(" ")
+            self.reasoning_callback("next")
+            callbacks["tool_start_callback"]("tool-1", "terminal", {"command": "date"})
+            self.reasoning_callback(" ")
+            stream_callback("完成。")
+            return {
+                "final_response": "完成。",
+                "messages": [
+                    {"role": "user", "content": "检查时间"},
+                    {"role": "assistant", "content": "完成。"},
+                ],
+            }
+
+    emitted = _submit_prompt(
+        monkeypatch,
+        _Agent(),
+        run_id="run-buffered-reasoning",
+        turn_id="turn-buffered-reasoning",
+    )
+
+    reasoning_deltas = [args[2] for args in emitted if args[0] == "reasoning.delta"]
+    assert [payload["delta"] for payload in reasoning_deltas] == [" plan", " ", "next"]
+    assert [payload["offset"] for payload in reasoning_deltas] == [0, 5, 6]
+    reasoning_completions = [
+        args[2] for args in emitted if args[0] == "reasoning.available"
+    ]
+    assert [payload["text"] for payload in reasoning_completions] == [" plan next"]
+    assert [payload["message_seq_in_run"] for payload in reasoning_completions] == [1]
+
+    message_deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    assert message_deltas[-1]["client_message_id"] == (
+        "turn-buffered-reasoning:assistant-segment:1"
+    )
+    assert message_deltas[-1]["message_seq_in_run"] == 2
+
+
 def test_interrupted_turn_completes_open_reasoning_before_message_terminal(monkeypatch):
     class _Agent:
         reasoning_callback = None

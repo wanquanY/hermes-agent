@@ -641,12 +641,25 @@ def _run_prompt_submit(
         current_reasoning = reasoning_text_by_message_seq.get(message_seq, "")
         next_reasoning = current_reasoning + incoming
         reasoning_text_by_message_seq[message_seq] = next_reasoning
+        # Responses-compatible providers may emit a whitespace-only reasoning
+        # summary for turns that have no user-visible reasoning. Keep that
+        # leading prefix buffered so later offsets remain exact, but do not
+        # publish a transcript item until the segment contains meaningful text.
+        if not next_reasoning.strip():
+            return
+        leading_prefix_buffered = not current_reasoning.strip()
+        emitted_delta = next_reasoning if leading_prefix_buffered else incoming
+        emitted_offset = (
+            0
+            if leading_prefix_buffered
+            else _MessageDeltaNormalizer._protocol_offset(current_reasoning)
+        )
         payload: dict[str, Any] = {
             "source": "provider_reasoning",
             "mode": "append",
-            "text": incoming,
-            "delta": incoming,
-            "offset": _MessageDeltaNormalizer._protocol_offset(current_reasoning),
+            "text": emitted_delta,
+            "delta": emitted_delta,
+            "offset": emitted_offset,
             "snapshot": next_reasoning,
             **identity,
         }
@@ -656,7 +669,12 @@ def _run_prompt_submit(
         identity = current_message_identity_payload()
         message_seq = str(identity.get("message_seq_in_run") or "")
         current_reasoning = reasoning_text_by_message_seq.get(message_seq, "")
-        if not current_reasoning or message_seq in completed_reasoning_message_seqs:
+        if not current_reasoning.strip():
+            # A whitespace-only provider summary never owned a visible
+            # assistant segment, so it must neither emit reasoning.available
+            # nor advance message_seq_in_run at a later tool boundary.
+            return ""
+        if message_seq in completed_reasoning_message_seqs:
             return current_reasoning
         _log_prompt_stage(
             session,
