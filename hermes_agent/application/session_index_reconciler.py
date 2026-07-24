@@ -96,8 +96,14 @@ class SessionIndexReconciler:
             f"""
             SELECT si.session_id
               FROM session_index si
-             WHERE si.active_run_id != ''
-               AND ({active_run_id_is_terminal})
+             WHERE (
+                    (si.active_run_id != '' AND ({active_run_id_is_terminal}))
+                    OR (
+                        si.waiting_approval = 1
+                        AND si.active_run_id = ''
+                        AND NOT ({active_run_exists})
+                    )
+               )
                AND NOT ({active_run_exists})
                AND (
                    si.conversation_kind != 'team'

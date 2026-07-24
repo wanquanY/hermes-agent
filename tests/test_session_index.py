@@ -891,6 +891,27 @@ def test_reconcile_clears_stale_waiting_approval_for_rejected_draft_mission(tmp_
     assert item["pending_approval_count"] == 0
 
 
+def test_reconcile_clears_stale_direct_waiting_state_without_active_run(tmp_path: Path):
+    db = open_cli_session_store(tmp_path / "state.db")
+    db.sessions.create(session_id="direct-stale-waiting", source="tui")
+    db.session_index.upsert(
+        session_id="direct-stale-waiting",
+        status="waiting_approval",
+        running=False,
+        waiting_approval=True,
+        pending_approval_count=1,
+        active_run_id="",
+    )
+
+    db.session_index.reconcile()
+
+    item = db.session_index.list()["sessions"][0]
+    assert item["status"] == "idle"
+    assert item["running"] is False
+    assert item["waiting_approval"] is False
+    assert item["pending_approval_count"] == 0
+
+
 def test_update_for_mission_not_running_clears_active_run_id(tmp_path: Path):
     db = open_cli_session_store(tmp_path / "state.db")
     db.session_index.upsert(

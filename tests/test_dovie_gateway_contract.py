@@ -418,6 +418,8 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         assert response["result"]["last_event_seq"] == run_events[-1]["seq"]
         assert response["result"]["lastEventSeq"] == response["result"]["last_event_seq"]
         assert response["result"]["projection"]["source"] == "conversation.render_snapshot"
+        assert response["result"]["runs"][0]["run_id"] == "run-1"
+        assert response["result"]["runs"][0]["status"] == "running"
 
         db.runs.terminate(
             run_id="run-1",
@@ -440,7 +442,86 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         ]
         assert len(completed_artifacts) == 1
         assert completed_artifacts[0]["payload"]["id"] == "artifact:launch-brief"
+        assert completed_response["result"]["runs"][0]["status"] == "completed"
         assert completed_response["result"]["last_event_seq"] > response["result"]["last_event_seq"]
+    finally:
+        db.close()
+
+
+def test_conversation_render_snapshot_preserves_cancelled_unmaterialized_tail(
+    tmp_path,
+    monkeypatch,
+):
+    import importlib
+
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module(
+        "tui_gateway.methods.conversation_render_snapshot"
+    )
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    db = open_cli_session_store(tmp_path / "state.db")
+    session_id = "stored-cancelled-tail-1"
+    run_id = "run-cancelled-tail-1"
+    turn_id = "turn-cancelled-tail-1"
+    try:
+        db.sessions.create(session_id=session_id, source="tui")
+        db.messages.append(
+            session_id,
+            role="user",
+            content="导出微信聊天记录",
+            participant_id="user",
+            metadata={"run_id": run_id, "turn_id": turn_id},
+        )
+        for event in (
+            {
+                "type": "message.interim",
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "payload": {
+                    "text": "我先确认你的导出目标：",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+            {
+                "type": "clarify.request",
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "payload": {
+                    "request_id": "clarify-cancelled-tail-1",
+                    "question": "请选择设备",
+                    "choices": ["iPhone", "Android"],
+                    "participant_id": "agent:agent-default",
+                },
+            },
+        ):
+            db.runs.append_event(session_id, event)
+        db.runs.terminate(
+            run_id=run_id,
+            session_id=session_id,
+            target_status="cancelled",
+            cause="worker_emitted",
+            turn_id=turn_id,
+        )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+
+        response = server._methods["conversation.render_snapshot"](
+            1,
+            {"session_id": session_id, "limit": 50},
+        )
+        result = response["result"]
+
+        assert result["runs"][0]["run_id"] == run_id
+        assert result["runs"][0]["status"] == "cancelled"
+        assert result["runs"][0]["terminal_seq"] == result["last_event_seq"]
+        assert [event["type"] for event in result["runEvents"]] == [
+            "message.interim",
+            "clarify.request",
+            "message.complete",
+        ]
+        assert result["runEvents"][-1]["payload"]["status"] == "cancelled"
     finally:
         db.close()
 

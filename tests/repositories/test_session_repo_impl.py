@@ -442,6 +442,50 @@ def test_project_run_state_marks_existing_session_index_running():
     }
 
 
+def test_project_terminal_run_clears_pending_interaction_state():
+    conn = _make_conn()
+    repo = SessionRepoImpl(conn)
+    repo.create(SessionSpec(session_id="s-terminal", source="test"))
+    conn.execute(
+        """
+        UPDATE session_index
+           SET status = 'waiting_approval', running = 0,
+               waiting_approval = 1, pending_approval_count = 1,
+               active_run_id = 'run-terminal',
+               active_execution_session_id = 'exec-terminal'
+         WHERE session_id = 's-terminal'
+        """
+    )
+
+    repo.project_run_state(
+        SessionRunProjection(
+            session_id="s-terminal",
+            run_id="run-terminal",
+            execution_session_id="exec-terminal",
+            runtime_scope_key="scope-terminal",
+            status="cancelled",
+            updated_at=200.0,
+        )
+    )
+
+    row = conn.execute(
+        """
+        SELECT status, running, waiting_approval, pending_approval_count,
+               active_run_id, active_execution_session_id
+          FROM session_index
+         WHERE session_id = 's-terminal'
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "status": "idle",
+        "running": 0,
+        "waiting_approval": 0,
+        "pending_approval_count": 0,
+        "active_run_id": "",
+        "active_execution_session_id": "",
+    }
+
+
 def test_project_run_state_updates_bound_team_conversation_index():
     conn = _make_conn()
     repo = SessionRepoImpl(conn)

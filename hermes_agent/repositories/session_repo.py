@@ -1704,6 +1704,7 @@ class SessionRepoImpl:
             f"""
             UPDATE session_index
                SET running = 0, status = 'idle',
+                   waiting_approval = 0, pending_approval_count = 0,
                    active_run_id = '', active_execution_session_id = '',
                    updated_at = MAX(updated_at, ?)
              WHERE session_id IN ({id_placeholders})

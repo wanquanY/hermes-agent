@@ -8,7 +8,7 @@ from typing import Any
 from hermes_team_mission.runtime.history import get_team_mission_node_runtime_history
 from hermes_team_mission.runtime.team_transcript_writer import main_transcript_message_decision
 from tui_gateway.methods._shared import bind_server_globals
-from tui_gateway.services import team_mission_activity_events
+from tui_gateway.services import run_control, team_mission_activity_events
 from tui_gateway.services.message_owner_projection import (
     MessageOwnerResolutionError,
     project_render_message_owners,
@@ -49,6 +49,7 @@ def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
 # envelope + WS framing).
 _RENDER_MAX_BYTES = 3_500_000
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 
 
 def _payload_byte_size(obj: Any) -> int:
@@ -62,6 +63,7 @@ def _ordinary_render_run_events(
     session_id: str,
     events: list[Any],
     messages: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     db = _get_db()
     active_run_id = ""
@@ -74,6 +76,7 @@ def _ordinary_render_run_events(
     return _filter_render_run_events(
         events,
         active_run_ids={active_run_id} if active_run_id else set(),
+        terminal_tail_run_ids=_unmaterialized_terminal_run_ids(runs, messages),
         messages=messages,
         include_completed_artifacts=True,
     )
@@ -82,6 +85,81 @@ def _ordinary_render_run_events(
 def _run_ids_from_render_messages(messages: list[dict[str, Any]]) -> list[str]:
     run_ids = sorted(item for item in _covered_render_run_ids(messages) if item)
     return run_ids
+
+
+def _canonical_snapshot_runs(
+    session_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    active_run_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return owner run state for the visible transcript window.
+
+    Messages establish which historic runs are in the requested page, while
+    ``active_run_ids`` keeps a just-started run visible before its first
+    transcript row lands. Run status must come from the run aggregate rather
+    than being reconstructed from message roles in a renderer.
+    """
+    visible_run_ids = _covered_render_run_ids(messages)
+    visible_run_ids.update(
+        _text(run_id) for run_id in (active_run_ids or set()) if _text(run_id)
+    )
+    if not session_id or not visible_run_ids:
+        return []
+    try:
+        candidates = run_control.list_runs(
+            session_id,
+            db=_get_db(),
+            limit=max(200, len(visible_run_ids)),
+        )
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot canonical runs hydrate skipped session_id=%s: %s",
+            session_id,
+            exc,
+        )
+        return []
+    return [
+        dict(run)
+        for run in candidates
+        if isinstance(run, dict) and _text(run.get("run_id")) in visible_run_ids
+    ]
+
+
+def _message_response_run_ids(messages: list[dict[str, Any]]) -> set[str]:
+    response_run_ids: set[str] = set()
+    for message in messages:
+        if _text(message.get("role")).lower() != "assistant":
+            continue
+        metadata = _message_metadata(message)
+        run_id = _text(metadata.get("run_id") or metadata.get("runId"))
+        if run_id:
+            response_run_ids.add(run_id)
+    return response_run_ids
+
+
+def _unmaterialized_terminal_run_ids(
+    runs: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> set[str]:
+    """Find terminal runs whose tail must remain recoverable from the ledger.
+
+    Successful runs are compacted once their assistant response is materialized
+    as transcript rows. Non-success terminal runs may stop between checkpoints
+    (including while an interaction is blocking), so their uncovered tail
+    remains authoritative even if an earlier assistant segment was persisted.
+    """
+    response_run_ids = _message_response_run_ids(messages)
+    return {
+        _text(run.get("run_id"))
+        for run in runs
+        if _text(run.get("run_id"))
+        and _text(run.get("status")).lower() in _TERMINAL_RUN_STATUSES
+        and (
+            _text(run.get("status")).lower() != "completed"
+            or _text(run.get("run_id")) not in response_run_ids
+        )
+    }
 
 
 def _mark_transport_truncated(result: dict[str, Any]) -> None:
@@ -941,13 +1019,21 @@ def _filter_render_run_events(
     run_events: list[Any],
     *,
     active_run_ids: set[str],
+    terminal_tail_run_ids: set[str] | None = None,
     messages: list[dict[str, Any]],
     include_completed_artifacts: bool,
 ) -> list[dict[str, Any]]:
     normalized_events = [dict(event) for event in run_events if isinstance(event, dict)]
     active_run_ids = {_text(run_id) for run_id in active_run_ids if _text(run_id)}
+    terminal_tail_run_ids = {
+        _text(run_id) for run_id in (terminal_tail_run_ids or set()) if _text(run_id)
+    }
     covered_run_ids = _covered_render_run_ids(messages)
-    if not active_run_ids and not (include_completed_artifacts and covered_run_ids):
+    if (
+        not active_run_ids
+        and not terminal_tail_run_ids
+        and not (include_completed_artifacts and covered_run_ids)
+    ):
         return []
     covered_facts = _covered_render_facts(messages)
     segment_by_turn: dict[str, int] = {}
@@ -956,13 +1042,20 @@ def _filter_render_run_events(
     for event in normalized_events:
         run_id = _event_run_id(event)
         is_active_run = bool(run_id and run_id in active_run_ids)
+        is_unmaterialized_terminal_tail = bool(
+            run_id and run_id in terminal_tail_run_ids
+        )
         is_visible_completed_artifact = bool(
             include_completed_artifacts
             and run_id
             and run_id in covered_run_ids
             and _text(event.get("type")).startswith("artifact.")
         )
-        if not is_active_run and not is_visible_completed_artifact:
+        if (
+            not is_active_run
+            and not is_unmaterialized_terminal_tail
+            and not is_visible_completed_artifact
+        ):
             continue
         payload = _record(event.get("payload"))
         turn_id = _text(event.get("turn_id") or payload.get("turn_id") or payload.get("turnId"))
@@ -995,10 +1088,12 @@ def _filter_team_render_run_events(
     *,
     conversation: dict[str, Any],
     messages: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return _filter_render_run_events(
         run_events,
         active_run_ids=_team_snapshot_active_chat_run_ids(conversation),
+        terminal_tail_run_ids=_unmaterialized_terminal_run_ids(runs, messages),
         messages=messages,
         include_completed_artifacts=False,
     )
@@ -1229,10 +1324,17 @@ def _team_conversation_snapshot(
         filtered_samples=filtered_message_summaries[:16],
         raw_samples=raw_message_summaries[:24],
     )
+    active_chat_run_ids = _team_snapshot_active_chat_run_ids(conversation)
+    runs = _canonical_snapshot_runs(
+        session_id,
+        messages,
+        active_run_ids=active_chat_run_ids,
+    )
     run_events = _filter_team_render_run_events(
         raw_run_events,
         conversation=conversation,
         messages=messages,
+        runs=runs,
     )
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
@@ -1256,6 +1358,7 @@ def _team_conversation_snapshot(
             "messages": messages,
             "activityMessages": activity_messages,
             "toolEvents": tool_events,
+            "runs": runs,
             "runEvents": run_events,
             "last_event_seq": last_event_seq,
             "lastEventSeq": last_event_seq,
@@ -1297,6 +1400,17 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
         )
     except MessageOwnerResolutionError as exc:
         return _err(rid, 5008, str(exc))
+    status = {}
+    try:
+        status = _get_db().runs.session_status(session_id) if _get_db() is not None else {}
+    except Exception:
+        status = {}
+    active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
+    runs = _canonical_snapshot_runs(
+        session_id,
+        messages,
+        active_run_ids={active_run_id} if active_run_id else set(),
+    )
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     return _ok(
         rid,
@@ -1309,10 +1423,12 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
             "participants": participants,
             "messages": messages,
             "toolEvents": [],
+            "runs": runs,
             "runEvents": _ordinary_render_run_events(
                 session_id,
                 raw_run_events,
                 messages,
+                runs,
             ),
             "last_event_seq": last_event_seq,
             "lastEventSeq": last_event_seq,
