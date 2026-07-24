@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-07-12"
-EXTENSION_VERSION = "2026-07-12"
+CONTRACT_VERSION = "2026-07-24"
+EXTENSION_VERSION = "2026-07-24"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -147,6 +147,7 @@ REQUIRED_METHODS = [
     "artifacts.list",
     "artifacts.register",
     "artifacts.delete",
+    "presentation.slide.regenerate",
 ]
 
 REQUIRED_EVENTS = [
@@ -379,6 +380,7 @@ REQUIRED_GATEWAY_METHODS = {
     "artifacts.list",
     "artifacts.register",
     "artifacts.delete",
+    "presentation.slide.regenerate",
     "prompt.submit",
 }
 

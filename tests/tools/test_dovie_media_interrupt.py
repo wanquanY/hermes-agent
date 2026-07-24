@@ -3,6 +3,135 @@ import threading
 import tools.dovie_media_tools as dovie_media_tools
 
 
+def test_image_generate_uses_backend_default_when_model_is_omitted(monkeypatch):
+    captured = {}
+
+    def fake_proxy_result(env_name, payload):
+        captured["env_name"] = env_name
+        captured["payload"] = payload
+        return "{}"
+
+    monkeypatch.setattr(dovie_media_tools, "_async_media_proxy_result", fake_proxy_result)
+
+    result = dovie_media_tools.dovie_image_generate({"prompt": "test"})
+
+    assert result == "{}"
+    assert captured["env_name"] == "DOVIE_IMAGE_GENERATE_PROXY_URL"
+    assert "model" not in captured["payload"]
+
+
+def test_image_generate_forwards_explicit_model(monkeypatch):
+    captured = {}
+
+    def fake_proxy_result(_env_name, payload):
+        captured["payload"] = payload
+        return "{}"
+
+    monkeypatch.setattr(dovie_media_tools, "_async_media_proxy_result", fake_proxy_result)
+
+    dovie_media_tools.dovie_image_generate(
+        {"prompt": "test", "model": "gpt-image-2"}
+    )
+
+    assert captured["payload"]["model"] == "gpt-image-2"
+
+
+def test_image_generate_uploads_local_workspace_reference_before_generation(
+    monkeypatch,
+    tmp_path,
+):
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(b"png")
+    captured = {}
+    monkeypatch.setenv(
+        "DOVIE_MEDIA_ASSET_PROXY_URL",
+        "https://dovie.example/media-assets/reference-image",
+    )
+    monkeypatch.setenv("DOVIE_LLM_RUNTIME_TOKEN", "runtime-token")
+    monkeypatch.setattr(dovie_media_tools, "_active_workspace_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        dovie_media_tools,
+        "_run_proxy_request_interruptibly",
+        lambda fn, **_kwargs: fn(),
+    )
+
+    def fake_upload(url, path, *, token, timeout):
+        captured["upload"] = (url, path, token, timeout)
+        return {"url": "https://assets.example/reference.png"}
+
+    def fake_generate(env_name, payload):
+        captured["generate"] = (env_name, payload)
+        return "{}"
+
+    monkeypatch.setattr(dovie_media_tools, "_post_reference_image", fake_upload)
+    monkeypatch.setattr(dovie_media_tools, "_async_media_proxy_result", fake_generate)
+
+    assert dovie_media_tools.dovie_image_generate(
+        {"prompt": "test", "reference_image_url": str(image_path)}
+    ) == "{}"
+    assert captured["upload"][1] == image_path
+    assert captured["generate"][1]["reference_image_url"] == (
+        "https://assets.example/reference.png"
+    )
+    assert captured["generate"][1]["generation_type"] == "i2i"
+
+
+def test_local_reference_rejects_paths_outside_workspace_and_attachment_store(
+    monkeypatch,
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    monkeypatch.setattr(dovie_media_tools, "_active_workspace_root", lambda: workspace)
+    monkeypatch.delenv("DOVIE_ATTACHMENT_ROOT", raising=False)
+
+    result = dovie_media_tools.dovie_image_generate(
+        {"prompt": "test", "reference_image_url": str(outside)}
+    )
+
+    assert "active workspace or Dovie attachment store" in result
+
+
+def test_attachment_blob_uses_durable_metadata_for_upload_name(monkeypatch, tmp_path):
+    attachment_root = tmp_path / "attachments"
+    attachment_dir = attachment_root / "asset"
+    attachment_dir.mkdir(parents=True)
+    blob = attachment_dir / "blob"
+    blob.write_bytes(b"png")
+    (attachment_dir / "meta.json").write_text(
+        '{"fileName":"reference.png","mimeType":"image/png"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOVIE_ATTACHMENT_ROOT", str(attachment_root))
+
+    assert dovie_media_tools._local_reference_metadata(blob) == (
+        "reference.png",
+        "image/png",
+    )
+
+
+def test_media_asset_url_and_attachment_root_derive_from_existing_runtime_env(
+    monkeypatch,
+    tmp_path,
+):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    monkeypatch.delenv("DOVIE_MEDIA_ASSET_PROXY_URL", raising=False)
+    monkeypatch.delenv("DOVIE_ATTACHMENT_ROOT", raising=False)
+    monkeypatch.setenv(
+        "DOVIE_IMAGE_GENERATE_PROXY_URL",
+        "https://api.example/api/v1/llm-proxy/v1/image-generate",
+    )
+    monkeypatch.setenv("DOVIE_RUNTIME_HOME", str(runtime_root))
+
+    assert dovie_media_tools._media_asset_proxy_url() == (
+        "https://api.example/api/v1/llm-proxy/v1/media-assets/reference-image"
+    )
+    assert dovie_media_tools._attachment_root() == tmp_path / "attachments"
+
+
 def test_media_poll_returns_on_interrupt(monkeypatch):
     poll_started = threading.Event()
     result_holder = {}

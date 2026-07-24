@@ -11,6 +11,8 @@ from dataclasses import dataclass
 class ArtifactTarget:
     path: str
     operation: str = ""
+    title: str = ""
+    mime_type: str = ""
 
 
 def parse_tool_result_dict(result: str) -> dict:
@@ -86,14 +88,65 @@ def _dedupe_targets(targets: list[ArtifactTarget]) -> list[ArtifactTarget]:
         if key in seen:
             continue
         seen.add(key)
-        deduped.append(ArtifactTarget(path=path, operation=operation))
+        deduped.append(target)
     return deduped
 
 
+def result_artifact_targets(data: dict) -> list[ArtifactTarget]:
+    """Extract explicit artifact records returned by a tool.
+
+    This result contract lets domain tools register only their durable,
+    user-facing outputs without taking an expensive whole-workspace snapshot.
+    The registry service still verifies that every path exists inside the
+    active workspace before persisting it.
+    """
+
+    values = data.get("artifacts")
+    if not isinstance(values, list):
+        return []
+    targets: list[ArtifactTarget] = []
+    for value in values:
+        if isinstance(value, str):
+            path = value.strip()
+            if path:
+                targets.append(ArtifactTarget(path=path))
+            continue
+        if not isinstance(value, dict):
+            continue
+        path = str(
+            value.get("path")
+            or value.get("artifact_path")
+            or value.get("artifactPath")
+            or ""
+        ).strip()
+        if not path:
+            continue
+        operation = str(value.get("operation") or "").strip().lower()
+        if operation not in {"created", "deleted", "modified"}:
+            operation = ""
+        targets.append(
+            ArtifactTarget(
+                path=path,
+                operation=operation,
+                title=str(value.get("title") or "").strip(),
+                mime_type=str(
+                    value.get("mime_type")
+                    or value.get("mimeType")
+                    or value.get("mime")
+                    or ""
+                ).strip(),
+            )
+        )
+    return _dedupe_targets(targets)
+
+
 def artifact_target_changes(name: str, args: dict, result: str) -> list[ArtifactTarget]:
+    data = parse_tool_result_dict(result)
+    explicit_targets = result_artifact_targets(data)
+    if explicit_targets:
+        return explicit_targets
     if name not in {"write_file", "patch"}:
         return []
-    data = parse_tool_result_dict(result)
     if not file_mutation_landed(name, data):
         return []
 

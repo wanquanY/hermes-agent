@@ -29,6 +29,101 @@ def test_artifact_target_paths_extracts_successful_patch_targets():
     ) == ["report.md", "nested/file.txt"]
 
 
+def test_artifact_target_paths_extracts_explicit_domain_tool_artifacts():
+    assert artifact_target_paths(
+        "dovie_presentation_generate",
+        {},
+        json.dumps(
+            {
+                "status": "completed",
+                "artifacts": [
+                    {
+                        "path": "/workspace/review.pptx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "operation": "created",
+                    }
+                ],
+            }
+        ),
+    ) == ["/workspace/review.pptx"]
+
+
+def test_artifact_payloads_preserve_modified_presentation_operation(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "review.pptx"
+    artifact.write_bytes(b"revised-pptx")
+
+    payloads = artifact_payloads_from_tool_complete(
+        tool_call_id="tool-presentation-revision",
+        name="dovie_presentation_regenerate_slide",
+        args={"page_number": 2},
+        result=json.dumps(
+            {
+                "status": "completed",
+                "artifacts": [
+                    {
+                        "path": str(artifact),
+                        "mime_type": (
+                            "application/vnd.openxmlformats-officedocument."
+                            "presentationml.presentation"
+                        ),
+                        "operation": "modified",
+                    }
+                ],
+            }
+        ),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["path"] == str(artifact)
+    assert payloads[0]["operation"] == "modified"
+    assert payloads[0]["origin"]["tool_name"] == (
+        "dovie_presentation_regenerate_slide"
+    )
+
+
+def test_artifact_created_payloads_validate_explicit_domain_tool_artifacts(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "review.pptx"
+    artifact.write_bytes(b"pptx")
+    outside = tmp_path / "outside.pptx"
+    outside.write_bytes(b"outside")
+
+    payloads = artifact_created_payloads_from_tool_complete(
+        tool_call_id="tool-presentation",
+        name="dovie_presentation_generate",
+        args={},
+        result=json.dumps(
+            {
+                "status": "completed",
+                "artifacts": [
+                    {
+                        "path": str(artifact),
+                        "title": "Quarterly review",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "operation": "created",
+                    },
+                    {"path": str(outside), "operation": "created"},
+                ],
+            }
+        ),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["path"] == str(artifact)
+    assert payloads[0]["mime_type"] == (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    assert payloads[0]["title"] == "Quarterly review"
+    assert payloads[0]["origin"]["tool_name"] == "dovie_presentation_generate"
+
+
 def test_artifact_payloads_extract_patch_files_deleted(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

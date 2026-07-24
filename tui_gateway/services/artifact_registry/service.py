@@ -118,7 +118,12 @@ def _artifact_records_from_tool_complete(
         artifact_path = resolve_artifact_path(target.path, cwd)
         if not is_path_inside(artifact_path, workspace_path):
             continue
-        mime_type = mimetypes.guess_type(artifact_path)[0] or "application/octet-stream"
+        mime_type = (
+            str(target.mime_type or "").strip()
+            or mimetypes.guess_type(artifact_path)[0]
+            or "application/octet-stream"
+        )
+        title = str(target.title or "").strip() or os.path.basename(artifact_path)
         artifact_origin = {
             "event": "tool.complete",
             "tool_id": tool_call_id,
@@ -127,7 +132,7 @@ def _artifact_records_from_tool_complete(
         }
         operation = str(target.operation or "")
         is_workspace_diff = artifact_path in terminal_operations
-        if operation and (operation == "deleted" or is_workspace_diff):
+        if operation in {"deleted", "modified"} or is_workspace_diff:
             artifact_origin["operation"] = operation
         if is_workspace_diff:
             artifact_origin["source"] = "workspace_diff"
@@ -138,7 +143,7 @@ def _artifact_records_from_tool_complete(
                     workspace_id=workspace_payload["id"],
                     path=artifact_path,
                     relative_path=_relative_artifact_path(artifact_path, workspace_path),
-                    title=os.path.basename(artifact_path),
+                    title=title,
                     mime_type=mime_type,
                     size_bytes=0,
                     workspace=workspace_payload,
@@ -150,9 +155,10 @@ def _artifact_records_from_tool_complete(
         if not os.path.isfile(artifact_path):
             continue
         stat = os.stat(artifact_path)
-        operation = terminal_operations.get(artifact_path)
-        if operation:
-            artifact_origin["operation"] = operation
+        workspace_operation = terminal_operations.get(artifact_path)
+        if workspace_operation:
+            operation = workspace_operation
+            artifact_origin["operation"] = workspace_operation
             artifact_origin["source"] = "workspace_diff"
         records.append(
             ArtifactRecord(
@@ -160,11 +166,12 @@ def _artifact_records_from_tool_complete(
                 workspace_id=workspace_payload["id"],
                 path=artifact_path,
                 relative_path=_relative_artifact_path(artifact_path, workspace_path),
-                title=os.path.basename(artifact_path),
+                title=title,
                 mime_type=mime_type,
                 size_bytes=int(stat.st_size),
                 workspace=workspace_payload,
                 origin=artifact_origin,
+                operation=operation if operation == "modified" else "",
             )
         )
 

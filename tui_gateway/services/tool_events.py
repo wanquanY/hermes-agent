@@ -25,6 +25,8 @@ DOVIE_STRUCTURED_RESULT_TOOLS = {
     "dovie_automation_task_list",
     "dovie_automation_task_update",
     "dovie_automation_task_remove",
+    "dovie_presentation_generate",
+    "dovie_presentation_regenerate_slide",
     "team_mission_start_task",
     "team_mission_node_create",
     "team_mission_edge_create",
@@ -110,6 +112,18 @@ def _dovie_structured_tool_result(name: str, result: str) -> dict | None:
         if event_name != "automation_job_removed":
             return None
         return data if isinstance(data.get("job"), dict) else None
+    if name == "dovie_presentation_generate":
+        if event_name not in {
+            "presentation_generation_completed",
+            "presentation_generation_failed",
+            "presentation_generation_cancelled",
+        }:
+            return None
+        return data
+    if name == "dovie_presentation_regenerate_slide":
+        if event_name != "presentation_slide_regenerated":
+            return None
+        return data
     if name == "team_mission_start_task":
         control = data.get("hermes_control")
         if not isinstance(control, dict):

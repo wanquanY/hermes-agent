@@ -55,6 +55,11 @@ CONFIGURABLE_TOOLSETS = [
     ("dovie_web",       "🔎 Dovie Web Search & Parse", "serper_search_tool, jina_web_parser_tool"),
     ("dovie_image",     "🎨 Dovie Image Generation",   "dovie_image_generate"),
     ("dovie_video",     "🎬 Dovie Video Generation",   "dovie_video_generate"),
+    (
+        "dovie_presentation",
+        "📊 Dovie Presentation Generation",
+        "dovie_presentation_generate, dovie_presentation_regenerate_slide",
+    ),
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),

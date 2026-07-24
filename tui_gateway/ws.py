@@ -99,6 +99,7 @@ _WS_CONTROL_METHODS = frozenset(
         "pet.scale",
         "profile.list",
         "profile.upsert",
+        "presentation.slide.regenerate",
         "run.cancel",
         "run.events",
         "run.fail",

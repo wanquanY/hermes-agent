@@ -103,6 +103,15 @@ TOOLSETS = {
         "includes": []
     },
 
+    "dovie_presentation": {
+        "description": "Dovie desktop-native PowerPoint generation and local export",
+        "tools": [
+            "dovie_presentation_generate",
+            "dovie_presentation_regenerate_slide",
+        ],
+        "includes": []
+    },
+
     "dovie_task_hub": {
         "description": "Internal conversation-scoped Dovie Task Hub read tools",
         "tools": [

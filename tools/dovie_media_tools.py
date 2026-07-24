@@ -8,12 +8,16 @@ provider credentials and routing stay on the Dovie backend.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
+import re
 import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from pathlib import Path
 from typing import Any
 
 from tools.registry import registry, tool_error
@@ -22,6 +26,7 @@ DOVIE_MEDIA_PROXY_DEFAULT_TIMEOUT_SECONDS = 310
 DOVIE_MEDIA_PROXY_MAX_TIMEOUT_SECONDS = 1800
 DOVIE_MEDIA_PROXY_DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 DOVIE_MEDIA_PROXY_DEFAULT_POLL_INTERVAL_SECONDS = 2
+DOVIE_MEDIA_REFERENCE_DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 
 
 DOVIE_IMAGE_GENERATE_SCHEMA = {
@@ -68,12 +73,18 @@ DOVIE_IMAGE_GENERATE_SCHEMA = {
             },
             "reference_image_url": {
                 "type": "string",
-                "description": "Optional reference image URL for image-to-image.",
+                "description": (
+                    "Optional HTTP(S) URL or local workspace/attached-image path "
+                    "for image-to-image."
+                ),
             },
             "reference_image_urls": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Optional reference image URLs for multi-image-to-image.",
+                "description": (
+                    "Optional HTTP(S) URLs or local workspace/attached-image paths "
+                    "for multi-image-to-image."
+                ),
             },
             "quality": {
                 "type": "string",
@@ -102,11 +113,11 @@ DOVIE_VIDEO_GENERATE_SCHEMA = {
             },
             "image_url": {
                 "type": "string",
-                "description": "Optional first-frame image URL for image-to-video.",
+                "description": "Optional first-frame HTTP(S) URL or local image path.",
             },
             "last_frame_image_url": {
                 "type": "string",
-                "description": "Optional last-frame image URL for first/last-frame video.",
+                "description": "Optional last-frame HTTP(S) URL or local image path.",
             },
             "resolution": {
                 "type": "string",
@@ -289,6 +300,209 @@ def _post_json(url: str, payload: dict[str, Any], *, token: str, timeout: int) -
     return _decode_json_response(raw, status)
 
 
+def _path_is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _active_workspace_root() -> Path:
+    try:
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        return resolve_agent_cwd().expanduser().resolve()
+    except Exception:
+        return Path(os.getcwd()).resolve()
+
+
+def _attachment_root() -> Path | None:
+    configured = str(os.getenv("DOVIE_ATTACHMENT_ROOT") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    runtime_root = str(os.getenv("DOVIE_RUNTIME_HOME") or "").strip()
+    if runtime_root:
+        return (Path(runtime_root).expanduser().resolve().parent / "attachments").resolve()
+    return None
+
+
+def _media_asset_proxy_url() -> str:
+    configured = _env_url("DOVIE_MEDIA_ASSET_PROXY_URL")
+    if configured:
+        return configured
+    image_proxy_url = _env_url("DOVIE_IMAGE_GENERATE_PROXY_URL")
+    if not image_proxy_url:
+        return ""
+    parsed = urllib.parse.urlsplit(image_proxy_url)
+    if not parsed.path.rstrip("/").endswith("/image-generate"):
+        return ""
+    base_path = parsed.path.rstrip("/")[: -len("/image-generate")]
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"{base_path}/media-assets/reference-image",
+            "",
+            "",
+        )
+    )
+
+
+def _local_reference_path(value: str) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme.lower() in {"http", "https"}:
+        return None
+    if parsed.scheme.lower() == "file":
+        if parsed.netloc not in {"", "localhost"}:
+            raise ValueError("local reference image file URL must not contain a remote host")
+        raw_path = urllib.request.url2pathname(parsed.path)
+    elif parsed.scheme and not re.match(r"^[a-zA-Z]:[\\/]", text):
+        raise ValueError("reference image must use HTTP(S) or a permitted local path")
+    else:
+        raw_path = text
+
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = _active_workspace_root() / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"local reference image does not exist: {candidate}") from exc
+    if not resolved.is_file():
+        raise ValueError(f"local reference image is not a file: {candidate}")
+
+    allowed_roots = [_active_workspace_root()]
+    attachment_root = _attachment_root()
+    if attachment_root is not None:
+        allowed_roots.append(attachment_root)
+    if not any(_path_is_inside(resolved, root) for root in allowed_roots):
+        raise ValueError(
+            "local reference image must be inside the active workspace or Dovie attachment store"
+        )
+    return resolved
+
+
+def _local_reference_metadata(path: Path) -> tuple[str, str]:
+    filename = path.name
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    metadata_path = path.parent / "meta.json"
+    attachment_root = _attachment_root()
+    if path.name != "blob" or attachment_root is None:
+        return filename, content_type
+    if not _path_is_inside(path, attachment_root):
+        return filename, content_type
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return filename, content_type
+    if not isinstance(metadata, dict):
+        return filename, content_type
+    original_name = str(metadata.get("fileName") or "").strip()
+    declared_type = str(metadata.get("mimeType") or "").strip().lower()
+    if original_name:
+        filename = os.path.basename(original_name)
+    if declared_type.startswith("image/"):
+        content_type = declared_type
+    return filename, content_type
+
+
+def _post_reference_image(
+    url: str,
+    path: Path,
+    *,
+    token: str,
+    timeout: int,
+) -> dict[str, Any]:
+    max_bytes = _env_int(
+        "DOVIE_MEDIA_REFERENCE_MAX_BYTES",
+        DOVIE_MEDIA_REFERENCE_DEFAULT_MAX_BYTES,
+    )
+    size_bytes = path.stat().st_size
+    if size_bytes > max_bytes:
+        raise ValueError(
+            f"local reference image exceeds the {max_bytes // (1024 * 1024)} MB limit"
+        )
+    filename, content_type = _local_reference_metadata(path)
+    safe_filename = filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
+    boundary = f"dovie-{uuid.uuid4().hex}"
+    body = b"".join(
+        (
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                'Content-Disposition: form-data; name="file"; '
+                f'filename="{safe_filename}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            path.read_bytes(),
+            f"\r\n--{boundary}--\r\n".encode("ascii"),
+        )
+    )
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            status = getattr(response, "status", 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        status = exc.code
+    except TimeoutError as exc:
+        raise RuntimeError(f"Dovie reference image upload timed out after {timeout}s") from exc
+    except socket.timeout as exc:
+        raise RuntimeError(f"Dovie reference image upload timed out after {timeout}s") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Dovie reference image upload failed: {exc}") from exc
+    return _decode_json_response(raw, status)
+
+
+def _normalize_reference_image(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    local_path = _local_reference_path(text)
+    if local_path is None:
+        return text
+    url = _media_asset_proxy_url()
+    token = _runtime_token()
+    if not url:
+        raise RuntimeError("DOVIE_MEDIA_ASSET_PROXY_URL is not configured.")
+    if not token:
+        raise RuntimeError("DOVIE_LLM_RUNTIME_TOKEN is not configured.")
+    result = _run_proxy_request_interruptibly(
+        lambda: _post_reference_image(
+            url,
+            local_path,
+            token=token,
+            timeout=_request_timeout(),
+        ),
+        message="Dovie reference image upload interrupted",
+    )
+    uploaded_url = str(result.get("url") or "").strip()
+    if not uploaded_url.startswith(("http://", "https://")):
+        raise RuntimeError("Dovie reference image upload returned no usable URL")
+    return uploaded_url
+
+
+def _normalize_reference_images(values: Any) -> list[str] | None:
+    if not isinstance(values, list):
+        return None
+    normalized = [_normalize_reference_image(value) for value in values if str(value or "").strip()]
+    return normalized or None
+
+
 def _get_json(url: str, *, token: str, timeout: int) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -425,21 +639,26 @@ def dovie_image_generate(args: dict[str, Any]) -> str:
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         return tool_error("prompt is required.")
-    reference_urls = args.get("reference_image_urls")
-    reference_url = str(args.get("reference_image_url") or "").strip()
+    try:
+        reference_urls = _normalize_reference_images(args.get("reference_image_urls"))
+        reference_url = _normalize_reference_image(args.get("reference_image_url"))
+    except Exception as exc:
+        return tool_error(str(exc))
+    model = str(args.get("model") or "").strip()
     generation_type = "i2i" if reference_url or reference_urls else "t2i"
     payload = {
         "prompt": prompt,
         "negative_prompt": args.get("negative_prompt"),
         "aspect_ratio": _normalize_image_aspect_ratio(args.get("aspect_ratio")),
         "generate_num": args.get("generate_num", 1),
-        "model": args.get("model") or "gemini",
         "generation_type": generation_type,
         "reference_image_url": reference_url or None,
         "reference_image_urls": reference_urls or None,
         "quality": args.get("quality") or "2K",
         "timeout": args.get("timeout"),
     }
+    if model:
+        payload["model"] = model
     return _async_media_proxy_result("DOVIE_IMAGE_GENERATE_PROXY_URL", payload)
 
 
@@ -447,8 +666,11 @@ def dovie_video_generate(args: dict[str, Any]) -> str:
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         return tool_error("prompt is required.")
-    image_url = str(args.get("image_url") or "").strip()
-    last_frame_image_url = str(args.get("last_frame_image_url") or "").strip()
+    try:
+        image_url = _normalize_reference_image(args.get("image_url"))
+        last_frame_image_url = _normalize_reference_image(args.get("last_frame_image_url"))
+    except Exception as exc:
+        return tool_error(str(exc))
     generation_type = str(args.get("generation_type") or "").strip()
     if not generation_type:
         generation_type = "flf" if image_url and last_frame_image_url else "i2v" if image_url else "t2v"

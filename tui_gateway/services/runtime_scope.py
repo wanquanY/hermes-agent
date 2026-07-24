@@ -59,6 +59,7 @@ _CONTROL_PLANE_METHODS = frozenset(
         "pet.scale",
         "profile.list",
         "profile.upsert",
+        "presentation.slide.regenerate",
         "run.events",
         "run.retry.prepare",
         "runtime.ensure",

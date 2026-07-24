@@ -37,6 +37,24 @@ def test_workspace_current_uses_control_plane_executor():
     assert executor is ws._ws_control_executor  # noqa: SLF001
 
 
+def test_presentation_slide_regenerate_uses_control_plane_executor():
+    request = {
+        "id": "1",
+        "method": "presentation.slide.regenerate",
+        "params": {
+            "workspace_path": "/tmp/workspace",
+            "presentation_path": "/tmp/workspace/deck.pptx",
+            "page_number": 1,
+            "prompt": "Revised slide",
+            "agent_profile_id": "agent-a",
+            "runtime_scope_key": "profile:agent-a",
+        },
+    }
+
+    assert not runtime_scope.should_route_to_worker(request)
+    assert ws._executor_for_request(request) is ws._ws_control_executor  # noqa: SLF001
+
+
 def test_session_list_uses_control_plane_executor():
     executor = ws._executor_for_request(  # noqa: SLF001
         {"id": "1", "method": "session.list", "params": {}}

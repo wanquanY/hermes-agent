@@ -217,6 +217,62 @@ def test_agent_profile_test_uses_dedicated_stream_events():
     assert events[9]["payload"]["result"]["dovie_event"] == "agent_profile_test_completed"
 
 
+def test_presentation_generation_keeps_structured_result():
+    events = []
+    bridge = _bridge(events)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-presentation",
+        "dovie_presentation_generate",
+        {"title": "Review", "page_prompts": ["Cover"]},
+        json.dumps(
+            {
+                "dovie_event": "presentation_generation_completed",
+                "status": "completed",
+                "title": "Review",
+                "total_pages": 1,
+                "output_path": "/tmp/review.pptx",
+                "artifacts": [],
+            }
+        ),
+    )
+
+    tool_complete = next(event for event in events if event["type"] == "tool.complete")
+    assert tool_complete["payload"]["result"]["status"] == "completed"
+    assert tool_complete["payload"]["result"]["output_path"] == "/tmp/review.pptx"
+
+
+def test_presentation_slide_regeneration_keeps_structured_result():
+    events = []
+    bridge = _bridge(events)
+
+    bridge.on_tool_complete(
+        "sid",
+        "tool-presentation-revision",
+        "dovie_presentation_regenerate_slide",
+        {
+            "presentation_path": "/tmp/review.pptx",
+            "page_number": 2,
+            "prompt": "Revised comparison",
+        },
+        json.dumps(
+            {
+                "dovie_event": "presentation_slide_regenerated",
+                "status": "completed",
+                "output_path": "/tmp/review.pptx",
+                "page_number": 2,
+                "revision": 1,
+                "artifacts": [],
+            }
+        ),
+    )
+
+    tool_complete = next(event for event in events if event["type"] == "tool.complete")
+    assert tool_complete["payload"]["result"]["page_number"] == 2
+    assert tool_complete["payload"]["result"]["revision"] == 1
+
+
 def test_subagent_events_preserve_persisted_activity_graph_identity():
     events = []
     bridge = _bridge(events)

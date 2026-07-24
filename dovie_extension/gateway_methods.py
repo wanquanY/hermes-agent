@@ -26,6 +26,7 @@ MODULES = (
     "tui_gateway.methods.integrations",
     "tui_gateway.methods.dovie_capabilities",
     "tui_gateway.methods.workspace_artifacts",
+    "tui_gateway.methods.presentation",
 )
 
 def dovie_gateway_method_overrides() -> frozenset[str]:
