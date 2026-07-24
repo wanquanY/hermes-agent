@@ -581,6 +581,7 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
                 "content": "hidden attachment context",
                 "metadata": {
                     "turn_id": "turn-1",
+                    "run_id": "run-1",
                     "draft_text": "请读这个文件",
                     "attachments": [
                         {
@@ -644,15 +645,24 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
     assert resp["result"]["removed_messages"] == 2
     assert resp["result"]["draft"]["text"] == "请读这个文件"
     assert resp["result"]["draft"]["attachments"][0]["name"] == "spec.pdf"
-    assert resp["result"]["messages"] == [
-        {
-            "role": "user",
-            "text": "next",
-            "message_id": "3",
-            "timestamp": 3.0,
-            "metadata": {"turn_id": "turn-2", "draft_text": "下一条"},
+    assert len(resp["result"]["messages"]) == 1
+    assert resp["result"]["messages"][0] == {
+        "role": "user",
+        "text": "next",
+        "message_id": "4",
+        "timestamp": 3.0,
+        "metadata": {
+            "turn_id": "turn-2",
+            "draft_text": "下一条",
+            "participant_id": "user",
+            "participantId": "user",
         },
-    ]
+        "participant_id": "user",
+        "participantId": "user",
+    }
+    assert resp["result"]["run_id"] == "run-1"
+    assert resp["result"]["authoritative_projection"]["schemaVersion"] == "2026-06-16"
+    assert "messages" not in resp["result"]["authoritative_projection"]
 
     recalled_events = db.runs.list_events(
         "stored-1",
@@ -664,7 +674,7 @@ def test_session_recall_turn_rewrites_stored_session_without_live_runtime(server
     assert recalled_event["type"] == "session.recalled"
     assert recalled_event["conversation_session_id"] == "stored-1"
     assert recalled_event["turn_id"] == "turn-1"
-    assert recalled_event["run_id"] == ""
+    assert recalled_event["run_id"] == "run-1"
     assert recalled_event["seq"] > 0
     assert recalled_event["runtime_source_seq"] > 0
     assert recalled_event.get("transient") is not True
@@ -737,7 +747,53 @@ def test_session_recall_turn_matches_stored_client_message_id(server, monkeypatc
     ).fetchone()[0]
     assert stored_count == 0
     assert resp["result"]["turn_id"] == "turn-local"
+    assert resp["result"]["run_id"] == "run-canonical"
     assert resp["result"]["draft"]["text"] == "恢复这个草稿"
+
+
+def test_recall_projection_does_not_recursively_embed_prior_recall_snapshots(
+    server,
+    monkeypatch,
+):
+    import importlib
+
+    session_history = importlib.import_module("tui_gateway.methods.session_history")
+    monkeypatch.setitem(
+        server._methods,
+        "conversation.render_snapshot",
+        lambda _rid, _params: {
+            "result": {
+                "kind": "ordinary",
+                "schemaVersion": "2026-06-16",
+                "renderReady": True,
+                "conversation_session_id": "stored-1",
+                "messages": [],
+                "runEvents": [
+                    {
+                        "type": "session.recalled",
+                        "seq": 8,
+                        "payload": {
+                            "turn_id": "turn-previous",
+                            "messages": [{"role": "user", "text": "large"}],
+                            "authoritative_projection": {
+                                "runEvents": [{"type": "message.delta"}],
+                            },
+                        },
+                    },
+                    {"type": "message.complete", "seq": 9, "payload": {"text": "ok"}},
+                ],
+            },
+        },
+    )
+
+    projection, messages = session_history._authoritative_recall_projection(
+        "stored-1",
+        [{"role": "user", "text": "fallback"}],
+    )
+
+    assert messages == []
+    assert projection["runEvents"][0]["payload"] == {"turn_id": "turn-previous"}
+    assert projection["runEvents"][1]["payload"] == {"text": "ok"}
 
 
 def test_session_recall_turn_matches_live_pending_run_id(server, monkeypatch):

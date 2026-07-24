@@ -380,6 +380,84 @@ def _draft_from_turn_message(message: dict | None, pending_turn: dict | None = N
     }
 
 
+def _run_id_from_turn_message(
+    message: dict | None,
+    target: dict[str, str],
+    pending_turn: dict | None = None,
+) -> str:
+    metadata = message.get("metadata") if isinstance(message, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    pending_turn = pending_turn if isinstance(pending_turn, dict) else {}
+    return str(
+        metadata.get("run_id")
+        or target.get("run_id")
+        or pending_turn.get("run_id")
+        or ""
+    ).strip()
+
+
+def _authoritative_recall_projection(
+    session_id: str,
+    fallback_messages: list[dict],
+) -> tuple[dict | None, list[dict]]:
+    """Build the canonical post-recall projection in the same mutation boundary.
+
+    ``messages`` remains a top-level field for protocol compatibility.  The
+    rest of ``conversation.render_snapshot`` is returned separately so clients
+    can reconstruct one authoritative snapshot without a second, racy read.
+    """
+
+    render_snapshot = _methods.get("conversation.render_snapshot")
+    if not callable(render_snapshot):
+        return None, fallback_messages
+    try:
+        response = render_snapshot(
+            "session-recall-authoritative-projection",
+            {
+                "session_id": session_id,
+                "conversation_session_id": session_id,
+                "direction": "tail",
+                "limit": 200,
+                "includeAncestors": True,
+                "includeRunEvents": True,
+                "runEventsLimit": 2000,
+                "includeToolEvents": True,
+                "toolEventsLimit": 2000,
+            },
+        )
+    except Exception:
+        return None, fallback_messages
+    if not isinstance(response, dict) or response.get("error"):
+        return None, fallback_messages
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None, fallback_messages
+    projection = dict(result)
+    rendered_messages = projection.pop("messages", None)
+    if not isinstance(rendered_messages, list):
+        return None, fallback_messages
+    # A prior recall event can itself carry an authoritative projection. Never
+    # nest those payloads into a later recall projection: that would make
+    # durable event rows and WebSocket frames grow recursively after repeated
+    # recalls. The event identity and terminal boundary remain replayable.
+    compact_run_events = []
+    for raw_event in projection.get("runEvents") or []:
+        if not isinstance(raw_event, dict):
+            continue
+        event = dict(raw_event)
+        if str(event.get("type") or "") == "session.recalled":
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                payload = dict(payload)
+                payload.pop("authoritative_projection", None)
+                payload.pop("messages", None)
+                event["payload"] = payload
+        compact_run_events.append(event)
+    if isinstance(projection.get("runEvents"), list):
+        projection["runEvents"] = compact_run_events
+    return projection, rendered_messages
+
+
 def _recall_event_payload(
     *,
     turn_id: str,
@@ -387,6 +465,7 @@ def _recall_event_payload(
     draft: dict,
     messages: list[dict],
     run_id: str = "",
+    authoritative_projection: dict | None = None,
 ) -> dict:
     payload = {
         "turn_id": turn_id,
@@ -397,6 +476,8 @@ def _recall_event_payload(
     normalized_run_id = str(run_id or "").strip()
     if normalized_run_id:
         payload["run_id"] = normalized_run_id
+    if isinstance(authoritative_projection, dict):
+        payload["authoritative_projection"] = authoritative_projection
     return payload
 
 
@@ -423,7 +504,7 @@ def _recall_turn_from_history(
     history: list[dict],
     target: dict[str, str],
     pending_turn: dict | None = None,
-) -> tuple[list[dict], dict, int] | None:
+) -> tuple[list[dict], dict, int, str] | None:
     target_idx = None
     for idx, message in enumerate(history):
         if _message_matches_recall_target(message, target):
@@ -440,8 +521,9 @@ def _recall_turn_from_history(
             break
     target_message = history[target_idx]
     draft = _draft_from_turn_message(target_message, pending_turn)
+    run_id = _run_id_from_turn_message(target_message, target, pending_turn)
     next_history = history[:target_idx] + history[remove_end:]
-    return next_history, draft, remove_end - target_idx
+    return next_history, draft, remove_end - target_idx, run_id
 
 
 def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
@@ -469,9 +551,13 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
         recalled = _recall_turn_from_history(list(history or []), target)
         if recalled is None:
             return _err(rid, 4019, "turn not found or already recalled")
-        next_history, draft, removed = recalled
+        next_history, draft, removed, recall_run_id = recalled
         db.messages.replace(session_key, next_history)
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
+        authoritative_projection, messages = _authoritative_recall_projection(
+            session_key,
+            messages,
+        )
     except Exception as exc:
         return _err(rid, 5036, f"recall failed: {exc}")
 
@@ -480,12 +566,15 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
         removed_messages=removed,
         draft=draft,
         messages=messages,
+        run_id=recall_run_id,
+        authoritative_projection=authoritative_projection,
     ))
-    return _ok(rid, {
+    result = {
         "status": "recalled",
         "session_id": sid,
         "conversation_session_id": session_key,
         "turn_id": turn_id,
+        "run_id": recall_run_id,
         "interrupted": False,
         "removed_messages": removed,
         "draft": draft,
@@ -494,7 +583,10 @@ def _recall_stored_turn(rid, sid: str, target: dict[str, str]) -> dict | None:
             "status": "unsupported",
             "warnings": ["Memory provider turn-level retraction is not implemented yet."],
         },
-    })
+    }
+    if isinstance(authoritative_projection, dict):
+        result["authoritative_projection"] = authoritative_projection
+    return _ok(rid, result)
 
 
 @method("session.recall_turn")
@@ -551,19 +643,25 @@ def _(rid, params: dict) -> dict:
                 session["pending_turn"] = None
                 session["run_updated_at"] = time.time()
                 messages = sanitize_transcript_messages(_history_to_messages(history))
+                authoritative_projection, messages = _authoritative_recall_projection(
+                    str(session.get("session_key") or sid),
+                    messages,
+                )
                 _emit("session.recalled", sid, _recall_event_payload(
                     turn_id=turn_id,
                     removed_messages=0,
                     draft=draft,
                     messages=messages,
                     run_id=recall_run_id,
+                    authoritative_projection=authoritative_projection,
                 ))
                 _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
-                return _ok(rid, {
+                result = {
                     "status": "recalled",
                     "session_id": sid,
                     "conversation_session_id": str(session.get("session_key") or ""),
                     "turn_id": turn_id,
+                    "run_id": recall_run_id,
                     "interrupted": interrupted,
                     "removed_messages": 0,
                     "draft": draft,
@@ -572,13 +670,15 @@ def _(rid, params: dict) -> dict:
                         "status": "unsupported",
                         "warnings": ["Memory provider turn-level retraction is not implemented yet."],
                     },
-                })
+                }
+                if isinstance(authoritative_projection, dict):
+                    result["authoritative_projection"] = authoritative_projection
+                return _ok(rid, result)
             return _err(rid, 4019, "turn not found or already recalled")
 
-        next_history, draft, removed = recalled
+        next_history, draft, removed, recall_run_id = recalled
         _rewrite_live_and_persisted_history(session, next_history)
         session.setdefault("recalled_turn_ids", set()).add(turn_id)
-        recall_run_id = ""
         if (
             running_target_matches
             or active_turn_id == turn_id
@@ -591,6 +691,10 @@ def _(rid, params: dict) -> dict:
             session["pending_turn"] = None
             session["run_updated_at"] = time.time()
         messages = sanitize_transcript_messages(_history_to_messages(next_history))
+        authoritative_projection, messages = _authoritative_recall_projection(
+            str(session.get("session_key") or sid),
+            messages,
+        )
 
     _emit("session.recalled", sid, _recall_event_payload(
         turn_id=turn_id,
@@ -598,14 +702,16 @@ def _(rid, params: dict) -> dict:
         draft=draft,
         messages=messages,
         run_id=recall_run_id,
+        authoritative_projection=authoritative_projection,
     ))
     if interrupted:
         _emit("message.complete", sid, {"text": "", "status": "interrupted", "turn_id": turn_id})
-    return _ok(rid, {
+    result = {
         "status": "recalled",
         "session_id": sid,
         "conversation_session_id": str(session.get("session_key") or ""),
         "turn_id": turn_id,
+        "run_id": recall_run_id,
         "interrupted": interrupted,
         "removed_messages": removed,
         "draft": draft,
@@ -614,4 +720,7 @@ def _(rid, params: dict) -> dict:
             "status": "unsupported",
             "warnings": ["Memory provider turn-level retraction is not implemented yet."],
         },
-    })
+    }
+    if isinstance(authoritative_projection, dict):
+        result["authoritative_projection"] = authoritative_projection
+    return _ok(rid, result)
