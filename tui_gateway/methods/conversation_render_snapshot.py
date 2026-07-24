@@ -194,25 +194,30 @@ def _merge_render_run_events(
 
 def _render_run_event_baseline(
     run_ids: set[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int | None]:
     """Read the canonical recovery baseline for explicitly visible runs.
 
     A conversation-wide event page is independently paginated and may contain
     only old history. Active and unmaterialized terminal runs therefore need a
     run-addressed read before the snapshot can safely publish the session
-    high-water mark used by the follow-up subscription.
+    high-water mark used by the follow-up subscription. The optional replay
+    cursor bounds that high-water mark when a single run exceeds the baseline
+    page, so the subscription resumes at the first omitted suffix.
     """
 
     normalized_run_ids = sorted(
         {_text(run_id) for run_id in run_ids if _text(run_id)}
     )
     if not normalized_run_ids:
-        return []
+        return [], None
     db = _get_db()
     runs = getattr(db, "runs", None) if db is not None else None
     loader = getattr(runs, "list_events_by_run_ids", None)
     if not callable(loader):
-        return []
+        raise RuntimeError(
+            "conversation.render_snapshot requires run-addressed event reads "
+            "for an active or unmaterialized terminal run"
+        )
     try:
         grouped = loader(
             normalized_run_ids,
@@ -220,20 +225,58 @@ def _render_run_event_baseline(
             include_internal=False,
         )
     except Exception as exc:
-        logger.warning(
-            "conversation.render_snapshot run baseline hydrate skipped run_ids=%s: %s",
-            normalized_run_ids,
-            exc,
-        )
-        return []
+        raise RuntimeError(
+            "conversation.render_snapshot failed to hydrate the canonical "
+            f"run-event baseline for run_ids={normalized_run_ids}"
+        ) from exc
     if not isinstance(grouped, dict):
-        return []
-    return [
+        raise RuntimeError(
+            "conversation.render_snapshot run-event baseline returned an invalid result"
+        )
+    events = [
         dict(event)
         for run_id in normalized_run_ids
         for event in grouped.get(run_id, [])
         if isinstance(event, dict)
     ]
+    replay_after_seq: int | None = None
+    latest_loader = getattr(runs, "latest_event_for_run", None)
+    for run_id in normalized_run_ids:
+        run_events = [
+            event
+            for event in grouped.get(run_id, [])
+            if isinstance(event, dict)
+        ]
+        if len(run_events) < _RENDER_RUN_BASELINE_LIMIT_PER_RUN:
+            continue
+        if not callable(latest_loader):
+            raise RuntimeError(
+                "conversation.render_snapshot requires latest-event reads "
+                "when a run-event baseline reaches its page limit"
+            )
+        try:
+            latest_event = latest_loader(run_id, include_internal=False)
+        except Exception as exc:
+            raise RuntimeError(
+                "conversation.render_snapshot failed to verify the canonical "
+                f"run-event baseline for run_id={run_id}"
+            ) from exc
+        loaded_last_seq = max(
+            (int(event.get("seq") or 0) for event in run_events),
+            default=0,
+        )
+        latest_seq = (
+            int(latest_event.get("seq") or 0)
+            if isinstance(latest_event, dict)
+            else 0
+        )
+        if latest_seq > loaded_last_seq:
+            replay_after_seq = (
+                loaded_last_seq
+                if replay_after_seq is None
+                else min(replay_after_seq, loaded_last_seq)
+            )
+    return events, replay_after_seq
 
 
 def _hydrate_render_run_event_baseline(
@@ -242,14 +285,17 @@ def _hydrate_render_run_event_baseline(
     active_run_ids: set[str],
     runs: list[dict[str, Any]],
     messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int | None]:
     baseline_run_ids = {
         _text(run_id) for run_id in active_run_ids if _text(run_id)
     }
     baseline_run_ids.update(_unmaterialized_terminal_run_ids(runs, messages))
-    return _merge_render_run_events(
-        run_events,
-        _render_run_event_baseline(baseline_run_ids),
+    baseline_events, replay_after_seq = _render_run_event_baseline(
+        baseline_run_ids
+    )
+    return (
+        _merge_render_run_events(run_events, baseline_events),
+        replay_after_seq,
     )
 
 
@@ -299,15 +345,20 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
     """Trim a render result so its WS frame can't trip close code 1009.
 
     Drops the recoverable collections newest-kept: oldest ``runEvents`` first
-    (live deltas re-arrive via the events subscription; finished-run text already
-    lives in ``messages``), then ``toolEvents`` and oldest ``messages``
-    (paginated + re-fetchable),
+    (and lowers the subscription cursor so omitted deltas replay; finished-run
+    text already lives in ``messages``), then ``toolEvents`` and oldest
+    ``messages`` (paginated + re-fetchable),
     until the serialized result fits. Flags ``transportTruncated`` + pageInfo
     hasMore so the client lazy-loads the remainder instead of assuming it has the
     whole history.
     """
     if _payload_byte_size(result) <= max_bytes:
         return result
+    original_run_event_seqs = {
+        int(event.get("seq") or 0)
+        for event in result.get("runEvents") or []
+        if isinstance(event, dict) and int(event.get("seq") or 0) > 0
+    }
     truncated = False
     for key in ("runEvents", "toolEvents", "messages", "activityMessages"):
         truncated = _cap_list_tail(result, result, key, max_bytes=max_bytes) or truncated
@@ -339,6 +390,20 @@ def _cap_render_result(result: dict[str, Any], *, max_bytes: int = _RENDER_MAX_B
                     break
             if not changed:
                 break
+    retained_run_event_seqs = {
+        int(event.get("seq") or 0)
+        for event in result.get("runEvents") or []
+        if isinstance(event, dict) and int(event.get("seq") or 0) > 0
+    }
+    dropped_run_event_seqs = original_run_event_seqs - retained_run_event_seqs
+    if dropped_run_event_seqs:
+        replay_after_seq = max(0, min(dropped_run_event_seqs) - 1)
+        for key in ("last_event_seq", "lastEventSeq"):
+            if key in result:
+                result[key] = min(
+                    max(int(result.get(key) or 0), 0),
+                    replay_after_seq,
+                )
     return result
 
 
@@ -1350,7 +1415,7 @@ def _team_conversation_snapshot(
         messages,
         active_run_ids=active_chat_run_ids,
     )
-    raw_run_events = _hydrate_render_run_event_baseline(
+    raw_run_events, replay_after_seq = _hydrate_render_run_event_baseline(
         raw_run_events,
         active_run_ids=active_chat_run_ids,
         runs=runs,
@@ -1439,6 +1504,8 @@ def _team_conversation_snapshot(
         runs=runs,
     )
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
+    if replay_after_seq is not None:
+        last_event_seq = min(last_event_seq, replay_after_seq)
     branch_info = page.get("branchInfo") if isinstance(page, dict) else None
     return _ok(
         rid,
@@ -1505,7 +1572,7 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
         raw_messages,
         active_run_ids=active_run_ids,
     )
-    raw_run_events = _hydrate_render_run_event_baseline(
+    raw_run_events, replay_after_seq = _hydrate_render_run_event_baseline(
         raw_run_events,
         active_run_ids=active_run_ids,
         runs=runs,
@@ -1526,6 +1593,8 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
         active_run_ids=active_run_ids,
     )
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
+    if replay_after_seq is not None:
+        last_event_seq = min(last_event_seq, replay_after_seq)
     return _ok(
         rid,
         _cap_render_result({
