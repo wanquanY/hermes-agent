@@ -48,6 +48,7 @@ def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
 # Keep the serialized result safely under it (headroom for the JSON-RPC
 # envelope + WS framing).
 _RENDER_MAX_BYTES = 3_500_000
+_RENDER_RUN_BASELINE_LIMIT_PER_RUN = 5_000
 _TERMINAL_MISSION_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "canceled", "interrupted"}
 
@@ -160,6 +161,96 @@ def _unmaterialized_terminal_run_ids(
             or _text(run.get("run_id")) not in response_run_ids
         )
     }
+
+
+def _merge_render_run_events(
+    page_events: list[Any],
+    baseline_events: list[Any],
+) -> list[dict[str, Any]]:
+    """Merge canonical event pages without introducing a second event order.
+
+    The session event page and the per-run recovery baseline are two read
+    windows over the same canonical ledger. Positive ``seq`` is unique within
+    a conversation session, so it is the only durable merge identity.
+    """
+
+    by_seq: dict[int, dict[str, Any]] = {}
+    unsequenced: list[dict[str, Any]] = []
+    for source in (page_events, baseline_events):
+        for raw in source:
+            if not isinstance(raw, dict):
+                continue
+            event = dict(raw)
+            try:
+                seq = int(event.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq > 0:
+                by_seq[seq] = event
+            else:
+                unsequenced.append(event)
+    return [by_seq[seq] for seq in sorted(by_seq)] + unsequenced
+
+
+def _render_run_event_baseline(
+    run_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Read the canonical recovery baseline for explicitly visible runs.
+
+    A conversation-wide event page is independently paginated and may contain
+    only old history. Active and unmaterialized terminal runs therefore need a
+    run-addressed read before the snapshot can safely publish the session
+    high-water mark used by the follow-up subscription.
+    """
+
+    normalized_run_ids = sorted(
+        {_text(run_id) for run_id in run_ids if _text(run_id)}
+    )
+    if not normalized_run_ids:
+        return []
+    db = _get_db()
+    runs = getattr(db, "runs", None) if db is not None else None
+    loader = getattr(runs, "list_events_by_run_ids", None)
+    if not callable(loader):
+        return []
+    try:
+        grouped = loader(
+            normalized_run_ids,
+            limit_per_run=_RENDER_RUN_BASELINE_LIMIT_PER_RUN,
+            include_internal=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "conversation.render_snapshot run baseline hydrate skipped run_ids=%s: %s",
+            normalized_run_ids,
+            exc,
+        )
+        return []
+    if not isinstance(grouped, dict):
+        return []
+    return [
+        dict(event)
+        for run_id in normalized_run_ids
+        for event in grouped.get(run_id, [])
+        if isinstance(event, dict)
+    ]
+
+
+def _hydrate_render_run_event_baseline(
+    run_events: list[Any],
+    *,
+    active_run_ids: set[str],
+    runs: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    baseline_run_ids = {
+        _text(run_id) for run_id in active_run_ids if _text(run_id)
+    }
+    baseline_run_ids.update(_unmaterialized_terminal_run_ids(runs, messages))
+    return _merge_render_run_events(
+        run_events,
+        _render_run_event_baseline(baseline_run_ids),
+    )
 
 
 def _mark_transport_truncated(result: dict[str, Any]) -> None:
@@ -1253,6 +1344,18 @@ def _team_conversation_snapshot(
         if not _record(summary.get("decision")).get("include")
     ]
     raw_run_events = list(page.get("runEvents") or []) if isinstance(page, dict) else []
+    active_chat_run_ids = _team_snapshot_active_chat_run_ids(conversation)
+    runs = _canonical_snapshot_runs(
+        session_id,
+        messages,
+        active_run_ids=active_chat_run_ids,
+    )
+    raw_run_events = _hydrate_render_run_event_baseline(
+        raw_run_events,
+        active_run_ids=active_chat_run_ids,
+        runs=runs,
+        messages=messages,
+    )
     participants = _participants_for_session(session_id)
     try:
         messages = project_render_message_owners(
@@ -1324,7 +1427,6 @@ def _team_conversation_snapshot(
         filtered_samples=filtered_message_summaries[:16],
         raw_samples=raw_message_summaries[:24],
     )
-    active_chat_run_ids = _team_snapshot_active_chat_run_ids(conversation)
     runs = _canonical_snapshot_runs(
         session_id,
         messages,
@@ -1391,6 +1493,24 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
     participants = _participants_for_session(session_id)
     raw_messages = list(page.get("messages") or [])
     raw_run_events = list(page.get("runEvents") or [])
+    status = {}
+    try:
+        status = _get_db().runs.session_status(session_id) if _get_db() is not None else {}
+    except Exception:
+        status = {}
+    active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
+    active_run_ids = {active_run_id} if active_run_id else set()
+    runs = _canonical_snapshot_runs(
+        session_id,
+        raw_messages,
+        active_run_ids=active_run_ids,
+    )
+    raw_run_events = _hydrate_render_run_event_baseline(
+        raw_run_events,
+        active_run_ids=active_run_ids,
+        runs=runs,
+        messages=raw_messages,
+    )
     try:
         messages = project_render_message_owners(
             raw_messages,
@@ -1400,16 +1520,10 @@ def _ordinary_conversation_snapshot(rid: Any, params: dict[str, Any]) -> dict[st
         )
     except MessageOwnerResolutionError as exc:
         return _err(rid, 5008, str(exc))
-    status = {}
-    try:
-        status = _get_db().runs.session_status(session_id) if _get_db() is not None else {}
-    except Exception:
-        status = {}
-    active_run_id = _text(status.get("active_run_id")) if isinstance(status, dict) else ""
     runs = _canonical_snapshot_runs(
         session_id,
         messages,
-        active_run_ids={active_run_id} if active_run_id else set(),
+        active_run_ids=active_run_ids,
     )
     last_event_seq = _run_event_session_last_seq(_get_db(), session_id)
     return _ok(

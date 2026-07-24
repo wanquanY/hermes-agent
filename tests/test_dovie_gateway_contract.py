@@ -448,6 +448,168 @@ def test_conversation_render_snapshot_returns_ordinary_render_ready_window(tmp_p
         db.close()
 
 
+def test_conversation_render_snapshot_hydrates_active_run_beyond_session_event_page(
+    tmp_path,
+    monkeypatch,
+):
+    import importlib
+
+    from hermes_agent.composition.cli_session_store import open_cli_session_store
+    from tui_gateway import server
+
+    conversation_render_snapshot = importlib.import_module(
+        "tui_gateway.methods.conversation_render_snapshot"
+    )
+    session_methods = importlib.import_module("tui_gateway.methods.session")
+    db = open_cli_session_store(tmp_path / "state.db")
+    session_id = "stored-long-running-1"
+    active_run_id = "run-active-tail-1"
+    active_turn_id = "turn-active-tail-1"
+    try:
+        db.sessions.create(session_id=session_id, source="tui")
+        db.runs.upsert(
+            run_id="run-historical-noise-1",
+            session_id=session_id,
+            runtime_scope_key="profile:agent-default",
+            turn_id="turn-historical-noise-1",
+            execution_session_id="runtime-historical-noise-1",
+            status="running",
+        )
+        for index in range(220):
+            db.runs.append_event(
+                session_id,
+                {
+                    "type": "status.update",
+                    "run_id": "run-historical-noise-1",
+                    "turn_id": "turn-historical-noise-1",
+                    "payload": {"status": "running", "index": index},
+                },
+            )
+        db.runs.terminate(
+            run_id="run-historical-noise-1",
+            session_id=session_id,
+            target_status="completed",
+            cause="worker_emitted",
+            turn_id="turn-historical-noise-1",
+        )
+        db.messages.append(
+            session_id,
+            role="user",
+            content="生成操作文档",
+            participant_id="user",
+            metadata={"run_id": active_run_id, "turn_id": active_turn_id},
+        )
+        db.runs.upsert(
+            run_id=active_run_id,
+            session_id=session_id,
+            runtime_scope_key="profile:agent-default",
+            turn_id=active_turn_id,
+            execution_session_id="runtime-active-tail-1",
+            status="running",
+        )
+        active_events = (
+            {
+                "type": "message.delta",
+                "payload": {
+                    "mode": "append",
+                    "text": "先读取现有资料。",
+                    "client_message_id": f"{active_turn_id}:assistant-segment:0",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+            {
+                "type": "message.interim",
+                "payload": {
+                    "text": "先读取现有资料。",
+                    "already_streamed": True,
+                    "client_message_id": f"{active_turn_id}:assistant-segment:0",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+            {
+                "type": "tool.start",
+                "payload": {
+                    "tool_id": "tool-active-tail-1",
+                    "name": "terminal",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+            {
+                "type": "tool.complete",
+                "payload": {
+                    "tool_id": "tool-active-tail-1",
+                    "name": "terminal",
+                    "result_text": "ok",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+            {
+                "type": "message.delta",
+                "payload": {
+                    "mode": "append",
+                    "text": "现在继续生成文档。",
+                    "client_message_id": f"{active_turn_id}:assistant-segment:1",
+                    "participant_id": "agent:agent-default",
+                },
+            },
+        )
+        for event in active_events:
+            db.runs.append_event(
+                session_id,
+                {
+                    **event,
+                    "session_id": "runtime-active-tail-1",
+                    "conversation_session_id": session_id,
+                    "run_id": active_run_id,
+                    "turn_id": active_turn_id,
+                    "runtime_scope_key": "profile:agent-default",
+                },
+            )
+        monkeypatch.setattr(conversation_render_snapshot, "_get_db", lambda: db)
+        monkeypatch.setattr(session_methods, "_get_db", lambda: db)
+
+        legacy_page = server._methods["session.messages"](
+            1,
+            {
+                "session_id": session_id,
+                "includeRunEvents": True,
+                "runEventsLimit": 200,
+            },
+        )["result"]
+        assert len(legacy_page["runEvents"]) == 200
+        assert all(event["run_id"] != active_run_id for event in legacy_page["runEvents"])
+
+        response = server._methods["conversation.render_snapshot"](
+            2,
+            {
+                "session_id": session_id,
+                "limit": 50,
+                "includeRunEvents": True,
+                "runEventsLimit": 200,
+            },
+        )
+        result = response["result"]
+        recovered = [
+            event for event in result["runEvents"]
+            if event["run_id"] == active_run_id
+        ]
+
+        assert [event["type"] for event in recovered] == [
+            "message.delta",
+            "message.interim",
+            "tool.start",
+            "tool.complete",
+            "message.delta",
+        ]
+        assert recovered[0]["payload"]["text"] == "先读取现有资料。"
+        assert recovered[-1]["payload"]["text"] == "现在继续生成文档。"
+        assert result["last_event_seq"] == recovered[-1]["seq"]
+        assert result["runs"][0]["run_id"] == active_run_id
+        assert result["runs"][0]["status"] == "running"
+    finally:
+        db.close()
+
+
 def test_conversation_render_snapshot_preserves_cancelled_unmaterialized_tail(
     tmp_path,
     monkeypatch,
@@ -712,6 +874,31 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
     db = open_cli_session_store(tmp_path / "state.db")
     try:
         db.sessions.create(session_id="team-session-1", source="team_mission")
+        db.runs.upsert(
+            run_id="historical-team-run-1",
+            session_id="team-session-1",
+            runtime_scope_key="team:conversation-1:leader",
+            turn_id="historical-team-turn-1",
+            execution_session_id="runtime-team-historical",
+            status="running",
+        )
+        for index in range(220):
+            db.runs.append_event(
+                "team-session-1",
+                {
+                    "type": "status.update",
+                    "run_id": "historical-team-run-1",
+                    "turn_id": "historical-team-turn-1",
+                    "payload": {"status": "running", "index": index},
+                },
+            )
+        db.runs.terminate(
+            run_id="historical-team-run-1",
+            session_id="team-session-1",
+            target_status="completed",
+            cause="worker_emitted",
+            turn_id="historical-team-turn-1",
+        )
         db.messages.append(
             "team-session-1",
             role="assistant",
@@ -780,6 +967,8 @@ def test_conversation_render_snapshot_returns_active_team_structural_runtime_eve
                 "kind": "team_mission",
                 "conversation_id": "conversation-1",
                 "runtime_scope_key": "team:conversation-1:leader",
+                "includeRunEvents": True,
+                "runEventsLimit": 200,
             },
         )
 
