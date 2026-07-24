@@ -1525,6 +1525,48 @@ def test_interim_commentary_preserves_assistant_content(monkeypatch):
     assert "I'll inspect the repo structure first." in observed["text"]
 
 
+def test_repeated_interim_commentary_is_internal_but_remains_in_provider_history(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+
+    def capture(text, **metadata):
+        observed.append({"text": text, **metadata})
+
+    agent.interim_assistant_callback = capture
+    first = {
+        "role": "assistant",
+        "content": "让我搜索微信的 FTS 全文索引数据库：",
+        "tool_calls": [{"id": "terminal_1"}],
+    }
+    repeated = {
+        "role": "assistant",
+        "content": "让我搜索微信的 FTS 全文索引数据库：",
+        "tool_calls": [{"id": "terminal_2"}],
+    }
+
+    agent._emit_interim_assistant_message(first)
+    agent._emit_interim_assistant_message(repeated)
+
+    assert "metadata" not in first
+    assert repeated["tool_calls"] == [{"id": "terminal_2"}]
+    assert repeated["metadata"] == {
+        "transcript_visibility": "internal",
+        "synthetic_kind": "repeated_interim_commentary",
+    }
+    assert observed == [
+        {
+            "text": "让我搜索微信的 FTS 全文索引数据库：",
+            "already_streamed": False,
+        },
+        {
+            "text": "让我搜索微信的 FTS 全文索引数据库：",
+            "already_streamed": False,
+            "transcript_visibility": "internal",
+            "synthetic_kind": "repeated_interim_commentary",
+        },
+    ]
+
+
 def test_stream_delta_strips_leaked_memory_context(monkeypatch):
     agent = _build_agent(monkeypatch)
     observed = []

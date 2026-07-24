@@ -22,6 +22,7 @@ TRANSCRIPT_VISIBILITY_KEY = "transcript_visibility"
 TRANSCRIPT_VISIBILITY_INTERNAL = "internal"
 TRANSCRIPT_VISIBILITY_PUBLIC = "public"
 SYNTHETIC_KIND_KEY = "synthetic_kind"
+REPEATED_INTERIM_COMMENTARY_KIND = "repeated_interim_commentary"
 
 EMPTY_RESPONSE_RECOVERY_PROMPT = (
     "You just executed tool calls but returned an empty response. "
@@ -166,6 +167,7 @@ __all__ = [
     "EPHEMERAL_RUNTIME_MESSAGE_FLAGS",
     "PRIVATE_MESSAGE_FLAGS",
     "PublicTranscriptVisibilityPolicy",
+    "REPEATED_INTERIM_COMMENTARY_KIND",
     "SYNTHETIC_KIND_KEY",
     "TRANSCRIPT_VISIBILITY_INTERNAL",
     "TRANSCRIPT_VISIBILITY_KEY",

@@ -69,6 +69,8 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from hermes_agent.domain.transcript_visibility import (
+    REPEATED_INTERIM_COMMENTARY_KIND,
+    TRANSCRIPT_VISIBILITY_INTERNAL,
     internal_transcript_metadata,
     is_ephemeral_runtime_message,
     private_transcript_reason,
@@ -4176,16 +4178,48 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
         """Surface a real mid-turn assistant commentary message to the UI layer."""
-        cb = getattr(self, "interim_assistant_callback", None)
-        if cb is None or not isinstance(assistant_msg, dict):
+        if not isinstance(assistant_msg, dict):
             return
         content = assistant_msg.get("content")
         visible = self._strip_think_blocks(content or "").strip()
         if not visible or visible == "(empty)":
             return
+        signature = self._normalize_interim_visible_text(visible)
+        public_signatures = getattr(
+            self,
+            "_public_interim_commentary_signatures",
+            None,
+        )
+        if not isinstance(public_signatures, set):
+            public_signatures = set()
+            self._public_interim_commentary_signatures = public_signatures
+        repeated_commentary = signature in public_signatures
+        if repeated_commentary:
+            metadata = assistant_msg.get("metadata")
+            assistant_msg["metadata"] = internal_transcript_metadata(
+                metadata if isinstance(metadata, dict) else None,
+                synthetic_kind=REPEATED_INTERIM_COMMENTARY_KIND,
+            )
+        else:
+            public_signatures.add(signature)
+
+        cb = getattr(self, "interim_assistant_callback", None)
+        if cb is None:
+            return
         already_streamed = self._interim_content_was_streamed(visible)
         try:
-            cb(visible, already_streamed=already_streamed)
+            cb(
+                visible,
+                already_streamed=already_streamed,
+                **(
+                    {
+                        "transcript_visibility": TRANSCRIPT_VISIBILITY_INTERNAL,
+                        "synthetic_kind": REPEATED_INTERIM_COMMENTARY_KIND,
+                    }
+                    if repeated_commentary
+                    else {}
+                ),
+            )
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
 

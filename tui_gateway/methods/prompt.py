@@ -12,6 +12,7 @@ from hermes_runtime_event_payloads import terminal_text_metadata
 from hermes_team_mission.state.conversation import normalize_team_mission_conversation_session
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
+from tui_gateway.services.interim_message_events import create_interim_assistant_callback
 from tui_gateway.methods.prompt_persistence import (
     commit_scope_summary_after_compression as _commit_scope_summary_after_compression,
     latest_assistant_message_id_for_turn as _latest_assistant_message_id_for_turn,
@@ -1241,22 +1242,11 @@ def _run_prompt_submit(
                     )
                 agent.reasoning_callback = _emit_reasoning_delta
                 if _server._load_interim_assistant_messages():
-                    def _interim_assistant_callback(
-                        commentary: str,
-                        *,
-                        already_streamed: bool = False,
-                    ) -> None:
-                        _emit(
-                            "message.interim",
-                            sid,
-                            {
-                                "text": str(commentary),
-                                "already_streamed": bool(already_streamed),
-                                **current_message_identity_payload(),
-                            },
-                        )
-
-                    agent.interim_assistant_callback = _interim_assistant_callback
+                    agent.interim_assistant_callback = create_interim_assistant_callback(
+                        emit=_emit,
+                        session_id=sid,
+                        identity_payload=current_message_identity_payload,
+                    )
                 else:
                     agent.interim_assistant_callback = None
                 _log_prompt_stage(

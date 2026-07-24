@@ -365,6 +365,8 @@ def test_interim_message_seals_covered_delta_after_its_durable_checkpoint(
             "text": "先说明处理结果，再继续调用工具。",
             "already_streamed": True,
             "client_message_id": client_message_id,
+            "transcript_visibility": "internal",
+            "synthetic_kind": "repeated_interim_commentary",
         },
     }
     run_control.record_event(interim, db=db)
@@ -378,6 +380,8 @@ def test_interim_message_seals_covered_delta_after_its_durable_checkpoint(
     assert events[0]["payload"]["stream_checkpoint"] is True
     assert events[0]["payload"]["text"] == interim["payload"]["text"]
     assert events[0]["runtime_source_seq"] < events[1]["runtime_source_seq"]
+    assert events[1]["payload"]["transcript_visibility"] == "internal"
+    assert events[1]["payload"]["synthetic_kind"] == "repeated_interim_commentary"
 
     run_control.record_event(
         {

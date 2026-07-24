@@ -111,8 +111,17 @@ class AgentStreamingRuntime:
         except Exception as exc:
             logger.debug("Could not set up stream consumer: %s", exc)
 
-    def interim_callback(self, text: str, *, already_streamed: bool = False) -> None:
+    def interim_callback(
+        self,
+        text: str,
+        *,
+        already_streamed: bool = False,
+        transcript_visibility: str = "",
+        synthetic_kind: str = "",
+    ) -> None:
         if not self._run_still_current():
+            return
+        if str(transcript_visibility or "").strip().lower() == "internal":
             return
         if self._stream_consumer is not None:
             if already_streamed:

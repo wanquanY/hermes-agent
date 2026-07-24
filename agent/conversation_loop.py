@@ -620,6 +620,10 @@ def run_conversation(
     agent._last_content_tools_all_housekeeping = False
     agent._mute_post_response = False
     agent._unicode_sanitization_passes = 0
+    # Tool-call protocol messages remain distinct in provider history, but an
+    # exact commentary repeat within one user turn is runtime-only transcript
+    # context after its first public occurrence.
+    agent._public_interim_commentary_signatures = set()
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
     # True until the server rejects an image_url content part with an error

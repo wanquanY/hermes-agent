@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.interim_message_events import create_interim_assistant_callback
 
 _server = bind_server_globals(globals())
 logger = logging.getLogger(__name__)
@@ -170,15 +171,9 @@ def _agent_cbs(sid: str) -> dict:
         status_update=_status_update,
     )
     if _server._load_interim_assistant_messages():
-        callbacks["interim_assistant_callback"] = (
-            lambda text, *, already_streamed=False: _server._emit(
-                "message.interim",
-                sid,
-                {
-                    "text": str(text),
-                    "already_streamed": bool(already_streamed),
-                },
-            )
+        callbacks["interim_assistant_callback"] = create_interim_assistant_callback(
+            emit=_server._emit,
+            session_id=sid,
         )
     return callbacks
 
