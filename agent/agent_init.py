@@ -1179,6 +1179,9 @@ def init_agent(
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+    from agent.image_routing import configured_image_input_mode
+
+    agent._image_input_mode = configured_image_input_mode(_agent_cfg)
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(

@@ -80,6 +80,44 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     return agent
 
 
+def test_codex_responses_hides_vision_fallback_tool_for_native_vision_model(
+    monkeypatch,
+):
+    agent = _build_agent(monkeypatch)
+    agent.tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run shell commands.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "vision_analyze",
+                "description": "Analyze an image with an auxiliary model.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    agent.model_descriptor = {
+        "id": "kimi-k3",
+        "vision_enabled": True,
+    }
+    agent._image_input_mode = "auto"
+
+    kwargs = agent._build_api_kwargs(
+        [{"role": "user", "content": "Describe the attached image."}]
+    )
+
+    assert {tool["name"] for tool in kwargs["tools"]} == {"terminal"}
+    assert {
+        tool["function"]["name"] for tool in agent.tools
+    } == {"terminal", "vision_analyze"}
+
+
 def _codex_message_response(text: str):
     return SimpleNamespace(
         output=[

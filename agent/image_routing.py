@@ -16,20 +16,14 @@ The decision is made once per message turn by :func:`decide_image_input_mode`.
 It reads ``agent.image_input_mode`` from config.yaml (``auto`` | ``native``
 | ``text``, default ``auto``) and the active model's capability metadata.
 
-In ``auto`` mode:
-  - If the user has explicitly configured ``auxiliary.vision.provider``
-    (i.e. not ``auto`` and not empty), we assume they want the text pipeline
-    regardless of the main model — they've opted in to a specific vision
-    backend for a reason (cost, quality, local-only, etc.).
-  - Otherwise, if the active model reports ``supports_vision=True`` in its
-    models.dev metadata, we attach natively.
-  - Otherwise (non-vision model, no explicit override), we fall back to text.
+In ``auto`` mode, the active model's capability is authoritative:
+  - If the active model supports vision, attach images natively.
+  - Otherwise, fall back to the auxiliary ``vision_analyze`` text pipeline.
 
-This keeps ``vision_analyze`` surfaced as a tool in every session — skills
-and agent flows that chain it (browser screenshots, deeper inspection of
-URL-referenced images, style-gating loops) keep working. The routing only
-affects *how user-attached images on the current turn* are presented to the
-main model.
+Configuring ``auxiliary.vision`` selects the fallback backend; it does not
+force vision-capable main models through that fallback. Users who deliberately
+want the auxiliary pipeline for every model can still set
+``agent.image_input_mode: text`` explicitly.
 """
 
 from __future__ import annotations
@@ -216,11 +210,22 @@ def _coerce_mode(raw: Any) -> str:
     return "auto"
 
 
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when the user configured a specific auxiliary vision backend.
+def configured_image_input_mode(cfg: Optional[Dict[str, Any]]) -> str:
+    """Return the explicitly configured image-input mode or ``"auto"``."""
+    if not isinstance(cfg, dict):
+        return "auto"
+    agent_cfg = cfg.get("agent") or {}
+    if not isinstance(agent_cfg, dict):
+        return "auto"
+    return _coerce_mode(agent_cfg.get("image_input_mode"))
 
-    An explicit override means the user *wants* the text pipeline (they're
-    paying for a dedicated vision model), so we don't silently bypass it.
+
+def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
+    """Return whether a concrete auxiliary vision backend is configured.
+
+    This is capability detection only. Inbound attachment routing deliberately
+    does not interpret it as a request to bypass a vision-capable main model;
+    ``agent.image_input_mode: text`` is the explicit switch for that behavior.
     """
     if not isinstance(cfg, dict):
         return False
@@ -285,21 +290,16 @@ def decide_image_input_mode(
         model descriptor. Used by Dovie and other gateway clients when the
         active model capability is known outside static models.dev metadata.
     """
-    mode_cfg = "auto"
-    if isinstance(cfg, dict):
-        agent_cfg = cfg.get("agent") or {}
-        if isinstance(agent_cfg, dict):
-            mode_cfg = _coerce_mode(agent_cfg.get("image_input_mode"))
+    mode_cfg = configured_image_input_mode(cfg)
 
     if mode_cfg == "native":
         return "native"
     if mode_cfg == "text":
         return "text"
 
-    # auto
-    if _explicit_aux_vision_override(cfg):
-        return "text"
-
+    # auto: model capability owns attachment routing. ``auxiliary.vision``
+    # only chooses the fallback backend when the main model cannot consume
+    # the image itself.
     if supports_vision_override is True:
         return "native"
     if supports_vision_override is False:
@@ -488,5 +488,6 @@ def build_native_content_parts(
 __all__ = [
     "decide_image_input_mode",
     "build_native_content_parts",
+    "configured_image_input_mode",
     "extract_image_refs",
 ]

@@ -1372,6 +1372,42 @@ class TestBuildApiKwargs:
         assert kwargs["messages"] is messages
         assert kwargs["timeout"] == 1800.0
 
+    def test_native_vision_model_does_not_receive_vision_fallback_tool(self, agent):
+        agent.tools = _make_tool_defs("web_search", "vision_analyze")
+        agent.model_descriptor = {"vision_enabled": True}
+        agent._image_input_mode = "auto"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert {
+            tool["function"]["name"] for tool in kwargs["tools"]
+        } == {"web_search"}
+        assert {
+            tool["function"]["name"] for tool in agent.tools
+        } == {"web_search", "vision_analyze"}
+
+    def test_non_vision_model_keeps_vision_fallback_tool(self, agent):
+        agent.tools = _make_tool_defs("web_search", "vision_analyze")
+        agent.model_descriptor = {"vision_enabled": False}
+        agent._image_input_mode = "auto"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert {
+            tool["function"]["name"] for tool in kwargs["tools"]
+        } == {"web_search", "vision_analyze"}
+
+    def test_explicit_text_image_mode_keeps_vision_tool_for_native_model(self, agent):
+        agent.tools = _make_tool_defs("web_search", "vision_analyze")
+        agent.model_descriptor = {"vision_enabled": True}
+        agent._image_input_mode = "text"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert {
+            tool["function"]["name"] for tool in kwargs["tools"]
+        } == {"web_search", "vision_analyze"}
+
     def test_public_moonshot_kimi_k2_5_omits_temperature(self, agent):
         """Kimi models should NOT have client-side temperature overrides.
 

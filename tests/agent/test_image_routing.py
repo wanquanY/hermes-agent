@@ -122,8 +122,8 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
 
-    def test_auto_respects_aux_vision_override_even_for_vision_model(self):
-        """If the user configured a dedicated vision backend, don't bypass it."""
+    def test_auto_uses_native_vision_even_when_auxiliary_backend_is_configured(self):
+        """The auxiliary backend is a fallback, not a main-model override."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
             assert (
@@ -133,7 +133,7 @@ class TestDecideImageInputMode:
                     cfg,
                     supports_vision_override=True,
                 )
-                == "text"
+                == "native"
             )
 
     def test_none_config_is_auto(self):
@@ -312,15 +312,15 @@ class TestAutoModeRespectsOverride:
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
             assert decide_image_input_mode("custom", "unknown", {}) == "text"
 
-    def test_explicit_aux_vision_override_still_wins(self):
-        # If the user has configured a dedicated vision aux backend, respect
-        # it even when supports_vision: true is also set.
+    def test_auxiliary_vision_config_does_not_override_native_capability(self):
+        # An auxiliary backend remains available for text-only models, but a
+        # vision-capable main model consumes user attachments directly.
         cfg = {
             "model": {"supports_vision": True},
             "auxiliary": {"vision": {"provider": "openrouter", "model": "gemini-2.5-pro"}},
         }
         with patch("agent.models_dev.get_model_capabilities", return_value=None):
-            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "text"
+            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "native"
 
 
 # ─── build_native_content_parts ──────────────────────────────────────────────

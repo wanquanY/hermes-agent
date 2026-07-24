@@ -89,3 +89,45 @@ def test_build_image_aware_run_message_routes_text_url_natively(monkeypatch):
         "native-image-build-end",
         {"run_id": "run-1", "turn_id": "turn-1", "skipped_count": 0, "part_count": 2},
     ) in logs
+
+
+def test_build_image_aware_run_message_prefers_descriptor_vision_over_auxiliary_config(
+    monkeypatch,
+    tmp_path,
+):
+    from agent import auxiliary_client
+    from hermes_cli import config
+    from tui_gateway.services.prompt_image_routing import build_image_aware_run_message
+
+    monkeypatch.setattr(auxiliary_client, "_read_main_provider", lambda: "custom")
+    monkeypatch.setattr(auxiliary_client, "_read_main_model", lambda: "kimi-k3")
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: {
+            "auxiliary": {
+                "vision": {
+                    "provider": "newapi",
+                    "model": "gemini-3.1-flash-image-preview",
+                },
+            },
+        },
+    )
+
+    image_path = tmp_path / "kimi-test.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    message = build_image_aware_run_message(
+        prompt="这个图片是什么内容？",
+        prompt_text="这个图片是什么内容？",
+        submitted_images=[str(image_path)],
+        session={"model_descriptor": {"vision_enabled": True}},
+        sid="runtime-vision",
+        run_id="run-vision",
+        turn_id="turn-vision",
+        log_prompt_stage=lambda *_args, **_kwargs: None,
+    )
+
+    assert isinstance(message, list)
+    assert any(part.get("type") == "image_url" for part in message)
+    assert "vision_analyze" not in str(message)
