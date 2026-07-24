@@ -320,6 +320,82 @@ def test_reasoning_available_seals_reasoning_after_its_durable_checkpoint(tmp_pa
     db.close()
 
 
+@pytest.mark.parametrize(
+    ("session_id", "runtime_scope_key"),
+    [
+        ("ordinary-interim-session", "profile:agent-default"),
+        ("leader-interim-session", "team:conversation-1:leader-conversation"),
+        ("member-interim-session", "team:conversation-1:member:agent-reviewer"),
+    ],
+)
+def test_interim_message_seals_covered_delta_after_its_durable_checkpoint(
+    tmp_path,
+    session_id,
+    runtime_scope_key,
+):
+    db = open_cli_session_store(tmp_path / f"{session_id}.db")
+    run_id = "message-interim-run"
+    client_message_id = "message-interim-turn:assistant-segment:3"
+    common = {
+        "conversation_session_id": session_id,
+        "session_id": "message-interim-runtime",
+        "run_id": run_id,
+        "turn_id": "message-interim-turn",
+        "runtime_scope_key": runtime_scope_key,
+    }
+    delta = {
+        **common,
+        "type": "message.delta",
+        "payload": {
+            "mode": "append",
+            "delta": "先说明处理结果，再继续调用工具。",
+            "offset": 0,
+            "client_message_id": client_message_id,
+        },
+    }
+    run_control.record_event(delta, db=db)
+
+    assert delta["transient"] is True
+    assert db.runs.list_events(session_id, run_id=run_id) == []
+
+    interim = {
+        **common,
+        "type": "message.interim",
+        "payload": {
+            "text": "先说明处理结果，再继续调用工具。",
+            "already_streamed": True,
+            "client_message_id": client_message_id,
+        },
+    }
+    run_control.record_event(interim, db=db)
+
+    events = db.runs.list_events(session_id, run_id=run_id)
+    assert [event["type"] for event in events] == [
+        "message.delta",
+        "message.interim",
+    ]
+    assert [event["seq"] for event in events] == [1, 2]
+    assert events[0]["payload"]["stream_checkpoint"] is True
+    assert events[0]["payload"]["text"] == interim["payload"]["text"]
+    assert events[0]["runtime_source_seq"] < events[1]["runtime_source_seq"]
+
+    run_control.record_event(
+        {
+            **common,
+            "type": "tool.start",
+            "payload": {"tool_call_id": "tool-after-interim", "name": "terminal"},
+        },
+        db=db,
+    )
+    events = db.runs.list_events(session_id, run_id=run_id)
+    assert [event["type"] for event in events] == [
+        "message.delta",
+        "message.interim",
+        "tool.start",
+    ]
+    db.close()
+
+
 def test_checkpoint_race_delivers_only_unseen_utf16_suffix():
     subscription = {}
     common = {

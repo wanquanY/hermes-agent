@@ -114,6 +114,11 @@ _STREAM_TRACE_EVENT_TYPES = {
 }
 _STREAM_CHECKPOINT_BOUNDARY_TYPES = {
     "message.complete",
+    # A durable interim seals assistant text that was already delivered through
+    # transient message.delta frames. Persist every covered stream checkpoint
+    # first so canonical replay preserves the same delta -> interim causality
+    # that live subscribers observed.
+    "message.interim",
     "reasoning.available",
     "error",
     "session.interrupted",
