@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import time
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from tui_gateway.services.artifact_registry.domain import ArtifactRecord
 from tui_gateway.services.artifact_registry.extractors import (
@@ -42,6 +44,95 @@ def _relative_artifact_path(artifact_path: str, workspace_path: str) -> str:
 def _artifact_id(workspace_id: str, artifact_path: str) -> str:
     raw = f"{workspace_id}:{os.path.abspath(artifact_path)}"
     return "artifact:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _remote_artifact_id(workspace_id: str, url: str) -> str:
+    raw = f"{workspace_id}:{url}"
+    return "artifact:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _http_url(value: object) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    return text if parsed.scheme.lower() in {"http", "https"} and parsed.netloc else ""
+
+
+def _remote_image_urls(name: str, result: str) -> list[str]:
+    if name not in {"dovie_image_generate", "image_generate"}:
+        return []
+    try:
+        data = json.loads(result)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    if data.get("success") is False or str(data.get("status") or "").lower() in {"error", "failed"}:
+        return []
+
+    containers = [
+        data,
+        data.get("data") if isinstance(data.get("data"), dict) else {},
+        data.get("result") if isinstance(data.get("result"), dict) else {},
+    ]
+    candidates: list[object] = []
+    for container in containers:
+        candidates.extend([
+            container.get("image_urls"),
+            container.get("image_url"),
+            container.get("images"),
+        ])
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        values = candidate if isinstance(candidate, list) else [candidate]
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("image_url") or value.get("src")
+            url = _http_url(value)
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _remote_image_artifact_records(
+    *,
+    tool_call_id: str,
+    name: str,
+    result: str,
+    workspace: dict[str, Any],
+    origin: dict[str, Any] | None,
+) -> list[ArtifactRecord]:
+    records: list[ArtifactRecord] = []
+    for index, url in enumerate(_remote_image_urls(name, result), start=1):
+        parsed = urlparse(url)
+        title = unquote(parsed.path.rstrip("/").split("/")[-1]) or f"生成图片 {index}"
+        mime_type = mimetypes.guess_type(parsed.path)[0] or "image/png"
+        records.append(
+            ArtifactRecord(
+                id=_remote_artifact_id(workspace["id"], url),
+                workspace_id=workspace["id"],
+                path=url,
+                relative_path=title,
+                title=title,
+                mime_type=mime_type,
+                size_bytes=0,
+                workspace=workspace,
+                origin={
+                    "event": "tool.complete",
+                    "tool_id": tool_call_id,
+                    "tool_name": name,
+                    "source": "remote_media",
+                    "url": url,
+                    **dict(origin or {}),
+                },
+            )
+        )
+    return records
 
 
 def _artifact_kind(mime_type: str) -> str:
@@ -85,6 +176,11 @@ def _artifact_payload_contract(payload: dict[str, Any]) -> dict[str, Any]:
     )
     payload["produced_by_run_id"] = produced_by_run_id
     payload["producedByRunId"] = produced_by_run_id
+    if origin.get("source") == "remote_media":
+        url = _http_url(origin.get("url") or payload.get("path"))
+        if url:
+            payload["url"] = url
+            payload["source"] = url
     return payload
 
 
@@ -105,7 +201,13 @@ def _artifact_records_from_tool_complete(
 ) -> list[ArtifactRecord]:
     workspace_payload = _workspace_payload(workspace, cwd)
     workspace_path = normalize_session_cwd(workspace_payload["path"])
-    records: list[ArtifactRecord] = []
+    records = _remote_image_artifact_records(
+        tool_call_id=tool_call_id,
+        name=name,
+        result=result,
+        workspace=workspace_payload,
+        origin=origin,
+    )
 
     terminal_changes = changed_workspace_artifacts(workspace_snapshot)
     terminal_operations = {change.path: change.operation for change in terminal_changes}

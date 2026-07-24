@@ -302,6 +302,81 @@ def test_record_artifacts_persists_and_deduplicates_by_workspace_path(
     assert listed[0]["origin"]["tool_id"] == "tool-2"
 
 
+def test_record_artifacts_persists_remote_image_generation_output(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path)
+    gateway_store._DEFAULT_STORES.clear()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image_url = "https://cdn.example.com/images/generated-cat.png"
+
+    [created] = record_artifacts_from_tool_complete(
+        session_id="session-1",
+        tool_call_id="image-tool-1",
+        name="dovie_image_generate",
+        args={"prompt": "cat"},
+        result=json.dumps({
+            "success": True,
+            "status": "completed",
+            "image_urls": [image_url],
+        }),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+        origin={"run_id": "run-1", "turn_id": "turn-1"},
+    )
+
+    assert created["path"] == image_url
+    assert created["url"] == image_url
+    assert created["source"] == image_url
+    assert created["relative_path"] == "generated-cat.png"
+    assert created["title"] == "generated-cat.png"
+    assert created["mime_type"] == "image/png"
+    assert created["availability"] == "available"
+    assert created["origin"] == {
+        "event": "tool.complete",
+        "tool_id": "image-tool-1",
+        "tool_name": "dovie_image_generate",
+        "source": "remote_media",
+        "url": image_url,
+        "run_id": "run-1",
+        "turn_id": "turn-1",
+    }
+    [listed] = list_artifacts(session_id="session-1")
+    assert listed["id"] == created["id"]
+    assert listed["path"] == image_url
+    assert listed["url"] == image_url
+    assert listed["source"] == image_url
+    assert listed["availability"] == "available"
+    assert listed["origin"] == created["origin"]
+
+
+def test_record_artifacts_ignores_failed_remote_image_generation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path)
+    gateway_store._DEFAULT_STORES.clear()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert record_artifacts_from_tool_complete(
+        session_id="session-1",
+        tool_call_id="image-tool-1",
+        name="dovie_image_generate",
+        args={"prompt": "cat"},
+        result=json.dumps({
+            "success": False,
+            "status": "failed",
+            "image_urls": ["https://cdn.example.com/images/should-not-render.png"],
+        }),
+        cwd=str(workspace),
+        workspace={"id": "workspace-test", "path": str(workspace)},
+    ) == []
+    assert list_artifacts(session_id="session-1") == []
+
+
 def test_record_artifacts_removes_deleted_file_from_registry(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway_store, "get_hermes_home", lambda: tmp_path)
     gateway_store._DEFAULT_STORES.clear()

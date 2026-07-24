@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 from hermes_agent.storage.sqlite_wal import configure_sqlite_connection
@@ -860,12 +861,26 @@ class GatewayStateStore:
         artifact_path = str(payload.get("path") or "")
         mime_type = str(payload.get("mime_type") or "application/octet-stream")
         size_bytes = int(payload.get("size_bytes") or 0)
+        try:
+            parsed_artifact_url = urlparse(artifact_path)
+            remote_url = (
+                artifact_path
+                if parsed_artifact_url.scheme.lower() in {"http", "https"}
+                and bool(parsed_artifact_url.netloc)
+                else ""
+            )
+        except ValueError:
+            remote_url = ""
         artifact_file = Path(artifact_path) if artifact_path else None
         try:
-            stat = artifact_file.stat() if artifact_file else None
+            stat = artifact_file.stat() if artifact_file and not remote_url else None
         except OSError:
             stat = None
-        if stat is not None and artifact_file is not None and artifact_file.is_file():
+        if remote_url:
+            payload["availability"] = "available"
+            payload["url"] = remote_url
+            payload["source"] = remote_url
+        elif stat is not None and artifact_file is not None and artifact_file.is_file():
             size_bytes = int(stat.st_size)
             payload["availability"] = "available"
             payload["updated_at"] = max(float(payload.get("updated_at") or 0), float(stat.st_mtime))
