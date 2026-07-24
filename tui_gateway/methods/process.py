@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 
 from tui_gateway.methods._shared import bind_server_globals
 
@@ -182,7 +181,7 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     try:
-        from tools.environments.local import _find_shell
+        from tools.environments.local import _find_interactive_shell
         from tools.process_registry import process_registry
 
         reuse = params.get("reuse", True) is not False
@@ -195,13 +194,12 @@ def _(rid, params: dict) -> dict:
             if running:
                 return _ok(rid, {"terminal": running[-1], "reused": True})
 
-        shell = _find_shell()
-        process = process_registry.spawn_local(
-            f"exec {shlex.quote(shell)} -l",
+        shell = _find_interactive_shell()
+        process = process_registry.spawn_interactive_shell(
+            shell=shell,
             cwd=_desktop_terminal_cwd(session),
             task_id=_desktop_terminal_task_id(session),
             session_key=str(session.get("session_key") or ""),
-            use_pty=True,
         )
         if getattr(process, "_pty", None) is None:
             process_registry.kill_process(process.id, source="terminal.session.open")

@@ -23,8 +23,9 @@ class FakeProcessRegistry:
         self.write_calls: list[tuple[str, str]] = []
         self.kill_calls: list[tuple[str, str]] = []
 
-    def spawn_local(self, command: str, **kwargs):
-        self.spawn_calls.append({"command": command, **kwargs})
+    def spawn_interactive_shell(self, *, shell: str, **kwargs):
+        command = f"exec {shell} -l"
+        self.spawn_calls.append({"command": command, "shell": shell, **kwargs})
         process = SimpleNamespace(
             id="proc_terminal",
             command=command,
@@ -67,6 +68,10 @@ class FakeProcessRegistry:
 def terminal_runtime(monkeypatch, tmp_path):
     registry = FakeProcessRegistry()
     monkeypatch.setattr(process_registry_module, "process_registry", registry)
+    monkeypatch.setattr(
+        "tools.environments.local._find_interactive_shell",
+        lambda: "/bin/zsh",
+    )
     with server._sessions_lock:
         server._sessions["runtime-session"] = {
             "session_key": "conversation-session",
@@ -113,7 +118,8 @@ def test_open_creates_and_then_reuses_session_scoped_pty(terminal_runtime):
     assert registry.spawn_calls[0]["cwd"] == str(tmp_path)
     assert registry.spawn_calls[0]["session_key"] == "conversation-session"
     assert registry.spawn_calls[0]["task_id"] == "dovie.desktop.terminal:conversation-session"
-    assert registry.spawn_calls[0]["use_pty"] is True
+    assert registry.spawn_calls[0]["shell"] == "/bin/zsh"
+    assert registry.spawn_calls[0]["command"] == "exec /bin/zsh -l"
 
 
 def test_open_uses_durable_session_and_explicit_workspace_when_agent_is_idle(terminal_runtime):

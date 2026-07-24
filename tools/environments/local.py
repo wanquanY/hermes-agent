@@ -381,6 +381,75 @@ def _find_bash() -> str:
     )
 
 
+def _account_login_shell() -> str:
+    """Return the POSIX account's configured login shell, when available."""
+    if _IS_WINDOWS:
+        return ""
+    try:
+        import pwd
+
+        return str(pwd.getpwuid(os.getuid()).pw_shell or "").strip()
+    except (ImportError, KeyError, OSError):
+        return ""
+
+
+def _resolve_shell_executable(value: object) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    expanded = os.path.expanduser(candidate)
+    if os.path.isabs(expanded):
+        return expanded if os.path.isfile(expanded) and os.access(expanded, os.X_OK) else ""
+    resolved = shutil.which(expanded)
+    return resolved if resolved and os.access(resolved, os.X_OK) else ""
+
+
+def _find_interactive_shell(env: dict | None = None) -> str:
+    """Resolve the user's real login shell for a human-operated terminal.
+
+    Automated Hermes commands intentionally continue to use :func:`_find_bash`
+    because their generated scripts rely on Bash syntax. Desktop terminal tabs
+    are a different boundary: they should behave like the user's native
+    terminal and load that shell's login and interactive startup files.
+    """
+    if _IS_WINDOWS:
+        return _find_bash()
+
+    source_env = os.environ if env is None else env
+    platform_default = "/bin/zsh" if platform.system() == "Darwin" else "/bin/bash"
+    for value in (
+        source_env.get("TERMINAL_INTERACTIVE_SHELL"),
+        _account_login_shell(),
+        source_env.get("SHELL"),
+        platform_default,
+        "/bin/sh",
+    ):
+        resolved = _resolve_shell_executable(value)
+        if resolved:
+            return resolved
+    raise RuntimeError("No executable interactive login shell is available")
+
+
+def _interactive_terminal_env(
+    base_env: dict | None,
+    extra_env: dict | None,
+    *,
+    shell: str,
+) -> dict[str, str]:
+    """Build the sanitized environment for a human-operated local terminal."""
+    env = _sanitize_subprocess_env(base_env, extra_env)
+    native_home = str((base_env or {}).get("HOME") or "").strip()
+    if native_home:
+        # A human-operated local terminal must load the user's own shell rc
+        # files. Agent subprocesses retain the existing per-profile HOME
+        # isolation implemented by ``_sanitize_subprocess_env``.
+        env["HOME"] = native_home
+    env["SHELL"] = shell
+    env.setdefault("TERM", "xterm-256color")
+    env.setdefault("COLORTERM", "truecolor")
+    return env
+
+
 # Backward compat — process_registry.py imports this name
 _find_shell = _find_bash
 

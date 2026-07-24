@@ -533,6 +533,54 @@ class TestPruning:
 # =========================================================================
 
 class TestSpawnEnvSanitization:
+    @pytest.mark.skipif(os.name == "nt", reason="uses the POSIX ptyprocess backend")
+    def test_interactive_shell_spawns_direct_login_pty(self, registry):
+        pty_process = MagicMock()
+        pty_process.pid = os.getpid()
+        fake_thread = MagicMock()
+        captured = {}
+
+        def fake_spawn(argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs["env"]
+            return pty_process
+
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": "/Users/tester",
+                "PATH": "/usr/bin:/bin",
+                "SHELL": "/bin/zsh",
+                "FIRECRAWL_API_KEY": "must-not-leak",
+            },
+            clear=True,
+        ), patch(
+            "ptyprocess.PtyProcess.spawn",
+            side_effect=fake_spawn,
+        ), patch(
+            "threading.Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            registry,
+            "_write_checkpoint",
+        ):
+            session = registry.spawn_interactive_shell(
+                shell="/bin/zsh",
+                cwd="/tmp",
+                task_id="desktop-terminal",
+                session_key="conversation",
+            )
+
+        assert captured["argv"] == ["/bin/zsh", "-l"]
+        assert captured["env"]["HOME"] == "/Users/tester"
+        assert captured["env"]["SHELL"] == "/bin/zsh"
+        assert captured["env"]["TERM"] == "xterm-256color"
+        assert "FIRECRAWL_API_KEY" not in captured["env"]
+        assert session.command == "exec /bin/zsh -l"
+        assert session._pty is pty_process
+        assert registry.get(session.id) is session
+        fake_thread.start.assert_called_once_with()
+
     def test_spawn_local_strips_blocked_vars_from_background_env(self, registry):
         captured = {}
 

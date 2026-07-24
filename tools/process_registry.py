@@ -41,7 +41,13 @@ import time
 import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
-from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
+from tools.environments.local import (
+    _find_interactive_shell,
+    _find_shell,
+    _interactive_terminal_env,
+    _resolve_safe_cwd,
+    _sanitize_subprocess_env,
+)
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -649,6 +655,87 @@ class ProcessRegistry:
                 logger.debug("Could not resolve environment temp dir: %s", exc)
         return "/tmp"
 
+    def _spawn_pty_session(
+        self,
+        session: ProcessSession,
+        argv: list[str],
+        env: dict[str, str],
+    ) -> ProcessSession:
+        """Start and register one local PTY without imposing a shell wrapper."""
+        if _IS_WINDOWS:
+            from winpty import PtyProcess as pty_process_class
+        else:
+            from ptyprocess import PtyProcess as pty_process_class
+
+        pty_process = pty_process_class.spawn(
+            argv,
+            cwd=session.cwd,
+            env=env,
+            dimensions=(30, 120),
+        )
+        session.pid = pty_process.pid
+        session.host_start_time = self._safe_host_start_time(session.pid)
+        session._pty = pty_process
+
+        try:
+            reader = threading.Thread(
+                target=self._pty_reader_loop,
+                args=(session,),
+                daemon=True,
+                name=f"proc-pty-reader-{session.id}",
+            )
+            session._reader_thread = reader
+            with self._lock:
+                self._prune_if_needed()
+                self._running[session.id] = session
+            reader.start()
+            self._write_checkpoint()
+        except Exception:
+            with self._lock:
+                self._running.pop(session.id, None)
+            try:
+                pty_process.terminate(force=True)
+            except Exception:
+                pass
+            raise
+        return session
+
+    def spawn_interactive_shell(
+        self,
+        *,
+        shell: str | None = None,
+        cwd: str | None = None,
+        task_id: str = "",
+        session_key: str = "",
+        env_vars: dict | None = None,
+    ) -> ProcessSession:
+        """Spawn the user's login shell directly for a human-operated terminal."""
+        resolved_shell = shell or _find_interactive_shell()
+        session = ProcessSession(
+            id=f"proc_{uuid.uuid4().hex[:12]}",
+            command=f"exec {shlex.quote(resolved_shell)} -l",
+            task_id=task_id,
+            session_key=session_key,
+            cwd=_resolve_safe_cwd(cwd or os.getcwd()),
+            started_at=time.time(),
+        )
+        terminal_env = _interactive_terminal_env(
+            os.environ,
+            env_vars,
+            shell=resolved_shell,
+        )
+        terminal_env["PYTHONUNBUFFERED"] = "1"
+        try:
+            return self._spawn_pty_session(
+                session,
+                [resolved_shell, "-l"],
+                terminal_env,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "interactive PTY support is unavailable on this runtime"
+            ) from exc
+
     def spawn_local(
         self,
         command: str,
@@ -680,40 +767,14 @@ class ProcessRegistry:
         if use_pty:
             # Try PTY mode for interactive CLI tools
             try:
-                if _IS_WINDOWS:
-                    from winpty import PtyProcess as _PtyProcessCls
-                else:
-                    from ptyprocess import PtyProcess as _PtyProcessCls
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
-                pty_proc = _PtyProcessCls.spawn(
+                return self._spawn_pty_session(
+                    session,
                     [user_shell, "-lic", f"set +m; {command}"],
-                    cwd=session.cwd,
-                    env=pty_env,
-                    dimensions=(30, 120),
+                    pty_env,
                 )
-                session.pid = pty_proc.pid
-                session.host_start_time = self._safe_host_start_time(session.pid)
-                # Store the pty handle on the session for read/write
-                session._pty = pty_proc
-
-                # PTY reader thread
-                reader = threading.Thread(
-                    target=self._pty_reader_loop,
-                    args=(session,),
-                    daemon=True,
-                    name=f"proc-pty-reader-{session.id}",
-                )
-                session._reader_thread = reader
-                reader.start()
-
-                with self._lock:
-                    self._prune_if_needed()
-                    self._running[session.id] = session
-
-                self._write_checkpoint()
-                return session
 
             except ImportError:
                 logger.warning("ptyprocess not installed, falling back to pipe mode")
