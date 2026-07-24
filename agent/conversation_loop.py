@@ -78,6 +78,9 @@ from hermes_constants import (
     FINISH_REASON_STREAM_ERROR,
     display_hermes_home as _dhh_fn,
 )
+from hermes_agent.domain.transcript_visibility import (
+    is_ephemeral_runtime_message,
+)
 from hermes_logging import set_session_context
 from tools.schema_sanitizer import strip_pattern_and_format
 from tools.skill_provenance import set_current_write_origin
@@ -5006,20 +5009,17 @@ def run_conversation(
                 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
-                # Pop thinking-only prefill and empty-response retry
-                # scaffolding before appending the final response.  These
-                # internal turns are only for the next API retry and should
-                # not become durable transcript context.
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and (
-                        messages[-1].get("_thinking_prefill")
-                        or messages[-1].get("_empty_recovery_synthetic")
-                        or messages[-1].get("_empty_terminal_sentinel")
-                    )
-                ):
-                    messages.pop()
+                # Remove retry/continuation scaffolding from the whole current
+                # turn before appending the final response. A successful retry
+                # may have executed more tools, which leaves the original
+                # nudge in the middle of the buffer rather than at its tail.
+                # Tail-only cleanup therefore leaked private user prompts into
+                # both the next model turn and the public transcript.
+                messages[:] = [
+                    message
+                    for message in messages
+                    if not is_ephemeral_runtime_message(message)
+                ]
 
                 messages.append(final_msg)
                 

@@ -101,6 +101,36 @@ class VisibleConversationTranscriptReadModel:
             },
         }
 
+    def list_recent_user_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 20,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return recent public user turns for retry/rewind commands."""
+
+        bounded_limit = _bounded_limit(limit)
+        with self._lock:
+            messages = self._visible_messages(
+                session_id,
+                include_ancestors=False,
+                include_inactive=include_inactive,
+            )
+        recent = [
+            message
+            for message in reversed(messages)
+            if str(message.get("role") or "").strip().lower() == "user"
+        ][:bounded_limit]
+        return [
+            {
+                "id": _storage_id(message),
+                "timestamp": message.get("timestamp"),
+                "preview": _message_preview(message.get("content"), 80),
+            }
+            for message in recent
+        ]
+
     def _visible_messages(
         self,
         session_id: str,
@@ -206,6 +236,24 @@ def _has_authoritative_stable_id(message: dict[str, Any]) -> bool:
             or ""
         ).strip()
     )
+
+
+def _message_preview(value: Any, limit: int) -> str:
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, list):
+        text = " ".join(
+            str(part.get("text") or "")
+            for part in value
+            if isinstance(part, dict)
+            and part.get("type") in {"text", "input_text", "output_text"}
+        )
+    else:
+        text = str(value or "")
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 1)]}…"
 
 
 def _without_storage_metadata(message: dict[str, Any]) -> dict[str, Any]:

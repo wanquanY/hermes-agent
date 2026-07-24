@@ -176,7 +176,7 @@ def _(rid, params: dict) -> dict:
     if activate:
         execution_session_id = uuid.uuid4().hex[:8]
         try:
-            history = db.messages.all_as_conversation(
+            history = db.messages.runtime_as_conversation(
                 conversation_session_id,
                 include_ancestors=False,
                 include_storage_metadata=False,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from hermes_agent.application.message_service import MessageService
+from hermes_agent.domain.transcript_visibility import (
+    EMPTY_RESPONSE_RECOVERY_PROMPT,
+)
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
 from hermes_agent.composition.session_repository_db import connect_session_repository_db
 from hermes_team_mission.domain.transcript_visibility import (
@@ -236,5 +239,136 @@ def test_message_service_routes_only_matching_conversation_kind_through_policy(
         assert [message["content"] for message in transcript] == [
             "普通会话中的原始元数据不能触发团队过滤"
         ]
+    finally:
+        conn.close()
+
+
+def test_public_transcript_hides_internal_rows_but_runtime_history_keeps_context(
+    tmp_path,
+):
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    sessions = SessionRepoImpl(conn)
+    sessions.create(
+        SessionSpec(
+            session_id="direct-session",
+            source="cli",
+            conversation_kind="direct",
+        )
+    )
+    messages = MessageService(conn, sessions)
+    try:
+        messages.append("direct-session", "user", "真实用户消息", timestamp=10.0)
+        internal_id = messages.append(
+            "direct-session",
+            "user",
+            "[IMPORTANT: Background process proc-1 completed normally]",
+            metadata={
+                "transcript_visibility": "internal",
+                "synthetic_kind": "background_process_completion",
+            },
+            timestamp=20.0,
+        )
+        messages.append(
+            "direct-session",
+            "assistant",
+            "后台任务已经完成。",
+            timestamp=30.0,
+        )
+
+        public = messages.all_as_conversation(
+            "direct-session",
+            include_storage_metadata=True,
+        )
+        runtime = messages.runtime_as_conversation(
+            "direct-session",
+            include_storage_metadata=True,
+        )
+
+        assert [message["content"] for message in public] == [
+            "真实用户消息",
+            "后台任务已经完成。",
+        ]
+        assert [message["content"] for message in runtime] == [
+            "真实用户消息",
+            "[IMPORTANT: Background process proc-1 completed normally]",
+            "后台任务已经完成。",
+        ]
+        assert int(runtime[1]["message_id"]) == internal_id
+        assert [row["content"] for row in messages.list("direct-session")] == [
+            "真实用户消息",
+            "后台任务已经完成。",
+        ]
+        assert [row["content"] for row in messages.runtime_list("direct-session")] == [
+            "真实用户消息",
+            "[IMPORTANT: Background process proc-1 completed normally]",
+            "后台任务已经完成。",
+        ]
+        assert messages.recent_user_messages("direct-session") == [
+            {
+                "id": int(runtime[0]["message_id"]),
+                "timestamp": 10.0,
+                "preview": "真实用户消息",
+            }
+        ]
+    finally:
+        conn.close()
+
+
+def test_public_transcript_quarantines_legacy_polluted_rows(tmp_path):
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    sessions = SessionRepoImpl(conn)
+    sessions.create(SessionSpec(session_id="direct-session", source="cli"))
+    messages = MessageService(conn, sessions)
+    try:
+        messages.append(
+            "direct-session",
+            "user",
+            "[IMPORTANT: Background process proc-old completed normally]\nOutput: secret",
+        )
+        messages.append(
+            "direct-session",
+            "user",
+            EMPTY_RESPONSE_RECOVERY_PROMPT,
+        )
+        messages.append(
+            "direct-session",
+            "assistant",
+            EMPTY_RESPONSE_RECOVERY_PROMPT,
+        )
+
+        public = messages.all_as_conversation("direct-session")
+        runtime = messages.runtime_as_conversation("direct-session")
+
+        assert [message["content"] for message in public] == [
+            EMPTY_RESPONSE_RECOVERY_PROMPT,
+        ]
+        assert len(runtime) == 3
+    finally:
+        conn.close()
+
+
+def test_team_visibility_composes_with_global_internal_message_policy(tmp_path):
+    conn, messages = _team_message_service(tmp_path)
+    try:
+        messages.append(
+            "team-session",
+            "user",
+            "private runtime prompt",
+            metadata={
+                "transcript_activity_kind": "leader_chat",
+                "transcript_visibility": "internal",
+            },
+        )
+        messages.append(
+            "team-session",
+            "assistant",
+            "visible answer",
+            metadata={"transcript_activity_kind": "leader_chat"},
+        )
+
+        assert [
+            message["content"]
+            for message in messages.all_as_conversation("team-session")
+        ] == ["visible answer"]
     finally:
         conn.close()

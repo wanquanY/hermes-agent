@@ -76,7 +76,7 @@ def _append_message_once(
     node_id = text(mission.get("node_id"))
     kind = text(mission.get("kind"))
     source_run_id = text(mission.get("source_run_id") or mission.get("run_id"))
-    for message in db.messages.list(session_id):
+    for message in db.messages.runtime_list(session_id):
         if (
             isinstance(message, dict)
             and text(message.get("role")) == role

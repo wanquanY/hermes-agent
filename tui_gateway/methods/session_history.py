@@ -11,7 +11,11 @@ from tui_gateway.methods.session import (
     _message_page_info,
     _requested_runtime_scope_key,
 )
-from tui_gateway.services.message_history import load_conversation_history
+from tui_gateway.services.message_history import (
+    filter_public_conversation_history,
+    load_conversation_history,
+    load_runtime_conversation_history,
+)
 from tui_gateway.services.run_events import list_runtime_events, list_tool_events
 
 _server = bind_server_globals(globals())
@@ -67,7 +71,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    history = list(session.get("history", []))
+    history = filter_public_conversation_history(list(session.get("history", [])))
     db = _get_db()
     if db is not None and session.get("session_key"):
         try:
@@ -441,7 +445,7 @@ def _recall_turn_from_history(
 
 
 def _load_stored_history_for_rewrite(db, session_key: str) -> list[dict]:
-    return load_conversation_history(
+    return load_runtime_conversation_history(
         db,
         session_key,
         include_ancestors=False,

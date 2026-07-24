@@ -134,7 +134,7 @@ def latest_assistant_message_id_for_turn(
     if db is None:
         return ""
     try:
-        messages = db.messages.all_as_conversation(
+        messages = db.messages.runtime_as_conversation(
             session_id,
             include_ancestors=False,
             include_storage_metadata=True,

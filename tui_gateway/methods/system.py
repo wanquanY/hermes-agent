@@ -822,7 +822,7 @@ def _dispatch_rewind_command(rid, session: dict | None, name: str, arg: str) -> 
         return _err(rid, 5008, f"{label}: {exc}")
 
     try:
-        active_history = db.messages.all_as_conversation(
+        active_history = db.messages.runtime_as_conversation(
             session_key,
             include_ancestors=False,
         )

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from hermes_agent.domain.transcript_visibility import (
+    is_public_transcript_message,
+    stable_transcript_message_id,
+)
+
 
 MAIN_TRANSCRIPT_ACTIVITY_KINDS = frozenset({
     "leader_chat",
@@ -20,16 +25,12 @@ class TeamMissionTranscriptVisibilityPolicy:
     """Selects the shared conversation transcript from Team Mission messages."""
 
     def includes(self, message: dict[str, Any]) -> bool:
-        return bool(main_transcript_message_decision(message)["include"])
+        return is_public_transcript_message(message) and bool(
+            main_transcript_message_decision(message)["include"]
+        )
 
     def stable_message_id(self, message: dict[str, Any]) -> str:
-        metadata = _mapping(message.get("metadata"))
-        return _text(
-            message.get("conversation_message_id")
-            or message.get("conversationMessageId")
-            or metadata.get("conversation_message_id")
-            or metadata.get("conversationMessageId")
-        )
+        return stable_transcript_message_id(message)
 
 
 def main_transcript_activity_kind(message: dict[str, Any]) -> str:

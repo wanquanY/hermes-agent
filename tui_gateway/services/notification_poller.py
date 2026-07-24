@@ -6,6 +6,11 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from hermes_agent.domain.transcript_visibility import internal_transcript_metadata
+
+
+PROCESS_COMPLETION_SYNTHETIC_KIND = "background_process_completion"
+
 
 def _dispatch_notification(
     *,
@@ -13,7 +18,7 @@ def _dispatch_notification(
     session: dict,
     text: str,
     emit: Callable[[str, str, dict | None], Any],
-    run_prompt_submit: Callable[[str, str, dict, str], Any],
+    run_prompt_submit: Callable[..., Any],
 ) -> None:
     with session["history_lock"]:
         if session.get("running"):
@@ -22,7 +27,15 @@ def _dispatch_notification(
 
     rid = f"__notif__{int(time.time() * 1000)}"
     emit("message.start", sid, None)
-    run_prompt_submit(rid, sid, session, text)
+    run_prompt_submit(
+        rid,
+        sid,
+        session,
+        text,
+        turn_metadata=internal_transcript_metadata(
+            synthetic_kind=PROCESS_COMPLETION_SYNTHETIC_KIND,
+        ),
+    )
 
 
 def _event_session_key(evt: dict) -> str:
@@ -48,7 +61,7 @@ def notification_poller_loop(
     session: dict,
     *,
     emit: Callable[[str, str, dict | None], Any],
-    run_prompt_submit: Callable[[str, str, dict, str], Any],
+    run_prompt_submit: Callable[..., Any],
     resolve_event_session: Callable[[dict], tuple[str, dict] | None] | None = None,
 ) -> None:
     from tools.process_registry import process_registry, format_process_notification
@@ -125,7 +138,7 @@ def start_notification_poller(
     session: dict,
     *,
     emit: Callable[[str, str, dict | None], Any],
-    run_prompt_submit: Callable[[str, str, dict, str], Any],
+    run_prompt_submit: Callable[..., Any],
     resolve_event_session: Callable[[dict], tuple[str, dict] | None] | None = None,
 ) -> threading.Event:
     stop = threading.Event()

@@ -418,7 +418,7 @@ def team_mission_bindings_events_map(db: Any, bindings: List[Dict[str, Any]], *,
 
 def team_mission_binding_message_excerpt(db: Any, binding: Dict[str, Any]) -> str:
     try:
-        messages = db.messages.list(text(binding.get("session_id")))
+        messages = db.messages.runtime_list(text(binding.get("session_id")))
     except Exception:
         messages = []
     parts: list[str] = []

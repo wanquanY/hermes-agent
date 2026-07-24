@@ -99,6 +99,75 @@ def test_truncated_tool_call_recovery_pair_is_not_persisted():
     assert persisted_contents == ["patch the file", "OK, splitting into 3 patches."]
 
 
+def test_empty_response_recovery_pair_is_not_persisted_when_retry_succeeds():
+    agent = _agent_with_recording_db()
+    messages = [
+        {
+            "role": "user",
+            "content": "finish the workflow",
+            "metadata": {"turn_id": "T1", "run_id": "R1"},
+        },
+        {
+            "role": "assistant",
+            "content": "(empty)",
+            "_empty_recovery_synthetic": True,
+        },
+        {
+            "role": "user",
+            "content": (
+                "You just executed tool calls but returned an empty response. "
+                "Please process the tool results above and continue with the task."
+            ),
+            "_empty_recovery_synthetic": True,
+        },
+        {"role": "assistant", "content": "workflow complete"},
+    ]
+
+    AIAgent._flush_messages_to_session_db(agent, messages, conversation_history=[])
+
+    assert [
+        (row["role"], row["content"])
+        for row in agent._session_db.appended
+    ] == [
+        ("user", "finish the workflow"),
+        ("assistant", "workflow complete"),
+    ]
+    assert agent._session_db.appended[-1]["metadata"]["turn_id"] == "T1"
+
+
+def test_durable_internal_notification_keeps_runtime_context_with_visibility_metadata():
+    agent = _agent_with_recording_db()
+    messages = [
+        {
+            "role": "user",
+            "content": "[IMPORTANT: Background process proc-1 completed normally]",
+            "metadata": {
+                "transcript_visibility": "internal",
+                "synthetic_kind": "background_process_completion",
+            },
+        },
+        {"role": "assistant", "content": "The background task completed."},
+    ]
+
+    AIAgent._flush_messages_to_session_db(agent, messages, conversation_history=[])
+
+    assert [
+        (row["role"], row["content"])
+        for row in agent._session_db.appended
+    ] == [
+        ("user", "[IMPORTANT: Background process proc-1 completed normally]"),
+        ("assistant", "The background task completed."),
+    ]
+    assert agent._session_db.appended[0]["metadata"] == {
+        "transcript_visibility": "internal",
+        "synthetic_kind": "background_process_completion",
+    }
+    assert (
+        agent._session_db.appended[1]["metadata"].get("transcript_visibility")
+        is None
+    )
+
+
 def test_real_user_turn_metadata_still_propagates_to_next_assistant():
     """Subtle invariant: when the synthetic row sits BETWEEN a real user
     message and the assistant reply, the assistant must still get stamped

@@ -42,7 +42,7 @@ from typing import Any, Optional
 
 from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway.run_worker import RunStartFrame
-from tui_gateway.services.message_history import load_conversation_history
+from tui_gateway.services.message_history import load_runtime_conversation_history
 from tui_gateway.services.profile_context import profile_context_for_params
 from tui_gateway.services.workspace import session_workspace_run_context
 
@@ -364,7 +364,7 @@ def _ensure_worker_session(frame: RunStartFrame) -> tuple[str, dict]:
                 exc_info=True,
             )
         try:
-            full_history = load_conversation_history(
+            full_history = load_runtime_conversation_history(
                 db,
                 frame.conversation_session_id,
                 include_storage_metadata=True,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from tui_gateway.methods._shared import bind_server_globals
+from tui_gateway.services.message_history import filter_public_conversation_history
 from tui_gateway.services.pending_prompt_queue import (
     pending_prompt_queue,
     queue_scope_for_db,
@@ -178,8 +179,9 @@ def _live_session_payload(
             session["transport"] = transport
         if touch:
             session["last_active"] = time.time()
-        history = list(session.get("display_history_prefix") or []) + list(
-            session.get("history") or []
+        history = filter_public_conversation_history(
+            list(session.get("display_history_prefix") or [])
+            + list(session.get("history") or [])
         )
         inflight = _inflight_snapshot(session)
         queued = _queued_prompt_snapshot(session)

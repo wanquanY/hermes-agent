@@ -92,3 +92,32 @@ def test_persist_session_strips_marked_terminal_empty_sentinel():
     assert messages == [{"role": "user", "content": "continue"}]
     assert agent.flushed_session_db_messages[-1] == messages
     assert all(not msg.get("_empty_terminal_sentinel") for msg in messages)
+
+
+def test_persist_session_strips_recovery_scaffolding_from_middle_of_successful_turn():
+    agent = _agent_with_stubbed_persistence()
+    messages = [
+        {"role": "user", "content": "run the task"},
+        {
+            "role": "assistant",
+            "content": "(empty)",
+            "_empty_recovery_synthetic": True,
+        },
+        {
+            "role": "user",
+            "content": (
+                "You just executed tool calls but returned an empty response. "
+                "Please process the tool results above and continue with the task."
+            ),
+            "_empty_recovery_synthetic": True,
+        },
+        {"role": "assistant", "content": "task completed"},
+    ]
+
+    AIAgent._persist_session(agent, messages, conversation_history=[])
+
+    assert agent._session_messages == [
+        {"role": "user", "content": "run the task"},
+        {"role": "assistant", "content": "task completed"},
+    ]
+    assert agent.flushed_session_db_messages[-1] == agent._session_messages

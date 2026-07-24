@@ -11,7 +11,11 @@ from dovie_extension.display_transcript import (
 )
 from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway.methods._shared import bind_server_globals
-from tui_gateway.services.message_history import load_conversation_history
+from tui_gateway.services.message_history import (
+    filter_public_conversation_history,
+    load_conversation_history,
+    load_runtime_conversation_history,
+)
 from tui_gateway.services import run_control
 from tui_gateway.services.profile_context import profile_context_for_params as _profile_context_for_params
 from tui_gateway.services.workspace import (
@@ -824,8 +828,9 @@ def _live_session_payload(
         session["workspace"] = workspace
         if runtime_scope_key:
             session["runtime_scope_key"] = runtime_scope_key
-        history = list(session.get("display_history_prefix") or []) + list(
-            session.get("history") or []
+        history = filter_public_conversation_history(
+            list(session.get("display_history_prefix") or [])
+            + list(session.get("history") or [])
         )
     page, page_info = _page_live_history(history, hydrate, message_limit)
     return {
@@ -1665,7 +1670,7 @@ def _(rid, params: dict) -> dict:
     try:
         db.sessions.reopen(target)
         history = sanitize_replay_history(
-            load_conversation_history(db, target),
+            load_runtime_conversation_history(db, target),
             now=time.time(),
         )
         # Participant-aware projection keeps only the viewing actor's own

@@ -68,6 +68,11 @@ from datetime import datetime
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+from hermes_agent.domain.transcript_visibility import (
+    internal_transcript_metadata,
+    is_ephemeral_runtime_message,
+    private_transcript_reason,
+)
 
 # OpenAI lazy proxy + safe stdio + proxy URL helpers — see agent/process_bootstrap.py.
 # `OpenAI` is re-exported here so `patch("run_agent.OpenAI", ...)` in tests works.
@@ -1318,9 +1323,16 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
         the current user message empty and caused the model to answer an older
         request from history.
         """
-        persisted = [dict(message) if isinstance(message, dict) else message for message in messages]
+        persisted = [
+            dict(message) if isinstance(message, dict) else message
+            for message in messages
+        ]
         self._apply_persist_user_message_override(persisted)
-        return persisted
+        return [
+            message
+            for message in persisted
+            if not is_ephemeral_runtime_message(message)
+        ]
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -2020,7 +2032,7 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
                     break
             assistant_segment_index = 0
             for prior in messages[start_idx:flush_from]:
-                if not isinstance(prior, dict) or prior.get("_synthetic_continuation"):
+                if not isinstance(prior, dict) or is_ephemeral_runtime_message(prior):
                     continue
                 prior_role = prior.get("role")
                 if prior_role == "user":
@@ -2036,17 +2048,25 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
                 # message is a user row, so a subsequent real assistant reply still
                 # gets stamped with the OUTER turn's ids (the synthetic doesn't
                 # define a new turn).
-                if isinstance(msg, dict) and msg.get("_synthetic_continuation"):
+                if is_ephemeral_runtime_message(msg):
                     if len(skipped_samples) < 12:
                         skipped_samples.append(
                             {
                                 **self._diagnostic_message_sample(msg_idx, msg),
-                                "skip_reason": "synthetic_continuation",
+                                "skip_reason": "ephemeral_runtime_message",
                             }
                         )
                     continue
                 role = msg.get("role", "unknown")
                 msg_metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+                private_reason = private_transcript_reason(msg)
+                if private_reason:
+                    msg_metadata = internal_transcript_metadata(
+                        msg_metadata,
+                        synthetic_kind=str(
+                            msg_metadata.get("synthetic_kind") or private_reason
+                        ),
+                    )
                 context_metadata = self._run_context_message_metadata(role)
                 active_turn_metadata = self._active_turn_metadata()
                 target_session_id = visible_session_id

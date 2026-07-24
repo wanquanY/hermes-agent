@@ -139,7 +139,7 @@ def _recall_collect_conv_message_ids(
     has materialized rows pointing back at them.
     """
     try:
-        msgs = db.messages.list(conversation_session_id) or []
+        msgs = db.messages.runtime_list(conversation_session_id) or []
     except Exception:
         return []
     turn_id = str(turn_id or "").strip()

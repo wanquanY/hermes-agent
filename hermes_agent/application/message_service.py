@@ -12,6 +12,10 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
+from hermes_agent.domain.transcript_visibility import (
+    PublicTranscriptVisibilityPolicy,
+    is_public_transcript_message,
+)
 from hermes_agent.read_models.message_history import (
     MessageHistoryReadModel,
     MessagePageQuery,
@@ -46,6 +50,10 @@ class MessageService:
         self._message_repo = MessageRepoImpl(conn)
         self._unit_of_work = unit_of_work or SqliteUnitOfWork(conn, self._lock)
         self._history = MessageHistoryReadModel(conn)
+        self._public_history = VisibleConversationTranscriptReadModel(
+            conn,
+            PublicTranscriptVisibilityPolicy(),
+        )
         self._visible_histories = {
             str(conversation_kind or "")
             .strip()
@@ -97,6 +105,20 @@ class MessageService:
     def list(
         self, session_id: str, include_inactive: bool = False
     ) -> list[dict[str, Any]]:
+        return [
+            message
+            for message in self.runtime_list(
+                session_id,
+                include_inactive=include_inactive,
+            )
+            if is_public_transcript_message(message)
+        ]
+
+    def runtime_list(
+        self, session_id: str, include_inactive: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return raw storage rows for runtime/domain maintenance only."""
+
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             rows = self._conn.execute(
@@ -150,7 +172,7 @@ class MessageService:
         limit: int = 20,
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
-        return self._history.list_recent_user_messages(
+        return self._history_for(session_id).list_recent_user_messages(
             session_id,
             limit=limit,
             include_inactive=include_inactive,
@@ -208,6 +230,27 @@ class MessageService:
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
         return self._history_for(session_id).all_as_conversation(
+            session_id,
+            include_ancestors=include_ancestors,
+            include_storage_metadata=include_storage_metadata,
+            include_inactive=include_inactive,
+        )
+
+    def runtime_as_conversation(
+        self,
+        session_id: str,
+        include_ancestors: bool = False,
+        include_storage_metadata: bool = False,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Load canonical model context, including durable internal messages.
+
+        Public callers should use :meth:`all_as_conversation`. Runtime
+        hydration uses this explicit raw projection so background completion
+        context remains available to the model without leaking into the UI.
+        """
+
+        return self._history.all_as_conversation(
             session_id,
             include_ancestors=include_ancestors,
             include_storage_metadata=include_storage_metadata,
@@ -293,7 +336,7 @@ class MessageService:
         conversation_kind = (
             str(session.conversation_kind if session else "").strip().lower()
         )
-        return self._visible_histories.get(conversation_kind, self._history)
+        return self._visible_histories.get(conversation_kind, self._public_history)
 
     def replace(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         stable = str(session_id or "").strip()

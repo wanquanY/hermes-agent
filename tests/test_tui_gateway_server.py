@@ -6828,8 +6828,8 @@ def test_notification_poller_routes_completion_to_event_owner(monkeypatch):
             return "sid_owner", owner
         return None
 
-    def run_prompt_submit(rid, sid, session, text):
-        submitted.append((sid, session["session_key"], text))
+    def run_prompt_submit(rid, sid, session, text, *, turn_metadata=None):
+        submitted.append((sid, session["session_key"], text, turn_metadata))
 
     while not process_registry.completion_queue.empty():
         process_registry.completion_queue.get_nowait()
@@ -6859,6 +6859,10 @@ def test_notification_poller_routes_completion_to_event_owner(monkeypatch):
         assert len(submitted) == 1
         assert submitted[0][0] == "sid_owner"
         assert submitted[0][1] == "owner-session"
+        assert submitted[0][3] == {
+            "transcript_visibility": "internal",
+            "synthetic_kind": "background_process_completion",
+        }
         status_calls = [a for a in emitted if a[0] == "status.update"]
         assert len(status_calls) == 1
         assert status_calls[0][1] == "sid_owner"
