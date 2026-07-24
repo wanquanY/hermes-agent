@@ -18,6 +18,7 @@ PNG_DATA_URL = f"data:image/png;base64,{base64.b64encode(PNG_DATA).decode('ascii
 
 def test_dovie_presentation_toolset_is_configurable():
     from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS
+    from tools.dovie_presentation_tools import DOVIE_PRESENTATION_GENERATE_SCHEMA
 
     configurable = {
         name: (label, summary)
@@ -28,6 +29,12 @@ def test_dovie_presentation_toolset_is_configurable():
         "📊 Dovie Presentation Generation",
         "dovie_presentation_generate, dovie_presentation_regenerate_slide",
     )
+    quality_schema = DOVIE_PRESENTATION_GENERATE_SCHEMA["parameters"]["properties"][
+        "quality"
+    ]
+    assert "default" not in quality_schema
+    assert "1K" not in quality_schema["description"]
+    assert "2K" not in quality_schema["description"]
 
 
 def test_registered_presentation_tool_uses_turn_scoped_workspace(
@@ -106,6 +113,7 @@ def test_generate_presentation_writes_local_pptx_and_checkpoint(tmp_path):
     ]
     assert len(calls) == 2
     assert all(call["prompt"].startswith("Editorial presentation.") for call in calls)
+    assert all("quality" not in call for call in calls)
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "completed"
@@ -270,7 +278,6 @@ def test_regenerate_presentation_slide_replaces_only_target_page(tmp_path):
             ),
             "aspect_ratio": "16:9",
             "generate_num": 1,
-            "quality": "2K",
         }
     ]
 

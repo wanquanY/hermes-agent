@@ -52,20 +52,24 @@ DOVIE_IMAGE_GENERATE_SCHEMA = {
             },
             "aspect_ratio": {
                 "type": "string",
-                "description": "Output aspect ratio.",
+                "description": (
+                    "Optional output aspect ratio. Omit unless the user requests one; "
+                    "the Dovie Admin model configuration supplies the default."
+                ),
                 "enum": [
                     "21:9", "16:9", "3:2", "4:3", "5:4", "1:1",
                     "4:5", "3:4", "2:3", "9:16",
                     "landscape", "portrait", "square",
                 ],
-                "default": "16:9",
             },
             "generate_num": {
                 "type": "integer",
-                "description": "Number of images to generate.",
+                "description": (
+                    "Optional number of images. Omit unless the user requests a count; "
+                    "the Dovie Admin model configuration supplies the default."
+                ),
                 "minimum": 1,
                 "maximum": 4,
-                "default": 1,
             },
             "model": {
                 "type": "string",
@@ -88,7 +92,11 @@ DOVIE_IMAGE_GENERATE_SCHEMA = {
             },
             "quality": {
                 "type": "string",
-                "description": "Optional image quality, for example 1K, 2K, or 4K.",
+                "description": (
+                    "Optional provider-native quality override. Omit unless the user "
+                    "explicitly requests a quality; never infer a value. The Dovie Admin "
+                    "model configuration supplies the supported default."
+                ),
             },
         },
         "required": ["prompt"],
@@ -614,7 +622,7 @@ def _async_media_proxy_result(env_name: str, payload: dict[str, Any]) -> str:
 
 
 def _normalize_image_aspect_ratio(value: Any) -> str:
-    text = str(value or "16:9").strip().lower()
+    text = str(value or "").strip().lower()
     if text == "landscape":
         return "16:9"
     if text == "portrait":
@@ -649,14 +657,19 @@ def dovie_image_generate(args: dict[str, Any]) -> str:
     payload = {
         "prompt": prompt,
         "negative_prompt": args.get("negative_prompt"),
-        "aspect_ratio": _normalize_image_aspect_ratio(args.get("aspect_ratio")),
-        "generate_num": args.get("generate_num", 1),
         "generation_type": generation_type,
         "reference_image_url": reference_url or None,
         "reference_image_urls": reference_urls or None,
-        "quality": args.get("quality") or "2K",
         "timeout": args.get("timeout"),
     }
+    aspect_ratio = _normalize_image_aspect_ratio(args.get("aspect_ratio"))
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    if args.get("generate_num") is not None:
+        payload["generate_num"] = args["generate_num"]
+    quality = str(args.get("quality") or "").strip()
+    if quality:
+        payload["quality"] = quality
     if model:
         payload["model"] = model
     return _async_media_proxy_result("DOVIE_IMAGE_GENERATE_PROXY_URL", payload)

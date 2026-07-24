@@ -18,6 +18,15 @@ def test_image_generate_uses_backend_default_when_model_is_omitted(monkeypatch):
     assert result == "{}"
     assert captured["env_name"] == "DOVIE_IMAGE_GENERATE_PROXY_URL"
     assert "model" not in captured["payload"]
+    assert "aspect_ratio" not in captured["payload"]
+    assert "generate_num" not in captured["payload"]
+    assert "quality" not in captured["payload"]
+
+    properties = dovie_media_tools.DOVIE_IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
+    assert "default" not in properties["aspect_ratio"]
+    assert "default" not in properties["generate_num"]
+    assert "1K" not in properties["quality"]["description"]
+    assert "2K" not in properties["quality"]["description"]
 
 
 def test_image_generate_forwards_explicit_model(monkeypatch):
@@ -30,10 +39,19 @@ def test_image_generate_forwards_explicit_model(monkeypatch):
     monkeypatch.setattr(dovie_media_tools, "_async_media_proxy_result", fake_proxy_result)
 
     dovie_media_tools.dovie_image_generate(
-        {"prompt": "test", "model": "gpt-image-2"}
+        {
+            "prompt": "test",
+            "model": "gpt-image-2",
+            "aspect_ratio": "landscape",
+            "generate_num": 2,
+            "quality": "high",
+        }
     )
 
     assert captured["payload"]["model"] == "gpt-image-2"
+    assert captured["payload"]["aspect_ratio"] == "16:9"
+    assert captured["payload"]["generate_num"] == 2
+    assert captured["payload"]["quality"] == "high"
 
 
 def test_image_generate_uploads_local_workspace_reference_before_generation(

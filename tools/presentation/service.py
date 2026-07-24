@@ -451,7 +451,7 @@ def _validate_request(args: dict[str, Any], workspace_root: str) -> dict[str, An
         "style_prefix": str(args.get("style_prefix") or "").strip(),
         "output_path": output,
         "model": str(args.get("model") or "").strip(),
-        "quality": str(args.get("quality") or "2K").strip(),
+        "quality": str(args.get("quality") or "").strip(),
         "max_concurrent": max(
             1,
             min(int(args.get("max_concurrent") or DEFAULT_MAX_CONCURRENT), 6),
@@ -639,10 +639,11 @@ def generate_presentation(
                     "prompt": full_prompt,
                     "aspect_ratio": request["aspect_ratio"],
                     "generate_num": 1,
-                    "quality": request["quality"],
                 }
                 if request["model"]:
                     generator_args["model"] = request["model"]
+                if request["quality"]:
+                    generator_args["quality"] = request["quality"]
                 if page["reference_image_url"]:
                     generator_args["reference_image_url"] = page["reference_image_url"]
                 result = _parse_generator_result(image_generator(generator_args))
@@ -769,7 +770,7 @@ def generate_presentation(
                 "job_id": job_id,
                 "generator": "dovie_image_generate",
                 "model": request["model"] or None,
-                "quality": request["quality"],
+                "quality": request["quality"] or None,
                 "style_prefix": request["style_prefix"] or None,
                 "revision": 0,
             },
@@ -861,7 +862,7 @@ def regenerate_presentation_slide(
                 else request["prompt"]
             )
             model = request["model"] or str(metadata.get("model") or "").strip()
-            quality = request["quality"] or str(metadata.get("quality") or "2K").strip()
+            quality = request["quality"] or str(metadata.get("quality") or "").strip()
             reference_image_url = request["reference_image_url"]
             if not reference_image_url and request["use_current_slide_as_reference"]:
                 reference_image_url = _http_url(current_slide.image_url)
@@ -870,10 +871,11 @@ def regenerate_presentation_slide(
                 "prompt": full_prompt,
                 "aspect_ratio": str(manifest.get("aspect_ratio") or "16:9"),
                 "generate_num": 1,
-                "quality": quality,
             }
             if model:
                 generator_args["model"] = model
+            if quality:
+                generator_args["quality"] = quality
             if reference_image_url:
                 generator_args["reference_image_url"] = reference_image_url
 
@@ -925,7 +927,7 @@ def regenerate_presentation_slide(
                 {
                     "generator": "dovie_image_generate",
                     "model": model or None,
-                    "quality": quality,
+                    "quality": quality or None,
                     "revision": revision,
                     "last_modified_at": revised_at,
                     "last_regenerated_page": page_number,

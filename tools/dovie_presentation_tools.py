@@ -69,8 +69,11 @@ DOVIE_PRESENTATION_GENERATE_SCHEMA = {
             },
             "quality": {
                 "type": "string",
-                "description": "Image quality such as 1K, 2K, or 4K.",
-                "default": "2K",
+                "description": (
+                    "Optional provider-native image quality override. Omit unless the "
+                    "user explicitly requests one; the Dovie Admin model configuration "
+                    "supplies the supported default."
+                ),
             },
             "max_concurrent": {
                 "type": "integer",
@@ -129,7 +132,10 @@ DOVIE_PRESENTATION_REGENERATE_SLIDE_SCHEMA = {
             },
             "quality": {
                 "type": "string",
-                "description": "Optional image quality override; defaults to the deck's quality.",
+                "description": (
+                    "Optional provider-native image quality override. Omit to reuse the "
+                    "deck override or the Dovie Admin model default."
+                ),
             },
             "reference_image_url": {
                 "type": "string",
