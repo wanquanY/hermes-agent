@@ -1493,6 +1493,85 @@ def test_run_submit_preserves_prestart_cancelled_run(server, monkeypatch):
     assert server._run_prompt_submit.call_count == 0
 
 
+def test_reserved_run_submit_replays_started_owner_result_without_duplicate_execution(
+    server,
+    monkeypatch,
+):
+    from tui_gateway.methods import run as run_methods
+
+    monkeypatch.setattr(
+        run_methods.run_control,
+        "get_run",
+        lambda _run_id, db=None: {
+            "run_id": "run-idempotent",
+            "turn_id": "turn-idempotent",
+            "conversation_session_id": "stored-idempotent",
+            "runtime_scope_key": "profile:agent-default",
+            "status": "running",
+            "metadata": {"idempotency_key": "message:idempotent"},
+        },
+    )
+    runtime_lookup = MagicMock(
+        side_effect=AssertionError("idempotent replay must not resolve or start a runtime")
+    )
+    monkeypatch.setattr(run_methods, "_runtime_for_run_target", runtime_lookup)
+
+    submitted = server.handle_request(
+        {
+            "id": "submit-replay",
+            "method": "run.submit",
+            "params": {
+                "conversation_session_id": "stored-idempotent",
+                "run_id": "run-idempotent",
+                "turn_id": "turn-idempotent",
+                "runtime_scope_key": "profile:agent-default",
+                "idempotency_key": "message:idempotent",
+                "text": "hello",
+                "_control_plane_reserved": True,
+            },
+        }
+    )
+
+    assert "error" not in submitted
+    assert submitted["result"]["status"] == "running"
+    assert submitted["result"]["idempotent_replay"] is True
+    assert runtime_lookup.call_count == 0
+
+
+def test_reserved_run_submit_rejects_idempotency_identity_drift(server, monkeypatch):
+    from tui_gateway.methods import run as run_methods
+
+    monkeypatch.setattr(
+        run_methods.run_control,
+        "get_run",
+        lambda _run_id, db=None: {
+            "run_id": "run-idempotent",
+            "turn_id": "turn-idempotent",
+            "conversation_session_id": "stored-idempotent",
+            "runtime_scope_key": "profile:agent-default",
+            "status": "running",
+            "metadata": {"idempotency_key": "message:original"},
+        },
+    )
+
+    submitted = server.handle_request(
+        {
+            "id": "submit-conflict",
+            "method": "run.submit",
+            "params": {
+                "conversation_session_id": "stored-idempotent",
+                "run_id": "run-idempotent",
+                "turn_id": "turn-idempotent",
+                "runtime_scope_key": "profile:agent-default",
+                "idempotency_key": "message:different",
+                "_control_plane_reserved": True,
+            },
+        }
+    )
+
+    assert submitted["error"]["code"] == 4409
+
+
 def test_run_submit_extracts_image_paths_from_prompt_attachments(server, monkeypatch, tmp_path):
     from tui_gateway.methods import prompt as prompt_methods
 

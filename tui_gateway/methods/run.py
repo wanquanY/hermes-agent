@@ -485,6 +485,71 @@ def _runtime_for_run_target(rid, params: dict) -> tuple[str, dict | None, dict |
     return "", None, _err(rid, 5000, "runtime lease unavailable")
 
 
+def _replay_reserved_submit_if_started(
+    rid,
+    *,
+    params: dict,
+    conversation_session_id: str,
+    run_id: str,
+    turn_id: str,
+    runtime_scope_key: str,
+    db,
+) -> dict | None:
+    """Return the canonical result for a repeated reserved submit.
+
+    The websocket acknowledgement can be lost after ``prompt.submit`` has
+    already made the run active. Re-entering that code path would either start
+    the prompt twice or mark the same run failed as "session busy". The run
+    registry is the idempotency source of truth once the reserved run has left
+    ``queued``.
+    """
+
+    existing = run_control.get_run(run_id, db=db)
+    if not isinstance(existing, dict):
+        return None
+    status = str(existing.get("status") or "").strip().lower()
+    if not status or status == "queued":
+        return None
+    existing_conversation_id = str(
+        existing.get("conversation_session_id") or existing.get("session_id") or ""
+    ).strip()
+    existing_turn_id = str(existing.get("turn_id") or "").strip()
+    existing_scope_key = str(existing.get("runtime_scope_key") or "").strip()
+    existing_metadata = _mapping(existing.get("metadata"))
+    incoming_idempotency_key = str(params.get("idempotency_key") or "").strip()
+    existing_idempotency_key = str(existing_metadata.get("idempotency_key") or "").strip()
+    conflicts = (
+        existing_conversation_id
+        and existing_conversation_id != conversation_session_id
+    ) or (
+        existing_turn_id
+        and turn_id
+        and existing_turn_id != turn_id
+    ) or (
+        existing_scope_key
+        and runtime_scope_key
+        and existing_scope_key != runtime_scope_key
+    ) or (
+        existing_idempotency_key
+        and incoming_idempotency_key
+        and existing_idempotency_key != incoming_idempotency_key
+    )
+    if conflicts:
+        return _err(rid, 4409, "reserved run submit identity conflict")
+    return _ok(
+        rid,
+        {
+            "status": status,
+            "run_id": str(existing.get("run_id") or run_id),
+            "turn_id": existing_turn_id or turn_id,
+            "conversation_session_id": existing_conversation_id
+            or conversation_session_id,
+            "runtime_scope_key": existing_scope_key or runtime_scope_key,
+            "idempotent_replay": True,
+        },
+    )
+
+
 @method("run.submit")
 def _(rid, params: dict) -> dict:
     target = _conversation_session_id_from_params(params)
@@ -506,6 +571,18 @@ def _(rid, params: dict) -> dict:
         or params.get("controlPlaneReserved")
     )
     transient = bool(params.get("transient") or params.get("temporary") or params.get("ephemeral"))
+    if target and requested_run_id and control_plane_reserved and not transient:
+        replay = _replay_reserved_submit_if_started(
+            rid,
+            params=params,
+            conversation_session_id=target,
+            run_id=requested_run_id,
+            turn_id=requested_turn_id,
+            runtime_scope_key=requested_scope_key,
+            db=run_db,
+        )
+        if replay is not None:
+            return replay
     if target and requested_run_id and not control_plane_reserved and not transient:
         reservation = run_control.create_run_if_session_idle(
             conversation_session_id=target,
