@@ -80,9 +80,9 @@ def classify_provider_failure(error: BaseException | None) -> str:
         return "connection"
     if any(token in name for token in ("protocol", "stream", "parse", "decode")):
         return "protocol"
-    status_code = getattr(error, "status_code", None)
+    status_code_value = getattr(error, "status_code", None)
     try:
-        status_code = int(status_code)
+        status_code = int(status_code_value) if status_code_value is not None else 0
     except (TypeError, ValueError):
         status_code = 0
     if status_code == 429:
