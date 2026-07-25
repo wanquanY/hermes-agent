@@ -196,9 +196,11 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, events=(), final_response=None, final_error=None):
+        self._events = list(events)
         self._final_response = final_response
         self._final_error = final_error
+        self.response = SimpleNamespace(status_code=200)
 
     def __enter__(self):
         return self
@@ -207,7 +209,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -481,6 +483,79 @@ def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
     response = agent._run_codex_stream(_codex_request_kwargs())
     assert calls["stream"] == 2
     assert response.output[0].content[0].text == "stream ok"
+
+
+def test_run_codex_stream_fault_injection_emits_retry_and_recovery_telemetry(monkeypatch):
+    from agent.provider_telemetry import ProviderCallTelemetry
+
+    agent = _build_agent(monkeypatch)
+    agent.session_id = "execution-provider-fault"
+    agent._hermes_active_run_id = "run-provider-fault"
+    agent._hermes_active_turn_id = "turn-provider-fault"
+    agent._hermes_active_runtime_scope_key = "profile:provider-fault"
+    agent._current_api_request_id = "turn-provider-fault:api:1"
+    agent._active_run_context = lambda: SimpleNamespace(
+        conversation_session_id="conversation-provider-fault",
+        execution_scope_key="profile:provider-fault",
+        activity_id="activity-provider-fault",
+        participant_id="participant-provider-fault",
+    )
+    events = []
+    monkeypatch.setattr(
+        "tui_gateway.services.run_control.publish_recorded_event",
+        lambda params, **_kwargs: events.append(params) or [],
+    )
+    telemetry = ProviderCallTelemetry.start(
+        agent,
+        logical_attempt=1,
+        max_logical_attempts=3,
+        stream_mode="streaming",
+    )
+    agent._provider_call_telemetry = telemetry
+    calls = {"stream": 0}
+
+    def _fake_stream(**_kwargs):
+        calls["stream"] += 1
+        if calls["stream"] == 1:
+            raise ConnectionError(
+                "secret prompt https://provider.invalid Authorization=Bearer-secret"
+            )
+        return _FakeResponsesStream(
+            events=[
+                SimpleNamespace(type="response.output_text.delta", delta="recovered"),
+                SimpleNamespace(type="response.completed"),
+            ],
+            final_response=_codex_message_response("recovered"),
+        )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=lambda **_kwargs: _codex_message_response("unexpected fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    telemetry.completed()
+
+    assert response.output[0].content[0].text == "recovered"
+    assert calls["stream"] == 2
+    assert [event["payload"]["stage"] for event in events] == [
+        "provider.call.started",
+        "provider.attempt.started",
+        "provider.attempt.failed",
+        "provider.attempt.retry_scheduled",
+        "provider.attempt.started",
+        "provider.response.headers",
+        "provider.response.first_event",
+        "provider.response.first_delta",
+        "provider.call.completed",
+    ]
+    assert events[5]["payload"]["metrics"]["network_attempt"] == 2
+    assert events[6]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
+    assert events[7]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
+    assert "provider.invalid" not in repr(events)
+    assert "Bearer-secret" not in repr(events)
 
 
 def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(monkeypatch):
