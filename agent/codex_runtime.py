@@ -23,6 +23,10 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from agent.provider_telemetry import (
+    current_provider_telemetry,
+    emit_provider_telemetry,
+)
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 
 logger = logging.getLogger(__name__)
@@ -1419,12 +1423,24 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     for attempt in range(max_stream_retries + 1):
         if agent._interrupt_requested:
             raise InterruptedError("Agent interrupted before Codex stream retry")
+        provider_telemetry = current_provider_telemetry(agent)
+        network_attempt = attempt + 1
+        if provider_telemetry is not None:
+            provider_telemetry.begin_network_attempt(
+                network_attempt,
+                max_stream_retries + 1,
+            )
         collected_output_items: list = []
         from agent.responses_stream_projector import ResponsesStreamProjector
 
         stream_projector = ResponsesStreamProjector()
         try:
             with active_client.responses.stream(**api_kwargs) as stream:
+                if provider_telemetry is not None:
+                    provider_telemetry.observe_headers(
+                        network_attempt,
+                        getattr(stream, "response", None),
+                    )
                 writer_token = claim_stream_writer(agent)
                 for event in stream:
                     # Mark stream activity for the TTFB watchdog in
@@ -1433,6 +1449,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     # staying None tells the watchdog no bytes are flowing.
                     agent._codex_stream_last_event_ts = time.time()
                     agent._touch_activity("receiving stream response")
+                    if provider_telemetry is not None:
+                        provider_telemetry.observe_first_event(network_attempt)
                     if not stream_writer_is_current(agent, writer_token):
                         logger.warning(
                             "Codex stream superseded by a newer writer; "
@@ -1446,6 +1464,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     event_type = projection.event_type
                     if projection.content_delta:
                         agent._codex_streamed_text_parts.append(projection.content_delta)
+                        if provider_telemetry is not None:
+                            provider_telemetry.observe_first_delta(network_attempt)
                         if not has_tool_calls:
                             if not first_delta_fired:
                                 first_delta_fired = True
@@ -1456,6 +1476,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                                         pass
                             agent._fire_stream_delta(projection.content_delta)
                     elif projection.reasoning_delta:
+                        if provider_telemetry is not None:
+                            provider_telemetry.observe_first_delta(network_attempt)
                         agent._fire_reasoning_delta(projection.reasoning_delta)
                     if projection.has_tool_call:
                         has_tool_calls = True
@@ -1500,6 +1522,14 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 return final_response
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:
+                if provider_telemetry is not None:
+                    provider_telemetry.retry_scheduled(
+                        failed_attempt=network_attempt,
+                        next_attempt=network_attempt + 1,
+                        max_attempts=max_stream_retries + 1,
+                        error=exc,
+                        retry_kind="responses_transport",
+                    )
                 logger.debug(
                     "Codex Responses stream transport failed (attempt %s/%s); retrying. %s error=%s",
                     attempt + 1,
@@ -1512,6 +1542,21 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 "Codex Responses stream transport failed; falling back to create(stream=True). %s error=%s",
                 agent._client_log_context(),
                 exc,
+            )
+            emit_provider_telemetry(
+                agent,
+                "provider.fallback.activated",
+                provider_call_id=(
+                    provider_telemetry.provider_call_id
+                    if provider_telemetry is not None
+                    else ""
+                ),
+                labels={
+                    "fallback_kind": "responses_create_stream",
+                    "reason_code": "transport_exhausted",
+                },
+                metrics={"network_attempt": network_attempt},
+                error=exc,
             )
             return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
         except TypeError as exc:
@@ -1535,6 +1580,21 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     "Codex Responses stream parser hit response.output=None without "
                     "recoverable events; falling back to create(stream=True). %s",
                     agent._client_log_context(),
+                )
+                emit_provider_telemetry(
+                    agent,
+                    "provider.fallback.activated",
+                    provider_call_id=(
+                        provider_telemetry.provider_call_id
+                        if provider_telemetry is not None
+                        else ""
+                    ),
+                    labels={
+                        "fallback_kind": "responses_create_stream",
+                        "reason_code": "null_output",
+                    },
+                    metrics={"network_attempt": network_attempt},
+                    error=exc,
                 )
                 return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             raise
@@ -1569,6 +1629,18 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 or "Expected to have received \"response.created\"" in err_text
             )
             if (missing_completed or prelude_error) and attempt < max_stream_retries:
+                if provider_telemetry is not None:
+                    provider_telemetry.retry_scheduled(
+                        failed_attempt=network_attempt,
+                        next_attempt=network_attempt + 1,
+                        max_attempts=max_stream_retries + 1,
+                        error=exc,
+                        retry_kind=(
+                            "responses_prelude"
+                            if prelude_error
+                            else "responses_completion"
+                        ),
+                    )
                 logger.debug(
                     "Responses stream %s (attempt %s/%s); retrying. %s",
                     "prelude rejected" if prelude_error else "closed before completion",
@@ -1583,6 +1655,25 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     "rejected before response.created" if prelude_error else "did not emit response.completed",
                     agent._client_log_context(),
                     err_text,
+                )
+                emit_provider_telemetry(
+                    agent,
+                    "provider.fallback.activated",
+                    provider_call_id=(
+                        provider_telemetry.provider_call_id
+                        if provider_telemetry is not None
+                        else ""
+                    ),
+                    labels={
+                        "fallback_kind": "responses_create_stream",
+                        "reason_code": (
+                            "prelude_rejected"
+                            if prelude_error
+                            else "completion_missing"
+                        ),
+                    },
+                    metrics={"network_attempt": network_attempt},
+                    error=exc,
                 )
                 return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             raise

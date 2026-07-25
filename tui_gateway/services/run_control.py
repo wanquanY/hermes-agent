@@ -1962,7 +1962,15 @@ def record_event(
                 )
 
     with _lock:
-        if stable and not transient_stream:
+        # Diagnostics are observation-only and must not become an implicit
+        # replay buffer. Replaying provider timing after a reconnect would
+        # double-count attempts in the Desktop flight recorder and could evict
+        # current evidence from its bounded ring.
+        if (
+            stable
+            and not transient_stream
+            and str(frame.get("event_domain") or "") != "diagnostics"
+        ):
             memory_session_key = _memory_session_key(stable, db)
             _events_by_session[memory_session_key].append(frame)
         if stable:

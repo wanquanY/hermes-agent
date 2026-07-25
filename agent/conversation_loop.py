@@ -66,6 +66,7 @@ from agent.nous_rate_guard import (
     record_nous_rate_limit,
 )
 from agent.process_bootstrap import _install_safe_stdio
+from agent.provider_telemetry import ProviderCallTelemetry, emit_provider_telemetry
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.system_prompt_cache import system_prompt_cache_scope_key
@@ -1734,18 +1735,44 @@ def run_conversation(
                             next_api_kwargs,
                             allow_stream=False,
                         )
-                    if _use_streaming:
-                        _log_dovie_turn_stage(agent, "streaming-api-call-start")
-                        result = agent._interruptible_streaming_api_call(
-                            next_api_kwargs,
-                            on_first_delta=_stop_spinner,
-                        )
-                        _log_dovie_turn_stage(agent, "streaming-api-call-end")
+                    telemetry = ProviderCallTelemetry.start(
+                        agent,
+                        logical_attempt=retry_count + 1,
+                        max_logical_attempts=max_retries,
+                        stream_mode="streaming" if _use_streaming else "non_streaming",
+                    )
+                    previous_telemetry = getattr(agent, "_provider_call_telemetry", None)
+                    agent._provider_call_telemetry = telemetry
+                    try:
+                        if _use_streaming:
+                            _log_dovie_turn_stage(agent, "streaming-api-call-start")
+                            result = agent._interruptible_streaming_api_call(
+                                next_api_kwargs,
+                                on_first_delta=_stop_spinner,
+                            )
+                            _log_dovie_turn_stage(agent, "streaming-api-call-end")
+                        else:
+                            telemetry.begin_network_attempt(1, 1)
+                            _log_dovie_turn_stage(agent, "non-streaming-api-call-start")
+                            result = agent._interruptible_api_call(next_api_kwargs)
+                            _log_dovie_turn_stage(agent, "non-streaming-api-call-end")
+                    except InterruptedError as error:
+                        telemetry.cancelled(error)
+                        raise
+                    except Exception as error:
+                        telemetry.failed(error)
+                        raise
+                    else:
+                        telemetry.completed()
                         return result
-                    _log_dovie_turn_stage(agent, "non-streaming-api-call-start")
-                    result = agent._interruptible_api_call(next_api_kwargs)
-                    _log_dovie_turn_stage(agent, "non-streaming-api-call-end")
-                    return result
+                    finally:
+                        if previous_telemetry is None:
+                            try:
+                                delattr(agent, "_provider_call_telemetry")
+                            except AttributeError:
+                                pass
+                        else:
+                            agent._provider_call_telemetry = previous_telemetry
 
                 from hermes_cli.middleware import run_llm_execution_middleware
 
@@ -1972,6 +1999,20 @@ def run_conversation(
                     
                     # Backoff before retry — jittered exponential: 5s base, 120s cap
                     wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
+                    emit_provider_telemetry(
+                        agent,
+                        "provider.attempt.retry_scheduled",
+                        provider_call_id=f"{api_request_id}:logical:{retry_count}",
+                        labels={
+                            "retry_kind": "invalid_response",
+                            "reason_code": "malformed_response",
+                        },
+                        metrics={
+                            "logical_attempt": retry_count + 1,
+                            "max_logical_attempts": max_retries,
+                            "retry_delay_ms": wait_time * 1_000,
+                        },
+                    )
                     agent._vprint(f"{agent.log_prefix}⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...", force=True)
                     logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
                     
@@ -3891,6 +3932,22 @@ def run_conversation(
                             except (TypeError, ValueError):
                                 pass
                 wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+                emit_provider_telemetry(
+                    agent,
+                    "provider.attempt.retry_scheduled",
+                    provider_call_id=f"{api_request_id}:logical:{retry_count}",
+                    labels={
+                        "retry_kind": "logical_call",
+                        "reason_code": getattr(classified.reason, "value", classified.reason),
+                    },
+                    metrics={
+                        "logical_attempt": retry_count + 1,
+                        "max_logical_attempts": max_retries,
+                        "retry_delay_ms": wait_time * 1_000,
+                        **({"status_code": status_code} if status_code else {}),
+                    },
+                    error=api_error,
+                )
                 if is_rate_limited:
                     agent._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                 else:

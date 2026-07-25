@@ -64,6 +64,10 @@ from agent.runtime_stability import (
     record_stream_success,
     reset_stream_stale_circuit,
 )
+from agent.provider_telemetry import (
+    current_provider_telemetry,
+    emit_provider_telemetry,
+)
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 from agent.tool_guardrails import (
     ToolGuardrailDecision,
@@ -1093,6 +1097,23 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 existing,
                 time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S,
             )
+        if agent._fallback_chain:
+            emit_provider_telemetry(
+                agent,
+                "provider.fallback.exhausted",
+                provider_call_id=str(
+                    getattr(agent, "_current_api_request_id", "") or ""
+                ),
+                labels={
+                    "reason_code": getattr(reason, "value", reason) or "unknown",
+                    "provider": getattr(agent, "provider", ""),
+                    "model": getattr(agent, "model", ""),
+                },
+                metrics={
+                    "fallback_index": getattr(agent, "_fallback_index", 0),
+                    "fallback_count": len(agent._fallback_chain),
+                },
+            )
         return False
 
     fb = agent._fallback_chain[agent._fallback_index]
@@ -1190,6 +1211,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             fb_api_mode = "bedrock_converse"
 
         old_model = agent.model
+        old_provider = agent.provider
 
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
@@ -1308,6 +1330,24 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         logging.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
+        )
+        emit_provider_telemetry(
+            agent,
+            "provider.fallback.activated",
+            provider_call_id=str(
+                getattr(agent, "_current_api_request_id", "") or ""
+            ),
+            labels={
+                "reason_code": getattr(reason, "value", reason) or "unknown",
+                "from_provider": old_provider,
+                "from_model": old_model,
+                "provider": fb_provider,
+                "model": fb_model,
+            },
+            metrics={
+                "fallback_index": getattr(agent, "_fallback_index", 0),
+                "fallback_count": len(agent._fallback_chain),
+            },
         )
         reset_stream_stale_circuit(agent, reason="fallback_activated")
         return True
@@ -1669,14 +1709,25 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         last_event = {"at": time.time()}
         region = api_kwargs.get("__bedrock_region__", "us-east-1")
         stale_timeout = _derive_stream_stale_timeout(agent, api_kwargs)
+        provider_telemetry = current_provider_telemetry(agent)
+        if provider_telemetry is not None:
+            provider_telemetry.begin_network_attempt(1, 1)
 
         def _fire_first():
-            if not first_delta_fired["done"] and on_first_delta:
+            if not first_delta_fired["done"]:
                 first_delta_fired["done"] = True
-                try:
-                    on_first_delta()
-                except Exception:
-                    pass
+                if provider_telemetry is not None:
+                    provider_telemetry.observe_first_delta(1)
+                if on_first_delta:
+                    try:
+                        on_first_delta()
+                    except Exception:
+                        pass
+
+        def _observe_bedrock_event() -> None:
+            last_event["at"] = time.time()
+            if provider_telemetry is not None:
+                provider_telemetry.observe_first_event(1)
 
         def _bedrock_call():
             try:
@@ -1693,6 +1744,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 client = _get_bedrock_runtime_client(region)
                 try:
                     raw_response = client.converse_stream(**api_kwargs)
+                    if provider_telemetry is not None:
+                        provider_telemetry.observe_headers(1, raw_response)
                 except Exception as _bedrock_exc:
                     if is_streaming_access_denied_error(_bedrock_exc):
                         agent._disable_streaming = True
@@ -1735,7 +1788,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         agent._interrupt_requested
                         or not stream_writer_is_current(agent, writer_token)
                     ),
-                    on_event=lambda: last_event.__setitem__("at", time.time()),
+                    on_event=_observe_bedrock_event,
                 )
             except Exception as e:
                 result["error"] = e
@@ -1764,6 +1817,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     agent,
                     f"Bedrock stream stale after {stale_elapsed:.0f}s",
                 )
+                if provider_telemetry is not None:
+                    provider_telemetry.stream_stalled(
+                        attempt=1,
+                        stalled_ms=stale_elapsed * 1_000,
+                    )
                 try:
                     from agent.bedrock_adapter import invalidate_runtime_client
 
@@ -1895,12 +1953,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         )
 
     def _fire_first_delta():
-        if not first_delta_fired["done"] and on_first_delta:
+        if not first_delta_fired["done"]:
             first_delta_fired["done"] = True
-            try:
-                on_first_delta()
-            except Exception:
-                pass
+            provider_telemetry = current_provider_telemetry(agent)
+            if provider_telemetry is not None:
+                with stream_attempt_lock:
+                    active_attempt = int(stream_attempt_state.get("current") or 1)
+                provider_telemetry.observe_first_delta(active_attempt)
+            if on_first_delta:
+                try:
+                    on_first_delta()
+                except Exception:
+                    pass
 
     def _call_chat_completions(stream_attempt_id: int):
         """Stream a chat completions response."""
@@ -1991,6 +2055,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         _log_dovie_stream_stage(agent, "chat-completions-create-start")
         stream = request_client.chat.completions.create(**stream_kwargs)
         _log_dovie_stream_stage(agent, "chat-completions-create-end")
+        provider_telemetry = current_provider_telemetry(agent)
+        if provider_telemetry is not None:
+            provider_telemetry.observe_headers(
+                stream_attempt_id,
+                getattr(stream, "response", None),
+            )
         writer_token = claim_stream_writer(agent)
 
         # Capture rate limit headers from the initial HTTP response.
@@ -2056,6 +2126,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 continue
             last_chunk_time["t"] = time.time()
             agent._touch_activity("receiving stream response")
+            provider_telemetry = current_provider_telemetry(agent)
+            if provider_telemetry is not None:
+                provider_telemetry.observe_first_event(stream_attempt_id)
             if stream_probe_enabled:
                 stream_probe_counts["chunks"] += 1
 
@@ -2410,6 +2483,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 )
             except Exception:
                 pass
+            provider_telemetry = current_provider_telemetry(agent)
+            if provider_telemetry is not None:
+                with stream_attempt_lock:
+                    active_attempt = int(stream_attempt_state.get("current") or 1)
+                provider_telemetry.observe_headers(
+                    active_attempt,
+                    getattr(stream, "response", None),
+                )
             writer_token = claim_stream_writer(agent)
             for event in stream:
                 if not stream_writer_is_current(agent, writer_token):
@@ -2427,6 +2508,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # already does this at the top of its chunk loop).
                 last_chunk_time["t"] = time.time()
                 agent._touch_activity("receiving stream response")
+                provider_telemetry = current_provider_telemetry(agent)
+                if provider_telemetry is not None:
+                    with stream_attempt_lock:
+                        active_attempt = int(stream_attempt_state.get("current") or 1)
+                    provider_telemetry.observe_first_event(active_attempt)
 
                 # Update per-attempt diagnostic counters (best-effort).
                 try:
@@ -2481,6 +2567,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
                 stream_attempt_id = _start_stream_attempt()
+                provider_telemetry = current_provider_telemetry(agent)
+                if provider_telemetry is not None:
+                    provider_telemetry.begin_network_attempt(
+                        stream_attempt_id,
+                        _max_stream_retries + 1,
+                    )
                 # Check for interrupt before each retry attempt.  Without
                 # this, /stop closes the HTTP connection (outer poll loop),
                 # but the retry loop opens a FRESH connection — negating the
@@ -2644,6 +2736,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             mid_tool_call=True,
                             diag=request_client_holder.get("diag"),
                         )
+                        if provider_telemetry is not None:
+                            provider_telemetry.retry_scheduled(
+                                failed_attempt=stream_attempt_id,
+                                next_attempt=stream_attempt_id + 1,
+                                max_attempts=_max_stream_retries + 1,
+                                error=e,
+                                retry_kind="mid_tool_stream",
+                            )
                         _cancel_current_stream_attempt("stream_mid_tool_retry_cleanup")
                         _close_request_client_once("stream_mid_tool_retry_cleanup")
                         if agent.api_mode != "anthropic_messages":
@@ -2708,6 +2808,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                                 mid_tool_call=False,
                                 diag=request_client_holder.get("diag"),
                             )
+                            if provider_telemetry is not None:
+                                provider_telemetry.retry_scheduled(
+                                    failed_attempt=stream_attempt_id,
+                                    next_attempt=stream_attempt_id + 1,
+                                    max_attempts=_max_stream_retries + 1,
+                                    error=e,
+                                    retry_kind="transport",
+                                )
                             # Close the stale request client before retry
                             _cancel_current_stream_attempt("stream_retry_cleanup")
                             _close_request_client_once("stream_retry_cleanup")
@@ -2850,6 +2958,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 agent,
                 f"stream response stale after {_stale_elapsed:.0f}s",
             )
+            provider_telemetry = current_provider_telemetry(agent)
+            if provider_telemetry is not None:
+                with stream_attempt_lock:
+                    active_attempt = int(stream_attempt_state.get("current") or 1)
+                provider_telemetry.stream_stalled(
+                    attempt=active_attempt,
+                    stalled_ms=_stale_elapsed * 1_000,
+                )
             # The Anthropic attempt already owns an isolated client; the next
             # retry builds a fresh one. Only OpenAI-wire traffic has a shared
             # primary pool that needs replacement here.

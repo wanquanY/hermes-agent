@@ -10,6 +10,7 @@ from typing import Any
 TRANSIENT_PLATFORM_EVENT_TYPES = frozenset(
     {
         "agent.terminal.output",
+        "runtime.provider.telemetry",
         "terminal.close",
         "terminal.list.request",
         "terminal.read.request",
@@ -34,15 +35,17 @@ DURABLE_CONVERSATION_EVENT_TYPES = frozenset(
 )
 
 TERMINAL_EVENT_DOMAIN = "terminal"
+DIAGNOSTICS_EVENT_DOMAIN = "diagnostics"
 
 
 def event_domain_for_type(event_type: str) -> str:
     """Return the renderer side-channel domain for a gateway event type."""
-    return (
-        TERMINAL_EVENT_DOMAIN
-        if str(event_type or "").strip() in TRANSIENT_PLATFORM_EVENT_TYPES
-        else ""
-    )
+    normalized = str(event_type or "").strip()
+    if normalized == "runtime.provider.telemetry":
+        return DIAGNOSTICS_EVENT_DOMAIN
+    if normalized in TRANSIENT_PLATFORM_EVENT_TYPES:
+        return TERMINAL_EVENT_DOMAIN
+    return ""
 
 
 def is_transient_platform_event(frame: dict[str, Any]) -> bool:
@@ -149,6 +152,7 @@ def _positive_int(value: Any) -> int:
 
 
 __all__ = [
+    "DIAGNOSTICS_EVENT_DOMAIN",
     "DURABLE_CONVERSATION_EVENT_TYPES",
     "RuntimeSourceSequencer",
     "TERMINAL_EVENT_DOMAIN",
