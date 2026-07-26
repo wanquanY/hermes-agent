@@ -3904,7 +3904,7 @@ class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
             callbacks.append(runtime_event_sink.on_tool_generating)
         if self.streaming_enabled:
             callbacks.append(self._on_tool_gen_start)
-        return self._combine_single_arg_callbacks(callbacks)
+        return self._combine_multi_arg_callbacks(callbacks)
 
     def _current_tool_progress_callback(self):
         sink = self._kanban_runtime_event_sink
@@ -10784,7 +10784,11 @@ class HermesCLI(CLICapabilityCommandsMixin, CLIBillingMixin):
     # Tool-call generation indicator (shown during streaming)
     # ====================================================================
 
-    def _on_tool_gen_start(self, tool_name: str) -> None:
+    def _on_tool_gen_start(
+        self,
+        tool_name: str,
+        _tool_call_id: str | None = None,
+    ) -> None:
         """Called when the model begins generating tool-call arguments.
 
         Closes any open streaming boxes (reasoning / response) exactly once,

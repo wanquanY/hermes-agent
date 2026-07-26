@@ -1408,6 +1408,20 @@ def _codex_backfilled_response(output_items: list, text_parts: list, *, has_tool
     return None
 
 
+def _forward_responses_tool_generation(
+    agent: Any,
+    projection: Any,
+    notified_tool_call_ids: set[str],
+) -> None:
+    """Publish one identity-stable generation event per Responses tool call."""
+    tool_call_id = str(getattr(projection, "tool_call_id", "") or "").strip()
+    tool_name = str(getattr(projection, "tool_name", "") or "").strip()
+    if not tool_call_id or not tool_name or tool_call_id in notified_tool_call_ids:
+        return
+    notified_tool_call_ids.add(tool_call_id)
+    agent._fire_tool_gen_started(tool_name, tool_call_id)
+
+
 def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
     """Execute one streaming Responses API request and return the final response."""
     import httpx as _httpx
@@ -1420,6 +1434,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     # returns empty output (e.g. chatgpt.com backend-api sends
     # response.incomplete instead of response.completed).
     agent._codex_streamed_text_parts: list = []
+    notified_tool_call_ids: set[str] = set()
     for attempt in range(max_stream_retries + 1):
         if agent._interrupt_requested:
             raise InterruptedError("Agent interrupted before Codex stream retry")
@@ -1479,6 +1494,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                         if provider_telemetry is not None:
                             provider_telemetry.observe_first_delta(network_attempt)
                         agent._fire_reasoning_delta(projection.reasoning_delta)
+                    _forward_responses_tool_generation(
+                        agent,
+                        projection,
+                        notified_tool_call_ids,
+                    )
                     if projection.has_tool_call:
                         has_tool_calls = True
                     # Collect completed output items — some backends
@@ -1698,6 +1718,7 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     collected_output_items: list = []
     collected_text_deltas: list = []
     has_tool_calls = False
+    notified_tool_call_ids: set[str] = set()
     from agent.responses_stream_projector import ResponsesStreamProjector
 
     stream_projector = ResponsesStreamProjector()
@@ -1737,6 +1758,11 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                 collected_text_deltas.append(projection.content_delta)
             if projection.reasoning_delta:
                 agent._fire_reasoning_delta(projection.reasoning_delta)
+            _forward_responses_tool_generation(
+                agent,
+                projection,
+                notified_tool_call_ids,
+            )
             if projection.has_tool_call:
                 has_tool_calls = True
 

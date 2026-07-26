@@ -1771,9 +1771,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     agent._fire_stream_delta(text)
                     deltas_were_sent["yes"] = True
 
-                def _on_tool(name):
+                def _on_tool(name, tool_call_id=None):
                     _fire_first()
-                    agent._fire_tool_gen_started(name)
+                    agent._fire_tool_gen_started(name, tool_call_id)
 
                 def _on_reasoning(text):
                     _fire_first()
@@ -2079,6 +2079,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         content_parts: list = []
         tool_calls_acc: dict = {}
         tool_gen_notified: set = set()
+        partial_tool_name_notified: set = set()
         # Ollama-compatible endpoints reuse index 0 for every tool call
         # in a parallel batch, distinguishing them only by id.  Track
         # the last seen id per raw index so we can detect a new tool
@@ -2301,18 +2302,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         entry["extra_content"] = extra
                     # Fire once per tool when the full name is available
                     name = entry["function"]["name"]
-                    if name and idx not in tool_gen_notified:
+                    tool_call_id = entry["id"]
+                    if name and idx not in partial_tool_name_notified:
+                        partial_tool_name_notified.add(idx)
+                        # Preserve partial-stream diagnostics even for
+                        # non-conforming providers that have not supplied an
+                        # invocation ID yet.
+                        result["partial_tool_names"].append(name)
+                    if name and tool_call_id and idx not in tool_gen_notified:
                         tool_gen_notified.add(idx)
                         _fire_first_delta()
-                        agent._fire_tool_gen_started(name)
-                        # Record the partial tool-call name so the outer
-                        # stub-builder can surface a user-visible warning
-                        # if streaming dies before this tool's arguments
-                        # are fully delivered.  Without this, a stall
-                        # during tool-call JSON generation lets the stub
-                        # at line ~6107 return `tool_calls=None`, silently
-                        # discarding the attempted action.
-                        result["partial_tool_names"].append(name)
+                        agent._fire_tool_gen_started(name, tool_call_id)
 
             if chunk.choices[0].finish_reason:
                 finish_reason = chunk.choices[0].finish_reason
@@ -2536,9 +2536,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
                         tool_name = getattr(block, "name", None)
+                        tool_call_id = getattr(block, "id", None)
                         if tool_name:
                             _fire_first_delta()
-                            agent._fire_tool_gen_started(tool_name)
+                            agent._fire_tool_gen_started(tool_name, tool_call_id)
 
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)

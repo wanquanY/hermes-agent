@@ -34,6 +34,8 @@ import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.tool_generation_events import invoke_tool_generation_callback
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -796,8 +798,9 @@ def stream_converse_with_callbacks(
         on_text_delta: Called with each text chunk as it arrives. Only fires
             when no tool_use blocks have been seen (same semantics as the
             Anthropic and chat_completions streaming paths).
-        on_tool_start: Called with the tool name when a toolUse block begins.
-            Lets the TUI show a spinner while tool arguments are generated.
+        on_tool_start: Called with the tool name and toolUse ID when a toolUse
+            block begins. Lets structured clients create a stable in-progress
+            row while arguments are still being generated.
         on_reasoning_delta: Called with reasoning/thinking text chunks.
             Bedrock surfaces thinking via ``reasoning`` content block deltas
             on supported models (Claude 4.6+).
@@ -840,7 +843,11 @@ def stream_converse_with_callbacks(
                     "input_json": "",
                 }
                 if on_tool_start:
-                    on_tool_start(current_tool["name"])
+                    invoke_tool_generation_callback(
+                        on_tool_start,
+                        current_tool["name"],
+                        current_tool["toolUseId"],
+                    )
 
         elif "contentBlockDelta" in event:
             delta = event["contentBlockDelta"].get("delta", {})

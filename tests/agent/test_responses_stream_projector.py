@@ -49,3 +49,24 @@ def test_reasoning_delta_and_completed_item_preserve_ordered_classification():
 
     assert reasoning.reasoning_delta == "think"
     assert completed.completed_item is item
+
+
+def test_function_call_added_exposes_stable_generation_identity():
+    projector = ResponsesStreamProjector()
+
+    projection = projector.project(
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-write-1",
+                "call_id": "call-write-1",
+                "name": "write_file",
+            },
+        }
+    )
+
+    assert projection.has_tool_call is True
+    assert projection.tool_call_id == "call-write-1"
+    assert projection.tool_name == "write_file"
+    assert projection.completed_item is None

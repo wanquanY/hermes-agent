@@ -251,13 +251,21 @@ class GatewayToolEventBridge:
         except Exception:
             pass
 
-    def on_tool_generating(self, sid: str, name: str | None) -> None:
+    def on_tool_generating(
+        self,
+        sid: str,
+        name: str | None,
+        tool_call_id: str | None = None,
+    ) -> None:
         session = self._sessions.get(sid)
         if session_interrupted(session):
             return
         self._notify_tool_boundary(sid, "tool.generating")
         if self._tool_progress_enabled(sid):
-            self._emit("tool.generating", sid, {"name": name})
+            payload = {"name": name}
+            if tool_call_id:
+                payload["tool_id"] = tool_call_id
+            self._emit("tool.generating", sid, payload)
 
     def on_reasoning_delta(self, sid: str, text: str) -> None:
         payload = {
@@ -625,7 +633,11 @@ class GatewayToolEventBridge:
             "tool_progress_callback": lambda event_type, name=None, preview=None, args=None, **kwargs: self.on_tool_progress(
                 sid, event_type, name, preview, args, **kwargs
             ),
-            "tool_gen_callback": lambda name: self.on_tool_generating(sid, name),
+            "tool_gen_callback": lambda name, tool_call_id=None: self.on_tool_generating(
+                sid,
+                name,
+                tool_call_id,
+            ),
             "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self.on_reasoning_delta(sid, text),
             "reaction_callback": lambda kind: self._emit(

@@ -90,6 +90,7 @@ from agent.process_bootstrap import (
 from agent.iteration_budget import IterationBudget
 from agent.credits_runtime import CreditsRuntimeMixin
 from agent.stream_writer_fence import StreamWriterAgentMixin
+from agent.tool_generation_events import invoke_tool_generation_callback
 from agent.turn_message_buffer import message_persist_boundary
 
 
@@ -4349,18 +4350,25 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
             except Exception:
                 pass
 
-    def _fire_tool_gen_started(self, tool_name: str) -> None:
+    def _fire_tool_gen_started(
+        self,
+        tool_name: str,
+        tool_call_id: str | None = None,
+    ) -> None:
         """Notify display layer that the model is generating tool call arguments.
 
         Fires once per tool name when the streaming response begins producing
         tool_call / tool_use tokens.  Gives the TUI a chance to show a spinner
         or status line so the user isn't staring at a frozen screen while a
-        large tool payload (e.g. a 45 KB write_file) is being generated.
+        large tool payload (e.g. a 45 KB write_file) is being generated.  When
+        the provider has already assigned the invocation identity, forward it
+        so structured clients can materialize one durable in-progress row and
+        later merge tool.start/tool.complete into that same row.
         """
         cb = self.tool_gen_callback
         if cb is not None:
             try:
-                cb(tool_name)
+                invoke_tool_generation_callback(cb, tool_name, tool_call_id)
             except Exception:
                 pass
 

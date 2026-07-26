@@ -544,3 +544,26 @@ def test_tool_boundary_hook_runs_even_when_progress_events_are_disabled():
         ("sid", "tool.generating"),
         ("sid", "tool.start"),
     ]
+
+
+def test_tool_generating_emits_stable_invocation_identity():
+    events = []
+    bridge = _bridge(events)
+    callbacks = bridge.agent_callbacks(
+        "sid",
+        block=lambda *_args, **_kwargs: "",
+        status_update=lambda *_args, **_kwargs: None,
+    )
+
+    callbacks["tool_gen_callback"]("write_file", "call-write-1")
+
+    assert events == [
+        {
+            "type": "tool.generating",
+            "session_id": "sid",
+            "payload": {
+                "name": "write_file",
+                "tool_id": "call-write-1",
+            },
+        }
+    ]

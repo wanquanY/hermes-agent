@@ -17,6 +17,8 @@ class ResponsesStreamProjection:
     event_type: str = ""
     content_delta: str = ""
     reasoning_delta: str = ""
+    tool_call_id: str = ""
+    tool_name: str = ""
     completed_item: Any = None
     terminal_response: Any = None
     has_tool_call: bool = False
@@ -36,14 +38,30 @@ class ResponsesStreamProjector:
 
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             item = _field(event, "item")
-            if str(_field(item, "type", "") or "") == "message":
+            item_type = str(_field(item, "type", "") or "")
+            if item_type == "message":
                 self._active_message_phase = str(
                     _field(item, "phase", "") or ""
                 ).strip().lower()
+            is_tool_call = "function_call" in item_type
             return ResponsesStreamProjection(
                 event_type=event_type,
+                tool_call_id=(
+                    str(
+                        _field(item, "call_id", "")
+                        or _field(item, "id", "")
+                        or ""
+                    )
+                    if is_tool_call
+                    else ""
+                ),
+                tool_name=(
+                    str(_field(item, "name", "") or "")
+                    if is_tool_call
+                    else ""
+                ),
                 completed_item=item if event_type == "response.output_item.done" else None,
-                has_tool_call="function_call" in str(_field(item, "type", "") or ""),
+                has_tool_call=is_tool_call,
             )
 
         if "function_call" in event_type:

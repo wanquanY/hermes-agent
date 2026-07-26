@@ -977,9 +977,12 @@ class TestStreamConverseWithCallbacks:
             {"metadata": {"usage": {"inputTokens": 0, "outputTokens": 0}}},
         ]}
         result = stream_converse_with_callbacks(
-            events, on_tool_start=lambda name: tools_started.append(name),
+            events,
+            on_tool_start=lambda name, tool_call_id: tools_started.append(
+                (name, tool_call_id)
+            ),
         )
-        assert tools_started == ["read_file"]
+        assert tools_started == [("read_file", "c1")]
 
     def test_interrupt_stops_processing(self):
         from agent.bedrock_adapter import stream_converse_with_callbacks

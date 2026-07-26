@@ -121,6 +121,7 @@ class TestStreamingAccumulator:
         mock_client.chat.completions.create.return_value = iter(chunks)
         mock_create.return_value = mock_client
 
+        generated_tools = []
         agent = AIAgent(
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
@@ -128,6 +129,9 @@ class TestStreamingAccumulator:
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
+            tool_gen_callback=lambda name, tool_call_id: generated_tools.append(
+                (name, tool_call_id)
+            ),
         )
         agent.api_mode = "chat_completions"
         agent._interrupt_requested = False
@@ -140,6 +144,7 @@ class TestStreamingAccumulator:
         assert tc[0].id == "call_123"
         assert tc[0].function.name == "terminal"
         assert tc[0].function.arguments == '{"command": "ls"}'
+        assert generated_tools == [("terminal", "call_123")]
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
@@ -868,6 +873,62 @@ class TestCodexStreamCallbacks:
         response = agent._run_codex_stream({}, client=mock_client)
         assert "Hello from Codex!" in deltas
 
+    def test_codex_function_call_surfaces_identity_before_arguments_finish(self):
+        from run_agent import AIAgent
+
+        generated_tools = []
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            tool_gen_callback=lambda name, tool_call_id: generated_tools.append(
+                (name, tool_call_id)
+            ),
+        )
+        agent.api_mode = "codex_responses"
+        agent._interrupt_requested = False
+
+        function_call = SimpleNamespace(
+            type="function_call",
+            id="item-write-1",
+            call_id="call-write-1",
+            name="write_file",
+        )
+        events = [
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=function_call,
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="item-write-1",
+                delta='{"path":"report.md","content":"',
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=function_call,
+            ),
+            SimpleNamespace(type="response.completed"),
+        ]
+
+        mock_stream = MagicMock()
+        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+        mock_stream.__exit__ = MagicMock(return_value=False)
+        mock_stream.__iter__ = MagicMock(return_value=iter(events))
+        mock_stream.get_final_response.return_value = SimpleNamespace(
+            output=[function_call],
+            status="completed",
+        )
+        mock_client = MagicMock()
+        mock_client.responses.stream.return_value = mock_stream
+
+        agent._run_codex_stream({}, client=mock_client)
+
+        assert generated_tools == [("write_file", "call-write-1")]
+
     def test_codex_stream_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
 
@@ -1009,6 +1070,7 @@ class TestAnthropicStreamCallbacks:
     def test_anthropic_stream_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
 
+        generated_tools = []
         agent = AIAgent(
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
@@ -1016,6 +1078,9 @@ class TestAnthropicStreamCallbacks:
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
+            tool_gen_callback=lambda name, tool_call_id: generated_tools.append(
+                (name, tool_call_id)
+            ),
         )
         agent.api_mode = "anthropic_messages"
         agent._interrupt_requested = False
@@ -1034,7 +1099,11 @@ class TestAnthropicStreamCallbacks:
             ),
             SimpleNamespace(
                 type="content_block_start",
-                content_block=SimpleNamespace(type="tool_use", name="terminal"),
+                content_block=SimpleNamespace(
+                    type="tool_use",
+                    id="call-anthropic-1",
+                    name="terminal",
+                ),
             ),
         ]
 
@@ -1058,6 +1127,7 @@ class TestAnthropicStreamCallbacks:
         agent._interruptible_streaming_api_call({})
 
         assert touch_calls.count("receiving stream response") == len(events)
+        assert generated_tools == [("terminal", "call-anthropic-1")]
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     def test_anthropic_stream_parser_valueerror_retries_before_delivery(

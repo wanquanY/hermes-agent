@@ -40,6 +40,7 @@ def test_kanban_runtime_event_sink_writes_run_scoped_side_channel_events(kanban_
         sink.start(profile="worker", workspace="/tmp/workspace")
         sink.on_message_delta("hello ")
         sink.on_message_delta("world")
+        sink.on_tool_generating("read_file", "tool-1")
         sink.on_tool_start("tool-1", "read_file", {"path": "brief.md"})
         sink.on_tool_complete("tool-1", "read_file", {"path": "brief.md"}, "brief")
         sink.complete(text="hello world", status="completed")
@@ -59,6 +60,7 @@ def test_kanban_runtime_event_sink_writes_run_scoped_side_channel_events(kanban_
         kinds = [event["kind"] for event in events]
         assert "runtime.session" in kinds
         assert "runtime.message_delta" in kinds
+        assert "runtime.tool_generating" in kinds
         assert "runtime.tool_start" in kinds
         assert "runtime.tool_complete" in kinds
         assert "runtime.message_complete" in kinds
@@ -68,6 +70,12 @@ def test_kanban_runtime_event_sink_writes_run_scoped_side_channel_events(kanban_
         assert "".join(event["payload"]["text"] for event in message_deltas) == "hello world"
         assert {event["payload"]["session_id"] for event in message_deltas} == {"sid-worker"}
         assert {event["payload"]["runtime_scope_key"] for event in message_deltas} == {"scope-worker"}
+
+        tool_generating = next(
+            event for event in events if event["kind"] == "runtime.tool_generating"
+        )
+        assert tool_generating["payload"]["type"] == "tool.generating"
+        assert tool_generating["payload"]["tool_id"] == "tool-1"
 
         tool_complete = next(event for event in events if event["kind"] == "runtime.tool_complete")
         assert tool_complete["payload"]["type"] == "tool.complete"

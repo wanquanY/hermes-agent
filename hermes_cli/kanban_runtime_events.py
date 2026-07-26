@@ -131,14 +131,21 @@ class KanbanRuntimeEventSink:
             self._reasoning_buf.append(str(text))
             self._flush_buffer_if_needed("reasoning")
 
-    def on_tool_generating(self, tool_name: str) -> None:
+    def on_tool_generating(
+        self,
+        tool_name: str,
+        tool_call_id: str | None = None,
+    ) -> None:
         self.flush()
+        payload = {
+            "type": "tool.generating",
+            "name": _text(tool_name),
+        }
+        if tool_call_id:
+            payload["tool_id"] = _text(tool_call_id)
         self.emit(
             "runtime.tool_generating",
-            {
-                "type": "tool.generating",
-                "name": _text(tool_name),
-            },
+            payload,
         )
 
     def on_tool_progress(
