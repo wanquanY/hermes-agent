@@ -1986,15 +1986,30 @@ def run_conversation(
                             compression_attempts = 0
                             primary_recovery_attempted = False
                             continue
-                        agent._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
-                        logging.error(f"{agent.log_prefix}Invalid API response after {max_retries} retries.")
+                        emit_provider_telemetry(
+                            agent,
+                            "provider.retry.exhausted",
+                            provider_call_id=api_request_id,
+                            labels={
+                                "retry_kind": "invalid_response",
+                                "reason_code": "malformed_response",
+                            },
+                            metrics={
+                                "retry_attempt": retry_count,
+                                "max_retries": max_retries,
+                            },
+                        )
+                        agent._emit_status(f"❌ All {max_retries} attempts returned invalid responses. Giving up.")
+                        logging.error(f"{agent.log_prefix}Invalid API response after {max_retries} attempts.")
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": f"Invalid API response after {max_retries} retries: {_failure_hint}",
-                            "failed": True  # Mark as failure for filtering
+                            "error": f"Invalid API response after {max_retries} attempts: {_failure_hint}",
+                            "failed": True,
+                            "error_code": "provider_retry_exhausted",
+                            "final_response_kind": "error",
                         }
                     
                     # Backoff before retry — jittered exponential: 5s base, 120s cap
@@ -2010,6 +2025,8 @@ def run_conversation(
                         metrics={
                             "logical_attempt": retry_count + 1,
                             "max_logical_attempts": max_retries,
+                            "retry_attempt": retry_count,
+                            "max_retries": max_retries,
                             "retry_delay_ms": wait_time * 1_000,
                         },
                     )
@@ -3828,7 +3845,7 @@ def run_conversation(
                         retry_count = 0
                         continue
                     # Try fallback before giving up entirely
-                    agent._emit_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
+                    agent._emit_status(f"⚠️ All {max_retries} attempts failed — trying fallback...")
                     if agent._try_activate_fallback():
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
@@ -3836,11 +3853,30 @@ def run_conversation(
                         compression_attempts = 0
                         primary_recovery_attempted = False
                         continue
+                    emit_provider_telemetry(
+                        agent,
+                        "provider.retry.exhausted",
+                        provider_call_id=api_request_id,
+                        labels={
+                            "retry_kind": "logical_call",
+                            "reason_code": getattr(
+                                classified.reason,
+                                "value",
+                                classified.reason,
+                            ),
+                        },
+                        metrics={
+                            "retry_attempt": retry_count,
+                            "max_retries": max_retries,
+                            **({"status_code": status_code} if status_code else {}),
+                        },
+                        error=api_error,
+                    )
                     _final_summary = agent._summarize_api_error(api_error)
                     if is_rate_limited:
-                        agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+                        agent._emit_status(f"❌ Rate limited after {max_retries} attempts — {_final_summary}")
                     else:
-                        agent._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
+                        agent._emit_status(f"❌ API failed after {max_retries} attempts — {_final_summary}")
                     agent._vprint(f"{agent.log_prefix}   💀 Final error: {_final_summary}", force=True)
 
                     # Detect SSE stream-drop pattern (e.g. "Network
@@ -3883,7 +3919,7 @@ def run_conversation(
                         )
 
                     logging.error(
-                        "%sAPI call failed after %s retries. %s | provider=%s model=%s msgs=%s tokens=~%s",
+                        "%sAPI call failed after %s attempts. %s | provider=%s model=%s msgs=%s tokens=~%s",
                         agent.log_prefix, max_retries, _final_summary,
                         _provider, _model, len(api_messages), f"{approx_tokens:,}",
                     )
@@ -3892,7 +3928,7 @@ def run_conversation(
                             api_kwargs, reason="max_retries_exhausted", error=api_error,
                         )
                     agent._persist_session(messages, conversation_history)
-                    _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
+                    _final_response = f"API call failed after {max_retries} attempts: {_final_summary}"
                     if _is_thinking_timeout:
                         from agent.thinking_timeout_guidance import (
                             build_thinking_timeout_guidance,
@@ -3918,6 +3954,8 @@ def run_conversation(
                         "completed": False,
                         "failed": True,
                         "error": _final_summary,
+                        "error_code": "provider_retry_exhausted",
+                        "final_response_kind": "error",
                     }
 
                 # For rate limits, respect the Retry-After header if present
@@ -3943,6 +3981,8 @@ def run_conversation(
                     metrics={
                         "logical_attempt": retry_count + 1,
                         "max_logical_attempts": max_retries,
+                        "retry_attempt": retry_count,
+                        "max_retries": max_retries,
                         "retry_delay_ms": wait_time * 1_000,
                         **({"status_code": status_code} if status_code else {}),
                     },
@@ -3967,6 +4007,12 @@ def run_conversation(
                 while time.time() < sleep_end:
                     if agent._interrupt_requested:
                         agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                        emit_provider_telemetry(
+                            agent,
+                            "provider.call.cancelled",
+                            provider_call_id=api_request_id,
+                            labels={"reason_code": "user_interrupted"},
+                        )
                         interrupt_text = (
                             "Operation interrupted: retrying API call after error "
                             f"(retry {retry_count}/{max_retries})."

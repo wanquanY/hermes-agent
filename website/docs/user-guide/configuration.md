@@ -720,14 +720,14 @@ Warnings are injected into the last tool result's JSON (as a `_budget_warning` f
 ```yaml
 agent:
   max_turns: 90                # Max iterations per conversation turn (default: 90)
-  api_max_retries: 3           # Retries per provider before fallback engages (default: 3)
+  api_max_retries: 5           # Total attempts per provider, initial request included
 ```
 
 Budget pressure is enabled by default. The agent sees warnings naturally as part of tool results, encouraging it to consolidate its work and deliver a response before running out of iterations.
 
 When the iteration budget is fully exhausted, the CLI shows a notification to the user: `⚠ Iteration budget reached (90/90) — response may be incomplete`. If the budget runs out during active work, the agent generates a summary of what was accomplished before stopping.
 
-`agent.api_max_retries` controls how many times Hermes retries a provider API call on transient errors (rate limits, connection drops, 5xx) **before** fallback-provider switching engages. The default is `3` — four attempts total. If you have [fallback providers](/docs/user-guide/features/fallback-providers) configured and want to fail over faster, drop this to `0` so the first transient error on your primary immediately hands off to the fallback instead of churning retries against the flaky endpoint.
+`agent.api_max_retries` is a legacy-named setting that controls the **total provider attempt budget**, including the initial request, for transient errors such as rate limits, connection drops, and 5xx responses. The default is `5` — one initial request plus up to four retries. If you have [fallback providers](/docs/user-guide/features/fallback-providers) configured and want to fail over faster, set this to `1` so the first failed attempt on the primary hands off to the fallback instead of retrying the flaky endpoint. Values below `1` are clamped to `1`.
 
 ### API Timeouts
 

@@ -21,6 +21,8 @@ from typing import Any
 
 PROVIDER_TELEMETRY_EVENT_TYPE = "runtime.provider.telemetry"
 PROVIDER_TELEMETRY_SCHEMA = "hermes.provider-telemetry.v1"
+PROVIDER_STATUS_EVENT_TYPE = "status.update"
+PROVIDER_STATUS_SCHEMA = "hermes.provider-status.v1"
 
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9_.:/+-]{1,128}$")
 _VALID_STAGES = frozenset(
@@ -35,11 +37,15 @@ _VALID_STAGES = frozenset(
         "provider.response.first_delta",
         "provider.attempt.retry_scheduled",
         "provider.attempt.failed",
+        "provider.retry.exhausted",
         "provider.stream.stalled",
         "provider.fallback.activated",
         "provider.fallback.exhausted",
     }
 )
+
+_ACTIVE_PROVIDER_STATUS_KEYS: set[tuple[str, str, str]] = set()
+_ACTIVE_PROVIDER_STATUS_LOCK = threading.Lock()
 
 
 def _bounded_label(value: Any) -> str:
@@ -130,6 +136,129 @@ def _active_identity(agent: Any) -> dict[str, str]:
     }
 
 
+def _provider_status_id(provider_call_id: str) -> str:
+    """Return one stable id for all retries of a logical provider request."""
+    value = str(provider_call_id or "").strip()[:256]
+    return re.sub(r":logical:\d+$", "", value) or value
+
+
+def _provider_status_key(
+    identity: dict[str, str],
+    provider_call_id: str,
+) -> tuple[str, str, str]:
+    return (
+        identity.get("conversation_session_id", ""),
+        identity.get("run_id", ""),
+        _provider_status_id(provider_call_id),
+    )
+
+
+def _provider_status_payload(
+    stage: str,
+    *,
+    provider_call_id: str,
+    labels: dict[str, str],
+    metrics: dict[str, float | int],
+) -> dict[str, Any] | None:
+    state = {
+        "provider.attempt.retry_scheduled": "retrying",
+        "provider.stream.stalled": "stalled",
+        "provider.fallback.activated": "fallback",
+        "provider.response.first_delta": "resolved",
+        "provider.call.completed": "resolved",
+        "provider.call.cancelled": "resolved",
+        "provider.retry.exhausted": "failed",
+    }.get(stage)
+    if not state:
+        return None
+
+    retry_kind = labels.get("retry_kind", "")
+    if stage == "provider.attempt.retry_scheduled":
+        if "max_network_attempts" in metrics:
+            attempt = metrics.get("network_attempt")
+            max_attempts = metrics.get("max_network_attempts")
+        else:
+            # The retry event describes the *next* logical request attempt.
+            # ``api_max_retries`` is a legacy name: its value is the maximum
+            # number of attempts, including the initial request.
+            attempt = metrics.get("logical_attempt")
+            max_attempts = metrics.get("max_logical_attempts")
+    elif stage == "provider.retry.exhausted":
+        attempt = metrics.get("retry_attempt") or metrics.get("logical_attempt")
+        max_attempts = metrics.get("max_retries") or metrics.get("max_logical_attempts")
+    else:
+        attempt = metrics.get("network_attempt") or metrics.get("logical_attempt")
+        max_attempts = (
+            metrics.get("max_network_attempts")
+            or metrics.get("max_logical_attempts")
+        )
+    delay_ms = metrics.get("retry_delay_ms")
+    payload: dict[str, Any] = {
+        "schema": PROVIDER_STATUS_SCHEMA,
+        "kind": "provider",
+        "category": "provider",
+        "state": state,
+        "status_id": _provider_status_id(provider_call_id),
+        "provider_call_id": str(provider_call_id or "").strip()[:256],
+        "provider": labels.get("provider", ""),
+        "model": labels.get("model", ""),
+        "reason_code": labels.get("reason_code", ""),
+        "retry_kind": retry_kind,
+        "fallback_kind": labels.get("fallback_kind", ""),
+    }
+    if attempt is not None:
+        payload["attempt"] = attempt
+    if max_attempts is not None:
+        payload["max_attempts"] = max_attempts
+    if delay_ms is not None:
+        payload["delay_ms"] = delay_ms
+    if "status_code" in metrics:
+        payload["status_code"] = metrics["status_code"]
+    return payload
+
+
+def _publish_provider_status(
+    identity: dict[str, str],
+    stage: str,
+    *,
+    provider_call_id: str,
+    labels: dict[str, str],
+    metrics: dict[str, float | int],
+) -> None:
+    payload = _provider_status_payload(
+        stage,
+        provider_call_id=provider_call_id,
+        labels=labels,
+        metrics=metrics,
+    )
+    if payload is None:
+        return
+
+    key = _provider_status_key(identity, provider_call_id)
+    state = str(payload.get("state") or "")
+    with _ACTIVE_PROVIDER_STATUS_LOCK:
+        active = key in _ACTIVE_PROVIDER_STATUS_KEYS
+        if state in {"retrying", "stalled", "fallback"}:
+            _ACTIVE_PROVIDER_STATUS_KEYS.add(key)
+        elif active:
+            _ACTIVE_PROVIDER_STATUS_KEYS.discard(key)
+        else:
+            # Normal provider completions must not create invisible status rows
+            # for every model/tool iteration. Only close a status that was
+            # opened by a retry, stall, or fallback event.
+            return
+
+    params = {
+        "type": PROVIDER_STATUS_EVENT_TYPE,
+        "transient": True,
+        **{key: value for key, value in identity.items() if value},
+        "payload": payload,
+    }
+    from tui_gateway.services import run_control
+
+    run_control.publish_recorded_event(params, persist=False)
+
+
 def emit_provider_telemetry(
     agent: Any,
     stage: str,
@@ -192,7 +321,19 @@ def emit_provider_telemetry(
         run_control.publish_recorded_event(params, persist=False)
     except Exception:
         # Observability is strictly non-interfering with inference.
-        return
+        pass
+    try:
+        _publish_provider_status(
+            identity,
+            normalized_stage,
+            provider_call_id=payload["provider_call_id"],
+            labels=safe_labels,
+            metrics=safe_metrics,
+        )
+    except Exception:
+        # User-visible progress is also non-interfering. A presentation failure
+        # must never abort or change inference retry behavior.
+        pass
 
 
 @dataclass
@@ -348,6 +489,8 @@ class ProviderCallTelemetry:
             metrics={
                 "network_attempt": next_attempt,
                 "max_network_attempts": max_attempts,
+                "retry_attempt": failed_attempt,
+                "max_retries": max(0, max_attempts - 1),
                 "retry_delay_ms": retry_delay_ms,
             },
             error=error,
@@ -387,6 +530,8 @@ def current_provider_telemetry(agent: Any) -> ProviderCallTelemetry | None:
 
 
 __all__ = [
+    "PROVIDER_STATUS_EVENT_TYPE",
+    "PROVIDER_STATUS_SCHEMA",
     "PROVIDER_TELEMETRY_EVENT_TYPE",
     "PROVIDER_TELEMETRY_SCHEMA",
     "ProviderCallTelemetry",

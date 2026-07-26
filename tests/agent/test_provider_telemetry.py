@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 from agent.provider_telemetry import (
+    PROVIDER_STATUS_EVENT_TYPE,
+    PROVIDER_STATUS_SCHEMA,
     PROVIDER_TELEMETRY_EVENT_TYPE,
     PROVIDER_TELEMETRY_SCHEMA,
     ProviderCallTelemetry,
@@ -112,7 +114,10 @@ def test_provider_call_telemetry_emits_each_first_signal_once(monkeypatch):
     )
     context.completed()
 
-    stages = [event["payload"]["stage"] for event in events]
+    telemetry_events = [
+        event for event in events if event["type"] == PROVIDER_TELEMETRY_EVENT_TYPE
+    ]
+    stages = [event["payload"]["stage"] for event in telemetry_events]
     assert stages == [
         "provider.call.started",
         "provider.attempt.started",
@@ -123,11 +128,89 @@ def test_provider_call_telemetry_emits_each_first_signal_once(monkeypatch):
         "provider.attempt.retry_scheduled",
         "provider.call.completed",
     ]
-    assert events[2]["payload"]["metrics"]["status_code"] == 200
-    assert events[2]["payload"]["metrics"]["time_to_headers_ms"] >= 0
-    assert events[3]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
-    assert events[4]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
+    assert telemetry_events[2]["payload"]["metrics"]["status_code"] == 200
+    assert telemetry_events[2]["payload"]["metrics"]["time_to_headers_ms"] >= 0
+    assert telemetry_events[3]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
+    assert telemetry_events[4]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
     assert all("must not escape" not in repr(event) for event in events)
+
+    status_events = [
+        event for event in events if event["type"] == PROVIDER_STATUS_EVENT_TYPE
+    ]
+    assert [event["payload"]["state"] for event in status_events] == [
+        "retrying",
+        "resolved",
+    ]
+    assert status_events[0]["payload"] == {
+        "schema": PROVIDER_STATUS_SCHEMA,
+        "kind": "provider",
+        "category": "provider",
+        "state": "retrying",
+        "status_id": "turn-1:api:1",
+        "provider_call_id": "turn-1:api:1:logical:2",
+        "provider": "openrouter",
+        "model": "openai/gpt-5",
+        "reason_code": "connection",
+        "retry_kind": "transport",
+        "fallback_kind": "",
+        "attempt": 2,
+        "max_attempts": 3,
+        "delay_ms": 0,
+    }
+    assert status_events[1]["payload"]["status_id"] == "turn-1:api:1"
+    assert status_events[1]["payload"]["state"] == "resolved"
+
+
+def test_provider_retry_exhaustion_closes_active_status(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "tui_gateway.services.run_control.publish_recorded_event",
+        lambda params, **_kwargs: events.append(params) or [],
+    )
+    agent = _agent()
+    provider_call_id = "turn-1:api:exhaustion"
+
+    emit_provider_telemetry(
+        agent,
+        "provider.attempt.retry_scheduled",
+        provider_call_id=f"{provider_call_id}:logical:1",
+        labels={"retry_kind": "logical_call"},
+        metrics={
+            "logical_attempt": 2,
+            "max_logical_attempts": 3,
+            "retry_delay_ms": 1_250,
+        },
+        error=TimeoutError("secret upstream details"),
+    )
+    emit_provider_telemetry(
+        agent,
+        "provider.retry.exhausted",
+        provider_call_id=provider_call_id,
+        labels={"retry_kind": "logical_call"},
+        metrics={"logical_attempt": 3, "max_logical_attempts": 3},
+        error=TimeoutError("secret final details"),
+    )
+    # A completion reported after the terminal failure must not resurrect an
+    # already-closed provider status.
+    emit_provider_telemetry(
+        agent,
+        "provider.call.completed",
+        provider_call_id=provider_call_id,
+    )
+
+    status_events = [
+        event for event in events if event["type"] == PROVIDER_STATUS_EVENT_TYPE
+    ]
+    assert [event["payload"]["state"] for event in status_events] == [
+        "retrying",
+        "failed",
+    ]
+    assert status_events[0]["payload"]["attempt"] == 2
+    assert status_events[0]["payload"]["max_attempts"] == 3
+    assert status_events[1]["payload"]["status_id"] == provider_call_id
+    assert status_events[1]["payload"]["attempt"] == 3
+    assert status_events[1]["payload"]["max_attempts"] == 3
+    assert "secret" not in repr(status_events)
 
 
 def test_provider_telemetry_is_disabled_without_run_or_scope(monkeypatch):

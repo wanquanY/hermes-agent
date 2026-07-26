@@ -67,6 +67,11 @@ def apply_dovie_product_runtime_policy(agent: Any, raw_context: Any) -> None:
 def prompt_terminal_status_from_result(result: dict, raw: Any) -> str:
     if result.get("interrupted"):
         return "interrupted"
+    if (
+        bool(result.get("failed"))
+        and str(result.get("final_response_kind") or "").strip().lower() == "error"
+    ):
+        return "error"
     error = str(result.get("error") or "").strip()
     if not error:
         return "complete"

@@ -1463,6 +1463,7 @@ def _run_prompt_submit(
 
             last_reasoning = None
             status_note = None
+            terminal_error_code = ""
             if isinstance(result, dict):
                 compression_count_after = int(
                     getattr(
@@ -1530,6 +1531,19 @@ def _run_prompt_submit(
                     result.get("failed") or result.get("partial")
                 ):
                     raw = f"Error: {result.get('error')}"
+                if (
+                    status == "error"
+                    and str(result.get("final_response_kind") or "").strip().lower()
+                    == "error"
+                ):
+                    # Infrastructure/provider failures are terminal metadata,
+                    # not model-authored assistant content. Publish only the
+                    # stable error code; raw provider details stay in protected
+                    # diagnostics rather than the durable conversation ledger.
+                    terminal_error_code = str(
+                        result.get("error_code") or "runtime_error"
+                    ).strip()
+                    raw = ""
                 lr = result.get("last_reasoning")
                 if isinstance(lr, str) and lr.strip():
                     last_reasoning = lr.strip()
@@ -1601,6 +1615,8 @@ def _run_prompt_submit(
             }
             if interrupt_detail:
                 payload["interrupt_detail"] = interrupt_detail
+            if terminal_error_code:
+                payload["error_code"] = terminal_error_code
             if final_delta_mismatch:
                 payload["final_text_mismatch"] = True
             if last_reasoning:

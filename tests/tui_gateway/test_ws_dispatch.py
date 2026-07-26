@@ -27,6 +27,15 @@ def test_prompt_terminal_status_reports_error_when_failed_without_usable_respons
         {"error": "provider failed", "failed": True},
         "Error: provider failed",
     ) == "error"
+    assert _prompt_terminal_status_from_result(
+        {
+            "error": "provider stream failed",
+            "error_code": "provider_retry_exhausted",
+            "failed": True,
+            "final_response_kind": "error",
+        },
+        "API call failed after 3 attempts: provider stream failed",
+    ) == "error"
 
 
 def test_workspace_current_uses_control_plane_executor():
