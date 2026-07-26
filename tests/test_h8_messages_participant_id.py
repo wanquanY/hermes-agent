@@ -320,6 +320,34 @@ def test_message_owner_migration_backfills_team_only_when_roster_owner_is_unique
         db.close()
 
 
+def test_runtime_flush_resolves_direct_message_owner_from_unique_roster(
+    tmp_path: Path,
+):
+    from run_agent import AIAgent
+
+    db = open_cli_session_store(tmp_path / "state.db")
+    try:
+        db.sessions.create("direct-session-1", source="tui", transient=False)
+        db.participants.ensure_user_participant("direct-session-1")
+        db.participants.ensure_agent_participant(
+            "direct-session-1",
+            agent_profile_id="profile-1",
+        )
+        agent = AIAgent.__new__(AIAgent)
+        agent._session_db = db
+
+        participant_id = agent._flush_message_participant_id(
+            "tool",
+            {"role": "tool", "content": "result"},
+            {"run_id": "run-1"},
+            session_id="direct-session-1",
+        )
+
+        assert participant_id == "agent:profile-1"
+    finally:
+        db.close()
+
+
 def test_team_conversation_render_history_messages_have_participant_id(tmp_path: Path, monkeypatch):
     from tui_gateway import server
 

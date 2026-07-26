@@ -8,13 +8,14 @@ import time
 from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_agent.repositories.message_repo import MessageRepoImpl
+from hermes_agent.repositories.branch_transcript_repo import BranchTranscriptRepo
 from hermes_agent.repositories.session_repo import (
     BranchLineageSpec,
     BranchRequestSpec,
     MaterializedBranchSessionSpec,
     SessionRepoImpl,
 )
+from hermes_agent.repositories.session_repo_support import MAX_SESSION_TITLE_LENGTH
 
 
 class SessionBranchService:
@@ -122,13 +123,13 @@ class SessionBranchService:
         normalized_scope = str(scope or "through_turn").strip() or "through_turn"
         point = branch_point if isinstance(branch_point, dict) else {}
         normalized_point = {
-            "message_id": str(point.get("message_id") or point.get("messageId") or "").strip(),
+            "message_id": str(
+                point.get("message_id") or point.get("messageId") or ""
+            ).strip(),
             "turn_id": str(point.get("turn_id") or point.get("turnId") or "").strip(),
             "run_id": str(point.get("run_id") or point.get("runId") or "").strip(),
             "client_message_id": str(
-                point.get("client_message_id")
-                or point.get("clientMessageId")
-                or ""
+                point.get("client_message_id") or point.get("clientMessageId") or ""
             ).strip(),
         }
 
@@ -193,29 +194,59 @@ class SessionBranchService:
         ).fetchone()
         if row is None:
             return source_session_id, 1
-        return str(row["root_session_id"] or source_session_id), int(row["branch_depth"] or 0) + 1
+        return str(row["root_session_id"] or source_session_id), int(
+            row["branch_depth"] or 0
+        ) + 1
 
     def _next_title_in_lineage_conn(
         self,
         conn: sqlite3.Connection,
+        root_session_id: str,
         base_title: str,
     ) -> str:
-        match = re.match(r"^(.*?) #(\d+)$", base_title)
-        base = match.group(1) if match else base_title
+        normalized = str(base_title or "").strip() or "新会话"
+        match = re.match(r"^(.*?)(?:\s*#\d+|（\d+）|\(\d+\))$", normalized)
+        base = (match.group(1) if match else normalized).rstrip()
         escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = conn.execute(
-            "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-            (base, f"{escaped} #%"),
+            """
+            SELECT COALESCE(NULLIF(s.display_title, ''), NULLIF(s.title, ''), '') AS title
+              FROM sessions s
+              LEFT JOIN session_lineage lineage ON lineage.session_id = s.id
+             WHERE (s.id = ? OR lineage.root_session_id = ?)
+               AND (
+                    COALESCE(NULLIF(s.display_title, ''), NULLIF(s.title, ''), '') = ?
+                    OR COALESCE(NULLIF(s.display_title, ''), NULLIF(s.title, ''), '')
+                       LIKE ? ESCAPE '\\'
+                    OR COALESCE(NULLIF(s.display_title, ''), NULLIF(s.title, ''), '')
+                       LIKE ? ESCAPE '\\'
+                    OR COALESCE(NULLIF(s.display_title, ''), NULLIF(s.title, ''), '')
+                       LIKE ? ESCAPE '\\'
+               )
+            """,
+            (
+                root_session_id,
+                root_session_id,
+                base,
+                f"{escaped}（%）",
+                f"{escaped}(%)",
+                f"{escaped} #%",
+            ),
         ).fetchall()
-        existing = [row["title"] for row in rows]
+        existing = [str(row["title"] or "").strip() for row in rows]
         if not existing:
             return base
         max_num = 1
         for title in existing:
-            numbered = re.match(r"^.* #(\d+)$", title or "")
+            numbered = re.match(r"^.*?(?:\s*#(\d+)|（(\d+)）|\((\d+)\))$", title)
             if numbered:
-                max_num = max(max_num, int(numbered.group(1)))
-        return f"{base} #{max_num + 1}"
+                max_num = max(
+                    max_num,
+                    int(next(group for group in numbered.groups() if group)),
+                )
+        suffix = f"（{max_num + 1}）"
+        available = MAX_SESSION_TITLE_LENGTH - len(suffix)
+        return f"{base[:available].rstrip()}{suffix}"
 
     def _branch_session_result_conn(
         self,
@@ -328,7 +359,9 @@ class SessionBranchService:
             target_model=target_model,
             target_model_config=target_model_config,
         )
-        branch_origin = str(branch_origin or "user_message_action").strip() or "user_message_action"
+        branch_origin = (
+            str(branch_origin or "user_message_action").strip() or "user_message_action"
+        )
 
         def _do(conn):
             source = conn.execute(
@@ -346,7 +379,9 @@ class SessionBranchService:
                 ).fetchone()
                 if existing_request is not None:
                     if existing_request["branch_fingerprint"] != fingerprint:
-                        raise ValueError("idempotency key conflicts with different branch point")
+                        raise ValueError(
+                            "idempotency key conflicts with different branch point"
+                        )
                     return self._branch_session_result_conn(
                         conn,
                         str(existing_request["result_session_id"]),
@@ -388,11 +423,21 @@ class SessionBranchService:
                 raise ValueError("source transcript is empty")
             tool_call_count = int(count_row["tool_call_count"] or 0)
 
+            root_session_id, branch_depth = self._branch_lineage_seed_conn(
+                conn,
+                source_session_id,
+            )
             created_at = time.time()
-            base_title = requested_title or source["title"] or "branch"
+            source_title = str(
+                source["display_title"]
+                or source["title"]
+                or source["preview"]
+                or "新会话"
+            ).strip()
             branch_title = requested_title or self._next_title_in_lineage_conn(
                 conn,
-                str(base_title),
+                root_session_id,
+                source_title,
             )
             session_repo = SessionRepoImpl(conn)
             session_repo.create_materialized_branch_session(
@@ -408,10 +453,6 @@ class SessionBranchService:
                 )
             )
 
-            root_session_id, branch_depth = self._branch_lineage_seed_conn(
-                conn,
-                source_session_id,
-            )
             session_repo.record_branch_lineage(
                 BranchLineageSpec(
                     session_id=new_session_id,
@@ -431,7 +472,7 @@ class SessionBranchService:
             )
 
             if included_row_id > 0:
-                MessageRepoImpl(conn).copy_branch_prefix(
+                BranchTranscriptRepo(conn).materialize_prefix(
                     list(source_session_ids),
                     included_row_id,
                     new_session_id,

@@ -2187,7 +2187,16 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                msg_participant_id = self._flush_message_participant_id(role, msg, msg_metadata)
+                msg_participant_id = self._flush_message_participant_id(
+                    role,
+                    msg,
+                    msg_metadata,
+                    session_id=target_session_id,
+                )
+                if msg_participant_id:
+                    msg_metadata["participant_id"] = msg_participant_id
+                    msg_metadata["participantId"] = msg_participant_id
+                    msg["metadata"] = msg_metadata
                 append_attempts += 1
                 appended_id = self._session_db.messages.append(
                     session_id=target_session_id,
@@ -2273,6 +2282,8 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
         role: str,
         msg: Dict,
         msg_metadata: Dict,
+        *,
+        session_id: str,
     ) -> str:
         """Resolve the stable visible speaker for a persisted message row.
 
@@ -2299,11 +2310,40 @@ class AIAgent(CreditsRuntimeMixin, StreamWriterAgentMixin):
             if participant_id:
                 return participant_id
         try:
-            from hermes_agent.orchestration.worker_publish_bridge import get_active_run_context
+            from hermes_agent.orchestration.worker_publish_bridge import (
+                get_active_run_context,
+            )
 
             active_context = get_active_run_context()
-            return str(getattr(active_context, "participant_id", "") or "").strip()
+            participant_id = str(
+                getattr(active_context, "participant_id", "") or ""
+            ).strip()
+            if participant_id:
+                return participant_id
         except Exception:
+            pass
+        try:
+            from hermes_agent.domain.message_owner_projection import (
+                project_render_message_owners,
+            )
+
+            participants = self._session_db.participants.list_conversation_participants(
+                session_id
+            )
+            [projected] = project_render_message_owners(
+                [
+                    {
+                        **msg,
+                        "role": role,
+                        "metadata": msg_metadata,
+                    }
+                ],
+                run_events=[],
+                participants=participants,
+                allow_single_execution_participant=True,
+            )
+            return str(projected.get("participant_id") or "").strip()
+        except (AttributeError, ValueError):
             return ""
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:

@@ -730,7 +730,7 @@ class TestMessageStorage:
         branch = db.sessions.get("branch-1")
         assert source["end_reason"] is None
         assert branch["parent_session_id"] is None
-        assert branch["title"] == "需求评审 #2"
+        assert branch["title"] == "需求评审（2）"
         assert branch["message_count"] == 3
         assert branch["tool_call_count"] == 1
 
@@ -755,7 +755,11 @@ class TestMessageStorage:
         assert conv[-1]["reasoning_details"] == {"summary": "details"}
         assert conv[-1]["codex_reasoning_items"] == [{"id": "reasoning-1"}]
         assert conv[-1]["codex_message_items"] == [{"id": "message-1"}]
-        assert conv[-1]["metadata"] == metadata
+        assert {
+            key: conv[-1]["metadata"][key]
+            for key in metadata
+        } == metadata
+        assert conv[-1]["metadata"]["participant_id"] == "agent"
 
         with db._lock:
             lineage = db._conn.execute(
@@ -778,6 +782,257 @@ class TestMessageStorage:
         assert branch_info["parent_session_id"] == "source"
         assert branch_info["branch_origin"] == "user_message_action"
         assert branch_info["branch_from_message_row_id"] == assistant_id
+
+    def test_user_branch_names_follow_display_title_and_stay_lineage_scoped(self, db):
+        db.sessions.create("source-a", "tui")
+        db.sessions.create("source-b", "tui")
+        with db._lock:
+            db._conn.executemany(
+                """
+                UPDATE sessions
+                   SET title = NULL,
+                       display_title = ?,
+                       display_title_source = 'first_user_message',
+                       preview = ?
+                 WHERE id = ?
+                """,
+                [
+                    ("原会话", "原会话", "source-a"),
+                    ("原会话", "原会话", "source-b"),
+                ],
+            )
+            db._conn.commit()
+        source_a_message = db.messages.append(
+            "source-a",
+            role="user",
+            content="source a",
+        )
+        source_b_message = db.messages.append(
+            "source-b",
+            role="user",
+            content="source b",
+        )
+
+        first = db.branches.branch_session(
+            source_session_id="source-a",
+            new_session_id="source-a-branch-2",
+            branch_point={"message_id": str(source_a_message)},
+        )
+        with db._lock:
+            first_branch_message = db._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                ("source-a-branch-2",),
+            ).fetchone()["id"]
+        second = db.branches.branch_session(
+            source_session_id="source-a-branch-2",
+            new_session_id="source-a-branch-3",
+            branch_point={"message_id": str(first_branch_message)},
+        )
+        unrelated = db.branches.branch_session(
+            source_session_id="source-b",
+            new_session_id="source-b-branch-2",
+            branch_point={"message_id": str(source_b_message)},
+        )
+
+        assert first["title"] == "原会话（2）"
+        assert second["title"] == "原会话（3）"
+        assert unrelated["title"] == "原会话（2）"
+
+    def test_user_branch_materializes_legacy_tool_owners_and_participant_roster(
+        self, db
+    ):
+        from hermes_agent.domain.message_owner_projection import (
+            project_render_message_owners,
+        )
+
+        db.sessions.create(
+            "source",
+            "tui",
+            model="gpt-test",
+            system_prompt="system",
+        )
+        db.participants.ensure_user_participant("source")
+        db.participants.ensure_agent_participant(
+            "source",
+            agent_profile_id="agent-default",
+            display_name="小多",
+        )
+        metadata = {
+            "turn_id": "turn-legacy",
+            "run_id": "run-legacy",
+        }
+        db.messages.append(
+            "source",
+            role="user",
+            content="legacy question",
+            metadata=metadata,
+        )
+        db.messages.append(
+            "source",
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call-legacy",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                },
+            ],
+            metadata=metadata,
+        )
+        tool_id = db.messages.append(
+            "source",
+            role="tool",
+            content="legacy tool result",
+            tool_call_id="call-legacy",
+            tool_name="read_file",
+            metadata=metadata,
+        )
+        db.runs.append_event(
+            "source",
+            {
+                "type": "session.info",
+                "run_id": "run-legacy",
+                "turn_id": "turn-legacy",
+                "payload": {},
+            },
+            participant_id="agent:agent-default",
+        )
+
+        result = db.branches.branch_session(
+            source_session_id="source",
+            new_session_id="branch-legacy",
+            branch_point={"message_id": str(tool_id)},
+        )
+
+        assert result["conversation_session_id"] == "branch-legacy"
+        messages = db.messages.all_as_conversation(
+            "branch-legacy",
+            include_ancestors=False,
+            include_storage_metadata=True,
+        )
+        assert [message["participant_id"] for message in messages] == [
+            "user",
+            "agent:agent-default",
+            "agent:agent-default",
+        ]
+        assert all(
+            message["metadata"]["participant_id"] == message["participant_id"]
+            for message in messages
+        )
+
+        participants = db.participants.list_conversation_participants("branch-legacy")
+        assert [
+            (participant["participant_id"], participant["role"])
+            for participant in participants
+        ] == [
+            ("user", "user"),
+            ("agent:agent-default", "agent"),
+        ]
+        assert all(
+            participant["memory_namespace"].startswith(
+                "conversation:branch-legacy/participant:"
+            )
+            for participant in participants
+        )
+        with db._lock:
+            child_event_count = db._conn.execute(
+                "SELECT COUNT(*) FROM run_events WHERE session_id = ?",
+                ("branch-legacy",),
+            ).fetchone()[0]
+        assert child_event_count == 0
+        projected = project_render_message_owners(
+            messages,
+            run_events=[],
+            participants=participants,
+            allow_single_execution_participant=True,
+        )
+        assert [message["participant_id"] for message in projected] == [
+            "user",
+            "agent:agent-default",
+            "agent:agent-default",
+        ]
+
+    def test_team_branch_resolves_legacy_tool_owner_by_message_event_identity(self, db):
+        db.sessions.create(
+            "team-source",
+            "team_mission",
+            model="gpt-test",
+            system_prompt="system",
+        )
+        db.participants.ensure_user_participant("team-source")
+        db.participants.ensure_member_participant(
+            "team-source",
+            member_id="writer",
+        )
+        db.participants.ensure_member_participant(
+            "team-source",
+            member_id="reviewer",
+        )
+        db.messages.append(
+            "team-source",
+            role="user",
+            content="review this",
+        )
+        db.messages.append(
+            "team-source",
+            role="assistant",
+            content="",
+            participant_id="member:writer",
+            tool_calls=[
+                {
+                    "id": "call-team",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                },
+            ],
+        )
+        tool_id = db.messages.append(
+            "team-source",
+            role="tool",
+            content="team tool result",
+            tool_call_id="call-team",
+            tool_name="read_file",
+        )
+        db.runs.append_event(
+            "team-source",
+            {
+                "type": "tool.complete",
+                "run_id": "run-team",
+                "turn_id": "turn-team",
+                "payload": {
+                    "message_id": str(tool_id),
+                    "tool_call_id": "call-team",
+                    "tool_name": "read_file",
+                },
+            },
+            participant_id="member:writer",
+        )
+
+        db.branches.branch_session(
+            source_session_id="team-source",
+            new_session_id="team-branch",
+            branch_point={"message_id": str(tool_id)},
+        )
+
+        messages = db.messages.all_as_conversation(
+            "team-branch",
+            include_ancestors=False,
+            include_storage_metadata=True,
+        )
+        assert [message["participant_id"] for message in messages] == [
+            "user",
+            "member:writer",
+            "member:writer",
+        ]
+        assert {
+            participant["participant_id"]
+            for participant in db.participants.list_conversation_participants(
+                "team-branch"
+            )
+        } == {
+            "user",
+            "member:writer",
+            "member:reviewer",
+        }
 
     def test_branch_session_idempotency_returns_existing_result_and_rejects_conflicts(self, db):
         db.sessions.create("source", "tui")

@@ -112,14 +112,6 @@ class MessageRepo(Protocol):
         patch: dict[str, Any],
     ) -> Message: ...
 
-    def copy_branch_prefix(
-        self,
-        source_session_ids: list[str],
-        included_row_id: int,
-        target_session_id: str,
-        copy_started_at: float,
-    ) -> int: ...
-
     def delete_by_session(self, session_id: str) -> int: ...
 
     def deactivate_from(self, session_id: str, since_message_id: int) -> list[int]: ...
@@ -290,58 +282,6 @@ class MessageRepoImpl:
         got = self._fetch_by_id(int(message_id))
         assert got is not None
         return got
-
-    def copy_branch_prefix(
-        self,
-        source_session_ids: list[str],
-        included_row_id: int,
-        target_session_id: str,
-        copy_started_at: float,
-    ) -> int:
-        stable_sources = [str(sid or "").strip() for sid in source_session_ids if str(sid or "").strip()]
-        stable_target = str(target_session_id or "").strip()
-        if not stable_sources:
-            raise ValueError("source_session_ids are required")
-        if not stable_target:
-            raise ValueError("target_session_id is required")
-        row_limit = int(included_row_id or 0)
-        if row_limit <= 0:
-            raise ValueError("included_row_id must be positive")
-        placeholders = ",".join("?" for _ in stable_sources)
-        params: tuple[Any, ...] = tuple(stable_sources) + (row_limit,)
-        count_row = self._conn.execute(
-            f"""
-            SELECT COUNT(*) AS n
-              FROM messages
-             WHERE session_id IN ({placeholders})
-               AND id <= ?
-            """,
-            params,
-        ).fetchone()
-        copied_count = int(count_row["n"] if isinstance(count_row, sqlite3.Row) else count_row[0])
-        if copied_count <= 0:
-            return 0
-        self._conn.execute(
-            f"""
-            INSERT INTO messages (
-                session_id, role, content, tool_call_id, tool_calls, tool_name,
-                timestamp, token_count, finish_reason, reasoning, reasoning_content,
-                reasoning_details, codex_reasoning_items, codex_message_items,
-                platform_message_id, metadata_json, api_content
-            )
-            SELECT
-                ?, role, content, tool_call_id, tool_calls, tool_name,
-                ? + (ROW_NUMBER() OVER (ORDER BY id) * 0.000001),
-                token_count, finish_reason, reasoning,
-                reasoning_content, reasoning_details, codex_reasoning_items,
-                codex_message_items, platform_message_id, metadata_json, api_content
-            FROM messages
-            WHERE session_id IN ({placeholders}) AND id <= ?
-            ORDER BY id
-            """,
-            (stable_target, float(copy_started_at or time.time())) + params,
-        )
-        return copied_count
 
     def delete_by_session(self, session_id: str) -> int:
         stable_sid = str(session_id or "").strip()
