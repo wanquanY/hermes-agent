@@ -19,7 +19,11 @@ _server = bind_server_globals(globals())
 def _reconcile(rid: object, params: dict) -> dict:
     del params
     try:
-        return _ok(rid, reconcile_dovie_capability_ownership())
+        from dovie_extension.product_plugins import product_plugin_statuses
+
+        result = reconcile_dovie_capability_ownership()
+        result["product_plugins"] = product_plugin_statuses()
+        return _ok(rid, result)
     except Exception as exc:
         return _err(rid, 5041, str(exc))
 

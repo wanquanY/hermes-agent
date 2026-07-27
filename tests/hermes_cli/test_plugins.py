@@ -136,6 +136,49 @@ class TestPluginDiscovery:
         )
         assert mgr._plugins["user-plugin"].enabled is True
 
+    def test_dovie_runtime_loads_only_product_allowlisted_bundled_plugin(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import hermes_cli.plugins as plugins_module
+
+        hermes_home = tmp_path / "hermes_home"
+        bundled_dir = tmp_path / "bundled_plugins"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DOVIE_MANAGED_HERMES_GATEWAY", "1")
+        monkeypatch.setenv(
+            "DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST",
+            "allowed-capability",
+        )
+        _make_plugin_dir(
+            bundled_dir,
+            "allowed-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        _make_plugin_dir(
+            bundled_dir,
+            "retired-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        monkeypatch.setattr(
+            plugins_module,
+            "get_bundled_plugins_dir",
+            lambda: bundled_dir,
+        )
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert mgr._plugins["allowed-capability"].enabled is True
+        assert mgr._plugins["retired-capability"].enabled is False
+        assert (
+            mgr._plugins["retired-capability"].error
+            == "retired from the Dovie capability catalog"
+        )
+
     def test_discover_project_plugins(self, tmp_path, monkeypatch):
         """Plugins in ./.hermes/plugins/ are discovered."""
         project_dir = tmp_path / "project"

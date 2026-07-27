@@ -122,6 +122,7 @@ _RUNTIME_MUTATION_METHODS = frozenset(
 _RUNTIME_REGISTRY_METHODS = frozenset(
     {
         "reload.mcp",
+        "reload.tools",
         "skills.reload",
         "toolsets.list",
         "tools.configure",

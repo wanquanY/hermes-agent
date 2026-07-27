@@ -16,6 +16,83 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, gateway_capabilities())
 
 
+@method("dovie.capabilities.plugin.status")
+def _(rid, params: dict) -> dict:
+    try:
+        from dovie_extension.product_plugins import product_plugin_status
+
+        return _ok(
+            rid,
+            product_plugin_status(
+                params.get("plugin_id") or params.get("pluginId"),
+                verify_connection=bool(
+                    params.get(
+                        "verify_connection",
+                        params.get("verifyConnection", False),
+                    )
+                ),
+            ),
+        )
+    except Exception as exc:
+        return _err(rid, 5025, str(exc))
+
+
+@method("dovie.capabilities.plugin.set_enabled")
+def _(rid, params: dict) -> dict:
+    try:
+        from dovie_extension.product_plugins import set_product_plugin_enabled
+
+        return _ok(
+            rid,
+            set_product_plugin_enabled(
+                params.get("plugin_id") or params.get("pluginId"),
+                enabled=bool(params.get("enabled")),
+            ),
+        )
+    except Exception as exc:
+        return _err(rid, 5025, str(exc))
+
+
+@method("reload.tools")
+def _(rid, params: dict) -> dict:
+    """Rebuild cached tool schemas without reconnecting unrelated MCP servers."""
+    try:
+        if bool(params.get("rediscover_plugins", params.get("rediscoverPlugins", False))):
+            from hermes_cli.plugins import discover_plugins
+
+            discover_plugins(force=True)
+
+        from tui_gateway.services.capability_runtime import (
+            refresh_profile_tool_runtime,
+        )
+
+        refreshed_session_ids = refresh_profile_tool_runtime(
+            _sessions,
+            _load_enabled_toolsets,
+        )
+        for session_id in refreshed_session_ids:
+            session = _sessions.get(session_id)
+            agent = session.get("agent") if isinstance(session, dict) else None
+            if agent is not None:
+                _emit("session.info", session_id, _session_info(agent, session))
+        return _ok(
+            rid,
+            {
+                "status": "reloaded",
+                "plugins_rediscovered": bool(
+                    params.get(
+                        "rediscover_plugins",
+                        params.get("rediscoverPlugins", False),
+                    )
+                ),
+                "refreshed_session_ids": refreshed_session_ids,
+                "refreshed_session_count": len(refreshed_session_ids),
+            },
+        )
+    except Exception as exc:
+        return _err(rid, 5015, str(exc))
+
+
 def _profile_runtime_scope_from_params(params: dict) -> dict:
     agent_profile_id = str(
         params.get("agent_profile_id")

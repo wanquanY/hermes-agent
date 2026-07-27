@@ -1,0 +1,18 @@
+name: lark-cli
+version: 0.1.0
+description: "Official Lark/Feishu CLI integration with Hermes-bound credentials, two-step user authorization, embedded official Skills, and approval-gated high-risk operations."
+author: Hermes Agent
+kind: capability
+platforms:
+  - linux
+  - macos
+  - windows
+provides_tools:
+  - lark_cli_status
+  - lark_cli_auth
+  - lark_cli_run
+  - lark_cli_skill
+skills:
+  - name: lark-cli
+    path: skills/lark-cli/SKILL.md
+    description: Operate Lark/Feishu through the official CLI with safe identity, authorization, and confirmation handling.

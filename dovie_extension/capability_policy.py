@@ -23,6 +23,29 @@ def is_managed_dovie_runtime() -> bool:
     )
 
 
+def managed_dovie_bundled_plugin_allowlist() -> set[str]:
+    """Return product-owned bundled Plugin ids explicitly enabled by Dovie.
+
+    The default is empty and therefore fail-closed. Dovie Desktop injects this
+    process-level policy when its packaged runtime includes and supports a
+    specific Hermes Plugin implementation.
+    """
+    raw = str(os.getenv("DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST") or "")
+    return {
+        token
+        for item in raw.split(",")
+        if (token := item.strip())
+    }
+
+
+def is_managed_dovie_bundled_plugin_allowed(*tokens: str) -> bool:
+    """Return whether any canonical Plugin token is product-authorized."""
+    if not is_managed_dovie_runtime():
+        return True
+    allowed = managed_dovie_bundled_plugin_allowlist()
+    return any(str(token or "").strip() in allowed for token in tokens)
+
+
 @lru_cache(maxsize=1)
 def _bundled_hermes_capability_ids() -> tuple[set[str], set[str]]:
     """Return canonical bundled Plugin tokens and their declared MCP names."""
@@ -133,7 +156,12 @@ def reconcile_dovie_capability_ownership() -> dict[str, Any]:
         enabled = plugins.get("enabled")
         if isinstance(enabled, list):
             next_enabled = [
-                value for value in enabled if str(value).strip() not in plugin_tokens
+                value
+                for value in enabled
+                if (
+                    str(value).strip() not in plugin_tokens
+                    or str(value).strip() in managed_dovie_bundled_plugin_allowlist()
+                )
             ]
             removed_plugins = sorted(
                 {str(value).strip() for value in enabled}
@@ -191,7 +219,9 @@ def filter_managed_dovie_mcp_servers(
 __all__ = [
     "filter_managed_dovie_mcp_servers",
     "hermes_builtin_mcp_names",
+    "is_managed_dovie_bundled_plugin_allowed",
     "is_managed_dovie_runtime",
+    "managed_dovie_bundled_plugin_allowlist",
     "reconcile_dovie_capability_ownership",
     "reconcile_managed_dovie_runtime",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dovie_extension import capability_policy
 from dovie_extension.capability_policy import (
     filter_managed_dovie_mcp_servers,
+    is_managed_dovie_bundled_plugin_allowed,
     reconcile_dovie_capability_ownership,
 )
 
@@ -82,6 +83,45 @@ def test_reconcile_is_idempotent(monkeypatch) -> None:
     assert result["removed_hermes_plugins"] == []
     assert result["removed_hermes_mcp"] == []
     assert saved == []
+
+
+def test_reconcile_preserves_product_allowlisted_bundled_plugin(monkeypatch) -> None:
+    from hermes_cli import config as config_module
+
+    config = {"plugins": {"enabled": ["lark-cli", "productivity/figma"]}}
+    saved: list[dict] = []
+    monkeypatch.setenv("DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST", "lark-cli")
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+    monkeypatch.setattr(config_module, "save_config", lambda value: saved.append(value))
+    monkeypatch.setattr(
+        capability_policy,
+        "_bundled_hermes_capability_ids",
+        lambda: ({"lark-cli", "productivity/figma"}, set()),
+    )
+    monkeypatch.setattr(
+        capability_policy,
+        "_core_hermes_mcp_names",
+        lambda: set(),
+    )
+
+    result = reconcile_dovie_capability_ownership()
+
+    assert config["plugins"]["enabled"] == ["lark-cli"]
+    assert result["removed_hermes_plugins"] == ["productivity/figma"]
+    assert saved == [config]
+
+
+def test_managed_bundled_plugin_allowlist_is_fail_closed(monkeypatch) -> None:
+    monkeypatch.setenv("DOVIE_MANAGED_HERMES_GATEWAY", "1")
+    monkeypatch.delenv("DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST", raising=False)
+    assert is_managed_dovie_bundled_plugin_allowed("lark-cli") is False
+
+    monkeypatch.setenv(
+        "DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST",
+        "productivity/figma, lark-cli",
+    )
+    assert is_managed_dovie_bundled_plugin_allowed("lark-cli") is True
+    assert is_managed_dovie_bundled_plugin_allowed("spotify") is False
 
 
 def test_profile_prepare_reconciles_before_worker_start(monkeypatch) -> None:
@@ -244,6 +284,46 @@ def test_profile_mcp_reload_refreshes_every_cached_conversation(monkeypatch) -> 
             "refresh",
             second_agent,
             {"enabled_override": ["mcp", "web"], "quiet_mode": True},
+        ),
+    ]
+
+
+def test_profile_tool_refresh_does_not_reconnect_mcp(monkeypatch) -> None:
+    from tools import mcp_tool
+    from tui_gateway.services.capability_runtime import refresh_profile_tool_runtime
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        mcp_tool,
+        "refresh_agent_mcp_tools",
+        lambda agent, **kwargs: calls.append(("refresh", agent, kwargs)),
+    )
+    monkeypatch.setattr(
+        mcp_tool,
+        "shutdown_mcp_servers",
+        lambda: pytest.fail("generic tool refresh must not reconnect MCP"),
+    )
+    monkeypatch.setattr(
+        mcp_tool,
+        "discover_mcp_tools",
+        lambda: pytest.fail("generic tool refresh must not rediscover MCP"),
+    )
+
+    agent = object()
+    refreshed = refresh_profile_tool_runtime(
+        {"conversation-1": {"agent": agent}},
+        lambda: ["lark_cli", "web"],
+    )
+
+    assert refreshed == ["conversation-1"]
+    assert calls == [
+        (
+            "refresh",
+            agent,
+            {
+                "enabled_override": ["lark_cli", "web"],
+                "quiet_mode": True,
+            },
         ),
     ]
 

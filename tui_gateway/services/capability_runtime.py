@@ -122,20 +122,13 @@ def probe_mcp_capabilities(name: str, server: dict) -> dict:
     }
 
 
-def reload_profile_mcp_runtime(
+def refresh_profile_tool_runtime(
     sessions: Mapping[str, Any],
     enabled_toolsets_loader: Callable[[], list[str] | None],
 ) -> list[str]:
-    from tools.mcp_tool import (
-        discover_mcp_tools,
-        refresh_agent_mcp_tools,
-        shutdown_mcp_servers,
-    )
+    """Rebuild every cached agent tool snapshot owned by one profile worker."""
+    from tools.mcp_tool import refresh_agent_mcp_tools
 
-    shutdown_mcp_servers()
-    discover_mcp_tools()
-    # One profile worker can own several open conversations. Refresh every
-    # cached agent snapshot so the installed tools become visible immediately.
     enabled_toolsets = enabled_toolsets_loader()
     refreshed_session_ids: list[str] = []
     for session_id, session in list(sessions.items()):
@@ -155,6 +148,18 @@ def reload_profile_mcp_runtime(
                 exc_info=True,
             )
     return refreshed_session_ids
+
+
+def reload_profile_mcp_runtime(
+    sessions: Mapping[str, Any],
+    enabled_toolsets_loader: Callable[[], list[str] | None],
+) -> list[str]:
+    """Reconnect MCP servers, then rebuild the profile's complete tool surface."""
+    from tools.mcp_tool import discover_mcp_tools, shutdown_mcp_servers
+
+    shutdown_mcp_servers()
+    discover_mcp_tools()
+    return refresh_profile_tool_runtime(sessions, enabled_toolsets_loader)
 
 
 def _oauth_context(update):

@@ -47,7 +47,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
-from dovie_extension.capability_policy import is_managed_dovie_runtime
+from dovie_extension.capability_policy import (
+    is_managed_dovie_bundled_plugin_allowed,
+    is_managed_dovie_runtime,
+)
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled
 from hermes_cli.config import cfg_get
@@ -962,7 +965,14 @@ class PluginManager:
             # remain available to Hermes CLI users, but are never imported in
             # a Dovie-managed gateway/profile process even if old config still
             # contains an enable token.
-            if manifest.source == "bundled" and is_managed_dovie_runtime():
+            if (
+                manifest.source == "bundled"
+                and is_managed_dovie_runtime()
+                and not is_managed_dovie_bundled_plugin_allowed(
+                    lookup_key,
+                    manifest.name,
+                )
+            ):
                 loaded = LoadedPlugin(manifest=manifest, enabled=False)
                 loaded.error = "retired from the Dovie capability catalog"
                 self._plugins[lookup_key] = loaded

@@ -1854,14 +1854,14 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
     return None
 
 
-def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
+def _toggle_plugin_toolset(name: str, *, enable: bool) -> bool:
     """Add or remove a plugin's toolset from platform_toolsets for all platforms.
 
     Only acts if the plugin actually provides tools (has a toolset key).
     """
     toolset_key = _get_plugin_toolset_key(name)
     if not toolset_key:
-        return
+        return False
 
     from hermes_cli.config import load_config, save_config
 
@@ -1890,6 +1890,7 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
 
     if changed:
         save_config(config)
+    return changed
 
 
 def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str, Any]:
@@ -1906,7 +1907,8 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
 
     if enabled:
         if name in en and name not in dis:
-            return {"ok": True, "name": name, "unchanged": True}
+            repaired = _toggle_plugin_toolset(name, enable=True)
+            return {"ok": True, "name": name, "unchanged": not repaired}
         en.add(name)
         dis.discard(name)
         _save_enabled_set(en)
@@ -1915,7 +1917,8 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
         return {"ok": True, "name": name, "unchanged": False}
 
     if name not in en and name in dis:
-        return {"ok": True, "name": name, "unchanged": True}
+        repaired = _toggle_plugin_toolset(name, enable=False)
+        return {"ok": True, "name": name, "unchanged": not repaired}
 
     en.discard(name)
     dis.add(name)
