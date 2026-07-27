@@ -528,16 +528,84 @@ def delete_team_mission_conversation(db: Any, identifier: str) -> Dict[str, Any]
     def _do(conn: sqlite3.Connection) -> list[str]:
         if mission_ids:
             placeholders = ",".join("?" for _ in mission_ids)
+            activity_rows = conn.execute(
+                f"""
+                SELECT activity_id
+                FROM activities
+                WHERE conversation_id IN (?, ?)
+                   OR target_mission_id IN ({placeholders})
+                """,
+                (conversation_id, conversation_session_id, *mission_ids),
+            ).fetchall()
+            activity_ids = [
+                _text(_row_value(row, "activity_id", ""))
+                for row in activity_rows
+                if _text(_row_value(row, "activity_id", ""))
+            ]
+            if activity_ids:
+                activity_placeholders = ",".join("?" for _ in activity_ids)
+                conn.execute(
+                    f"DELETE FROM activity_commands WHERE activity_id IN ({activity_placeholders})",
+                    tuple(activity_ids),
+                )
+            conn.execute(
+                f"""
+                DELETE FROM activities
+                WHERE conversation_id IN (?, ?)
+                   OR target_mission_id IN ({placeholders})
+                """,
+                (conversation_id, conversation_session_id, *mission_ids),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM conversation_missions
+                WHERE conversation_id = ?
+                   OR mission_id IN ({placeholders})
+                """,
+                (conversation_id, *mission_ids),
+            )
             for table in (
                 "team_mission_artifacts",
                 "team_mission_run_bindings",
                 "team_mission_edges",
                 "team_mission_nodes",
+                "team_mission_events",
+                "team_mission_event_seq_counter",
+                "team_mission_deliverables",
+                "team_mission_results",
             ):
                 conn.execute(
                     f"DELETE FROM {table} WHERE mission_id IN ({placeholders})",
                     tuple(mission_ids),
                 )
+        else:
+            activity_rows = conn.execute(
+                """
+                SELECT activity_id
+                FROM activities
+                WHERE conversation_id IN (?, ?)
+                """,
+                (conversation_id, conversation_session_id),
+            ).fetchall()
+            activity_ids = [
+                _text(_row_value(row, "activity_id", ""))
+                for row in activity_rows
+                if _text(_row_value(row, "activity_id", ""))
+            ]
+            if activity_ids:
+                activity_placeholders = ",".join("?" for _ in activity_ids)
+                conn.execute(
+                    f"DELETE FROM activity_commands WHERE activity_id IN ({activity_placeholders})",
+                    tuple(activity_ids),
+                )
+            conn.execute(
+                "DELETE FROM activities WHERE conversation_id IN (?, ?)",
+                (conversation_id, conversation_session_id),
+            )
+            conn.execute(
+                "DELETE FROM conversation_missions WHERE conversation_id = ?",
+                (conversation_id,),
+            )
         conn.execute("DELETE FROM team_mission_conversations WHERE conversation_id = ?", (conversation_id,))
         conn.execute("DELETE FROM team_missions WHERE conversation_id = ?", (conversation_id,))
         return _delete_session_rows(conn, session_ids_to_delete)

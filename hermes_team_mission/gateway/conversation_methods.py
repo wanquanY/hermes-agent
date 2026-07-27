@@ -846,6 +846,180 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, public_team_conversation_result(result))
 
 
+def _normalized_conversation_delete_session_ids(*values) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        items = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in items:
+            session_id = str(item or "").strip()
+            if session_id and session_id not in normalized:
+                normalized.append(session_id)
+    return normalized
+
+
+class _ConversationDeleteBlockedError(RuntimeError):
+    pass
+
+
+def _conversation_delete_owned_session_ids(
+    db,
+    conversation_session_id: str,
+    *,
+    is_team_conversation: bool,
+) -> list[str]:
+    session_ids = [conversation_session_id]
+    if not is_team_conversation:
+        return session_ids
+    getter = getattr(db, "list_team_mission_conversation_execution_session_ids", None)
+    if not callable(getter):
+        return session_ids
+    return _normalized_conversation_delete_session_ids(
+        session_ids,
+        getter(mission_id=conversation_session_id, limit=500),
+    )
+
+
+def _conversation_delete_active_error(db, session_ids: list[str]) -> str:
+    for session_id in session_ids:
+        run_state = run_control.session_status(
+            session_id,
+            db=db,
+            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+        )
+        if run_state.get("running"):
+            return "cannot delete a conversation with an active run"
+    try:
+        with _sessions_lock:
+            snapshot = list(_sessions.values())
+    except Exception as exc:
+        return f"could not enumerate active sessions: {exc}"
+    active_session_ids = {
+        str(session.get("session_key") or "").strip()
+        for session in snapshot
+        if str(session.get("session_key") or "").strip()
+    }
+    if active_session_ids.intersection(session_ids):
+        return "cannot delete an active conversation"
+    return ""
+
+
+def _finalize_conversation_delete(
+    db,
+    result: dict,
+    *,
+    owned_session_ids: list[str],
+) -> dict:
+    deleted_session_ids = _normalized_conversation_delete_session_ids(
+        owned_session_ids,
+        result.get("deleted_session_ids"),
+        result.get("run_session_ids"),
+        result.get("conversation_session_id"),
+    )
+    artifact_cleanup = {
+        "deleted_artifact_links": 0,
+        "deleted_artifacts": 0,
+        "deleted_artifact_ids": [],
+        "physical_files_deleted": 0,
+    }
+    workspace_bindings = []
+    workspace_binding_cleanup_error = ""
+    if deleted_session_ids:
+        try:
+            artifact_cleanup = delete_session_artifacts(deleted_session_ids)
+        except Exception as exc:
+            artifact_cleanup = {**artifact_cleanup, "error": str(exc)}
+        try:
+            workspace_bindings = delete_session_workspace_bindings(deleted_session_ids)
+        except Exception as exc:
+            workspace_binding_cleanup_error = str(exc)
+    remove_session_files = getattr(db, "_remove_session_files", None)
+    if callable(remove_session_files):
+        sessions_dir = Path(get_hermes_home()) / "sessions"
+        for session_id in deleted_session_ids:
+            try:
+                remove_session_files(sessions_dir, session_id)
+            except Exception:
+                pass
+    result["deleted_session_ids"] = deleted_session_ids
+    result["artifact_cleanup"] = artifact_cleanup
+    result["deleted_artifact_links"] = int(artifact_cleanup.get("deleted_artifact_links") or 0)
+    result["deleted_artifacts"] = int(artifact_cleanup.get("deleted_artifacts") or 0)
+    result["physical_files_deleted"] = int(artifact_cleanup.get("physical_files_deleted") or 0)
+    result["deleted_workspace_bindings"] = workspace_bindings
+    result["deleted_workspace_binding_count"] = len(workspace_bindings)
+    if workspace_binding_cleanup_error:
+        result["workspace_binding_cleanup_error"] = workspace_binding_cleanup_error
+    return result
+
+
+def _delete_conversation_by_session_id(db, conversation_session_id: str) -> dict:
+    conversation = db.get_team_mission_conversation_by_session(conversation_session_id) or {}
+    is_team_conversation = bool(conversation)
+    owned_session_ids = _conversation_delete_owned_session_ids(
+        db,
+        conversation_session_id,
+        is_team_conversation=is_team_conversation,
+    )
+    active_error = _conversation_delete_active_error(db, owned_session_ids)
+    if active_error:
+        raise _ConversationDeleteBlockedError(active_error)
+    if is_team_conversation:
+        result = db.delete_team_mission_conversation(conversation_session_id)
+        result = result if isinstance(result, dict) else {}
+        result["conversation_kind"] = "team"
+        result["existed"] = True
+    else:
+        sessions_dir = Path(get_hermes_home()) / "sessions"
+        deletion = db.sessions.delete(conversation_session_id, sessions_dir=sessions_dir)
+        existed = bool(deletion.session_deleted or deletion.index_deleted)
+        result = {
+            "deleted": True,
+            "existed": existed,
+            "conversation_kind": "direct",
+            "conversation_session_id": conversation_session_id,
+            "deleted_session_ids": [conversation_session_id],
+            "via": (
+                "session"
+                if deletion.session_deleted
+                else "session_index_cleanup"
+                if deletion.index_deleted
+                else "already_absent"
+            ),
+        }
+    result.setdefault("deleted", True)
+    result.setdefault("conversation_session_id", conversation_session_id)
+    return _finalize_conversation_delete(
+        db,
+        result,
+        owned_session_ids=owned_session_ids,
+    )
+
+
+@method("conversation.delete")
+def _(rid, params: dict) -> dict:
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5036)
+    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    conversation_session_id = str(
+        _conversation_session_id_from_params(params, metadata)
+        or params.get("session_id")
+        or params.get("sessionId")
+        or ""
+    ).strip()
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    try:
+        result = _delete_conversation_by_session_id(db, conversation_session_id)
+    except _ConversationDeleteBlockedError as exc:
+        message = str(exc)
+        code = 5036 if message.startswith("could not enumerate") else 4023
+        return _err(rid, code, message)
+    except Exception as exc:
+        return _err(rid, 5036, f"conversation delete failed: {exc}")
+    return _ok(rid, result)
+
+
 @method("team_mission.conversation.delete")
 def _(rid, params: dict) -> dict:
     db = _get_db()
@@ -867,64 +1041,16 @@ def _(rid, params: dict) -> dict:
     if not conversation:
         return _err(rid, 4040, "team mission conversation not found")
     conversation_session_id = str(conversation.get("conversation_session_id") or "").strip()
-    if conversation_session_id:
-        run_state = run_control.session_status(
-            conversation_session_id,
-            db=db,
-            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
-        )
-        if run_state.get("running"):
-            return _err(rid, 4023, "cannot delete a conversation with an active leader run")
     try:
-        result = db.delete_team_mission_conversation(identifier)
-        deleted_session_ids = list((result or {}).get("deleted_session_ids") or [])
-        artifact_cleanup = {
-            "deleted_artifact_links": 0,
-            "deleted_artifacts": 0,
-            "deleted_artifact_ids": [],
-            "physical_files_deleted": 0,
-        }
-        workspace_bindings = []
-        workspace_binding_cleanup_error = ""
-        if deleted_session_ids:
-            try:
-                artifact_cleanup = delete_session_artifacts(deleted_session_ids)
-            except Exception as exc:
-                artifact_cleanup = {
-                    **artifact_cleanup,
-                    "error": str(exc),
-                }
-            try:
-                workspace_bindings = delete_session_workspace_bindings(deleted_session_ids)
-            except Exception as exc:
-                workspace_bindings = []
-                workspace_binding_cleanup_error = str(exc)
-        remove_session_files = getattr(db, "_remove_session_files", None)
-        if callable(remove_session_files):
-            sessions_dir = Path(get_hermes_home()) / "sessions"
-            for session_id in dict.fromkeys(str(item or "").strip() for item in deleted_session_ids):
-                if not session_id:
-                    continue
-                try:
-                    remove_session_files(sessions_dir, session_id)
-                except Exception:
-                    pass
-        if isinstance(result, dict):
-            result["deleted_session_ids"] = deleted_session_ids
-            result["artifact_cleanup"] = artifact_cleanup
-            result["deleted_artifact_links"] = int(artifact_cleanup.get("deleted_artifact_links") or 0)
-            result["deleted_artifacts"] = int(artifact_cleanup.get("deleted_artifacts") or 0)
-            result["physical_files_deleted"] = int(artifact_cleanup.get("physical_files_deleted") or 0)
-            result["deleted_workspace_bindings"] = workspace_bindings
-            result["deleted_workspace_binding_count"] = len(workspace_bindings)
-            if workspace_binding_cleanup_error:
-                result["workspace_binding_cleanup_error"] = workspace_binding_cleanup_error
-        if conversation_session_id:
-            result.setdefault("conversation_session_id", conversation_session_id)
+        result = _delete_conversation_by_session_id(db, conversation_session_id)
+    except _ConversationDeleteBlockedError as exc:
+        message = str(exc)
+        if message == "cannot delete a conversation with an active run":
+            message = "cannot delete a conversation with an active leader run"
+        code = 5008 if message.startswith("could not enumerate") else 4023
+        return _err(rid, code, message)
     except Exception as exc:
         return _err(rid, 5008, f"team mission conversation delete failed: {exc}")
-    if not result:
-        return _err(rid, 4040, "team mission conversation not found")
     return _ok(rid, public_team_conversation_result(result))
 
 

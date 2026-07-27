@@ -72,6 +72,7 @@ _WS_CONTROL_METHODS = frozenset(
     {
         "events.compact",
         "conversation.activity.list",
+        "conversation.delete",
         "conversation.render_snapshot",
         "events.prune",
         "events.subscribe",

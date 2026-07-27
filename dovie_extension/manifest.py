@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-07-24"
-EXTENSION_VERSION = "2026-07-24"
+CONTRACT_VERSION = "2026-07-27"
+EXTENSION_VERSION = "2026-07-27"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -34,6 +34,7 @@ REQUIRED_METHODS = [
     "conversation.activity.list",
     "conversation.activity.context.change",
     "conversation.render_snapshot",
+    "conversation.delete",
     "session.delete",
     "session.title",
     "prompt.submit",
@@ -278,6 +279,7 @@ REQUIRED_GATEWAY_METHODS = {
     "conversation.activity.list",
     "conversation.activity.context.change",
     "conversation.render_snapshot",
+    "conversation.delete",
     "session.delete",
     "session.title",
     "run.reserve",

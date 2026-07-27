@@ -21,7 +21,7 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-07-24"
+    assert manifest["protocolVersion"] == "2026-07-27"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -82,7 +82,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-07-24"
+    assert response["result"]["protocolVersion"] == "2026-07-27"
     assert response["result"]["timelineContract"]["contractVersion"] == "3.1"
     assert response["result"]["timelineContract"]["capabilities"]["cursor"]["afterSeq"] is True
     assert response["result"]["timelineContract"]["capabilities"]["history"]["canonical"] is False
@@ -94,6 +94,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "session.events" in response["result"]["methods"]
     assert "events.unsubscribe" in response["result"]["methods"]
     assert "conversation.render_snapshot" in response["result"]["methods"]
+    assert "conversation.delete" in response["result"]["methods"]
     assert "team_mission.create" in response["result"]["methods"]
     assert "team_mission.graph" in response["result"]["methods"]
     assert "team_mission.graph.reduce" in response["result"]["methods"]
@@ -151,6 +152,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     assert "clarify.respond" in response["result"]["methods"]
     assert "run.events" in server._methods
     assert "conversation.render_snapshot" in server._methods
+    assert "conversation.delete" in server._methods
     assert "session.message_metadata.merge" in server._methods
     assert "events.unsubscribe" in server._methods
     assert "team_mission.create" in server._methods
@@ -223,6 +225,7 @@ def test_extracted_gateway_methods_own_registered_handlers():
     assert server._methods["run.events"].__module__ == "tui_gateway.methods.run"
     assert server._methods["events.unsubscribe"].__module__ == "tui_gateway.methods.run"
     expected_team_mission_owners = {
+        "conversation.delete": "hermes_team_mission.gateway.conversation_methods",
         "team_mission.create": "hermes_team_mission.gateway.conversation_methods",
         "team_capability.snapshot.get": "hermes_team_mission.gateway.conversation_methods",
         "team_capability.snapshot.refresh": "hermes_team_mission.gateway.conversation_methods",

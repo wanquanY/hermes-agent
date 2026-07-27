@@ -26,6 +26,7 @@ _CONTROL_PLANE_METHODS = frozenset(
     {
         "artifacts.list",
         "conversation.activity.list",
+        "conversation.delete",
         "conversation.render_snapshot",
         "capability.operation.get",
         "capability.operation.start",
