@@ -2026,7 +2026,12 @@ def _qwen_access_token_is_expiring(expiry_date_ms: Any, skew_seconds: int = QWEN
     return (time.time() + max(0, int(skew_seconds))) * 1000 >= expiry_ms
 
 
-def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20.0) -> Dict[str, Any]:
+def _refresh_qwen_cli_tokens(
+    tokens: Dict[str, Any],
+    timeout_seconds: float = 20.0,
+    *,
+    persist: bool = True,
+) -> Dict[str, Any]:
     refresh_token = str(tokens.get("refresh_token", "") or "").strip()
     if not refresh_token:
         raise AuthError(
@@ -2094,7 +2099,8 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
         "resource_url": str(payload.get("resource_url", tokens.get("resource_url", "portal.qwen.ai")) or "portal.qwen.ai").strip(),
         "expiry_date": int(time.time() * 1000) + max(1, expires_in_seconds) * 1000,
     }
-    _save_qwen_cli_tokens(refreshed)
+    if persist:
+        _save_qwen_cli_tokens(refreshed)
     return refreshed
 
 
@@ -7305,7 +7311,7 @@ def _minimax_oauth_login(
 
 def _refresh_minimax_oauth_state(
     state: Dict[str, Any], *, timeout_seconds: float = 15.0,
-    force: bool = False,
+    force: bool = False, persist: bool = True,
 ) -> Dict[str, Any]:
     """Refresh MiniMax OAuth access token if close to expiry (or forced)."""
     if not state.get("refresh_token"):
@@ -7365,7 +7371,8 @@ def _refresh_minimax_oauth_state(
         "expires_at": datetime.fromtimestamp(expires_at_unix, tz=timezone.utc).isoformat(),
         "expires_in": expires_in_s,
     })
-    _minimax_save_auth_state(new_state)
+    if persist:
+        _minimax_save_auth_state(new_state)
     return new_state
 
 

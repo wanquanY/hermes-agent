@@ -47,6 +47,43 @@ def _anthropic_reasoning_is_mandatory(model: str | None) -> bool:
 class OpenRouterProfile(ProviderProfile):
     """OpenRouter aggregator — provider preferences, reasoning config passthrough."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if _anthropic_reasoning_is_mandatory(model):
+            efforts = ["low", "medium", "high", "max"]
+            try:
+                from agent.anthropic_thinking import supports_xhigh_effort
+
+                if supports_xhigh_effort(model.rsplit("/", 1)[-1]):
+                    efforts.append("xhigh")
+            except Exception:
+                pass
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": efforts,
+                "default_reasoning_effort": "high",
+                "reasoning_format": "reasoning_details",
+            }
+        return {
+            "reasoning_efforts": [
+                "none",
+                "enabled",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "reasoning_details",
+        }
+
     def fetch_models(
         self,
         *,

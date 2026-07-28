@@ -10,6 +10,28 @@ from providers.base import ProviderProfile
 class NousProfile(ProviderProfile):
     """Nous Portal — product tags, reasoning with Nous-specific omission."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "reasoning_efforts": [
+                "none",
+                "enabled",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "reasoning_details",
+        }
+
     def build_extra_body(
         self, *, session_id: str | None = None, **context
     ) -> dict[str, Any]:

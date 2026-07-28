@@ -56,8 +56,28 @@ class UpstageProfile(ProviderProfile):
     turn it off with ``/reasoning none``.
     """
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if not _model_supports_reasoning(model):
+            return {"reasoning_enabled": False}
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["none", "low", "medium", "high"],
+            "default_reasoning_effort": _DEFAULT_REASONING_EFFORT,
+            "reasoning_format": "reasoning_content",
+        }
+
     def build_api_kwargs_extras(
-        self, *, reasoning_config: dict | None = None, model: str | None = None, **context
+        self,
+        *,
+        reasoning_config: dict | None = None,
+        model: str | None = None,
+        **context,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         top_level: dict[str, Any] = {}
 
@@ -107,9 +127,7 @@ upstage = UpstageProfile(
     auth_type="api_key",
     # default_aux_model left empty → auxiliary side tasks use the main model.
     # entry [0] is the setup default — solar-pro3, the current Solar Pro flagship.
-    fallback_models=(
-        "solar-pro3",
-    ),
+    fallback_models=("solar-pro3",),
 )
 
 register_provider(upstage)

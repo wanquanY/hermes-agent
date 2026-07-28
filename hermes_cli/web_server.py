@@ -3078,6 +3078,20 @@ def _new_oauth_session(provider_id: str, flow: str) -> tuple[str, Dict[str, Any]
     return sid, sess
 
 
+def _oauth_session_can_complete(session_id: str, session: Dict[str, Any]) -> bool:
+    """Reject completion after cancellation, expiry, or session replacement."""
+
+    with _oauth_sessions_lock:
+        return (
+            _oauth_sessions.get(session_id) is session
+            and session.get("status") == "pending"
+            and (
+                not session.get("expires_at")
+                or float(session["expires_at"]) > time.time()
+            )
+        )
+
+
 def _save_anthropic_oauth_creds(access_token: str, refresh_token: str, expires_at_ms: int) -> None:
     """Persist Anthropic PKCE creds to both Hermes file AND credential pool.
 
@@ -3127,12 +3141,13 @@ def _save_anthropic_oauth_creds(access_token: str, refresh_token: str, expires_a
         _log.warning("anthropic pool add (dashboard) failed: %s", e)
 
 
-def _start_anthropic_pkce() -> Dict[str, Any]:
+def _start_anthropic_pkce(credential_sink=None) -> Dict[str, Any]:
     """Begin PKCE flow. Returns the auth URL the UI should open."""
     if not _ANTHROPIC_OAUTH_AVAILABLE:
         raise HTTPException(status_code=501, detail="Anthropic OAuth not available (missing adapter)")
     verifier, challenge = _generate_pkce_pair()
     sid, sess = _new_oauth_session("anthropic", "pkce")
+    sess["credential_sink"] = credential_sink
     sess["verifier"] = verifier
     sess["state"] = verifier  # Anthropic round-trips verifier as state
     params = {
@@ -3192,35 +3207,63 @@ def _submit_anthropic_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
         with urllib.request.urlopen(req, timeout=20) as resp:
             result = json.loads(resp.read().decode())
     except Exception as e:
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = f"Token exchange failed: {e}"
-        return {"ok": False, "status": "error", "message": sess["error_message"]}
+        message = f"Token exchange failed: {e}"
+        if _oauth_session_can_complete(session_id, sess):
+            with _oauth_sessions_lock:
+                sess["status"] = "error"
+                sess["error_message"] = message
+        return {"ok": False, "status": str(sess.get("status") or "error"), "message": message}
 
     access_token = result.get("access_token", "")
     refresh_token = result.get("refresh_token", "")
     expires_in = int(result.get("expires_in") or 3600)
     if not access_token:
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = "No access token returned"
-        return {"ok": False, "status": "error", "message": sess["error_message"]}
+        message = "No access token returned"
+        if _oauth_session_can_complete(session_id, sess):
+            with _oauth_sessions_lock:
+                sess["status"] = "error"
+                sess["error_message"] = message
+        return {"ok": False, "status": str(sess.get("status") or "error"), "message": message}
 
     expires_at_ms = int(time.time() * 1000) + (expires_in * 1000)
+    if not _oauth_session_can_complete(session_id, sess):
+        return {"ok": False, "status": str(sess.get("status") or "cancelled")}
     try:
-        _save_anthropic_oauth_creds(access_token, refresh_token, expires_at_ms)
+        credential_sink = sess.get("credential_sink")
+        if callable(credential_sink):
+            credential_status = credential_sink(
+                {
+                    "provider_id": "anthropic",
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_at_ms": expires_at_ms,
+                    "token_type": result.get("token_type") or "Bearer",
+                }
+            )
+            sess["credential_generation"] = int(
+                (credential_status or {}).get("generation") or 0
+            )
+        else:
+            _save_anthropic_oauth_creds(access_token, refresh_token, expires_at_ms)
     except Exception as e:
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = f"Save failed: {e}"
-        return {"ok": False, "status": "error", "message": sess["error_message"]}
+        message = f"Save failed: {e}"
+        if _oauth_session_can_complete(session_id, sess):
+            with _oauth_sessions_lock:
+                sess["status"] = "error"
+                sess["error_message"] = message
+        return {"ok": False, "status": str(sess.get("status") or "error"), "message": message}
+    if not _oauth_session_can_complete(session_id, sess):
+        return {"ok": False, "status": str(sess.get("status") or "cancelled")}
     with _oauth_sessions_lock:
         sess["status"] = "approved"
     _log.info("oauth/pkce: anthropic login completed (session=%s)", session_id)
     return {"ok": True, "status": "approved"}
 
 
-async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
+async def _start_device_code_flow(
+    provider_id: str,
+    credential_sink=None,
+) -> Dict[str, Any]:
     """Initiate a device-code flow (Nous, OpenAI Codex, or MiniMax).
 
     Calls the provider's device-auth endpoint via the existing CLI helpers,
@@ -3263,6 +3306,7 @@ async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
             None, _do_nous_device_request
         )
         sid, sess = _new_oauth_session("nous", "device_code")
+        sess["credential_sink"] = credential_sink
         sess["device_code"] = str(device_data["device_code"])
         sess["interval"] = int(device_data["interval"])
         sess["expires_at"] = time.time() + int(device_data["expires_in"])
@@ -3283,7 +3327,8 @@ async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
 
     if provider_id == "openai-codex":
         # Codex uses fixed OpenAI device-auth endpoints; reuse the helper.
-        sid, _ = _new_oauth_session("openai-codex", "device_code")
+        sid, sess = _new_oauth_session("openai-codex", "device_code")
+        sess["credential_sink"] = credential_sink
         # Use the helper but in a thread because it polls inline.
         # We can't extract just the start step without refactoring auth.py,
         # so we run the full helper in a worker and proxy the user_code +
@@ -3351,6 +3396,7 @@ async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
             None, _do_minimax_request
         )
         sid, sess = _new_oauth_session("minimax-oauth", "device_code")
+        sess["credential_sink"] = credential_sink
         # The CLI flow names this `interval_ms` because MiniMax's
         # `interval` field is in milliseconds (defensive default 2000ms
         # in _minimax_poll_token).
@@ -3449,16 +3495,31 @@ def _nous_poller(session_id: str) -> None:
             force_refresh=False,
             inference_auth_mode=NOUS_INFERENCE_AUTH_MODE_FRESH,
         )
-        from hermes_cli.auth import persist_nous_credentials
-        persist_nous_credentials(full_state)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
+        credential_sink = sess.get("credential_sink")
+        if callable(credential_sink):
+            credential_status = credential_sink(
+                {"provider_id": "nous", **full_state}
+            )
+            sess["credential_generation"] = int(
+                (credential_status or {}).get("generation") or 0
+            )
+        else:
+            from hermes_cli.auth import persist_nous_credentials
+
+            persist_nous_credentials(full_state)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
         with _oauth_sessions_lock:
             sess["status"] = "approved"
         _log.info("oauth/device: nous login completed (session=%s)", session_id)
     except Exception as e:
         _log.warning("nous device-code poll failed (session=%s): %s", session_id, e)
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = str(e)
+        if _oauth_session_can_complete(session_id, sess):
+            with _oauth_sessions_lock:
+                sess["status"] = "error"
+                sess["error_message"] = str(e)
 
 
 def _minimax_poller(session_id: str) -> None:
@@ -3533,15 +3594,29 @@ def _minimax_poller(session_id: str) -> None:
             ).isoformat(),
             "expires_in": expires_in_s,
         }
-        _minimax_save_auth_state(auth_state)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
+        credential_sink = sess.get("credential_sink")
+        if callable(credential_sink):
+            credential_status = credential_sink(
+                {"provider_id": "minimax-oauth", **auth_state}
+            )
+            sess["credential_generation"] = int(
+                (credential_status or {}).get("generation") or 0
+            )
+        else:
+            _minimax_save_auth_state(auth_state)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
         with _oauth_sessions_lock:
             sess["status"] = "approved"
         _log.info("oauth/device: minimax login completed (session=%s)", session_id)
     except Exception as e:
         _log.warning("minimax device-code poll failed (session=%s): %s", session_id, e)
-        with _oauth_sessions_lock:
-            sess["status"] = "error"
-            sess["error_message"] = str(e)
+        if _oauth_session_can_complete(session_id, sess):
+            with _oauth_sessions_lock:
+                sess["status"] = "error"
+                sess["error_message"] = str(e)
 
 
 def _codex_full_login_worker(session_id: str) -> None:
@@ -3600,7 +3675,11 @@ def _codex_full_login_worker(session_id: str) -> None:
         code_resp = None
         with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
             while time.monotonic() < deadline:
+                if not _oauth_session_can_complete(session_id, sess):
+                    return
                 time.sleep(poll_interval)
+                if not _oauth_session_can_complete(session_id, sess):
+                    return
                 poll = client.post(
                     f"{issuer}/api/accounts/deviceauth/token",
                     json={"device_auth_id": device_auth_id, "user_code": user_code},
@@ -3644,31 +3723,56 @@ def _codex_full_login_worker(session_id: str) -> None:
         if not access_token:
             raise RuntimeError("token exchange did not return access_token")
 
-        # Persist via credential pool — same shape as auth_commands.add_command
-        from agent.credential_pool import (
-            PooledCredential,
-            load_pool,
-            AUTH_TYPE_OAUTH,
-            SOURCE_MANUAL,
-        )
-        import uuid as _uuid
-        pool = load_pool("openai-codex")
         base_url = (
             os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
             or DEFAULT_CODEX_BASE_URL
         )
-        entry = PooledCredential(
-            provider="openai-codex",
-            id=_uuid.uuid4().hex[:6],
-            label="dashboard device_code",
-            auth_type=AUTH_TYPE_OAUTH,
-            priority=0,
-            source=f"{SOURCE_MANUAL}:dashboard_device_code",
-            access_token=access_token,
-            refresh_token=refresh_token,
-            base_url=base_url,
-        )
-        pool.add_entry(entry)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
+        credential_sink = sess.get("credential_sink")
+        if callable(credential_sink):
+            credential_status = credential_sink(
+                {
+                    "provider_id": "openai-codex",
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "base_url": base_url,
+                    "token_type": tokens.get("token_type") or "Bearer",
+                    "expires_at_ms": (
+                        int(time.time() * 1000)
+                        + max(1, int(tokens.get("expires_in") or 3600)) * 1000
+                    ),
+                }
+            )
+            sess["credential_generation"] = int(
+                (credential_status or {}).get("generation") or 0
+            )
+        else:
+            # Dashboard standalone mode retains its existing credential-pool
+            # persistence. Managed Desktop passes a Broker sink above.
+            from agent.credential_pool import (
+                AUTH_TYPE_OAUTH,
+                SOURCE_MANUAL,
+                PooledCredential,
+                load_pool,
+            )
+            import uuid as _uuid
+
+            pool = load_pool("openai-codex")
+            entry = PooledCredential(
+                provider="openai-codex",
+                id=_uuid.uuid4().hex[:6],
+                label="dashboard device_code",
+                auth_type=AUTH_TYPE_OAUTH,
+                priority=0,
+                source=f"{SOURCE_MANUAL}:dashboard_device_code",
+                access_token=access_token,
+                refresh_token=refresh_token,
+                base_url=base_url,
+            )
+            pool.add_entry(entry)
+        if not _oauth_session_can_complete(session_id, sess):
+            return
         with _oauth_sessions_lock:
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
@@ -3676,7 +3780,7 @@ def _codex_full_login_worker(session_id: str) -> None:
         _log.warning("codex device-code worker failed (session=%s): %s", session_id, e)
         with _oauth_sessions_lock:
             s = _oauth_sessions.get(session_id)
-            if s:
+            if s and s.get("status") == "pending":
                 s["status"] = "error"
                 s["error_message"] = str(e)
 
@@ -3744,6 +3848,7 @@ async def poll_oauth_session(provider_id: str, session_id: str):
         "status": sess["status"],
         "error_message": sess.get("error_message"),
         "expires_at": sess.get("expires_at"),
+        "credential_generation": int(sess.get("credential_generation") or 0),
     }
 
 

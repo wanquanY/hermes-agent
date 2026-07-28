@@ -47,8 +47,35 @@ def _model_supports_thinking(model: str | None) -> bool:
 class DeepSeekProfile(ProviderProfile):
     """DeepSeek — extra_body.thinking + top-level reasoning_effort."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if not _model_supports_thinking(model):
+            return {"reasoning_enabled": False}
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": [
+                "none",
+                "enabled",
+                "low",
+                "medium",
+                "high",
+                "max",
+            ],
+            "default_reasoning_effort": "enabled",
+            "reasoning_format": "reasoning_content",
+        }
+
     def build_api_kwargs_extras(
-        self, *, reasoning_config: dict | None = None, model: str | None = None, **context
+        self,
+        *,
+        reasoning_config: dict | None = None,
+        model: str | None = None,
+        **context,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
@@ -61,7 +88,10 @@ class DeepSeekProfile(ProviderProfile):
         # API default; the API requires this to be set explicitly to avoid the
         # reasoning_content echo trap on subsequent turns.
         enabled = True
-        if isinstance(reasoning_config, dict) and reasoning_config.get("enabled") is False:
+        if (
+            isinstance(reasoning_config, dict)
+            and reasoning_config.get("enabled") is False
+        ):
             enabled = False
 
         extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}

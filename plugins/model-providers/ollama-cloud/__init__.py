@@ -11,6 +11,25 @@ from providers.base import ProviderProfile
 class OllamaCloudProfile(ProviderProfile):
     """Translate Hermes reasoning levels to Ollama's top-level parameter."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "reasoning_efforts": [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "max",
+            ],
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "reasoning_content",
+        }
+
     def build_api_kwargs_extras(
         self,
         *,

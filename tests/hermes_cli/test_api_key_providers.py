@@ -624,6 +624,29 @@ class TestRuntimeProviderResolution:
         assert result["api_mode"] == "chat_completions"
         assert result["api_key"] == "kimi-key"
 
+    def test_runtime_kimi_explicit_coding_key_uses_coding_endpoint(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("KIMI_API_KEY", raising=False)
+        monkeypatch.delenv("KIMI_CODING_API_KEY", raising=False)
+        monkeypatch.delenv("KIMI_BASE_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._get_model_config",
+            lambda: {},
+        )
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(
+            requested="kimi-coding",
+            explicit_api_key="sk-kimi-managed-key",
+        )
+
+        assert result["provider"] == "kimi-coding"
+        assert result["api_key"] == "sk-kimi-managed-key"
+        assert result["base_url"] == KIMI_CODE_BASE_URL
+        assert result["api_mode"] == "anthropic_messages"
+
     def test_runtime_stepfun(self, monkeypatch):
         monkeypatch.setenv("STEPFUN_API_KEY", "stepfun-key")
         monkeypatch.setenv("STEPFUN_BASE_URL", STEPFUN_STEP_PLAN_CN_BASE_URL)

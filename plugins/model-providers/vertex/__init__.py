@@ -26,6 +26,24 @@ from providers.base import ProviderProfile
 class VertexProfile(ProviderProfile):
     """Vertex AI — reuse Gemini's thinking_config translation for extra_body."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        from providers import get_provider_profile
+
+        gemini_profile = get_provider_profile("gemini")
+        if gemini_profile is None:
+            return {}
+        return gemini_profile.model_capabilities(
+            model,
+            base_url=base_url,
+            api_mode=api_mode,
+        )
+
     def build_extra_body(
         self, *, session_id: str | None = None, **context: Any
     ) -> dict[str, Any]:

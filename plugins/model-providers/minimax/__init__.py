@@ -29,6 +29,36 @@ def _is_minimax_m3(model: str | None) -> bool:
 class MiniMaxProfile(ProviderProfile):
     """MiniMax — M3 OpenAI-compatible reasoning controls."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        effective_mode = str(api_mode or self.api_mode or "").strip().lower()
+        if effective_mode == "anthropic_messages":
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                ],
+                "default_reasoning_effort": "medium",
+                "reasoning_format": "thinking_blocks",
+            }
+        if _is_minimax_global_openai_base_url(base_url) and _is_minimax_m3(model):
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["none", "enabled"],
+                "default_reasoning_effort": "enabled",
+                "reasoning_format": "reasoning_content",
+            }
+        return {}
+
     def build_api_kwargs_extras(
         self,
         *,
@@ -66,6 +96,7 @@ minimax = MiniMaxProfile(
     env_vars=("MINIMAX_API_KEY",),
     base_url="https://api.minimax.io/anthropic",
     auth_type="api_key",
+    supports_health_check=False,
     default_aux_model="MiniMax-M3",
 )
 
@@ -76,6 +107,7 @@ minimax_cn = MiniMaxProfile(
     env_vars=("MINIMAX_CN_API_KEY",),
     base_url="https://api.minimaxi.com/anthropic",
     auth_type="api_key",
+    supports_health_check=False,
     default_aux_model="MiniMax-M3",
 )
 
@@ -89,6 +121,7 @@ minimax_oauth = MiniMaxProfile(
     env_vars=(),  # OAuth — tokens in auth.json, not env
     base_url="https://api.minimax.io/anthropic",
     auth_type="oauth_external",
+    supports_health_check=False,
     default_aux_model="MiniMax-M2.7",
 )
 

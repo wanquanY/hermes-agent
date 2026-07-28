@@ -731,6 +731,7 @@ def switch_model(
     user_providers: dict = None,
     custom_providers: list | None = None,
     catalog_model_id: str = "",
+    connection_id: str = "",
 ) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
@@ -976,6 +977,7 @@ def switch_model(
             runtime = resolve_runtime_provider(
                 requested=target_provider,
                 target_model=new_model,
+                connection_id=connection_id or None,
             )
             api_key = runtime.get("api_key", "")
             base_url = runtime.get("base_url", "")
@@ -996,6 +998,7 @@ def switch_model(
             runtime = resolve_runtime_provider(
                 requested=current_provider,
                 target_model=new_model,
+                connection_id=connection_id or None,
             )
             # Same-provider switches must never downgrade an already-live
             # credential to the local-server placeholder. This matters for

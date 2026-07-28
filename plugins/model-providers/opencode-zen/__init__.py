@@ -45,6 +45,62 @@ class OpenCodeGoProfile(ProviderProfile):
             _flat_model_name(model), self.default_max_tokens
         )
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if _is_glm_5_2_model(model):
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": ["none", "high", "max"],
+                "default_reasoning_effort": "high",
+                "reasoning_format": "reasoning_content",
+            }
+        if _is_kimi_k2_model(model):
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": [
+                    "none",
+                    "enabled",
+                    "low",
+                    "medium",
+                    "high",
+                ],
+                "default_reasoning_effort": "enabled",
+                "reasoning_format": "reasoning_content",
+            }
+        if _is_deepseek_thinking_model(model):
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": [
+                    "none",
+                    "enabled",
+                    "low",
+                    "medium",
+                    "high",
+                    "max",
+                ],
+                "default_reasoning_effort": "enabled",
+                "reasoning_format": "reasoning_content",
+            }
+        if _flat_model_name(model).startswith("minimax-"):
+            return {
+                "reasoning_enabled": True,
+                "reasoning_efforts": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                ],
+                "default_reasoning_effort": "medium",
+                "reasoning_format": "thinking_blocks",
+            }
+        return {}
+
     def build_api_kwargs_extras(
         self,
         *,

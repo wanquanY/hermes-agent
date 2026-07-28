@@ -25,6 +25,7 @@ bedrock = BedrockProfile(
     env_vars=(),  # AWS SDK credentials — not env vars
     base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
     auth_type="aws_sdk",
+    supports_health_check=False,
 )
 
 register_provider(bedrock)

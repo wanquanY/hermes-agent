@@ -55,6 +55,27 @@ def _glm_5_2_reasoning_effort(reasoning_config: dict | None) -> str | None:
 class ZaiProfile(ProviderProfile):
     """Z.AI / GLM reasoning wire contract."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if not _model_supports_thinking(model) and not _is_glm_5_2(model):
+            return {"reasoning_enabled": False}
+        efforts = (
+            ["none", "enabled", "high", "max"]
+            if _is_glm_5_2(model)
+            else ["none", "enabled"]
+        )
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": efforts,
+            "default_reasoning_effort": "enabled",
+            "reasoning_format": "reasoning_content",
+        }
+
     def build_api_kwargs_extras(
         self,
         *,
@@ -70,9 +91,7 @@ class ZaiProfile(ProviderProfile):
 
         if isinstance(reasoning_config, dict):
             enabled = reasoning_config.get("enabled") is not False
-            extra_body["thinking"] = {
-                "type": "enabled" if enabled else "disabled"
-            }
+            extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
 
         if _is_glm_5_2(model):
             effort = _glm_5_2_reasoning_effort(reasoning_config)

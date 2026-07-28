@@ -29,7 +29,10 @@ def _profile_user_agent() -> str:
     (OpenCode Zen, etc.) sit behind a WAF that returns 403 for that.
     """
     try:
-        from hermes_cli import __version__ as _ver  # lazy: avoid layer cycle at import time
+        from hermes_cli import (
+            __version__ as _ver,
+        )  # lazy: avoid layer cycle at import time
+
         return f"hermes-cli/{_ver}"
     except Exception:
         return "hermes-cli"
@@ -45,16 +48,20 @@ class ProviderProfile:
     aliases: tuple = ()
 
     # ── Human-readable metadata ───────────────────────────────
-    display_name: str = ""       # e.g. "GMI Cloud" — shown in picker/labels
-    description: str = ""        # e.g. "GMI Cloud (multi-model direct API)" — picker subtitle
-    signup_url: str = ""         # e.g. "https://www.gmicloud.ai/" — shown during setup
+    display_name: str = ""  # e.g. "GMI Cloud" — shown in picker/labels
+    description: str = ""  # e.g. "GMI Cloud (multi-model direct API)" — picker subtitle
+    signup_url: str = ""  # e.g. "https://www.gmicloud.ai/" — shown during setup
 
     # ── Auth & endpoints ─────────────────────────────────────
     env_vars: tuple = ()
     base_url: str = ""
     models_url: str = ""  # explicit models endpoint; falls back to {base_url}/models
-    auth_type: str = "api_key"   # api_key|oauth_device_code|oauth_external|copilot|aws_sdk
-    supports_health_check: bool = True  # False → doctor skips /models probe for this provider
+    auth_type: str = (
+        "api_key"  # api_key|oauth_device_code|oauth_external|copilot|aws_sdk
+    )
+    supports_health_check: bool = (
+        True  # False → doctor skips /models probe for this provider
+    )
 
     # ── Vision support ────────────────────────────────────────
     # Provider-level capabilities are transport facts, not guesses derived
@@ -99,6 +106,7 @@ class ProviderProfile:
             return self.hostname
         if self.base_url:
             from urllib.parse import urlparse
+
             return urlparse(self.base_url).hostname or ""
         return ""
 
@@ -138,6 +146,22 @@ class ProviderProfile:
         Default: ({}, {}).
         """
         return {}, {}
+
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Return provider-owned capability metadata for one model.
+
+        The managed model inventory uses this hook to expose the same
+        reasoning controls that the provider's request adapter actually
+        implements. Empty means the provider has no stronger declaration than
+        the external model catalog or user-supplied manual metadata.
+        """
+        return {}
 
     def default_vision_model(self) -> str | None:
         """Return this provider's preferred vision model, if it has one.

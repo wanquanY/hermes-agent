@@ -1304,6 +1304,20 @@ def _resolve_explicit_runtime(
             "requested_provider": requested_provider,
         }
 
+    from hermes_cli.managed_connection_runtime import (
+        resolve_explicit_oauth_runtime,
+    )
+
+    managed_oauth_runtime = resolve_explicit_oauth_runtime(
+        provider=provider,
+        requested_provider=requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+        provider_registry=PROVIDER_REGISTRY,
+    )
+    if managed_oauth_runtime is not None:
+        return managed_oauth_runtime
+
     # Azure Foundry: user-configured endpoint with selectable API mode
     if provider == "azure-foundry":
         return _resolve_azure_foundry_runtime(
@@ -1324,8 +1338,15 @@ def _resolve_explicit_runtime(
         base_url = explicit_base_url
         if not base_url:
             if provider in {"kimi-coding", "kimi-coding-cn"}:
-                creds = resolve_api_key_provider_credentials(provider)
-                base_url = creds.get("base_url", "").rstrip("/")
+                if explicit_api_key:
+                    base_url = auth_mod._resolve_kimi_base_url(
+                        explicit_api_key,
+                        pconfig.inference_base_url,
+                        env_url,
+                    ).rstrip("/")
+                else:
+                    creds = resolve_api_key_provider_credentials(provider)
+                    base_url = creds.get("base_url", "").rstrip("/")
             else:
                 base_url = env_url or pconfig.inference_base_url
 
@@ -1372,6 +1393,8 @@ def resolve_runtime_provider(
     target_model: Optional[str] = None,
     runtime_executor: Optional[str] = None,
     codex_home: Optional[str] = None,
+    connection_id: Optional[str] = None,
+    credential_purpose: str = "inference",
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -1383,6 +1406,24 @@ def resolve_runtime_provider(
     persisted default. Other callers can leave it None to preserve existing
     behavior (api_mode derived from config).
     """
+    if str(connection_id or "").strip():
+        from hermes_cli.managed_connection_runtime import (
+            resolve_managed_connection_runtime,
+        )
+
+        return resolve_managed_connection_runtime(
+            connection_id=str(connection_id or "").strip(),
+            requested=requested,
+            target_model=target_model,
+            runtime_executor=runtime_executor,
+            codex_home=codex_home,
+            credential_purpose=credential_purpose,
+            provider_registry=PROVIDER_REGISTRY,
+            normalize_runtime_executor=_normalize_runtime_executor,
+            resolve_runtime=resolve_runtime_provider,
+            logger=logger,
+        )
+
     requested_provider = resolve_requested_provider(requested)
     normalized_runtime_executor = _normalize_runtime_executor(runtime_executor)
 

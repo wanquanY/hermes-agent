@@ -36,6 +36,27 @@ def _is_confirmed_kimi_coding_url(base_url: str) -> bool:
 class KimiProfile(ProviderProfile):
     """Kimi/Moonshot — temperature omitted, thinking xor reasoning_effort."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        efforts = ["none", "enabled", "low", "medium", "high"]
+        if api_mode == "anthropic_messages":
+            efforts.extend(("max", "xhigh"))
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": efforts,
+            "default_reasoning_effort": "enabled",
+            "reasoning_format": (
+                "thinking_blocks"
+                if api_mode == "anthropic_messages"
+                else "reasoning_content"
+            ),
+        }
+
     def fetch_models(
         self,
         *,
@@ -46,7 +67,10 @@ class KimiProfile(ProviderProfile):
         """Use Kimi Code's OpenAI-compatible surface for model discovery."""
         effective_base = (base_url or self.base_url or "").rstrip("/")
         confirmed_coding_endpoint = _is_confirmed_kimi_coding_url(effective_base)
-        if confirmed_coding_endpoint and urlparse(effective_base).path.rstrip("/") == "/coding":
+        if (
+            confirmed_coding_endpoint
+            and urlparse(effective_base).path.rstrip("/") == "/coding"
+        ):
             effective_base += "/v1"
         models = super().fetch_models(
             api_key=api_key,
