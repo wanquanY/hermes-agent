@@ -273,6 +273,12 @@ def _run_intent_metadata(params: dict) -> dict:
         "activity_id",
         "activity_kind",
         "participant_id",
+        "turn_system_context",
+        "enabled_toolsets",
+        "approval_policy",
+        "resolution_id",
+        "route_fingerprint",
+        "route_kind",
     ):
         value = params.get(field_name)
         if value not in (None, "", [], {}):
@@ -291,6 +297,50 @@ def _run_intent_metadata(params: dict) -> dict:
     if runtime_scope_key:
         metadata["runtime_scope_key"] = runtime_scope_key
     return metadata
+
+
+def _execution_target(params: dict) -> dict:
+    raw = params.get("execution_target") or params.get("executionTarget")
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {"kind": "conversation"}
+
+
+@method("run.prepare")
+def _(rid, params: dict) -> dict:
+    conversation_session_id = _conversation_session_id_from_params(params)
+    if not conversation_session_id:
+        return _err(rid, 4006, "conversation_session_id required")
+    _runtime_sid, live_session = _resolve_runtime_session(
+        conversation_session_id
+    )
+    db = _run_db_for_stable_session(conversation_session_id)
+    raw_revision = params.get(
+        "expected_session_revision",
+        params.get("expectedSessionRevision"),
+    )
+    try:
+        expected_revision = (
+            int(raw_revision) if raw_revision is not None else None
+        )
+    except (TypeError, ValueError):
+        return _err(rid, 4002, "expected_session_revision must be an integer")
+    try:
+        from tui_gateway.services.model_route_runtime import prepare_run_route
+
+        prepared = prepare_run_route(
+            conversation_session_id=conversation_session_id,
+            execution_target=_execution_target(params),
+            expected_session_revision=expected_revision,
+            live_session=live_session,
+            db=db,
+        )
+        return _ok(rid, prepared)
+    except Exception as error:
+        from tui_gateway.services.model_route_runtime import route_error_response
+
+        response = route_error_response(rid, error)
+        return response or _err(rid, 5001, str(error))
 
 
 def _message_text(content) -> str:
@@ -631,6 +681,42 @@ def _(rid, params: dict) -> dict:
                     "runtime_scope_key": existing_run.get("runtime_scope_key") or requested_scope_key,
                 },
             )
+    route_resolution = None
+    resolution_id = str(
+        params.get("resolution_id") or params.get("resolutionId") or ""
+    ).strip()
+    if resolution_id:
+        _runtime_sid, live_session = _resolve_runtime_session(target)
+        try:
+            from tui_gateway.services.model_route_runtime import consume_run_route
+
+            route_resolution = consume_run_route(
+                resolution_id=resolution_id,
+                conversation_session_id=target,
+                execution_target=_execution_target(params),
+                live_session=live_session,
+                db=run_db,
+            )
+        except Exception as error:
+            from tui_gateway.services.model_route_runtime import (
+                route_error_response,
+            )
+
+            response = route_error_response(rid, error)
+            if response is None:
+                response = _err(rid, 5001, str(error))
+            if target and requested_run_id and not transient:
+                _mark_registered_run_failed(
+                    run_id=requested_run_id,
+                    conversation_session_id=target,
+                    runtime_scope_key=requested_scope_key,
+                    turn_id=requested_turn_id,
+                    message=response.get("error", {}).get(
+                        "message",
+                        "run route resolution failed",
+                    ),
+                )
+            return response
     sid, session, err = _runtime_for_run_target(rid, params)
     if err:
         if target and requested_run_id and not transient:
@@ -653,6 +739,15 @@ def _(rid, params: dict) -> dict:
         "run_id": requested_run_id,
         "turn_id": requested_turn_id,
         "_run_registry_reserved": True,
+        **(
+            {
+                "route_resolution": route_resolution,
+                "route_fingerprint": route_resolution["route_fingerprint"],
+                "route_kind": route_resolution["route"]["route_kind"],
+            }
+            if route_resolution
+            else {}
+        ),
     }
     response = _methods["prompt.submit"](rid, submit_params)
     if isinstance(response, dict) and response.get("error") and requested_run_id and not transient:
@@ -688,6 +783,8 @@ def _(rid, params: dict) -> dict:
                 db=run_db,
             )
         result["runtime_scope_key"] = runtime_scope_key
+        if route_resolution:
+            result["route_resolution"] = route_resolution
     return response
 
 

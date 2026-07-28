@@ -21,7 +21,7 @@ def test_dovie_gateway_capabilities_reports_complete_gateway_abi():
     manifest = gateway_capabilities()
 
     assert manifest["ok"] is True
-    assert manifest["protocolVersion"] == "2026-07-27"
+    assert manifest["protocolVersion"] == "2026-07-28"
     for method in REQUIRED_METHODS:
         assert method in manifest["methods"]
     assert "message.delta" in manifest["events"]
@@ -82,7 +82,7 @@ def test_gateway_capabilities_json_rpc_method_is_registered():
     importlib.import_module("tui_gateway.methods.run")
     response = server._methods["gateway.capabilities"](1, {})
 
-    assert response["result"]["protocolVersion"] == "2026-07-27"
+    assert response["result"]["protocolVersion"] == "2026-07-28"
     assert response["result"]["timelineContract"]["contractVersion"] == "3.1"
     assert response["result"]["timelineContract"]["capabilities"]["cursor"]["afterSeq"] is True
     assert response["result"]["timelineContract"]["capabilities"]["history"]["canonical"] is False

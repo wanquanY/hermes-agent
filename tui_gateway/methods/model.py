@@ -13,6 +13,153 @@ def _model_set_value(params: dict) -> str:
 
 @method("model.set")
 def _(rid, params: dict) -> dict:
+    raw_selection = params.get("selection") or params.get("model_selection")
+    if isinstance(raw_selection, dict):
+        try:
+            from hermes_cli.model_routes import normalize_model_selection
+            from tui_gateway.services.model_route_runtime import (
+                persist_selection,
+                route_error_response,
+                route_snapshot,
+                selection_from_state,
+            )
+
+            selection = normalize_model_selection(raw_selection)
+            value = selection["model_id"]
+            execution_target = params.get("execution_target") or params.get(
+                "executionTarget"
+            )
+            if not isinstance(execution_target, dict):
+                execution_target = {"kind": "conversation"}
+            scoped_member_selection = (
+                str(execution_target.get("kind") or "") == "team_member"
+            )
+            session_id = str(params.get("session_id") or "").strip()
+            session = _sessions.get(session_id)
+            if session and session.get("running"):
+                return _err(
+                    rid,
+                    4009,
+                    "session busy — /interrupt the current turn before switching models",
+                )
+            conversation_session_id = str(
+                params.get("conversation_session_id")
+                or params.get("conversationSessionId")
+                or (session or {}).get("session_key")
+                or session_id
+            ).strip()
+            db = _get_db()
+            current_selection = None
+            current_revision = 0
+            try:
+                current_selection, current_revision = selection_from_state(
+                    conversation_session_id=conversation_session_id,
+                    live_session=session,
+                    db=db,
+                    execution_target=execution_target,
+                )
+            except Exception:
+                current_selection = None
+            snapshot = route_snapshot(selection)
+            changed = current_selection != snapshot["selection"]
+
+            descriptor = _normalize_model_descriptor(
+                params.get("model_descriptor") or params.get("modelDescriptor")
+            )
+            if descriptor and descriptor["id"] != value:
+                return _err(
+                    rid,
+                    4002,
+                    "model descriptor id must match selection model_id",
+                )
+            if (
+                changed
+                and not scoped_member_selection
+                and session
+                and session.get("agent") is not None
+            ):
+                result = _apply_model_switch(
+                    session_id,
+                    session,
+                    value,
+                    parsed_flags=(
+                        value,
+                        selection["provider_id"],
+                        False,
+                        False,
+                        True,
+                    ),
+                    catalog_model_id=(
+                        str(selection.get("catalog_model_id") or "")
+                        or _authoritative_catalog_model_id(descriptor)
+                    ),
+                    managed_selection=snapshot["selection"],
+                )
+                warning = result.get("warning") or ""
+            else:
+                warning = ""
+            next_revision = current_revision + 1 if changed else max(
+                current_revision,
+                1,
+            )
+            if session is not None:
+                if scoped_member_selection:
+                    member_id = str(
+                        execution_target.get("target_member_id")
+                        or execution_target.get("targetMemberId")
+                        or ""
+                    ).strip()
+                    scoped = dict(session.get("model_selections") or {})
+                    scoped[f"team_member:{member_id}"] = {
+                        "selection": dict(snapshot["selection"]),
+                        "revision": next_revision,
+                        "route_snapshot": dict(snapshot),
+                    }
+                    session["model_selections"] = scoped
+                else:
+                    session["model_selection"] = dict(snapshot["selection"])
+                    session["model_selection_revision"] = next_revision
+                    session["route_snapshot"] = dict(snapshot)
+                    _set_session_model_descriptor(
+                        session,
+                        descriptor,
+                        clear_if_empty=True,
+                    )
+            persist_selection(
+                db=db,
+                conversation_session_id=conversation_session_id,
+                selection=snapshot["selection"],
+                snapshot=snapshot,
+                revision=next_revision,
+                execution_target=execution_target,
+            )
+            if changed:
+                _emit(
+                    "session.model.changed",
+                    session_id or conversation_session_id,
+                    {
+                        **snapshot,
+                        "conversation_session_id": conversation_session_id,
+                        "session_revision": next_revision,
+                        "execution_target": execution_target,
+                    },
+                )
+            return _ok(
+                rid,
+                {
+                    **snapshot,
+                    "scope": "session",
+                    "changed": changed,
+                    "session_revision": next_revision,
+                    "warning": warning or None,
+                },
+            )
+        except Exception as error:
+            from tui_gateway.services.model_route_runtime import route_error_response
+
+            response = route_error_response(rid, error)
+            return response or _err(rid, 5001, str(error))
+
     value = _model_set_value(params)
     if not value:
         return _err(rid, 4002, "model value required")
@@ -109,6 +256,19 @@ def _(rid, params: dict) -> dict:
             canonical_order=True,
             max_models=50,
         )
+        from hermes_cli.model_connection_inventory import (
+            project_model_options_v2,
+            runtime_connection_repository,
+            runtime_credential_status_reader,
+        )
+
+        repository = runtime_connection_repository()
+        if repository is not None:
+            payload = project_model_options_v2(
+                payload,
+                repository,
+                credential_status_reader=runtime_credential_status_reader(),
+            )
         return _ok(rid, payload)
     except Exception as e:
         return _err(rid, 5033, str(e))

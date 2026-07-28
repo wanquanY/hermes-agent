@@ -59,3 +59,28 @@ def test_responses_descriptor_emits_only_canonical_reasoning_field_each_turn():
         "reasoning_effort": "low",
         "service_tier": "default",
     }
+
+
+def test_managed_connection_descriptor_cannot_replace_route_protocol():
+    agent = SimpleNamespace(
+        api_mode="anthropic_messages",
+        reasoning_config=None,
+        request_overrides={},
+        _transport_cache={},
+        _primary_runtime={"api_mode": "anthropic_messages"},
+        _managed_connection_id="builtin:kimi-coding",
+    )
+    session = {"agent": agent}
+
+    set_session_model_descriptor(
+        session,
+        {
+            "id": "kimi-k3",
+            "api_format": "openai",
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["low", "medium", "high"],
+        },
+    )
+
+    assert agent.api_mode == "anthropic_messages"
+    assert agent.model_descriptor["id"] == "kimi-k3"

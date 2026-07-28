@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-07-27"
-EXTENSION_VERSION = "2026-07-27"
+CONTRACT_VERSION = "2026-07-28"
+EXTENSION_VERSION = "2026-07-28"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -39,6 +39,7 @@ REQUIRED_METHODS = [
     "session.title",
     "prompt.submit",
     "run.reserve",
+    "run.prepare",
     "run.retry.prepare",
     "run.submit",
     "run.cancel",
@@ -103,6 +104,23 @@ REQUIRED_METHODS = [
     "conversation.context.summary.list",
     "model.set",
     "model.options",
+    "model.connection.list",
+    "model.connection.get",
+    "model.connection.upsert",
+    "model.connection.delete",
+    "model.connection.validate",
+    "model.connection.activate",
+    "model.manual_model.upsert",
+    "model.manual_model.delete",
+    "model.picker_visibility.set",
+    "model.credential.refresh",
+    "model.oauth.start",
+    "model.oauth.submit",
+    "model.oauth.poll",
+    "model.oauth.cancel",
+    "model.oauth.import_external",
+    "model.profile_default.get",
+    "model.profile_default.set",
     "approval.pending.list",
     "approval.policy.get",
     "approval.policy.set",
@@ -177,6 +195,11 @@ REQUIRED_EVENTS = [
     "agent_profile_test.tool",
     "agent_profile_test.progress",
     "agent_profile_test.complete",
+    "model.catalog.changed",
+    "model.connection.changed",
+    "model.credential.status_changed",
+    "model.profile_default.changed",
+    "session.model.changed",
 ]
 
 REQUIRED_STATE_FEATURES = [
@@ -289,6 +312,7 @@ REQUIRED_GATEWAY_METHODS = {
     "session.delete",
     "session.title",
     "run.reserve",
+    "run.prepare",
     "run.retry.prepare",
     "run.submit",
     "run.cancel",
@@ -320,6 +344,23 @@ REQUIRED_GATEWAY_METHODS = {
     "profile.draft.discard",
     "team_mission.graph",
     "team_mission.conversation.recall_turn",
+    "model.connection.list",
+    "model.connection.get",
+    "model.connection.upsert",
+    "model.connection.delete",
+    "model.connection.validate",
+    "model.connection.activate",
+    "model.manual_model.upsert",
+    "model.manual_model.delete",
+    "model.picker_visibility.set",
+    "model.credential.refresh",
+    "model.oauth.start",
+    "model.oauth.submit",
+    "model.oauth.poll",
+    "model.oauth.cancel",
+    "model.oauth.import_external",
+    "model.profile_default.get",
+    "model.profile_default.set",
     "team_mission.plan.reject",
     "team_mission.graph.reduce",
     "team_mission.snapshot.get",
@@ -423,7 +464,9 @@ def _runtime_features_present() -> set[str]:
 
 
 def gateway_capabilities() -> dict[str, Any]:
-    from tui_gateway.services.contract_capabilities import timeline_contract_capabilities
+    from tui_gateway.services.contract_capabilities import (
+        timeline_contract_capabilities,
+    )
 
     methods = sorted(_gateway_methods_present())
     state_features = sorted(_state_features_present())
@@ -432,7 +475,9 @@ def gateway_capabilities() -> dict[str, Any]:
     missing_methods = sorted(set(REQUIRED_METHODS) - set(methods))
     missing_events: list[str] = []
     missing_state_features = sorted(set(REQUIRED_STATE_FEATURES) - set(state_features))
-    missing_runtime_features = sorted(set(REQUIRED_RUNTIME_FEATURES) - set(runtime_features))
+    missing_runtime_features = sorted(
+        set(REQUIRED_RUNTIME_FEATURES) - set(runtime_features)
+    )
     missing_capabilities = sorted(
         set(missing_methods)
         | set(missing_events)

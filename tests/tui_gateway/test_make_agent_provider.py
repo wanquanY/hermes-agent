@@ -354,6 +354,88 @@ def test_runtime_token_refresh_rebinds_credentials_without_downgrading_responses
     assert agent.api_mode == "chat_completions"
 
 
+def test_managed_runtime_refresh_preserves_connection_endpoint_and_protocol():
+    from tui_gateway.services.runtime_credentials import ensure_agent_runtime_current
+
+    class _Agent:
+        def __init__(self):
+            self.model = "kimi-k3"
+            self.provider = "kimi-coding"
+            self.base_url = "https://api.moonshot.ai/v1"
+            self.api_key = "sk-kimi-managed-key"
+            self.api_mode = "chat_completions"
+            self._gateway_runtime_requested_provider = "kimi-coding"
+            self._managed_connection_id = "builtin:kimi-coding"
+            self._managed_credential_generation = 3
+            self._managed_credential_lease_id = "lease-old"
+            self.reasoning_config = None
+            self.request_overrides = {}
+            self._transport_cache = {}
+            self._primary_runtime = {"api_mode": "chat_completions"}
+            self.switch_calls = []
+
+        def switch_model(self, **kwargs):
+            self.switch_calls.append(kwargs)
+            self.model = kwargs["new_model"]
+            self.provider = kwargs["new_provider"]
+            self.base_url = kwargs["base_url"]
+            self.api_key = kwargs["api_key"]
+            self.api_mode = kwargs["api_mode"]
+            self._primary_runtime["api_mode"] = self.api_mode
+
+    agent = _Agent()
+    session = {
+        "agent": agent,
+        # A generic model catalog format must not override the managed
+        # connection's endpoint-owned Anthropic Messages protocol.
+        "model_descriptor": {
+            "id": "kimi-k3",
+            "api_format": "openai",
+        },
+    }
+    fake_runtime = {
+        "provider": "kimi-coding",
+        "base_url": "https://api.kimi.com/coding",
+        "api_key": "sk-kimi-managed-key",
+        "api_mode": "anthropic_messages",
+        "requested_provider": "kimi-coding",
+        "connection_id": "builtin:kimi-coding",
+        "credential_generation": 4,
+        "credential_lease_id": "lease-new",
+    }
+
+    with patch(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        return_value=fake_runtime,
+    ) as mock_resolve:
+        changed = ensure_agent_runtime_current(
+            sid="sid-kimi-managed",
+            session=session,
+            resolve_model=lambda: "kimi-k3",
+            emit_session_info=lambda *_args: None,
+        )
+
+    assert changed is True
+    mock_resolve.assert_called_once_with(
+        requested="kimi-coding",
+        target_model="kimi-k3",
+        connection_id="builtin:kimi-coding",
+    )
+    assert agent.switch_calls == [
+        {
+            "new_model": "kimi-k3",
+            "new_provider": "kimi-coding",
+            "api_key": "sk-kimi-managed-key",
+            "base_url": "https://api.kimi.com/coding",
+            "api_mode": "anthropic_messages",
+        }
+    ]
+    assert agent.base_url == "https://api.kimi.com/coding"
+    assert agent.api_mode == "anthropic_messages"
+    assert agent._managed_credential_generation == 4
+    assert agent._managed_credential_lease_id == "lease-new"
+
+
 def test_make_agent_ignores_display_personality_without_system_prompt():
     """The TUI matches the classic CLI: personality only becomes active once
     it has been saved to agent.system_prompt."""

@@ -551,6 +551,11 @@ def _execute_prompt_submit(rid, params: dict) -> dict:
                 "model_descriptor": model_descriptor,
                 "reasoning_config": _turn_reasoning_config(params),
                 "dovie_product_context": dovie_product_context,
+                **(
+                    {"route_resolution": dict(params["route_resolution"])}
+                    if isinstance(params.get("route_resolution"), dict)
+                    else {}
+                ),
             }
         finally:
             _leave_profile_context(profile_tokens)
@@ -1207,6 +1212,15 @@ def _run_prompt_submit(
                 "ephemeral_system_prompt",
                 active_context_missing,
             )
+            from tui_gateway.services.managed_credential_runtime import (
+                activate_managed_inference_route,
+                reset_managed_inference_route,
+            )
+
+            route_context_tokens = activate_managed_inference_route(
+                agent,
+                (turn_metadata or {}).get("route_resolution"),
+            )
             turn_reasoning_config = (
                 (turn_metadata or {}).get("reasoning_config")
                 if isinstance((turn_metadata or {}).get("reasoning_config"), dict)
@@ -1331,6 +1345,7 @@ def _run_prompt_submit(
                     },
                 )
             finally:
+                reset_managed_inference_route(route_context_tokens)
                 # The agent is cached across turns; never retain a closure tied
                 # to this turn's run/message identity.
                 agent.interim_assistant_callback = None
@@ -1895,181 +1910,6 @@ def _run_prompt_submit(
 
     _log_prompt_stage(session, sid, "worker-dispatch", run_id=turn_run_id, turn_id=turn_id)
     threading.Thread(target=run, daemon=True).start()
-
-
-@method("clipboard.paste")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-        from hermes_cli.clipboard import has_clipboard_image, save_clipboard_image
-    except Exception as e:
-        return _err(rid, 5027, f"clipboard unavailable: {e}")
-
-    session["image_counter"] = session.get("image_counter", 0) + 1
-    img_dir = Path(_active_hermes_home()) / "images"
-    img_dir.mkdir(parents=True, exist_ok=True)
-    img_path = (
-        img_dir
-        / f"clip_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session['image_counter']}.png"
-    )
-
-    # Save-first: mirrors CLI keybinding path; more robust than has_image() precheck
-    if not save_clipboard_image(img_path):
-        session["image_counter"] = max(0, session["image_counter"] - 1)
-        msg = (
-            "Clipboard has image but extraction failed"
-            if has_clipboard_image()
-            else "No image found in clipboard"
-        )
-        return _ok(rid, {"attached": False, "message": msg})
-
-    session.setdefault("attached_images", []).append(str(img_path))
-    return _ok(
-        rid,
-        {
-            "attached": True,
-            "path": str(img_path),
-            "count": len(session["attached_images"]),
-            **_image_meta(img_path),
-        },
-    )
-
-
-@method("image.attach")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    raw = str(params.get("path", "") or "").strip()
-    if not raw:
-        return _err(rid, 4015, "path required")
-    try:
-        (
-            image_extensions,
-            detect_file_drop,
-            resolve_attachment_path,
-            split_path_input,
-        ) = _attachment_path_helpers()
-
-        dropped = detect_file_drop(raw)
-        if dropped:
-            image_path = dropped["path"]
-            remainder = dropped["remainder"]
-        else:
-            path_token, remainder = split_path_input(raw)
-            image_path = resolve_attachment_path(path_token)
-            if image_path is None:
-                return _err(rid, 4016, f"image not found: {path_token}")
-        if image_path.suffix.lower() not in image_extensions:
-            return _err(rid, 4016, f"unsupported image: {image_path.name}")
-        session.setdefault("attached_images", []).append(str(image_path))
-        return _ok(
-            rid,
-            {
-                "attached": True,
-                "path": str(image_path),
-                "count": len(session["attached_images"]),
-                "remainder": remainder,
-                "text": remainder or f"[User attached image: {image_path.name}]",
-                **_image_meta(image_path),
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5027, str(e))
-
-
-@method("input.detect_drop")
-def _(rid, params: dict) -> dict:
-    session, err = _sess_nowait(params, rid)
-    if err:
-        return err
-    try:
-        raw = str(params.get("text", "") or "")
-        _, detect_file_drop, _, _ = _attachment_path_helpers()
-        dropped = detect_file_drop(raw)
-        if not dropped:
-            return _ok(rid, {"matched": False})
-
-        drop_path = dropped["path"]
-        remainder = dropped["remainder"]
-        if dropped["is_image"]:
-            session.setdefault("attached_images", []).append(str(drop_path))
-            text = remainder or f"[User attached image: {drop_path.name}]"
-            return _ok(
-                rid,
-                {
-                    "matched": True,
-                    "is_image": True,
-                    "path": str(drop_path),
-                    "count": len(session["attached_images"]),
-                    "text": text,
-                    **_image_meta(drop_path),
-                },
-            )
-
-        text = f"[User attached file: {drop_path}]" + (
-            f"\n{remainder}" if remainder else ""
-        )
-        return _ok(
-            rid,
-            {
-                "matched": True,
-                "is_image": False,
-                "path": str(drop_path),
-                "name": drop_path.name,
-                "text": text,
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5027, str(e))
-
-
-@method("prompt.background")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    text, parent = params.get("text", ""), params.get("session_id", "")
-    if not text:
-        return _err(rid, 4012, "text required")
-    task_id = f"bg_{uuid.uuid4().hex[:6]}"
-
-    def run():
-        session_tokens = _set_session_context(task_id, terminal_cwd=session.get("cwd"))
-        try:
-            from run_agent import AIAgent
-
-            result = AIAgent(
-                **_background_agent_kwargs(session["agent"], task_id)
-            ).run_conversation(
-                user_message=text,
-                task_id=task_id,
-            )
-            _emit(
-                "background.complete",
-                parent,
-                {
-                    "task_id": task_id,
-                    "text": (
-                        result.get("final_response", str(result))
-                        if isinstance(result, dict)
-                        else str(result)
-                    ),
-                },
-            )
-        except Exception as e:
-            _emit(
-                "background.complete",
-                parent,
-                {"task_id": task_id, "text": f"error: {e}"},
-            )
-        finally:
-            _clear_session_context(session_tokens)
-
-    threading.Thread(target=run, daemon=True).start()
-    return _ok(rid, {"task_id": task_id})
 
 
 def has_pending_prompt(request_id: str) -> bool:

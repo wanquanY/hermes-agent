@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import os
 import threading
+from pathlib import Path
 from typing import Any, Awaitable, TypeVar
 
 from tui_gateway.methods._shared import bind_server_globals
@@ -21,6 +22,8 @@ _MANAGED_PROXY_PATHS: tuple[tuple[str, str], ...] = (
     ("DOVIE_VIDEO_GENERATE_PROXY_URL", "/api/v1/llm-proxy/v1/video-generate"),
     ("DOVIE_SKILL_CATEGORIES_URL", "/api/v1/llm-proxy/v1/skill-market/categories"),
 )
+_LOCAL_OWNER_ENV = "DOVIE_LOCAL_OWNER_ID"
+_CREDENTIAL_BROKER_BOOTSTRAP_ENV = "DOVIE_CREDENTIAL_BROKER_BOOTSTRAP_FILE"
 
 
 def _has_any(params: dict[str, Any], keys: tuple[str, ...]) -> bool:
@@ -56,6 +59,37 @@ def _apply_env_update(key: str, value: str) -> None:
         os.environ.pop(key, None)
 
 
+def _validated_credential_boundary(
+    params: dict[str, Any],
+) -> tuple[bool, str, str]:
+    owner_keys = ("local_owner_id", "localOwnerId")
+    bootstrap_keys = (
+        "credential_broker_bootstrap_path",
+        "credentialBrokerBootstrapPath",
+    )
+    owner_present = _has_any(params, owner_keys)
+    bootstrap_present = _has_any(params, bootstrap_keys)
+    if owner_present != bootstrap_present:
+        raise ValueError(
+            "local owner and credential broker bootstrap must be updated together"
+        )
+    if not owner_present:
+        return False, "", ""
+    owner_id = _text_param(params, owner_keys)
+    bootstrap_path = _text_param(params, bootstrap_keys)
+    if bool(owner_id) != bool(bootstrap_path):
+        raise ValueError(
+            "local owner and credential broker bootstrap must both be set or cleared"
+        )
+    if owner_id:
+        from hermes_cli.credential_resolver import DovieBrokerCredentialResolver
+        from hermes_cli.model_connections import validate_local_owner_id
+
+        validate_local_owner_id(owner_id)
+        DovieBrokerCredentialResolver(Path(bootstrap_path)).validate_boundary(owner_id)
+    return True, owner_id, bootstrap_path
+
+
 async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, Any]:
     """Update runtime cloud proxy env in the gateway and live workers.
 
@@ -69,6 +103,9 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
     origin_present = _has_any(params, origin_keys)
     runtime_token = _text_param(params, token_keys)
     api_origin = _normalize_api_origin(_text_param(params, origin_keys))
+    boundary_present, local_owner_id, credential_broker_bootstrap_path = (
+        _validated_credential_boundary(params)
+    )
 
     env_updates: dict[str, str] = {}
     if token_present:
@@ -90,6 +127,17 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
         for key, value in proxy_env.items():
             _apply_env_update(key, value)
 
+    if boundary_present:
+        _apply_env_update(_LOCAL_OWNER_ENV, local_owner_id)
+        _apply_env_update(
+            _CREDENTIAL_BROKER_BOOTSTRAP_ENV,
+            credential_broker_bootstrap_path,
+        )
+        env_updates[_LOCAL_OWNER_ENV] = local_owner_id
+        env_updates[_CREDENTIAL_BROKER_BOOTSTRAP_ENV] = (
+            credential_broker_bootstrap_path
+        )
+
     resulting_token = os.environ.get("DOVIE_LLM_RUNTIME_TOKEN", "")
     resulting_origin = os.environ.get("DOVIE_API_ORIGIN", "")
 
@@ -99,11 +147,16 @@ async def apply_runtime_cloud_proxy_update(params: dict[str, Any]) -> dict[str, 
 
         workers_notified = await worker_supervisor().broadcast_runtime_env_update(env_updates)
 
-    return {
+    result = {
         "ok": True,
         "fingerprint": _fingerprint(resulting_token, resulting_origin),
         "workers_notified": workers_notified,
     }
+    if boundary_present:
+        result["credential_boundary_configured"] = bool(
+            local_owner_id and credential_broker_bootstrap_path
+        )
+    return result
 
 
 def _run_coro_sync(coro: Awaitable[_T]) -> _T:

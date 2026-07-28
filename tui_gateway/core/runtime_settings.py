@@ -502,6 +502,7 @@ def _apply_model_switch(
     pin_session_override: bool = True,
     parsed_flags: Any | None = None,
     catalog_model_id: str = "",
+    managed_selection: dict | None = None,
 ) -> dict:
     from hermes_cli.model_switch import (
         parse_model_flags_detailed,
@@ -682,6 +683,7 @@ def _apply_model_switch(
         user_providers=user_provs,
         custom_providers=custom_provs,
         catalog_model_id=catalog_model_id,
+        connection_id=str((managed_selection or {}).get("connection_id") or ""),
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
@@ -800,6 +802,14 @@ def _apply_model_switch(
             "provider": (result.target_provider or None),
             "base_url": (result.base_url or None),
             "api_mode": (result.api_mode or None),
+            **(
+                {
+                    "connection_id": managed_selection["connection_id"],
+                    "model_selection": dict(managed_selection),
+                }
+                if managed_selection
+                else {}
+            ),
         }
     if persist_global:
         _persist_model_switch(result)

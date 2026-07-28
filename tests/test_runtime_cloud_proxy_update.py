@@ -128,6 +128,63 @@ async def test_runtime_cloud_proxy_update_sets_main_process_env(
 
 
 @pytest.mark.asyncio
+async def test_runtime_cloud_proxy_update_propagates_validated_credential_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = _FakeSupervisor(notified=2)
+    _install_fake_supervisor(monkeypatch, supervisor)
+    monkeypatch.delenv("DOVIE_LOCAL_OWNER_ID", raising=False)
+    monkeypatch.delenv("DOVIE_CREDENTIAL_BROKER_BOOTSTRAP_FILE", raising=False)
+    observed: list[str] = []
+    monkeypatch.setattr(
+        "hermes_cli.credential_resolver.DovieBrokerCredentialResolver.validate_boundary",
+        lambda _resolver, owner_id: observed.append(owner_id),
+    )
+
+    result = await runtime_cloud_proxy.apply_runtime_cloud_proxy_update(
+        {
+            "local_owner_id": "owner_12345678",
+            "credential_broker_bootstrap_path": "/tmp/bootstrap.json",
+        }
+    )
+
+    assert observed == ["owner_12345678"]
+    assert os.environ["DOVIE_LOCAL_OWNER_ID"] == "owner_12345678"
+    assert (
+        os.environ["DOVIE_CREDENTIAL_BROKER_BOOTSTRAP_FILE"]
+        == "/tmp/bootstrap.json"
+    )
+    assert supervisor.updates == [
+        {
+            "DOVIE_LOCAL_OWNER_ID": "owner_12345678",
+            "DOVIE_CREDENTIAL_BROKER_BOOTSTRAP_FILE": "/tmp/bootstrap.json",
+        }
+    ]
+    assert result["workers_notified"] == 2
+    assert result["credential_boundary_configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_cloud_proxy_update_rejects_partial_boundary_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = _FakeSupervisor()
+    _install_fake_supervisor(monkeypatch, supervisor)
+    monkeypatch.setenv("DOVIE_LLM_RUNTIME_TOKEN", "existing-token")
+
+    with pytest.raises(ValueError, match="must be updated together"):
+        await runtime_cloud_proxy.apply_runtime_cloud_proxy_update(
+            {
+                "runtime_token": "must-not-apply",
+                "local_owner_id": "owner_12345678",
+            }
+        )
+
+    assert os.environ["DOVIE_LLM_RUNTIME_TOKEN"] == "existing-token"
+    assert supervisor.updates == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_cloud_proxy_update_broadcasts_to_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

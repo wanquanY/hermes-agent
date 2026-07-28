@@ -486,6 +486,31 @@ def _persisted_session_runtime(session_key: str) -> tuple[str, str | None]:
     return model, provider
 
 
+def _persisted_session_model_selection(session_key: str) -> dict:
+    """Read the durable structured model selection for runtime rebuilds."""
+
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    try:
+        db = _db_for_stable_session(key)
+        row = db.sessions.get(key) if db is not None else None
+    except Exception:
+        return {}
+    if not isinstance(row, dict):
+        return {}
+    raw_config = row.get("model_config")
+    config = raw_config if isinstance(raw_config, dict) else {}
+    if not config and isinstance(raw_config, str) and raw_config.strip():
+        try:
+            parsed = json.loads(raw_config)
+            config = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    selection = config.get("model_selection")
+    return dict(selection) if isinstance(selection, dict) else {}
+
+
 # Backfilled from upstream 6de3963e3 (#43702) + 7d938cc5c — referenced by the
 # absorbed bc4dbce858 model-switch no-op fix, but the underlying helpers landed
 # in those two non-P0 commits. Without them /model raises NameError after a
@@ -977,6 +1002,14 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
             "provider": provider or None,
             "base_url": base_url or None,
             "api_mode": api_mode or None,
+            **(
+                {
+                    "connection_id": model_config.get("connection_id"),
+                    "model_selection": dict(model_config["model_selection"]),
+                }
+                if isinstance(model_config.get("model_selection"), dict)
+                else {}
+            ),
         }
     if provider:
         overrides["provider_override"] = provider

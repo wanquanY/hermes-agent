@@ -2300,7 +2300,31 @@ _AUTO_PROVIDER_LABELS = {
     "_resolve_api_key_provider": "api-key",
 }
 
-_MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
+_MAIN_RUNTIME_FIELDS = (
+    "provider",
+    "model",
+    "base_url",
+    "api_key",
+    "api_mode",
+    "auth_mode",
+)
+
+
+def _direct_route_runtime(
+    main_runtime: Optional[Dict[str, Any]],
+) -> tuple[bool, Optional[Dict[str, Any]]]:
+    """Return the route-scoped main runtime and whether fallbacks are closed."""
+    try:
+        from agent.inference_route_context import (
+            current_route_main_runtime,
+            direct_only_route_active,
+        )
+
+        if direct_only_route_active():
+            return True, main_runtime or current_route_main_runtime()
+    except Exception:
+        logger.debug("auxiliary inference route context unavailable", exc_info=True)
+    return False, main_runtime
 
 
 def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3341,6 +3365,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     """
     global auxiliary_is_nous, _stale_base_url_warned
     auxiliary_is_nous = False  # Reset — _try_nous() will set True if it wins
+    direct_only, main_runtime = _direct_route_runtime(main_runtime)
     runtime = _normalize_main_runtime(main_runtime)
     runtime_provider = runtime.get("provider", "")
     runtime_model = str(runtime.get("model") or "")
@@ -3407,12 +3432,10 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     if (main_provider and main_model
             and main_provider not in {"auto", ""}):
         resolved_provider = main_provider
-        explicit_base_url = None
-        explicit_api_key = None
+        explicit_base_url = runtime_base_url or None
+        explicit_api_key = runtime_api_key or None
         if runtime_base_url and (main_provider == "custom" or main_provider.startswith("custom:")):
             resolved_provider = "custom"
-            explicit_base_url = runtime_base_url
-            explicit_api_key = runtime_api_key or None
         # Skip Step-1 if the main provider was recently 402'd. The unhealthy
         # cache TTL bounds how long we bypass it, so a topped-up account
         # recovers automatically. If we tried Step-1 anyway, every aux call
@@ -3435,6 +3458,12 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                 return client, resolved or main_model
 
     # ── Step 2: aggregator / fallback chain ──────────────────────────────
+    if direct_only:
+        logger.warning(
+            "Auxiliary auto-detect: direct-only route has no usable main provider; "
+            "cloud fallback is disabled"
+        )
+        return None, None
     tried = []
     for label, try_fn in _get_provider_chain():
         if _is_provider_unhealthy(label):
@@ -5173,12 +5202,31 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    direct_only, main_runtime = _direct_route_runtime(main_runtime)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+    if direct_only:
+        resolved_provider = "auto"
+        resolved_model = None
+        resolved_base_url = None
+        resolved_api_key = None
+        resolved_api_mode = None
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
-    if task == "vision":
+    if task == "vision" and direct_only:
+        client, final_model = _get_cached_client(
+            "auto",
+            async_mode=False,
+            main_runtime=main_runtime,
+            is_vision=True,
+        )
+        resolved_provider = "auto"
+        if client is None:
+            raise RuntimeError(
+                "Direct-only route has no usable selected-provider vision client"
+            )
+    elif task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
             model=resolved_model or model,
@@ -5227,7 +5275,7 @@ def call_llm(
             # Pass model=None so each provider uses its own default —
             # resolved_model may be an OpenRouter-format slug that doesn't
             # work on other providers.
-            if not resolved_base_url:
+            if not resolved_base_url and not direct_only:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
                 client, final_model = _get_cached_client("auto", main_runtime=main_runtime)
@@ -5325,7 +5373,7 @@ def call_llm(
             resolved_provider == "nous"
             or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
         )
-        if _is_auth_error(first_err) and client_is_nous:
+        if not direct_only and _is_auth_error(first_err) and client_is_nous:
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
@@ -5345,7 +5393,8 @@ def call_llm(
                     refreshed_client.chat.completions.create(**kwargs), task)
 
         # ── Auth refresh retry ───────────────────────────────────────
-        if (_is_auth_error(first_err)
+        if (not direct_only
+                and _is_auth_error(first_err)
                 and resolved_provider not in {"auto", "", None}
                 and not client_is_nous):
             if _refresh_provider_credentials(resolved_provider):
@@ -5372,7 +5421,8 @@ def call_llm(
 
         # ── Same-provider credential-pool recovery ─────────────────────
         pool_provider = _recoverable_pool_provider(resolved_provider, client)
-        if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+        if (not direct_only and pool_provider
+                and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err))):
             recovery_err = first_err
             if _is_rate_limit_error(first_err):
                 try:
@@ -5421,7 +5471,7 @@ def call_llm(
         # When the provider returns a 429 rate-limit (not billing), fall
         # back to an alternative provider instead of exhausting retries
         # against the same rate-limited endpoint.
-        should_fallback = (
+        should_fallback = not direct_only and (
             _is_payment_error(first_err)
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)
@@ -5590,6 +5640,7 @@ async def async_call_llm(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: float = None,
     max_tokens: int = None,
@@ -5601,12 +5652,31 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    direct_only, main_runtime = _direct_route_runtime(main_runtime)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
+    if direct_only:
+        resolved_provider = "auto"
+        resolved_model = None
+        resolved_base_url = None
+        resolved_api_key = None
+        resolved_api_mode = None
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
-    if task == "vision":
+    if task == "vision" and direct_only:
+        client, final_model = _get_cached_client(
+            "auto",
+            async_mode=True,
+            main_runtime=main_runtime,
+            is_vision=True,
+        )
+        resolved_provider = "auto"
+        if client is None:
+            raise RuntimeError(
+                "Direct-only route has no usable selected-provider vision client"
+            )
+    elif task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
             model=resolved_model or model,
@@ -5638,6 +5708,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -5647,10 +5718,14 @@ async def async_call_llm(
                     f"was found. Set the {_explicit.upper()}_API_KEY environment "
                     f"variable, or switch to a different provider with `hermes model`."
                 )
-            if not resolved_base_url:
+            if not resolved_base_url and not direct_only:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
-                client, final_model = _get_cached_client("auto", async_mode=True)
+                client, final_model = _get_cached_client(
+                    "auto",
+                    async_mode=True,
+                    main_runtime=main_runtime,
+                )
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
@@ -5732,7 +5807,7 @@ async def async_call_llm(
             resolved_provider == "nous"
             or base_url_host_matches(_client_base, "inference-api.nousresearch.com")
         )
-        if _is_auth_error(first_err) and client_is_nous:
+        if not direct_only and _is_auth_error(first_err) and client_is_nous:
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
@@ -5751,7 +5826,8 @@ async def async_call_llm(
                     await refreshed_client.chat.completions.create(**kwargs), task)
 
         # ── Auth refresh retry (mirrors sync call_llm) ───────────────
-        if (_is_auth_error(first_err)
+        if (not direct_only
+                and _is_auth_error(first_err)
                 and resolved_provider not in {"auto", "", None}
                 and not client_is_nous):
             if _refresh_provider_credentials(resolved_provider):
@@ -5777,7 +5853,8 @@ async def async_call_llm(
 
         # ── Same-provider credential-pool recovery (mirrors sync) ─────
         pool_provider = _recoverable_pool_provider(resolved_provider, client)
-        if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+        if (not direct_only and pool_provider
+                and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err))):
             recovery_err = first_err
             if _is_rate_limit_error(first_err):
                 try:
@@ -5809,7 +5886,7 @@ async def async_call_llm(
                 )
 
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
-        should_fallback = (
+        should_fallback = not direct_only and (
             _is_payment_error(first_err)
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)

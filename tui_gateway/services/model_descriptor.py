@@ -25,9 +25,11 @@ _EXECUTOR_OWNED_API_MODES = frozenset({"codex_app_server"})
 def model_descriptor_api_mode(raw: object) -> str:
     """Resolve a catalog wire format to Hermes' transport name.
 
-    The catalog owns protocol selection. Unknown/native formats intentionally
-    return an empty value so their provider runtime keeps authority until a
-    dedicated Hermes transport exists for that protocol.
+    The catalog owns protocol selection for ambient/cloud runtimes. Managed
+    connections own their endpoint and wire protocol as one atomic route, so
+    their descriptors are capability metadata only. Unknown/native formats
+    intentionally return an empty value so the provider runtime keeps
+    authority until a dedicated Hermes transport exists for that protocol.
     """
     if not isinstance(raw, dict):
         return ""
@@ -59,6 +61,13 @@ def _restore_descriptor_api_mode(agent: Any) -> None:
 
 def _apply_descriptor_api_mode(agent: Any, descriptor: dict[str, Any]) -> None:
     if agent is None:
+        return
+    raw_connection_id = getattr(agent, "_managed_connection_id", "")
+    if isinstance(raw_connection_id, str) and raw_connection_id.strip():
+        # A managed connection resolves credential, endpoint, and protocol as
+        # one route. Restore any descriptor layer that predated the managed
+        # binding, then leave the provider runtime authoritative.
+        _restore_descriptor_api_mode(agent)
         return
     target = model_descriptor_api_mode(descriptor)
     current = str(getattr(agent, "api_mode", "") or "").strip().lower()

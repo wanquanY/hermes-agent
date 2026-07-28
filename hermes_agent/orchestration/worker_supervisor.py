@@ -220,6 +220,7 @@ DB_RPC_ALLOWED_METHODS = frozenset(
         "sessions.sanitize_title",
         "sessions.set_title",
         "sessions.update_cwd",
+        "sessions.update_runtime_config",
         "sessions.update_source",
         "sessions.update_system_prompt",
         "sessions.update_token_counts",

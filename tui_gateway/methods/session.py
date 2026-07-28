@@ -21,25 +21,31 @@ from tui_gateway.services.profile_context import profile_context_for_params as _
 from tui_gateway.services.workspace import (
     bind_session_workspace as _bind_session_workspace,
     normalize_session_cwd as _normalize_session_cwd,
-    session_workspace_bindings_by_session_ids as _session_workspace_bindings_by_session_ids,
     workspace_for_session as _workspace_for_session,
     workspace_from_params as _workspace_from_params,
+)
+from tui_gateway.services.session_create_request import (
+    is_byo_codex_agent as _is_byo_codex_agent,
+    requested_agent_profile_id as _requested_agent_profile_id,
+    requested_codex_account_mode as _requested_codex_account_mode,
+    requested_codex_extra_env as _requested_codex_extra_env,
+    requested_codex_home as _requested_codex_home,
+    requested_created_by_user_id as _requested_created_by_user_id,
+    requested_profile_version_id as _requested_profile_version_id,
+    requested_runtime_executor as _requested_runtime_executor,
+    requested_runtime_scope_key as _requested_runtime_scope_key,
+)
+from tui_gateway.services.session_index_projection import (
+    normalized_conversation_kind as _normalized_conversation_kind,
+    row_with_active_mission_running as _session_index_row_with_active_mission_running,
+    session_index_list_item as _session_index_list_item,
+    workspace_bindings_for_rows as _session_index_workspace_bindings_for_rows,
 )
 
 _server = bind_server_globals(globals())
 _interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
 _agent_interrupt_work_queue: queue.SimpleQueue = queue.SimpleQueue()
 _INTERNAL_SESSION_LIST_SOURCES = ("tool", "cron")
-
-
-def _normalized_conversation_kind(row: dict | None) -> str:
-    kind = str(
-        (row or {}).get("conversation_kind")
-        or (row or {}).get("conversationKind")
-        or ""
-    ).strip().lower()
-    return kind if kind in {"direct", "team"} else "direct"
-
 
 def _interrupt_trace(message: str) -> None:
     if not is_truthy_value(os.environ.get("HERMES_INTERRUPT_TRACE")):
@@ -91,127 +97,11 @@ def _schedule_agent_interrupt_work(fn) -> None:
     _agent_interrupt_work_queue.put(fn)
 
 
-# ── Methods: session ─────────────────────────────────────────────────
-
-
 def _stored_workspace(session_id: str) -> dict | None:
     try:
         return _workspace_for_session(session_id)
     except Exception:
         return None
-
-
-def _requested_runtime_scope_key(params: dict | None = None) -> str:
-    return str(
-        (params or {}).get("runtime_scope_key")
-        or (params or {}).get("runtimeScopeKey")
-        or ""
-    ).strip()
-
-
-def _requested_runtime_executor(params: dict | None = None) -> str:
-    params = params or {}
-    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    return str(
-        params.get("runtime_executor")
-        or params.get("runtimeExecutor")
-        or profile.get("runtime_executor")
-        or profile.get("runtimeExecutor")
-        or ""
-    ).strip()
-
-
-def _requested_codex_home(params: dict | None = None) -> str:
-    params = params or {}
-    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    return str(
-        params.get("codex_home")
-        or params.get("codexHome")
-        or params.get("codexHomePath")
-        or profile.get("codex_home")
-        or profile.get("codexHome")
-        or profile.get("codexHomePath")
-        or ""
-    ).strip()
-
-
-def _requested_codex_extra_env(params: dict | None = None) -> dict:
-    params = params or {}
-    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    for candidate in (
-        params.get("codex_extra_env"),
-        params.get("codexExtraEnv"),
-        profile.get("codex_extra_env"),
-        profile.get("codexExtraEnv"),
-    ):
-        if isinstance(candidate, dict) and candidate:
-            return {str(k): str(v) for k, v in candidate.items() if v is not None}
-    return {}
-
-
-def _requested_codex_account_mode(params: dict | None = None) -> str:
-    params = params or {}
-    profile = params.get("dovie_profile") or params.get("dovieProfile") or params.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    return str(
-        params.get("codex_account_mode")
-        or params.get("codexAccountMode")
-        or profile.get("codex_account_mode")
-        or profile.get("codexAccountMode")
-        or ""
-    ).strip().lower()
-
-
-def _is_byo_codex_agent(agent) -> bool:
-    if agent is None:
-        return False
-    if str(getattr(agent, "api_mode", "") or "").strip() != "codex_app_server":
-        return False
-    try:
-        from agent.codex_runtime import normalize_codex_account_mode
-
-        account_mode = normalize_codex_account_mode(
-            getattr(agent, "codex_account_mode", ""),
-            extra_env=getattr(agent, "codex_extra_env", None),
-        )
-    except Exception:
-        return False
-    return account_mode == "byo"
-
-
-def _requested_agent_profile_id(params: dict | None = None) -> str:
-    return str(
-        (params or {}).get("agent_profile_id")
-        or (params or {}).get("agentProfileId")
-        or ""
-    ).strip()
-
-
-def _requested_profile_version_id(params: dict | None = None) -> str:
-    return str(
-        (params or {}).get("agent_profile_version_id")
-        or (params or {}).get("agentProfileVersionId")
-        or ""
-    ).strip()
-
-
-def _requested_created_by_user_id(params: dict | None = None) -> str:
-    return str(
-        (params or {}).get("created_by_user_id")
-        or (params or {}).get("createdByUserId")
-        or (params or {}).get("created_by")
-        or (params or {}).get("createdBy")
-        or (params or {}).get("user_id")
-        or (params or {}).get("userId")
-        or ""
-    ).strip()
 
 
 def _ensure_session_create_conversation_participants(
@@ -281,7 +171,7 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
     running = bool(session.get("running") or control_state.get("running"))
-    return {
+    snapshot = {
         "running": running,
         "runtime_scope_key": str(control_state.get("runtime_scope_key") or session.get("active_runtime_scope_key") or conversation_session_id),
         "active_execution_session_id": runtime_sid or "",
@@ -291,6 +181,16 @@ def _session_run_snapshot(runtime_sid: str, session: dict | None, db=None) -> di
         "run_updated_at": (session.get("run_updated_at") or control_state.get("run_updated_at") or 0) if running else 0,
         "last_event_seq": int(control_state.get("last_event_seq") or 0),
     }
+    from tui_gateway.services.model_route_runtime import route_status_fields
+
+    snapshot.update(
+        route_status_fields(
+            conversation_session_id=conversation_session_id,
+            live_session=session,
+            db=db,
+        )
+    )
+    return snapshot
 
 
 def _live_sessions_by_stored_key() -> dict[str, tuple[str, dict]]:
@@ -873,8 +773,28 @@ def _(rid, params: dict) -> dict:
     # session.create. Built INTO the agent (see _make_agent honoring
     # session["model_override"]) so the session starts on its own model without
     # a post-build /model switch. Never a global config write.
-    create_model = str(params.get("model") or "").strip()
-    create_provider = str(params.get("provider") or "").strip()
+    from tui_gateway.services.model_route_runtime import (
+        normalize_create_selection,
+        route_config_fields,
+        route_error_response,
+        route_result_fields,
+    )
+
+    try:
+        model_selection, route_snapshot = normalize_create_selection(
+            params.get("model_selection", params.get("selection"))
+        )
+    except Exception as error:
+        response = route_error_response(rid, error)
+        return response or _err(rid, 4002, str(error))
+    create_model = str(
+        (model_selection or {}).get("model_id") or params.get("model") or ""
+    ).strip()
+    create_provider = str(
+        (model_selection or {}).get("provider_id")
+        or params.get("provider")
+        or ""
+    ).strip()
     create_runtime_executor = _requested_runtime_executor(params)
     create_codex_home = _requested_codex_home(params)
     create_codex_extra_env = _requested_codex_extra_env(params)
@@ -889,6 +809,14 @@ def _(rid, params: dict) -> dict:
             "codex_extra_env": create_codex_extra_env or None,
             "codex_account_mode": create_codex_account_mode or None,
             "model_explicit": bool(create_model),
+            **(
+                {
+                    "connection_id": model_selection["connection_id"],
+                    "model_selection": dict(model_selection),
+                }
+                if model_selection
+                else {}
+            ),
         }
     create_reasoning_override = None
     if _effort := str(params.get("reasoning_effort") or "").strip():
@@ -965,6 +893,7 @@ def _(rid, params: dict) -> dict:
             codex_row_config["model_explicit"] = _model_explicit
         if _prov:
             codex_row_config["provider"] = _prov
+    codex_row_config.update(route_config_fields(model_selection, route_snapshot))
     if db is not None:
         try:
             db.sessions.create(
@@ -1013,6 +942,7 @@ def _(rid, params: dict) -> dict:
                     "transient": transient,
                     "control_plane_only": True,
                 },
+                **route_result_fields(route_snapshot),
             },
         )
 
@@ -1033,6 +963,9 @@ def _(rid, params: dict) -> dict:
         "image_counter": 0,
         "pending_title": create_title or None,
         "model_override": session_model_override,
+        "model_selection": dict(model_selection) if model_selection else None,
+        "model_selection_revision": 1 if model_selection else 0,
+        "route_snapshot": dict(route_snapshot) if route_snapshot else None,
         "create_reasoning_override": create_reasoning_override,
         "create_service_tier_override": create_service_tier_override,
         "close_on_disconnect": close_on_disconnect,
@@ -1108,6 +1041,7 @@ def _(rid, params: dict) -> dict:
                 "transient": transient,
                 "control_plane_only": control_plane_only,
             },
+            **route_result_fields(route_snapshot),
         },
     )
 
@@ -1215,234 +1149,6 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5006, str(e))
-
-
-def _session_index_list_item(row: dict) -> dict:
-    """Map a control-plane session_index row to the desktop session list shape.
-
-    P4 keeps the team sidebar shape single-source by always emitting the
-    team-metadata keys. Plain chat sessions receive empty values while team
-    rows receive the joined conversation and latest-active-mission projection.
-    """
-    session_kind = row.get("session_kind") or "hermes_session"
-    conversation_kind = _normalized_conversation_kind(row)
-    is_team_conversation = conversation_kind == "team"
-    active_mission_id = (
-        row.get("active_mission_id")
-        or row.get("team_conversation_active_mission_id")
-        or row.get("mission_id")
-        or ""
-    )
-    item = {
-        "id": row.get("session_id") or "",
-        "title": row.get("title") or "",
-        "display_title": row.get("title") or "",
-        "displayTitle": row.get("title") or "",
-        "preview": row.get("preview") or "",
-        "started_at": row.get("started_at") or 0,
-        "updated_at": row.get("updated_at") or row.get("started_at") or 0,
-        "message_count": row.get("message_count") or 0,
-        "source": row.get("source") or "",
-        "transient": bool(row.get("transient")),
-        "session_kind": session_kind,
-        "conversation_kind": conversation_kind,
-        "agentProfileId": row.get("owner_agent_profile_id") or "",
-        "agent_profile_id": row.get("owner_agent_profile_id") or "",
-        "agentProfileVersionId": row.get("owner_profile_version_id") or "",
-        "runtimeScopeKey": row.get("runtime_scope_key") or "",
-        "runtime_scope_key": row.get("runtime_scope_key") or "",
-        "status": row.get("status") or "",
-        "running": bool(row.get("running")),
-        "waiting_approval": bool(row.get("waiting_approval")),
-        "pending_approval_count": row.get("pending_approval_count") or 0,
-        "active_run_id": row.get("active_run_id") or "",
-        "active_execution_session_id": row.get("active_execution_session_id") or "",
-        "conversation_id": row.get("conversation_id") or "",
-        "team_id": row.get("team_id") or "",
-        "team_conversation_title": row.get("team_conversation_title") or "",
-        "mission_id": row.get("mission_id") or active_mission_id or "",
-        "active_mission_id": active_mission_id,
-        "mission_status": row.get("mission_status") or "",
-        "workspace_binding": _session_index_workspace_binding_contract(
-            row.get("workspace_binding")
-        ),
-        "team_context": _session_index_team_context_contract(row),
-        "derived_state": _session_index_derived_state_contract(row),
-    }
-    if is_team_conversation:
-        if active_mission_id:
-            item["mission_id"] = active_mission_id
-    # Conversation-architecture refactor (P2): team display context joined in
-    # at read time. Only emit when present so plain-chat rows stay clean.
-    if is_team_conversation and row.get("team_id"):
-        team_name = row.get("team_name") or ""
-        team_avatar = _safe_json_decode(row.get("team_avatar_json"))
-        lead_profile_id = row.get("team_lead_profile_id") or ""
-        lead_profile_name = row.get("team_lead_profile_name") or ""
-        lead_profile_avatar = row.get("team_lead_profile_avatar") or ""
-        member_count = int(row.get("team_member_count") or 0)
-        leader_member = _safe_json_decode(row.get("team_leader_member_json")) or {}
-        if not isinstance(leader_member, dict):
-            leader_member = {}
-        display_members = _safe_json_decode(row.get("team_display_members_json")) or []
-        if not isinstance(display_members, list):
-            display_members = []
-        if leader_member and not display_members:
-            display_members = [leader_member]
-        team_block = {
-            "id": row.get("team_id") or "",
-            "name": team_name,
-        }
-        if team_avatar is not None:
-            team_block["avatar"] = team_avatar
-        if lead_profile_id:
-            team_block["lead_agent_profile_id"] = lead_profile_id
-            team_block["leadAgentProfileId"] = lead_profile_id
-        if member_count:
-            team_block["member_count"] = member_count
-            team_block["memberCount"] = member_count
-        if leader_member:
-            team_block["leader_member"] = leader_member
-            team_block["leaderMember"] = leader_member
-        if display_members:
-            team_block["display_members"] = display_members
-            team_block["displayMembers"] = display_members
-        item["team"] = team_block
-        if team_name:
-            item["team_name"] = team_name
-            item["teamName"] = team_name
-        if member_count:
-            item["team_member_count"] = member_count
-            item["teamMemberCount"] = member_count
-        if lead_profile_name:
-            item["lead_profile_name"] = lead_profile_name
-            item["leadProfileName"] = lead_profile_name
-        if lead_profile_avatar:
-            item["lead_profile_avatar"] = lead_profile_avatar
-            item["leadProfileAvatar"] = lead_profile_avatar
-    if row.get("conversation_id"):
-        objective = row.get("team_conversation_objective") or ""
-        workspace_id = row.get("team_conversation_workspace_id") or ""
-        workspace_path = row.get("team_conversation_workspace_path") or ""
-        active_mission_id = row.get("team_conversation_active_mission_id") or ""
-        if objective:
-            item["objective"] = objective
-        if workspace_id:
-            item["workspace_id"] = workspace_id
-            item["workspaceId"] = workspace_id
-        if workspace_path:
-            item["workspace_path"] = workspace_path
-            item["workspacePath"] = workspace_path
-        if active_mission_id and not item.get("active_mission_id"):
-            item["active_mission_id"] = active_mission_id
-    return item
-
-
-def _session_index_workspace_binding_contract(binding: object) -> dict | None:
-    if not isinstance(binding, dict):
-        return None
-    workspace_id = str(binding.get("workspace_id") or binding.get("id") or "").strip()
-    workspace_path = str(
-        binding.get("workspace_path")
-        or binding.get("path")
-        or ((binding.get("workspace") or {}).get("path") if isinstance(binding.get("workspace"), dict) else "")
-        or ""
-    ).strip()
-    if not workspace_id and not workspace_path:
-        return None
-    return {
-        "workspace_id": workspace_id,
-        "workspace_path": workspace_path,
-    }
-
-
-def _session_index_team_context_contract(row: dict) -> dict | None:
-    raw_context = row.get("team_context")
-    if isinstance(raw_context, dict):
-        context = {
-            "team_id": str(raw_context.get("team_id") or "").strip(),
-            "team_conversation_id": str(raw_context.get("team_conversation_id") or "").strip(),
-            "mission_id": str(raw_context.get("mission_id") or "").strip(),
-            "member_id": str(raw_context.get("member_id") or "").strip(),
-        }
-    else:
-        context = {
-            "team_id": str(row.get("team_context_team_id") or row.get("team_id") or "").strip(),
-            "team_conversation_id": str(
-                row.get("team_context_conversation_id") or row.get("conversation_id") or ""
-            ).strip(),
-            "mission_id": str(
-                row.get("team_context_mission_id")
-                or row.get("mission_id")
-                or row.get("active_mission_id")
-                or ""
-            ).strip(),
-            "member_id": str(row.get("team_context_member_id") or "").strip(),
-        }
-    return context if any(context.values()) else None
-
-
-def _session_index_derived_state_contract(row: dict) -> dict:
-    raw_state = row.get("derived_state")
-    if isinstance(raw_state, dict):
-        return {
-            "running": bool(raw_state.get("running")),
-            "waiting_approval": bool(raw_state.get("waiting_approval")),
-            "terminal_status": (
-                str(raw_state.get("terminal_status")).strip()
-                if raw_state.get("terminal_status") is not None
-                else None
-            ) or None,
-        }
-    return {
-        "running": bool(row.get("derived_running", row.get("running"))),
-        "waiting_approval": bool(
-            row.get("derived_waiting_approval", row.get("waiting_approval"))
-        ),
-        "terminal_status": (
-            str(row.get("derived_terminal_status")).strip()
-            if row.get("derived_terminal_status") is not None
-            else None
-        ) or None,
-    }
-
-
-def _session_index_workspace_bindings_for_rows(rows: list[dict]) -> dict[str, dict]:
-    session_ids = [
-        str(row.get("session_id") or row.get("id") or "").strip()
-        for row in rows
-        if isinstance(row, dict)
-    ]
-    session_ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id]
-    if not session_ids:
-        return {}
-    try:
-        bindings = _session_workspace_bindings_by_session_ids(session_ids)
-    except Exception:
-        return {}
-    return bindings if isinstance(bindings, dict) else {}
-
-
-def _session_index_row_with_active_mission_running(db, row: dict) -> dict:
-    item = dict(row or {})
-    is_team_conversation = _normalized_conversation_kind(item) == "team"
-    conversation_id = str(item.get("conversation_id") or "").strip()
-    has_active_mission = getattr(db, "has_active_mission", None)
-    if is_team_conversation and conversation_id and callable(has_active_mission):
-        item["running"] = bool(has_active_mission(conversation_id))
-    return item
-
-
-def _safe_json_decode(value):
-    if not value:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        import json
-        return json.loads(str(value))
-    except (TypeError, ValueError):
-        return None
 
 
 @method("session.index.list")

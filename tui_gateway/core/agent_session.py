@@ -728,6 +728,30 @@ def _make_agent(
         "requested": requested_provider,
         "target_model": model or None,
     }
+    _connection_id = _first_text(
+        (_override or {}).get("connection_id"),
+        (
+            (_override or {}).get("model_selection") or {}
+        ).get("connection_id")
+        if isinstance((_override or {}).get("model_selection"), dict)
+        else "",
+    )
+    if not _connection_id:
+        try:
+            from tui_gateway.core.session_config import (
+                _persisted_session_model_selection,
+            )
+
+            _persisted_selection = _persisted_session_model_selection(
+                session_id or key
+            )
+            _connection_id = str(
+                _persisted_selection.get("connection_id") or ""
+            ).strip()
+        except Exception:
+            _connection_id = ""
+    if _connection_id and _connection_id != "cloud:dovie":
+        runtime_kwargs["connection_id"] = _connection_id
     if _runtime_executor:
         runtime_kwargs["runtime_executor"] = _runtime_executor
     if _codex_home:
@@ -838,6 +862,27 @@ def _make_agent(
         agent.codex_explicit_model = (
             model if _codex_account_mode == "platform" and _model_explicit else ""
         )
+    agent._managed_connection_id = str(runtime.get("connection_id") or "")
+    agent._managed_credential_generation = int(
+        runtime.get("credential_generation") or 0
+    )
+    agent._managed_credential_lease_id = str(
+        runtime.get("credential_lease_id") or ""
+    )
+    if agent._managed_connection_id:
+        try:
+            from hermes_cli.model_connections import ModelConnectionRepository
+
+            _managed_connection = ModelConnectionRepository.for_runtime().get(
+                agent._managed_connection_id
+            )
+        except Exception:
+            _managed_connection = None
+        agent._managed_credential_ref = str(
+            (_managed_connection or {}).get("credential_ref") or ""
+        )
+    else:
+        agent._managed_credential_ref = ""
     remember_requested_runtime_provider(agent, runtime, requested_provider)
     try:
         from agent.credits_tracker import seed_credits_at_session_start

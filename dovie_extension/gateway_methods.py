@@ -22,6 +22,7 @@ MODULES = (
     "hermes_team_mission.gateway.memory_methods",
     "hermes_team_mission.gateway.history_methods",
     "tui_gateway.methods.model",
+    "tui_gateway.methods.model_connections",
     "tui_gateway.methods.prompt",
     "tui_gateway.methods.integrations",
     "tui_gateway.methods.dovie_capabilities",

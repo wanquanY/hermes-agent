@@ -732,6 +732,14 @@ def _submit_message_to_member(
             agent_role="team_member",
         ),
     }
+    for route_field in (
+        "resolution_id",
+        "route_fingerprint",
+        "execution_target",
+        "expected_session_revision",
+    ):
+        if params.get(route_field) not in (None, "", {}, []):
+            submit_params[route_field] = params[route_field]
     if not member_requests_codex_runtime and "model" in params:
         submit_params["model"] = params["model"]
     if not member_requests_codex_runtime and (

@@ -47,13 +47,24 @@ def ensure_agent_runtime_current(
     ).strip() or None
     if requested_provider is None:
         return False
+    raw_connection_id = getattr(agent, "_managed_connection_id", "")
+    managed_connection_id = (
+        raw_connection_id.strip()
+        if isinstance(raw_connection_id, str)
+        else ""
+    )
 
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     model = str(getattr(agent, "model", "") or resolve_model()).strip()
+    runtime_kwargs = {
+        "requested": requested_provider,
+        "target_model": model or None,
+    }
+    if managed_connection_id:
+        runtime_kwargs["connection_id"] = managed_connection_id
     runtime = resolve_runtime_provider(
-        requested=requested_provider,
-        target_model=model or None,
+        **runtime_kwargs,
     )
     from tui_gateway.services.model_descriptor import model_descriptor_api_mode
 
@@ -65,8 +76,12 @@ def ensure_agent_runtime_current(
     # refresh from silently downgrading a Responses model back to the
     # provider's compatibility default (usually chat_completions).
     next_api_mode = (
-        model_descriptor_api_mode(session.get("model_descriptor"))
-        or runtime.get("api_mode")
+        runtime.get("api_mode")
+        if managed_connection_id
+        else (
+            model_descriptor_api_mode(session.get("model_descriptor"))
+            or runtime.get("api_mode")
+        )
     )
     changed = (
         getattr(agent, "provider", None) != next_provider
@@ -94,6 +109,13 @@ def ensure_agent_runtime_current(
         agent.api_mode = next_api_mode
 
     remember_requested_runtime_provider(agent, runtime, requested_provider)
+    if managed_connection_id:
+        agent._managed_credential_generation = int(
+            runtime.get("credential_generation") or 0
+        )
+        agent._managed_credential_lease_id = str(
+            runtime.get("credential_lease_id") or ""
+        )
     if runtime.get("credential_pool") is not None:
         agent._credential_pool = runtime.get("credential_pool")
     descriptor = session.get("model_descriptor")
