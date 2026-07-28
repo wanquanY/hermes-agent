@@ -12,7 +12,6 @@ MAX_PRODUCTION_FILE_LINES = 2_000
 # pinned to the committed baseline, so they can shrink but never grow and no
 # new oversized gateway module can be introduced.
 LEGACY_LINE_CEILINGS = {
-    "tui_gateway/methods/session.py": 2_282,
     "tui_gateway/services/run_control.py": 3_278,
 }
 

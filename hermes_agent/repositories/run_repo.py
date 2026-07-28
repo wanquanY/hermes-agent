@@ -595,12 +595,13 @@ class RunRepoImpl:
             and terminal_status in TERMINAL_RUN_STATUSES
             and prefer_terminal_run_status(existing_status, terminal_status) == existing_status
         ):
-            return self._existing_terminal_event(
+            terminal_event = self._existing_terminal_event(
                 stable,
                 run_id,
                 existing_status,
                 existing,
             )
+            return terminal_event
 
         canonical_seq = allocate_run_event_seq(
             self._conn,

@@ -22,150 +22,136 @@ from hermes_profile_dir import resolve_default_agent_dir
 _log = logging.getLogger(__name__)
 
 
-_CONTROL_PLANE_METHODS = frozenset(
-    {
-        "artifacts.list",
-        "conversation.activity.list",
-        "conversation.delete",
-        "conversation.render_snapshot",
-        "capability.operation.get",
-        "capability.operation.start",
-        "dovie.capabilities.reconcile",
-        "events.compact",
-        "events.prune",
-        "events.subscribe",
-        "events.unsubscribe",
-        "mcp.manage",
-        "mcp.servers.list",
-        "model.connection.activate",
-        "model.connection.delete",
-        "model.connection.get",
-        "model.connection.list",
-        "model.connection.upsert",
-        "model.connection.validate",
-        "model.credential.refresh",
-        "model.manual_model.delete",
-        "model.manual_model.upsert",
-        "model.picker_visibility.set",
-        "model.set",
-        "profile.archive",
-        "profile.draft.discard",
-        "profile.draft.get",
-        "profile.draft.list",
-        "profile.draft.upsert",
-        "profile.get",
-        "profile.growth.summary",
-        "profile.learning.graph",
-        "profile.learning.node.delete",
-        "profile.learning.node.detail",
-        "profile.learning.node.edit",
-        "learning.frames",
-        "learning.detail",
-        "learning.delete",
-        "learning.edit",
-        "pet.cells",
-        "pet.gallery",
-        "pet.select",
-        "pet.remove",
-        "pet.disable",
-        "pet.scale",
-        "profile.list",
-        "profile.upsert",
-        "presentation.slide.regenerate",
-        "run.events",
-        "run.retry.prepare",
-        "runtime.ensure",
-        "session.list",
-        "session.messages",
-        "session.message_metadata.merge",
-        "session.status",
-        "session.title",
-        "project.facts",
-        "verification.status",
-        "team_mission.conversation.delete",
-        "team_mission.conversation.ensure",
-        "team_mission.conversation.list",
-        "team_mission.conversation.participants",
-        "team_mission.conversation.rename",
-        "team_mission.conversation.render",
-        "team_mission.conversation.resolve",
-        "team_mission.conversation.execution_session_ids",
-        "team_mission.create",
-        "team_mission.events",
-        "team_mission.graph",
-        "team_mission.graph.reduce",
-        "team_mission.snapshot.get",
-        "team_mission.result.get",
-        "team_mission.message.submit",
-        "team_mission.node.history",
-        "terminal.session.close",
-        "terminal.session.list",
-        "terminal.session.open",
-        "terminal.session.resize",
-        "terminal.session.write",
-    }
-)
+_CONTROL_PLANE_METHODS = frozenset({
+    "artifacts.list",
+    "conversation.activity.list",
+    "conversation.delete",
+    "conversation.render_snapshot",
+    "capability.operation.get",
+    "capability.operation.start",
+    "dovie.capabilities.reconcile",
+    "events.compact",
+    "events.prune",
+    "events.subscribe",
+    "events.unsubscribe",
+    "mcp.manage",
+    "mcp.servers.list",
+    "model.connection.activate",
+    "model.connection.delete",
+    "model.connection.get",
+    "model.connection.list",
+    "model.connection.upsert",
+    "model.connection.validate",
+    "model.credential.refresh",
+    "model.manual_model.delete",
+    "model.manual_model.upsert",
+    "model.picker_visibility.set",
+    "model.set",
+    "profile.archive",
+    "profile.draft.discard",
+    "profile.draft.get",
+    "profile.draft.list",
+    "profile.draft.upsert",
+    "profile.get",
+    "profile.growth.summary",
+    "profile.learning.graph",
+    "profile.learning.node.delete",
+    "profile.learning.node.detail",
+    "profile.learning.node.edit",
+    "learning.frames",
+    "learning.detail",
+    "learning.delete",
+    "learning.edit",
+    "pet.cells",
+    "pet.gallery",
+    "pet.select",
+    "pet.remove",
+    "pet.disable",
+    "pet.scale",
+    "profile.list",
+    "profile.upsert",
+    "presentation.slide.regenerate",
+    "run.events",
+    "run.retry.prepare",
+    "runtime.ensure",
+    "session.list",
+    "session.messages",
+    "session.message_metadata.merge",
+    "session.status",
+    "session.title",
+    "project.facts",
+    "verification.status",
+    "team_mission.conversation.delete",
+    "team_mission.conversation.ensure",
+    "team_mission.conversation.list",
+    "team_mission.conversation.participants",
+    "team_mission.conversation.rename",
+    "team_mission.conversation.render",
+    "team_mission.conversation.resolve",
+    "team_mission.conversation.execution_session_ids",
+    "team_mission.create",
+    "team_mission.events",
+    "team_mission.graph",
+    "team_mission.graph.reduce",
+    "team_mission.snapshot.get",
+    "team_mission.result.get",
+    "team_mission.message.submit",
+    "team_mission.node.history",
+    "terminal.session.close",
+    "terminal.session.list",
+    "terminal.session.open",
+    "terminal.session.resize",
+    "terminal.session.write",
+})
 
-_RUNTIME_AGENT_METHODS = frozenset(
-    {
-        "prompt.submit",
-        "run.submit",
-    }
-)
+_RUNTIME_AGENT_METHODS = frozenset({
+    "prompt.submit",
+    "run.submit",
+})
 
-_RUNTIME_STATE_READ_METHODS = frozenset(
-    {
-        "run.list",
-        "run.status",
-    }
-)
+_RUNTIME_STATE_READ_METHODS = frozenset({
+    "run.list",
+    "run.status",
+})
 
-_RUNTIME_MUTATION_METHODS = frozenset(
-    {
-        "team_mission.cancel",
-        "team_mission.node.update",
-        "team_mission.plan.approve",
-        "team_mission.plan.reject",
-        "team_mission.schedule.ready",
-    }
-)
+_RUNTIME_MUTATION_METHODS = frozenset({
+    "team_mission.cancel",
+    "team_mission.node.update",
+    "team_mission.plan.approve",
+    "team_mission.plan.reject",
+    "team_mission.schedule.ready",
+})
 
-_RUNTIME_REGISTRY_METHODS = frozenset(
-    {
-        "reload.mcp",
-        "reload.tools",
-        "run.prepare",
-        "skills.reload",
-        "toolsets.list",
-        "tools.configure",
-        "write_approval.approve",
-        "write_approval.configure",
-        "write_approval.detail",
-        "write_approval.list",
-        "write_approval.reject",
-        "write_approval.status",
-    }
-)
+_RUNTIME_REGISTRY_METHODS = frozenset({
+    "reload.mcp",
+    "reload.tools",
+    "run.prepare",
+    "skills.reload",
+    "toolsets.list",
+    "tools.configure",
+    "write_approval.approve",
+    "write_approval.configure",
+    "write_approval.detail",
+    "write_approval.list",
+    "write_approval.reject",
+    "write_approval.status",
+})
 
-_INTERACTIVE_RESPONSE_METHODS = frozenset(
-    {
-        "approval.respond",
-        "clarify.respond",
-        "secret.respond",
-        "sudo.respond",
-        "terminal.list.respond",
-        "terminal.read.respond",
-        "terminal.write.respond",
-    }
-)
+_INTERACTIVE_RESPONSE_METHODS = frozenset({
+    "approval.respond",
+    "clarify.respond",
+    "secret.respond",
+    "sudo.respond",
+    "terminal.list.respond",
+    "terminal.read.respond",
+    "terminal.write.respond",
+})
 
-_CONTROL_PLANE_INTERACTIVE_METHODS = frozenset(
-    {
-        "approval.pending.list",
-        "approval.policy.get",
-        "approval.policy.set",
-    }
-)
+_CONTROL_PLANE_INTERACTIVE_METHODS = frozenset({
+    "approval.pending.list",
+    "approval.policy.get",
+    "approval.policy.set",
+})
 
 _CRON_RUNTIME_ACTIONS = frozenset({"add", "update", "remove", "run", "pause", "resume"})
 _CRON_CONTROL_PLANE_ACTIONS = frozenset({"", "list", "status", "runs"})
@@ -299,10 +285,14 @@ def should_route_to_worker(req: Any, *, resolve_team_context: bool = True) -> bo
 
     if method == "cron.manage":
         action = str(params.get("action") or "").strip().lower()
-        control_plane_only = bool(params.get("controlPlaneOnly") or params.get("control_plane_only"))
+        control_plane_only = bool(
+            params.get("controlPlaneOnly") or params.get("control_plane_only")
+        )
         if control_plane_only and action in _CRON_CONTROL_PLANE_ACTIONS:
             return False
-        return scope.has_scope and (action in _CRON_RUNTIME_ACTIONS or not control_plane_only)
+        return scope.has_scope and (
+            action in _CRON_RUNTIME_ACTIONS or not control_plane_only
+        )
 
     if method == "clarify.respond" and _is_local_clarify_response(params):
         return False
