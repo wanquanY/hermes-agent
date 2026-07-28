@@ -17,6 +17,7 @@ runtime is not selected.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -25,9 +26,94 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from hermes_constants import get_hermes_home
+from tools.environments.local import hermes_subprocess_env
+
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+logger = logging.getLogger(__name__)
+
+
+_DETECTED_USER_HTTPS_PROXY: Optional[str] = None
+_DETECT_USER_PROXY_ATTEMPTED = False
+
+
+def _detect_user_https_proxy() -> Optional[str]:
+    """Discover an HTTPS proxy the user has configured outside the worker env.
+
+    Hermes workers spawned from Electron/GUI paths don't inherit the login
+    shell's HTTPS_PROXY. When a user is behind clash/v2ray/corporate proxy,
+    the codex WSS client then direct-connects and burns 100+s on 5 retries
+    before falling back to HTTPS. Try a couple of cheap probes and cache
+    the answer so repeated codex spawns don't pay the cost. Returns None
+    (also cached) when nothing found — the codex spawn proceeds proxy-less
+    like today.
+    """
+    global _DETECTED_USER_HTTPS_PROXY, _DETECT_USER_PROXY_ATTEMPTED
+    if _DETECT_USER_PROXY_ATTEMPTED:
+        return _DETECTED_USER_HTTPS_PROXY
+    _DETECT_USER_PROXY_ATTEMPTED = True
+    # 1. macOS system-wide proxy (System Settings → Network → Proxies).
+    try:
+        proc = subprocess.run(
+            ["scutil", "--proxy"],
+            capture_output=True, text=True, timeout=1.5,
+            stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            https_enabled = False
+            host = ""
+            port = ""
+            for raw in proc.stdout.splitlines():
+                line = raw.strip()
+                if line.startswith("HTTPSEnable"):
+                    https_enabled = line.endswith(": 1")
+                elif line.startswith("HTTPSProxy"):
+                    host = line.split(":", 1)[1].strip()
+                elif line.startswith("HTTPSPort"):
+                    port = line.split(":", 1)[1].strip()
+            if https_enabled and host and port:
+                _DETECTED_USER_HTTPS_PROXY = f"http://{host}:{port}"
+                return _DETECTED_USER_HTTPS_PROXY
+    except Exception:
+        pass
+    # 2. Login shell env (zshrc/bashrc) — matches how CLI codex works.
+    try:
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        proc = subprocess.run(
+            [shell, "-ilc", "printf %s \"$HTTPS_PROXY\""],
+            capture_output=True, text=True, timeout=2.0,
+            stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode == 0:
+            value = (proc.stdout or "").strip()
+            if value:
+                _DETECTED_USER_HTTPS_PROXY = value
+                return _DETECTED_USER_HTTPS_PROXY
+    except Exception:
+        pass
+    return None
+
+
+def _kanban_writable_root(spawn_env: dict[str, str]) -> str:
+    """Return the narrow Kanban board root for Codex workspace-write workers."""
+    legacy_db = spawn_env.get("HERMES_KANBAN_DB", "").strip()
+    if legacy_db:
+        return os.path.dirname(legacy_db)
+
+    explicit_root = spawn_env.get("HERMES_KANBAN_ROOT", "").strip()
+    if explicit_root:
+        return explicit_root
+
+    kanban_home = spawn_env.get("HERMES_KANBAN_HOME", "").strip() or spawn_env.get(
+        "HERMES_HOME",
+        str(get_hermes_home()),
+    )
+    board = spawn_env.get("HERMES_KANBAN_BOARD", "").strip()
+    if board and board != "default":
+        return os.path.join(kanban_home, "kanban", "boards", board)
+    return kanban_home
 
 
 @dataclass
@@ -74,12 +160,73 @@ class CodexAppServerClient:
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        cmd = [codex_bin, "app-server"] + list(extra_args or [])
-        spawn_env = os.environ.copy()
-        if env:
-            spawn_env.update(env)
+        spawn_env = hermes_subprocess_env(
+            inherit_credentials=True,
+            extra_env=env,
+        )
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
+
+        app_server_args = list(extra_args or [])
+        # Kanban workers must be able to write their handoff/status back to
+        # the board DB, which lives outside the per-task workspace. Keep the
+        # Codex sandbox on, but add the Kanban root as the only extra writable
+        # root. Without this, codex-runtime workers finish their actual work
+        # but crash/block when kanban_complete/kanban_block writes SQLite.
+        if spawn_env.get("HERMES_KANBAN_TASK"):
+            kanban_root = _kanban_writable_root(spawn_env)
+            app_server_args.extend(
+                [
+                    "-c",
+                    'sandbox_mode="workspace-write"',
+                    "-c",
+                    f'sandbox_workspace_write.writable_roots=["{kanban_root}"]',
+                    "-c",
+                    "sandbox_workspace_write.network_access=false",
+                ]
+            )
+
+        # Codex app-server prefers WebSocket transport for openai realtime
+        # (streaming responses over WSS) and only falls back to HTTPS after
+        # 5 timeouts (~100s) if the WSS connect fails. Users behind a proxy
+        # (clash / v2ray / corporate) usually export HTTP_PROXY / HTTPS_PROXY
+        # but not WSS_PROXY — the codex WSS client uses a separate env var
+        # for its WebSocket path and, without it, direct-connects to the
+        # openai realtime endpoint (blocked/slow on many networks) instead
+        # of tunneling through the proxy. Auto-mirror HTTPS_PROXY into
+        # WSS_PROXY so the WSS path uses the same tunnel and first-turn
+        # latency drops from ~100s to a few seconds.
+        #
+        # Fallback chain when spawn_env has no proxy: hermes workers spawned
+        # from Electron (macOS Dovie desktop) do NOT inherit the user's shell
+        # HTTPS_PROXY — GUI launches don't source zshrc, and pnpm dev's env
+        # gets sanitized somewhere in the electron→hermes-gateway→worker chain.
+        # Probe (once, cached) the macOS system proxy and login shell so the
+        # codex WSS connect can pick up the user's proxy regardless of the
+        # electron launch path. A user-provided WSS_PROXY still wins.
+        _env_https = spawn_env.get("HTTPS_PROXY") or spawn_env.get("https_proxy")
+        _detected = None if _env_https else _detect_user_https_proxy()
+        _https_proxy = _env_https or _detected
+        logger.debug("[codex-perf][proxy] env_https=%r detected=%r effective=%r",
+            _env_https, _detected, _https_proxy,
+        )
+        if _https_proxy:
+            spawn_env.setdefault("HTTPS_PROXY", _https_proxy)
+            spawn_env.setdefault("https_proxy", _https_proxy)
+            spawn_env.setdefault("WSS_PROXY", _https_proxy)
+            spawn_env.setdefault("wss_proxy", _https_proxy)
+        _http_proxy = (
+            spawn_env.get("HTTP_PROXY")
+            or spawn_env.get("http_proxy")
+            or _https_proxy
+        )
+        if _http_proxy:
+            spawn_env.setdefault("HTTP_PROXY", _http_proxy)
+            spawn_env.setdefault("http_proxy", _http_proxy)
+            spawn_env.setdefault("ALL_PROXY", _http_proxy)
+            spawn_env.setdefault("all_proxy", _http_proxy)
+
+        cmd = [codex_bin, "app-server"] + app_server_args
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
@@ -347,6 +494,7 @@ def check_codex_binary(
             capture_output=True,
             text=True,
             timeout=10,
+            stdin=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         return False, (

@@ -101,6 +101,7 @@ class TestCompletionQueue:
         assert completion["session_id"] == s.id
         assert completion["command"] == "echo hello"
         assert completion["exit_code"] == 0
+        assert completion["started_at"] == s.started_at
         assert "build succeeded" in completion["output"]
 
     def test_move_to_finished_nonzero_exit(self, registry):
@@ -318,8 +319,8 @@ class TestCompletionConsumed:
         # Now the completion is marked as consumed
         assert registry.is_completion_consumed("proc_wait")
 
-    def test_poll_marks_completion_consumed(self, registry):
-        """poll() returning exited status marks session as consumed."""
+    def test_poll_observes_without_consuming_completion(self, registry):
+        """poll() deduplicates CLI injection but keeps watcher delivery alive."""
         s = _make_session(sid="proc_poll", notify_on_complete=True, output="done")
         s.exited = True
         s.exit_code = 0
@@ -327,7 +328,8 @@ class TestCompletionConsumed:
 
         result = registry.poll("proc_poll")
         assert result["status"] == "exited"
-        assert registry.is_completion_consumed("proc_poll")
+        assert not registry.is_completion_consumed("proc_poll")
+        assert registry._drain_should_skip("proc_poll")
 
     def test_log_marks_completion_consumed(self, registry):
         """read_log() on exited session marks as consumed."""

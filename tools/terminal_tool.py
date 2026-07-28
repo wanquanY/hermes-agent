@@ -47,7 +47,18 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+from utils import env_var_enabled
+
 logger = logging.getLogger(__name__)
+
+
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from channels.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +254,11 @@ def _get_approval_callback():
     return getattr(_callback_tls, "approval", None)
 
 
+def get_approval_callback():
+    """Return the active thread-scoped approval UI callback."""
+    return _get_approval_callback()
+
+
 def set_sudo_password_callback(cb):
     """Register a callback for sudo password prompts (used by CLI).
 
@@ -265,7 +281,7 @@ def set_approval_callback(cb):
 def _get_sudo_password_cache_scope() -> str:
     """Return the cache scope for interactive sudo passwords."""
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
 
         session_key = get_session_env("HERMES_SESSION_KEY", "")
     except Exception:
@@ -319,10 +335,39 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _docker_volume_uses_host_path(volume_spec: str) -> bool:
+    if not isinstance(volume_spec, str):
+        return False
+    volume = volume_spec.strip()
+    return bool(volume) and (
+        volume.startswith(("/", "~", "./", "../"))
+        or (len(volume) >= 3 and volume[1] == ":" and volume[2] in ("/", "\\"))
+    )
+
+
+def _docker_has_host_access(config: Dict[str, Any]) -> bool:
+    if config.get("env_type") != "docker":
+        return False
+    if config.get("host_cwd") and config.get("docker_mount_cwd_to_workspace"):
+        return True
+    return any(
+        _docker_volume_uses_host_path(volume)
+        for volume in config.get("docker_volumes", [])
+    )
+
+
+def _check_all_guards(
+    command: str,
+    env_type: str,
+    has_host_access: bool = False,
+) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
-    return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback())
+    return _check_all_guards_impl(
+        command,
+        env_type,
+        approval_callback=_get_approval_callback(),
+        has_host_access=has_host_access,
+    )
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -360,7 +405,7 @@ def _handle_sudo_failure(output: str, env_type: str) -> str:
     
     Returns enhanced output if sudo failed in messaging context, else original.
     """
-    is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
+    is_gateway = env_var_enabled("HERMES_GATEWAY_SESSION")
     
     if not is_gateway:
         return output
@@ -868,7 +913,7 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     if not has_configured_password and not sudo_password and _sudo_nopasswd_works():
         return command, None
 
-    if not has_configured_password and not sudo_password and os.getenv("HERMES_INTERACTIVE"):
+    if not has_configured_password and not sudo_password and env_var_enabled("HERMES_INTERACTIVE"):
         sudo_password = _prompt_for_sudo_password(timeout_seconds=45)
         if sudo_password:
             _set_cached_sudo_password(sudo_password)
@@ -951,6 +996,20 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         overrides: Dict of config keys to override
     """
     _task_env_overrides[task_id] = overrides
+    override_cwd = str(overrides.get("cwd") or "").strip()
+    if override_cwd:
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+
+        session_key = resolve_terminal_session_key(task_id)
+        terminal_cwd_registry.record(task_id, session_key, override_cwd)
+        with terminal_cwd_registry.execution_guard(task_id):
+            with _env_lock:
+                live_env = _active_environments.get(task_id)
+                if live_env is not None:
+                    live_env.cwd = override_cwd
 
 
 def clear_task_env_overrides(task_id: str):
@@ -1015,8 +1074,9 @@ def _get_env_config() -> Dict[str, Any]:
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
+    dovie_workspace_root = os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
     if env_type == "local":
-        default_cwd = os.getcwd()
+        default_cwd = dovie_workspace_root or os.getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
     elif env_type == "vercel_sandbox":
@@ -1028,13 +1088,13 @@ def _get_env_config() -> Dict[str, Any]:
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
-    cwd = os.getenv("TERMINAL_CWD", default_cwd)
+    cwd = _session_env("TERMINAL_CWD", default_cwd) or default_cwd
     if cwd:
         cwd = os.path.expanduser(cwd)
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
-        docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
+        docker_cwd_source = _session_env("TERMINAL_CWD", "") or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
             any(candidate.startswith(p) for p in host_prefixes)
@@ -1252,6 +1312,59 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
 
+def get_environment(config: Dict[str, Any], task_id: str = "default"):
+    """Create an execution environment from a terminal config dictionary."""
+    env_type = str(config.get("env_type") or "local")
+    image = (
+        config.get("docker_image")
+        or config.get("singularity_image")
+        or config.get("modal_image")
+        or config.get("daytona_image")
+        or ""
+    )
+    ssh_config = None
+    if env_type == "ssh":
+        ssh_config = {
+            "host": config.get("ssh_host", ""),
+            "user": config.get("ssh_user", ""),
+            "port": config.get("ssh_port", 22),
+            "key": config.get("ssh_key", ""),
+            "persistent": config.get("ssh_persistent", False),
+        }
+    container_config = None
+    if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+        container_config = {
+            "container_cpu": config.get("container_cpu", 1),
+            "container_memory": config.get("container_memory", 5120),
+            "container_disk": config.get("container_disk", 51200),
+            "container_persistent": config.get("container_persistent", True),
+            "modal_mode": config.get("modal_mode", "auto"),
+            "vercel_runtime": config.get("vercel_runtime", ""),
+            "docker_volumes": config.get("docker_volumes", []),
+            "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+            "docker_forward_env": config.get("docker_forward_env", []),
+            "docker_env": config.get("docker_env", {}),
+            "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
+            "docker_extra_args": config.get("docker_extra_args", []),
+        }
+    local_config = None
+    if env_type == "local":
+        local_config = {
+            "persistent": config.get("local_persistent", False),
+        }
+    return _create_environment(
+        env_type=env_type,
+        image=image,
+        cwd=str(config.get("cwd") or os.getcwd()),
+        timeout=int(config.get("timeout") or 180),
+        ssh_config=ssh_config,
+        container_config=container_config,
+        local_config=local_config,
+        task_id=task_id,
+        host_cwd=config.get("host_cwd"),
+    )
+
+
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     """Clean up environments that have been inactive for longer than lifetime_seconds."""
     current_time = time.time()
@@ -1288,6 +1401,9 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     # Phase 2: stop the actual sandboxes OUTSIDE the lock so other tool calls
     # are not blocked while Modal/Docker sandboxes shut down.
     for task_id, env in envs_to_stop:
+        from tools.terminal_cwd_registry import terminal_cwd_registry
+
+        terminal_cwd_registry.discard_environment(task_id)
         # Invalidate stale file_ops cache entry (Bug fix: prevents
         # ShellFileOperations from referencing a dead sandbox)
         try:
@@ -1413,6 +1529,11 @@ def cleanup_vm(task_id: str):
     with _env_lock:
         env = _active_environments.pop(task_id, None)
         _last_activity.pop(task_id, None)
+
+    if env is not None:
+        from tools.terminal_cwd_registry import terminal_cwd_registry
+
+        terminal_cwd_registry.discard_environment(task_id)
 
     # Clean up per-task creation lock
     with _creation_locks_lock:
@@ -1717,6 +1838,12 @@ def terminal_tool(
         # every delegate_task child share one container; only task_ids with
         # a registered env override (RL benchmarks) get isolated sandboxes.
         effective_task_id = _resolve_container_task_id(task_id)
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+
+        terminal_session_key = resolve_terminal_session_key(task_id)
 
         # Check per-task overrides (set by environments like TerminalBench2Env)
         # before falling back to global env var config
@@ -1858,18 +1985,25 @@ def terminal_tool(
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
         if not force:
-            approval = _check_all_guards(command, env_type)
+            approval = _check_all_guards(
+                command,
+                env_type,
+                has_host_access=_docker_has_host_access(config),
+            )
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
-                if approval.get("status") == "approval_required":
+                if approval.get("status") == "pending_approval":
                     return json.dumps({
                         "output": "",
                         "exit_code": -1,
-                        "error": approval.get("message", "Waiting for user approval"),
-                        "status": "approval_required",
+                        "error": "",
+                        "status": "pending_approval",
+                        "approval_pending": True,
                         "command": approval.get("command", command),
                         "description": approval.get("description", "command flagged"),
                         "pattern_key": approval.get("pattern_key", ""),
+                        "smart_denied": approval.get("smart_denied", False),
+                        "allow_permanent": approval.get("allow_permanent", True),
                     }, ensure_ascii=False)
                 # Command was blocked
                 desc = approval.get("description", "command flagged")
@@ -1920,11 +2054,16 @@ def terminal_tool(
             # Spawn a tracked background process via the process registry.
             # For local backends: uses subprocess.Popen with output buffering.
             # For non-local backends: runs inside the sandbox via env.execute().
-            from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
 
-            session_key = get_current_session_key(default="")
-            effective_cwd = workdir or cwd
+            session_key = terminal_session_key
+            notification_session_key = session_key
+            effective_cwd = terminal_cwd_registry.resolve(
+                environment_key=effective_task_id,
+                session_key=terminal_session_key,
+                default_cwd=cwd,
+                explicit_workdir=workdir,
+            )
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
@@ -1960,18 +2099,23 @@ def terminal_tool(
                 # watch-pattern and completion notifications can be
                 # routed back to the correct chat/thread.
                 if background and (notify_on_complete or watch_patterns):
-                    from gateway.session_context import get_session_env as _gse
-                    _gw_platform = _gse("HERMES_SESSION_PLATFORM", "")
+                    from channels.session_context import get_session_context_env as _gcse
+
+                    _gw_platform = _gcse("HERMES_SESSION_PLATFORM", "")
+                    notification_session_key = _gcse("HERMES_SESSION_KEY", "")
+                    proc_session.session_key = notification_session_key
                     if _gw_platform:
-                        _gw_chat_id = _gse("HERMES_SESSION_CHAT_ID", "")
-                        _gw_thread_id = _gse("HERMES_SESSION_THREAD_ID", "")
-                        _gw_user_id = _gse("HERMES_SESSION_USER_ID", "")
-                        _gw_user_name = _gse("HERMES_SESSION_USER_NAME", "")
+                        _gw_chat_id = _gcse("HERMES_SESSION_CHAT_ID", "")
+                        _gw_thread_id = _gcse("HERMES_SESSION_THREAD_ID", "")
+                        _gw_user_id = _gcse("HERMES_SESSION_USER_ID", "")
+                        _gw_user_name = _gcse("HERMES_SESSION_USER_NAME", "")
+                        _gw_message_id = _gcse("HERMES_SESSION_MESSAGE_ID", "")
                         proc_session.watcher_platform = _gw_platform
                         proc_session.watcher_chat_id = _gw_chat_id
                         proc_session.watcher_user_id = _gw_user_id
                         proc_session.watcher_user_name = _gw_user_name
                         proc_session.watcher_thread_id = _gw_thread_id
+                        proc_session.watcher_message_id = _gw_message_id
 
                 # Mutual exclusion: if both notify_on_complete and watch_patterns
                 # are set, drop watch_patterns. The combination produces duplicate
@@ -1989,6 +2133,22 @@ def terminal_tool(
                     logger.warning("background proc %s: %s", proc_session.id, conflict_note)
                     result_data["watch_patterns_ignored"] = conflict_note
 
+                if background and (notify_on_complete or watch_patterns):
+                    from channels.session_context import async_delivery_supported
+
+                    if not async_delivery_supported():
+                        notify_on_complete = False
+                        watch_patterns = []
+                        unsupported_note = (
+                            "This session cannot receive asynchronous tool "
+                            "completion notifications. Poll the process session "
+                            "status instead."
+                        )
+                        result_data["notify_on_complete"] = False
+                        result_data["notify_unsupported"] = unsupported_note
+                        proc_session.notify_on_complete = False
+                        proc_session.watch_patterns = []
+
                 # Mark for agent notification on completion
                 if notify_on_complete and background:
                     proc_session.notify_on_complete = True
@@ -2002,12 +2162,13 @@ def terminal_tool(
                         process_registry.pending_watchers.append({
                             "session_id": proc_session.id,
                             "check_interval": 5,
-                            "session_key": session_key,
+                            "session_key": notification_session_key,
                             "platform": proc_session.watcher_platform,
                             "chat_id": proc_session.watcher_chat_id,
                             "user_id": proc_session.watcher_user_id,
                             "user_name": proc_session.watcher_user_name,
                             "thread_id": proc_session.watcher_thread_id,
+                            "message_id": proc_session.watcher_message_id,
                             "notify_on_complete": True,
                         })
 
@@ -2031,11 +2192,23 @@ def terminal_tool(
             
             while retry_count <= max_retries:
                 try:
-                    execute_kwargs = {
-                        "timeout": effective_timeout,
-                        "cwd": workdir or cwd,
-                    }
-                    result = env.execute(command, **execute_kwargs)
+                    with terminal_cwd_registry.execution_guard(effective_task_id):
+                        effective_cwd = terminal_cwd_registry.resolve(
+                            environment_key=effective_task_id,
+                            session_key=terminal_session_key,
+                            default_cwd=cwd,
+                            explicit_workdir=workdir,
+                        )
+                        execute_kwargs = {
+                            "timeout": effective_timeout,
+                            "cwd": effective_cwd,
+                        }
+                        result = env.execute(command, **execute_kwargs)
+                        terminal_cwd_registry.record(
+                            effective_task_id,
+                            terminal_session_key,
+                            getattr(env, "cwd", effective_cwd),
+                        )
                 except Exception as e:
                     error_str = str(e).lower()
                     if "timeout" in error_str:
@@ -2111,9 +2284,11 @@ def terminal_tool(
             from tools.ansi_strip import strip_ansi
             output = strip_ansi(output)
 
-            # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            # Use the same command-aware policy as background process output.
+            # Environment dumps need KEY=value masking; source/config output
+            # keeps the lower-false-positive code-file mode.
+            from agent.redact import redact_terminal_output
+            output = redact_terminal_output(output.strip(), command) if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
@@ -2159,13 +2334,23 @@ def check_terminal_requirements() -> bool:
             if not docker:
                 logger.error("Docker executable not found in PATH or common install locations")
                 return False
-            result = subprocess.run([docker, "version"], capture_output=True, timeout=5)
+            result = subprocess.run(
+                [docker, "version"],
+                capture_output=True,
+                timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
             return result.returncode == 0
 
         elif env_type == "singularity":
             executable = shutil.which("apptainer") or shutil.which("singularity")
             if executable:
-                result = subprocess.run([executable, "--version"], capture_output=True, timeout=5)
+                result = subprocess.run(
+                    [executable, "--version"],
+                    capture_output=True,
+                    timeout=5,
+                    stdin=subprocess.DEVNULL,
+                )
                 return result.returncode == 0
             return False
 
@@ -2292,7 +2477,7 @@ if __name__ == "__main__":
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")
-    print(f"  TERMINAL_CWD: {os.getenv('TERMINAL_CWD', os.getcwd())}")
+    print(f"  TERMINAL_CWD: {_session_env('TERMINAL_CWD', os.getcwd())}")
     from hermes_constants import display_hermes_home as _dhh
     print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', f'{_dhh()}/sandboxes')}")
     print(f"  TERMINAL_TIMEOUT: {os.getenv('TERMINAL_TIMEOUT', '60')}")

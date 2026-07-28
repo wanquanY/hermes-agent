@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Dict, List
@@ -66,6 +67,11 @@ def register_credential_file(
     The resolved host path must remain inside HERMES_HOME so that a malicious
     skill cannot declare ``required_credential_files: ['../../.ssh/id_rsa']``
     and exfiltrate sensitive host files into a container sandbox.
+
+    Containment alone is insufficient because the master credential stores
+    themselves live inside ``HERMES_HOME``. The canonical agent read policy is
+    therefore also the mount policy: a file the agent may not read cannot be
+    bind-mounted into skill-controlled code.
     """
     hermes_home = _resolve_hermes_home()
 
@@ -95,6 +101,27 @@ def register_credential_file(
     resolved = host_path.resolve()
     if not resolved.is_file():
         logger.debug("credential_files: skipping %s (not found)", resolved)
+        return False
+
+    # Fail closed when the canonical read guard is unavailable. Mounting a
+    # legitimate per-service token can be retried after the runtime is healthy;
+    # mounting .env/auth.json into an untrusted skill cannot be undone.
+    try:
+        from agent.file_safety import get_read_block_error
+
+        denied = get_read_block_error(str(resolved))
+    except Exception as exc:  # pragma: no cover - core import boundary
+        logger.warning(
+            "credential_files: refusing %r because the read guard is unavailable (%s)",
+            relative_path,
+            exc,
+        )
+        return False
+    if denied:
+        logger.warning(
+            "credential_files: refusing %r because it is protected credential material",
+            relative_path,
+        )
         return False
 
     container_path = f"{container_base.rstrip('/')}/{relative_path}"
@@ -347,6 +374,9 @@ _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/images", "image_cache"),
     ("cache/audio", "audio_cache"),
     ("cache/screenshots", "browser_screenshots"),
+    ("cache/web", "web_cache"),
+    ("cache/delegation", "delegation_cache"),
+    ("cache/videos", "video_cache"),
 ]
 
 
@@ -374,6 +404,40 @@ def get_cache_directory_mounts(
     return mounts
 
 
+def map_cache_path_to_container(
+    host_path: str,
+    container_base: str = "/root/.hermes",
+) -> str | None:
+    """Map a host cache path into the matching sandbox cache mount."""
+    path = Path(host_path)
+    for mount in get_cache_directory_mounts(container_base=container_base):
+        host_dir = Path(mount["host_path"])
+        try:
+            rel = path.relative_to(host_dir)
+        except ValueError:
+            continue
+        return posixpath.join(mount["container_path"], rel.as_posix())
+    return None
+
+
+def from_agent_visible_cache_path(
+    container_path: str,
+    container_base: str = "/root/.hermes",
+) -> str:
+    """Translate a Docker-visible media-cache path back to its host mount."""
+    if os.environ.get("TERMINAL_ENV", "local") != "docker":
+        return container_path
+
+    path = Path(container_path)
+    for mount in get_cache_directory_mounts(container_base=container_base):
+        try:
+            rel = path.relative_to(mount["container_path"])
+        except ValueError:
+            continue
+        return str(Path(mount["host_path"]) / rel)
+    return container_path
+
+
 def to_agent_visible_cache_path(
     host_path: str,
     container_base: str = "/root/.hermes",
@@ -391,15 +455,8 @@ def to_agent_visible_cache_path(
     if os.environ.get("TERMINAL_ENV", "local") != "docker":
         return host_path
 
-    path = Path(host_path)
-    for mount in get_cache_directory_mounts(container_base=container_base):
-        host_dir = Path(mount["host_path"])
-        try:
-            rel = path.relative_to(host_dir)
-            return str(Path(mount["container_path"]) / rel)
-        except ValueError:
-            continue
-    return host_path
+    mapped = map_cache_path_to_container(host_path, container_base=container_base)
+    return mapped if mapped is not None else host_path
 
 
 def iter_cache_files(
@@ -432,5 +489,3 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-
-

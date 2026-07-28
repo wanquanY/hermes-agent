@@ -9,10 +9,14 @@ from unittest.mock import patch
 import pytest
 
 from agent.image_routing import (
+    _coerce_capability_bool,
     _coerce_mode,
     _explicit_aux_vision_override,
+    _lookup_supports_vision,
+    _supports_vision_override,
     build_native_content_parts,
     decide_image_input_mode,
+    extract_image_refs,
 )
 
 
@@ -86,6 +90,30 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
             assert decide_image_input_mode("anthropic", "claude-sonnet-4", {}) == "native"
 
+    def test_auto_uses_platform_vision_override_before_static_registry(self):
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert (
+                decide_image_input_mode(
+                    "custom",
+                    "gpt-5.5",
+                    {},
+                    supports_vision_override=True,
+                )
+                == "native"
+            )
+
+    def test_auto_uses_platform_non_vision_override_before_static_registry(self):
+        with patch("agent.image_routing._lookup_supports_vision", return_value=True):
+            assert (
+                decide_image_input_mode(
+                    "openai",
+                    "gpt-5.5",
+                    {},
+                    supports_vision_override=False,
+                )
+                == "text"
+            )
+
     def test_auto_with_non_vision_model(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=False):
             assert decide_image_input_mode("openrouter", "qwen/qwen3-235b", {}) == "text"
@@ -94,11 +122,19 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
 
-    def test_auto_respects_aux_vision_override_even_for_vision_model(self):
-        """If the user configured a dedicated vision backend, don't bypass it."""
+    def test_auto_uses_native_vision_even_when_auxiliary_backend_is_configured(self):
+        """The auxiliary backend is a fallback, not a main-model override."""
         cfg = {"auxiliary": {"vision": {"provider": "openrouter", "model": "google/gemini-2.5-flash"}}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
-            assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "text"
+            assert (
+                decide_image_input_mode(
+                    "anthropic",
+                    "claude-sonnet-4",
+                    cfg,
+                    supports_vision_override=True,
+                )
+                == "native"
+            )
 
     def test_none_config_is_auto(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
@@ -123,6 +159,168 @@ class TestDecideImageInputMode:
         }
         with patch("agent.models_dev.fetch_models_dev", return_value=registry):
             assert decide_image_input_mode("xiaomi", "mimo-v2.5-pro", {}) == "text"
+
+
+# ─── _coerce_capability_bool ─────────────────────────────────────────────────
+
+
+class TestCoerceCapabilityBool:
+    def test_real_bool_passes_through(self):
+        assert _coerce_capability_bool(True) is True
+        assert _coerce_capability_bool(False) is False
+
+    def test_int_0_and_1(self):
+        assert _coerce_capability_bool(1) is True
+        assert _coerce_capability_bool(0) is False
+
+    def test_other_ints_return_none(self):
+        assert _coerce_capability_bool(2) is None
+        assert _coerce_capability_bool(-1) is None
+
+    def test_yaml_true_tokens(self):
+        for s in ("true", "TRUE", "True", "yes", "on", "1", "  true  "):
+            assert _coerce_capability_bool(s) is True
+
+    def test_yaml_false_tokens(self):
+        for s in ("false", "FALSE", "False", "no", "off", "0", "  false  "):
+            assert _coerce_capability_bool(s) is False
+
+    def test_quoted_false_does_not_silently_become_true(self):
+        # Regression: bool("false") is True in Python. A user writing
+        # supports_vision: "false" must NOT enable native vision routing.
+        assert _coerce_capability_bool("false") is False
+
+    def test_unrecognised_strings_return_none(self):
+        # None == fall through to models.dev, not a silent truthy.
+        assert _coerce_capability_bool("maybe") is None
+        assert _coerce_capability_bool("") is None
+        assert _coerce_capability_bool("definitely") is None
+
+    def test_other_types_return_none(self):
+        assert _coerce_capability_bool(None) is None
+        assert _coerce_capability_bool([]) is None
+        assert _coerce_capability_bool({}) is None
+        assert _coerce_capability_bool(1.5) is None
+
+
+# ─── _supports_vision_override ───────────────────────────────────────────────
+
+
+class TestSupportsVisionOverride:
+    def test_no_cfg_returns_none(self):
+        assert _supports_vision_override(None, "custom", "my-llava") is None
+        assert _supports_vision_override({}, "custom", "my-llava") is None
+
+    def test_top_level_shortcut_wins(self):
+        cfg = {"model": {"supports_vision": True}}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is True
+
+    def test_top_level_false_propagates(self):
+        cfg = {"model": {"supports_vision": False}}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is False
+
+    def test_per_provider_per_model_via_runtime_name(self):
+        cfg = {
+            "providers": {
+                "custom": {"models": {"my-llava": {"supports_vision": True}}},
+            },
+        }
+        assert _supports_vision_override(cfg, "custom", "my-llava") is True
+
+    def test_per_provider_per_model_via_config_name(self):
+        # Named custom provider — runtime self.provider == "custom", config
+        # holds the original name under model.provider.
+        cfg = {
+            "model": {"provider": "my-vllm"},
+            "providers": {
+                "my-vllm": {"models": {"my-llava": {"supports_vision": True}}},
+            },
+        }
+        assert _supports_vision_override(cfg, "custom", "my-llava") is True
+
+    def test_quoted_false_string_in_yaml_does_not_enable(self):
+        # Real-world: user writes supports_vision: "false" (quoted).
+        cfg = {"model": {"supports_vision": "false"}}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is False
+
+    def test_unrecognised_value_falls_through(self):
+        cfg = {"model": {"supports_vision": "maybe"}}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is None
+
+    def test_no_override_returns_none(self):
+        cfg = {"model": {"default": "my-llava"}}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is None
+
+    def test_malformed_sections_are_ignored(self):
+        # User accidentally wrote a string where a section was expected —
+        # don't blow up, just fall through.
+        cfg = {"model": "some-string", "providers": ["not-a-dict"]}
+        assert _supports_vision_override(cfg, "custom", "my-llava") is None
+
+
+# ─── _lookup_supports_vision (override-aware) ────────────────────────────────
+
+
+class TestLookupSupportsVisionOverride:
+    def test_config_override_short_circuits_models_dev(self):
+        # Config says True, models.dev says None — config wins.
+        cfg = {"model": {"supports_vision": True}}
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert _lookup_supports_vision("custom", "my-llava", cfg) is True
+
+    def test_config_override_false_beats_vision_capable_models_dev(self):
+        # User explicitly disables vision on a models.dev-vision-capable model.
+        fake_caps = type("Caps", (), {"supports_vision": True})()
+        cfg = {"model": {"supports_vision": False}}
+        with patch("agent.models_dev.get_model_capabilities", return_value=fake_caps):
+            assert _lookup_supports_vision("anthropic", "claude-sonnet-4", cfg) is False
+
+    def test_no_override_falls_back_to_models_dev(self):
+        fake_caps = type("Caps", (), {"supports_vision": True})()
+        with patch("agent.models_dev.get_model_capabilities", return_value=fake_caps):
+            assert _lookup_supports_vision("anthropic", "claude-sonnet-4", {}) is True
+
+    def test_no_override_no_models_dev_entry_returns_none(self):
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert _lookup_supports_vision("custom", "my-llava", {}) is None
+
+    def test_cfg_none_falls_back_to_models_dev(self):
+        # Caller didn't pass cfg at all — old call sites must still work.
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert _lookup_supports_vision("openrouter", "x", None) is None
+
+
+# ─── decide_image_input_mode with auto + override ────────────────────────────
+
+
+class TestAutoModeRespectsOverride:
+    def test_auto_native_for_custom_with_supports_vision_true(self):
+        # The motivating bug: Qwen3.6 on local llama.cpp via provider=custom.
+        # Without the override, auto falls back to text. With it, auto picks
+        # native — no need to also set agent.image_input_mode: native.
+        cfg = {"model": {"supports_vision": True}}
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "native"
+
+    def test_auto_text_for_custom_with_supports_vision_false(self):
+        cfg = {"model": {"supports_vision": False}}
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert decide_image_input_mode("custom", "some-text-only", cfg) == "text"
+
+    def test_auto_text_for_custom_with_no_override(self):
+        # Unchanged baseline: unknown custom model → text.
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert decide_image_input_mode("custom", "unknown", {}) == "text"
+
+    def test_auxiliary_vision_config_does_not_override_native_capability(self):
+        # An auxiliary backend remains available for text-only models, but a
+        # vision-capable main model consumes user attachments directly.
+        cfg = {
+            "model": {"supports_vision": True},
+            "auxiliary": {"vision": {"provider": "openrouter", "model": "gemini-2.5-pro"}},
+        }
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert decide_image_input_mode("custom", "qwen3.6-35b", cfg) == "native"
 
 
 # ─── build_native_content_parts ──────────────────────────────────────────────
@@ -244,6 +442,113 @@ class TestBuildNativeContentParts:
         assert url.startswith("data:image/png;base64,"), (
             f"Expected MIME sniffing to detect PNG bytes regardless of .webp suffix, got: {url[:60]}"
         )
+
+    def test_url_only_passes_remote_image_url_through(self):
+        parts, skipped = build_native_content_parts(
+            "what is this?",
+            [],
+            image_urls=["https://example.com/diagram.png"],
+        )
+
+        assert skipped == []
+        assert len(parts) == 2
+        assert parts[0]["type"] == "text"
+        assert "[Image attached: https://example.com/diagram.png]" in parts[0]["text"]
+        assert parts[1] == {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/diagram.png"},
+        }
+
+    def test_mixed_local_path_and_remote_url_parts(self, tmp_path: Path):
+        img = tmp_path / "local.png"
+        img.write_bytes(_png_bytes())
+
+        parts, skipped = build_native_content_parts(
+            "compare",
+            [str(img)],
+            image_urls=["https://example.com/remote.jpg"],
+        )
+
+        assert skipped == []
+        text_part = parts[0]
+        image_parts = [p for p in parts if p.get("type") == "image_url"]
+        assert text_part["text"].count("[Image attached") == 2
+        assert str(img) in text_part["text"]
+        assert "https://example.com/remote.jpg" in text_part["text"]
+        assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert image_parts[1]["image_url"]["url"] == "https://example.com/remote.jpg"
+
+
+# ─── extract_image_refs ──────────────────────────────────────────────────────
+
+
+class TestExtractImageRefs:
+    def test_empty_or_none_returns_empty(self):
+        assert extract_image_refs("") == ([], [])
+        assert extract_image_refs(None) == ([], [])  # type: ignore[arg-type]
+
+    def test_finds_existing_absolute_path(self, tmp_path: Path):
+        img = tmp_path / "screenshot.png"
+        img.write_bytes(_png_bytes())
+
+        paths, urls = extract_image_refs(f"Look at {img} and summarize it.")
+
+        assert paths == [str(img)]
+        assert urls == []
+
+    def test_skips_nonexistent_local_path(self, tmp_path: Path):
+        paths, urls = extract_image_refs(f"Look at {tmp_path / 'missing.png'}.")
+
+        assert paths == []
+        assert urls == []
+
+    def test_finds_http_image_url(self):
+        paths, urls = extract_image_refs("Check https://example.com/photos/cat.png.")
+
+        assert paths == []
+        assert urls == ["https://example.com/photos/cat.png"]
+
+    def test_finds_https_url_with_query_string(self):
+        paths, urls = extract_image_refs("Diagram: https://cdn.example.com/a.jpeg?size=large&v=2")
+
+        assert paths == []
+        assert urls == ["https://cdn.example.com/a.jpeg?size=large&v=2"]
+
+    def test_ignores_paths_and_urls_in_code_blocks(self, tmp_path: Path):
+        img = tmp_path / "real.png"
+        img.write_bytes(_png_bytes())
+        text = (
+            f"Attach {img}\n"
+            "```\n"
+            "/tmp/example.png\n"
+            "https://example.com/example.png\n"
+            "```\n"
+            "`https://example.com/inline.png`"
+        )
+
+        paths, urls = extract_image_refs(text)
+
+        assert paths == [str(img)]
+        assert urls == []
+
+    def test_dedupes_paths_and_urls(self, tmp_path: Path):
+        img = tmp_path / "dup.png"
+        img.write_bytes(_png_bytes())
+        text = f"{img} {img} https://example.com/x.png https://example.com/x.png"
+
+        paths, urls = extract_image_refs(text)
+
+        assert paths == [str(img)]
+        assert urls == ["https://example.com/x.png"]
+
+    def test_mixed_paths_and_urls(self, tmp_path: Path):
+        img = tmp_path / "local.png"
+        img.write_bytes(_png_bytes())
+
+        paths, urls = extract_image_refs(f"Compare {img} with https://example.com/design/v2.png")
+
+        assert paths == [str(img)]
+        assert urls == ["https://example.com/design/v2.png"]
 
 
 # ─── Oversize handling ───────────────────────────────────────────────────────

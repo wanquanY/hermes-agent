@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
+from agent.skill_utils import is_excluded_skill_path
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ def _backup_cron_jobs_into(dest: Path) -> Dict[str, Any]:
         info["reason"] = "no cron/jobs.json present"
         return info
     try:
-        raw = src.read_text(encoding="utf-8")
+        raw = src.read_text(encoding="utf-8-sig")
     except OSError as e:
         logger.debug("Failed to read cron/jobs.json for backup: %s", e)
         info["reason"] = f"read error: {e}"
@@ -176,7 +177,9 @@ def get_keep() -> int:
 
 def _count_skill_files(base: Path) -> int:
     try:
-        return sum(1 for _ in base.rglob("SKILL.md"))
+        return sum(
+            1 for p in base.rglob("SKILL.md") if not is_excluded_skill_path(p)
+        )
     except OSError:
         return 0
 

@@ -43,14 +43,14 @@ logger = logging.getLogger(__name__)
 # is discovered but the gateway hasn't been fully initialised yet.
 # ---------------------------------------------------------------------------
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     MessageEvent,
     MessageType,
 )
-from gateway.session import SessionSource
-from gateway.config import PlatformConfig, Platform
+from channels.session_identity import SessionSource
+from hermes_gateway.config import PlatformConfig, Platform
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ class IRCAdapter(BasePlatformAdapter):
         self.nickname = os.getenv("IRC_NICKNAME") or extra.get("nickname", "hermes-bot")
         self.channel = os.getenv("IRC_CHANNEL") or extra.get("channel", "")
         self.use_tls = (
-            os.getenv("IRC_USE_TLS", "").lower() in ("1", "true", "yes")
+            os.getenv("IRC_USE_TLS", "").lower() in {"1", "true", "yes"}
             if os.getenv("IRC_USE_TLS")
             else extra.get("use_tls", True)
         )
@@ -128,7 +128,7 @@ class IRCAdapter(BasePlatformAdapter):
         max_msg = extra.get("max_message_length")
         if max_msg is None:
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 entry = platform_registry.get("irc")
                 if entry and entry.max_message_length:
                     max_msg = entry.max_message_length
@@ -163,7 +163,7 @@ class IRCAdapter(BasePlatformAdapter):
 
         # Prevent two profiles from using the same IRC identity
         try:
-            from gateway.status import acquire_scoped_lock, release_scoped_lock
+            from channels.runtime_status import acquire_scoped_lock, release_scoped_lock
             lock_key = f"{self.server}:{self.nickname}"
             if not acquire_scoped_lock("irc", lock_key):
                 logger.error("IRC: %s@%s already in use by another profile", self.nickname, self.server)
@@ -222,7 +222,7 @@ class IRCAdapter(BasePlatformAdapter):
         # Release the scoped lock so another profile can use this identity
         if getattr(self, "_lock_key", None):
             try:
-                from gateway.status import release_scoped_lock
+                from channels.runtime_status import release_scoped_lock
                 release_scoped_lock("irc", self._lock_key)
             except Exception:
                 pass
@@ -680,7 +680,7 @@ def _env_enablement() -> dict | None:
         seed["nickname"] = nickname
     use_tls = os.getenv("IRC_USE_TLS", "").strip().lower()
     if use_tls:
-        seed["use_tls"] = use_tls in ("1", "true", "yes")
+        seed["use_tls"] = use_tls in {"1", "true", "yes"}
     # Passwords live in PlatformConfig.extra as well for back-compat with
     # existing config.yaml users; env-reads at construct time still win.
     if os.getenv("IRC_SERVER_PASSWORD"):
@@ -756,7 +756,7 @@ async def _standalone_send(
     nickname = os.getenv("IRC_NICKNAME") or extra.get("nickname", "hermes-bot")
     use_tls_env = os.getenv("IRC_USE_TLS")
     if use_tls_env is not None:
-        use_tls = use_tls_env.lower() in ("1", "true", "yes")
+        use_tls = use_tls_env.lower() in {"1", "true", "yes"}
     else:
         use_tls = bool(extra.get("use_tls", True))
 
@@ -821,7 +821,7 @@ async def _standalone_send(
                 await _raw(f"PONG :{payload}")
             elif cmd == "001":
                 registered = True
-            elif cmd in ("432", "433"):
+            elif cmd in {"432", "433"}:
                 nick_attempts += 1
                 if nick_attempts > max_nick_attempts:
                     return {"error": "IRC standalone send: too many nick collisions"}
@@ -829,7 +829,7 @@ async def _standalone_send(
                 # mutated value, so the suffix stays bounded.
                 standalone_nick = f"{nick_base}-cron-{nick_attempts}"[:30]
                 await _raw(f"NICK {standalone_nick}")
-            elif cmd in ("464", "465"):
+            elif cmd in {"464", "465"}:
                 return {"error": f"IRC standalone send: server rejected client ({cmd})"}
 
         if nickserv_password:
@@ -860,9 +860,9 @@ async def _standalone_send(
                 if jcmd == "PING":
                     payload = jmsg["params"][0] if jmsg["params"] else ""
                     await _raw(f"PONG :{payload}")
-                elif jcmd in ("366", "JOIN"):
+                elif jcmd in {"366", "JOIN"}:
                     joined = True
-                elif jcmd in ("403", "405", "471", "473", "474", "475"):
+                elif jcmd in {"403", "405", "471", "473", "474", "475"}:
                     return {"error": f"IRC standalone send: JOIN {target} rejected ({jcmd})"}
 
         # Bytes-aware per-line splitting so multi-line plain text never

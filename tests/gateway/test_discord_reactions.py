@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome, SendResult
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome, SendResult
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _ensure_discord_mock():
@@ -40,7 +40,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
 
 class FakeTree:

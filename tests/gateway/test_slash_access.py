@@ -1,13 +1,13 @@
-"""Unit tests for gateway.slash_access — per-platform slash command access control.
+"""Unit tests for channels.slash_commands.access — slash command access control.
 
 Tests the pure policy resolver (no gateway plumbing). Integration tests that
 exercise the dispatch site live in test_slash_access_dispatch.py.
 """
 from __future__ import annotations
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.session import SessionSource
-from gateway.slash_access import (
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.session import SessionSource
+from channels.slash_commands.access import (
     SlashAccessPolicy,
     policy_for_source,
     policy_from_extra,

@@ -1,17 +1,18 @@
 """Tests for Telegram message reactions tied to processing lifecycle hooks."""
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+from hermes_gateway.session import SessionSource
 
 
 def _make_adapter(**extra_env):
-    from gateway.platforms.telegram import TelegramAdapter
+    from channels.platforms.telegram import TelegramAdapter
 
     adapter = object.__new__(TelegramAdapter)
     adapter.platform = Platform.TELEGRAM
@@ -277,8 +278,8 @@ async def test_clear_reactions_returns_false_without_bot(monkeypatch):
 # ── config.py bridging ───────────────────────────────────────────────
 
 
-def test_config_bridges_telegram_reactions(monkeypatch, tmp_path):
-    """gateway/config.py bridges telegram.reactions to TELEGRAM_REACTIONS env var."""
+def test_config_loads_telegram_reactions(monkeypatch, tmp_path):
+    """The typed gateway config owns telegram.reactions without env mutation."""
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump({
@@ -291,11 +292,10 @@ def test_config_bridges_telegram_reactions(monkeypatch, tmp_path):
     # the var doesn't exist yet — load_gateway_config will overwrite it.
     monkeypatch.setenv("TELEGRAM_REACTIONS", "")
 
-    from gateway.config import load_gateway_config
-    load_gateway_config()
+    from hermes_gateway.config import load_gateway_config
+    config = load_gateway_config()
 
-    import os
-    assert os.getenv("TELEGRAM_REACTIONS") == "true"
+    assert config.platforms[Platform.TELEGRAM].extra["reactions"] is True
 
 
 def test_config_reactions_env_takes_precedence(monkeypatch, tmp_path):
@@ -310,8 +310,8 @@ def test_config_reactions_env_takes_precedence(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("TELEGRAM_REACTIONS", "false")
 
-    from gateway.config import load_gateway_config
-    load_gateway_config()
+    from hermes_gateway.config import load_gateway_config
+    config = load_gateway_config()
 
-    import os
-    assert os.getenv("TELEGRAM_REACTIONS") == "false"
+    assert "reactions" not in config.platforms[Platform.TELEGRAM].extra
+    assert os.environ["TELEGRAM_REACTIONS"] == "false"

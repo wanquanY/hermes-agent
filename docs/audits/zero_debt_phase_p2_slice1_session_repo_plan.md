@@ -1,0 +1,962 @@
+# P2 Slice 1 执行规格：Session Repository Ownership
+
+状态：`in_progress_checkpoint_18`
+
+## 前置门槛
+
+本 slice 只能在以下命令通过后开始：
+
+```bash
+.venv/bin/python scripts/zero_debt/phase_closure.py --phase P1
+```
+
+P1 human sign-off 已通过，P2 已开始执行。当前 checkpoint 已完成
+`gateway.SessionStore`、TUI `session.create` 的 repo-backed 写入迁移，以及
+TUI `session.list/session.most_recent/session.index.list` 的 read-model owner
+迁移，以及 TUI `session.title/session.status` 的 repo-backed metadata 迁移，
+将 TUI `session.delete` 迁到独立 domain deletion service，并将 TUI
+`session.resume` 的 stored metadata/reopen/compression-tip 解析迁到
+`SessionRepoImpl`，同时将 `session_history` 中的 session row identity
+解析迁到 repo，并将 `session.messages` 的普通 message page projection
+迁到 `MessageHistoryReadModel`。
+
+## 目标
+
+把 `session.create/get/list` 的生产存储所有权收口到
+`hermes_agent.repositories.session_repo.SessionRepoImpl`。
+
+当前 dispatch 入口审计：
+
+- `docs/audits/zero_debt_phase_p2_slice1_session_dispatch_map.md`
+
+目标链路：
+
+```text
+gateway dispatch -> session method -> SessionRepoImpl -> SQLite sessions/session_index -> wire response
+```
+
+## 当前可用目标 owner
+
+- `hermes_agent/repositories/session_repo.py`
+  - `SessionRepoImpl.create`
+  - `SessionRepoImpl.get`
+  - `SessionRepoImpl.list`
+  - `SessionRepoImpl.update_index`
+  - `SessionRepoImpl.branch`
+  - `SessionRepoImpl.close`
+- `hermes_agent/gateway/methods/session_methods.py`
+  - `make_method_session_create`
+  - `make_method_session_get`
+  - `make_method_session_list`
+
+## 当前旧 owner
+
+- `gateway/session.py`
+  - 直接构造 `SessionDB`
+  - 承担 session metadata/transcript 旧职责
+- 任何生产路径中直接调用 `SessionDB.create_session/get_session/list_sessions`
+  的 session create/get/list 语义
+
+## 执行步骤
+
+1. 建立 production repo wiring
+   - 找到当前 `session.*` production dispatch 入口。
+   - 不能只验证 `hermes_agent/transport/stdio_daemon.py`；该路径已经
+     repo-backed，但 DoXie/TUI sidecar 仍走 `dovie_extension` /
+     `tui_gateway.methods.session` 旧入口。
+   - 让 `session.create/get/list` 使用同一个 `SessionRepoImpl` construction path。
+   - repo connection 必须来自明确的 SQLite connection provider，不能在 method
+     内部临时构造 `SessionDB`。
+
+2. 写端到端测试
+   - v3 target-path tests already cover `pipeline.dispatch` +
+     `SessionRepoImpl`; do not duplicate those tests.
+   - New P2 Slice 1 tests must cover the DoXie/TUI production sidecar route
+     currently exposed by `dovie_extension` and `tui_gateway.methods.session`.
+   - 测试必须断言 SQLite `sessions` 和 `session_index` 真实落库。
+   - 测试必须断言 wire response 字段：
+     - `session_id`
+     - `source`
+     - `title`
+     - `display_title`
+     - `session_kind`
+     - `conversation_kind`
+     - `started_at`
+     - `updated_at`
+
+3. 删除旧同职责路径
+   - 删除或行为清空 `gateway/session.py` 中 create/get/list 对 `SessionDB`
+     的直接生产路径。
+   - 不允许保留 fallback。
+   - 若旧文件仍需承载非 session repository 职责，必须拆出新 owner，不能继续
+     混放在 session storage owner 中。
+
+4. 收紧 P2 verdict
+   - `p2:no_sessiondb_production` 应至少移除所有 session create/get/list
+     相关 offenders。
+   - 如果剩余 offenders 属于 run/message/team mission 等后续 slice，必须在
+     P2 preflight verdict 中可解释。
+
+## E2E 测试用例
+
+建议新增或扩展：
+
+```text
+tests/gateway/test_session_repository_dispatch.py
+```
+
+用例：
+
+1. `session.create` creates `sessions` and `session_index`
+2. `session.get` reads the created session via repo-backed path
+3. `session.list` returns the created session with limit/source filters
+4. invalid params return protocol error without DB side effect
+5. no production call in this path imports or constructs `SessionDB`
+
+## 完成定义
+
+本 slice 完成时必须同时满足：
+
+- `session.create/get/list` production dispatch 走 `SessionRepoImpl`
+- `gateway/session.py` 不再拥有 create/get/list storage 行为
+- E2E 测试证明 dispatch -> repo -> SQLite -> wire response
+- `scripts/zero_debt/verdict.py --phase P2 --json` 的
+  `p2:no_sessiondb_production` offender 数量下降，且没有新增 identity alias
+- `scripts/zero_debt/phase_closure.py --phase P1` 已经通过
+
+## Checkpoint 1 证据
+
+已完成：
+
+- `gateway/session.py` 的 session metadata create/reset/switch 不再直接通过
+  `SessionDB` 写入，改由 `SessionRepoImpl` 负责。
+- 新增 `hermes_agent/storage/session_repository_db.py`，为
+  `SessionRepoImpl` 提供不依赖 legacy state facade 的 SQLite bootstrap。
+- `tui_gateway.methods.session` 的 `session.create` 不再直接调用
+  `db.create_session`，改由 `SessionRepoImpl.create` 写入 `sessions` /
+  `session_index`。
+- `SessionRepoImpl` 补齐 TUI create 需要的 `model/model_config/transient`
+  metadata，并新增 `reopen()`，`close()` 保持第一次 terminal reason。
+- 新增 `tests/gateway/test_session_repository_dispatch.py` 验证
+  dispatch -> repo -> SQLite -> wire response。
+
+已运行：
+
+```bash
+.venv/bin/pytest tests/repositories/test_session_repo_impl.py tests/gateway/test_session_repository_dispatch.py tests/gateway/test_session.py tests/tui_gateway/test_protocol.py::test_session_create_control_plane_only_persists_through_session_repo -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+.venv/bin/pytest tests/gateway/test_session_list_allowed_sources.py tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py -q
+.venv/bin/pytest tests/storage/test_migrations_smoke.py tests/storage/test_migrations_loader.py -q
+.venv/bin/ruff check gateway/session.py tui_gateway/methods/session.py hermes_agent/repositories/session_repo.py hermes_agent/storage/session_repository_db.py tests/gateway/test_session.py tests/gateway/test_session_repository_dispatch.py tests/tui_gateway/test_protocol.py tests/repositories/test_session_repo_impl.py tests/observability/test_zero_debt_gates.py
+```
+
+当前 P2 verdict 仍应失败，剩余失败项：
+
+- `p2:no_sessiondb_production`
+- `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `tui_gateway.methods.session` 的 `session.list` 仍依赖
+  `db.list_sessions_rich` 与富投影旧 owner，需要拆出 repo/read-model owner 后
+  再切。
+- `session.messages/delete/title/status/usage` 等同文件旧 DB path 属于后续
+  message/read-model slice，不能混在本 checkpoint 中一次性改坏。
+
+## 禁止事项
+
+- 禁止在 DoXie 前端补偿 Hermes session storage 缺口。
+- 禁止新增 `stored_session_id` / `stable_session_id` / `runtime_session_id`
+  内部 owner。
+- 禁止保留旧 `SessionDB` fallback。
+- 禁止先删除 `gateway/session.py` 而没有新 owner 承担等价 production 行为。
+
+## Checkpoint 2 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/session_list.py`，由
+  `SessionListReadModel` 接管 user-facing session list 富投影 SQL。
+- `tui_gateway.methods.session` 的 `session.list` 不再调用
+  `db.list_sessions_rich`，改为通过 `SessionListReadModel` 从同一个 SQLite
+  connection 读取 `sessions/session_lineage` 并返回 wire response。
+- `hermes_agent/storage/session_repository_db.py` 的 repo bootstrap 补齐
+  `session_lineage`，保证 fresh profile 的 `session.list` 不依赖 legacy facade
+  建表副作用。
+- `pyproject.toml` package discovery 纳入 `hermes_agent.*`，避免新 owner 在
+  editable 以外的安装形态下不可用。
+- `tests/gateway/test_session_list_allowed_sources.py` 不再 mock
+  `list_sessions_rich`，改为真实 SQLite -> read model -> TUI handler 链路。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/session_list.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_list_allowed_sources.py hermes_agent/storage/session_repository_db.py
+.venv/bin/pytest tests/gateway/test_session_list_allowed_sources.py tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+.venv/bin/ruff check hermes_agent/read_models/session_list.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_list_allowed_sources.py pyproject.toml hermes_agent/storage/session_repository_db.py
+python scripts/zero_debt/verdict.py --phase P2 --json
+python scripts/zero_debt/status.py --json
+```
+
+当前验证结果：
+
+- 定向 session-list / protocol / ws-dispatch 测试：`131 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.messages/delete/title/status/usage` 等同文件旧 DB path 属于后续
+  message/read-model slice。
+- `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。
+
+## Checkpoint 3 证据
+
+已完成：
+
+- `tui_gateway.methods.session` 的 `session.most_recent` 不再调用
+  `db.list_sessions_rich`，改为复用 `SessionListReadModel` 的
+  `order_by_last_active` projection。
+- `session.list` 与 `session.most_recent` 共享同一套 internal source deny-list
+  和 session list read owner，不再维护两套最近会话查询逻辑。
+- `tests/test_tui_gateway_server.py` 的 `session.most_recent` 用例不再 fake
+  `list_sessions_rich`，改为真实 SQLite `sessions` 行 -> read-model ->
+  JSON-RPC handler。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_most_recent_returns_first_non_denied tests/test_tui_gateway_server.py::test_session_most_recent_returns_null_when_only_internal_rows tests/test_tui_gateway_server.py::test_session_most_recent_folds_db_exception_into_null_result tests/test_tui_gateway_server.py::test_session_most_recent_handles_db_unavailable -q
+.venv/bin/ruff check tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_most_recent_returns_first_non_denied tests/test_tui_gateway_server.py::test_session_most_recent_returns_null_when_only_internal_rows tests/test_tui_gateway_server.py::test_session_most_recent_folds_db_exception_into_null_result tests/test_tui_gateway_server.py::test_session_most_recent_handles_db_unavailable tests/gateway/test_session_list_allowed_sources.py tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- 组合 session list / most_recent / protocol / ws-dispatch 测试：`135 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `tui_gateway.methods.session` 中 `session.messages/delete/title/status/usage`
+  等旧 DB path 属于后续 message/read-model slice。
+- `tui_gateway/methods/insights_rollback.py` 仍有 `list_sessions_rich` 辅助查询，
+  需要在对应 rollback/read-model slice 中处理。
+- `tui_gateway/services/worker_supervisor.py` 仍暴露 legacy worker proxy method
+  allowlist，需随 worker storage owner 迁移移除。
+- `gateway/session.py` transcript 相关 legacy storage 仍需在 message slice 迁出。
+
+## Checkpoint 4 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/session_index.py`，由
+  `SessionIndexReadModel` 接管 `session_index` sidebar 富投影 SQL。
+- `tui_gateway.methods.session` 的 `session.index.list` 不再调用
+  `db.list_session_index`，改为通过 `SessionIndexReadModel` 从 SQLite
+  connection 读取。
+- 保留 `_ensure_session_index_reconciled(db)` 作为阶段内显式 writer/backfill
+  hook；read model 保持只读，`reconcile/repair` 后续迁到独立 writer-domain
+  owner。
+- 新增 `test_gateway_session_index_list_uses_read_model_not_sessiondb_method`，
+  证明 handler 在 DB wrapper 不暴露 `list_session_index` 时仍能通过 `_conn`
+  read-model 返回 sidebar rows。
+- 新 read-model 没有增加 P2 legacy identity alias offender baseline。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/session_index.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_kind_column.py
+.venv/bin/pytest tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py -q
+.venv/bin/ruff check hermes_agent/read_models/session_index.py hermes_agent/read_models/__init__.py tui_gateway/methods/session.py tests/gateway/test_session_kind_column.py
+.venv/bin/pytest tests/gateway/test_session_kind_column.py tests/gateway/test_session_list_team_enrichment.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_list_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_list_is_not_proxied_to_runtime_worker -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+```
+
+当前验证结果：
+
+- 组合 session index/list/protocol/ws-dispatch 测试：`132 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+
+剩余工作：
+
+- `SessionDB.list_session_index` 旧方法仍存在，测试也仍有直接调用；需要在
+  后续 repository/read-model parity slice 中迁移直接调用者后删除旧方法。
+- `reconcile_session_index` 和 `_repair_session_index_*` 仍属于 legacy facade
+  写副作用，需要拆到独立 writer-domain owner。
+- `session.messages/delete/title/status/usage` 等旧 DB path 仍待迁移。
+
+## Checkpoint 5 证据
+
+已完成：
+
+- `SessionRepoImpl` 新增 `get_title/get_by_title/set_title`，由 repo owner
+  负责 title metadata 的读写、唯一性检查、`display_title` 同步和
+  `session_index.title` 同步。
+- `tui_gateway.methods.session` 的 `session.title` 不再调用
+  `db.get_session_title/db.get_session_by_title/db.set_session_title`，改为
+  通过 `SessionRepoImpl` 操作 `sessions/session_index`。
+- `tests/test_tui_gateway_server.py` 的 `session.title` 用例迁到真实
+  SQLite + `SessionRepoImpl`，不再 mock legacy title DB 方法；异常路径只
+  mock repo interface。
+- `tests/repositories/test_session_repo_impl.py` 增加 title repo 不变量：
+  标题规范化、按 title 查找、`display_title` 同步、index 同步、auto source
+  拒绝和重复 title 拒绝。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_title -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_title or session_status or session_delete" tests/tui_gateway/test_protocol.py tests/tui_gateway/test_ws_dispatch.py::test_session_title_uses_control_plane_executor tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_title_is_not_proxied_to_runtime_worker tests/repositories/test_session_repo_impl.py tests/gateway/test_session_repository_dispatch.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+```
+
+当前验证结果：
+
+- Session title/repo/protocol/routing 组合测试：`22 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+
+剩余工作：
+
+- `session.delete/status/usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `SessionDB.set_session_title/get_session_title/get_session_by_title` 旧方法
+  仍存在，待所有非 gateway 调用者迁移后删除。
+
+## Checkpoint 6 证据
+
+已完成：
+
+- `tui_gateway.methods.session` 的 `session.status` 不再调用
+  `db.get_session/db.get_session_by_title` 读取 stored metadata，改由
+  `SessionRepoImpl.get/get_by_title` 读取 title/created/updated。
+- `session.status` 的运行态仍通过 `_session_run_snapshot/run_control`
+  projection 负责；本 checkpoint 不把 run-state owner 混进 session repo。
+- `SessionRepoImpl` 增加 legacy `sessions` schema projection 支持：旧库缺少
+  `updated_at/session_kind/conversation_kind` 时，分别通过
+  `last_active/start_at` 与明确表达式派生，避免 repo 接入真实旧库时报
+  `OperationalError`。
+- `tests/test_tui_gateway_server.py::test_session_status_reads_live_gateway_agent`
+  改成真实 SQLite/repo-backed stored metadata。
+- `tests/repositories/test_session_repo_impl.py` 增加 legacy schema projection
+  regression test。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py::test_session_status_reads_live_gateway_agent tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime tests/tui_gateway/test_protocol.py::test_session_status_returns_machine_readable_run_state tests/repositories/test_session_repo_impl.py -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_status or session_title" tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime tests/tui_gateway/test_protocol.py::test_session_status_returns_machine_readable_run_state tests/tui_gateway/test_ws_dispatch.py::test_run_status_uses_control_plane_executor tests/repositories/test_session_repo_impl.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session status/title/repo/routing 组合测试：`13 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.delete/usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `session.status` 的 run-state projection 仍经 `run_control`，后续应在
+  RunState owner slice 中统一收口。
+
+## Checkpoint 7 证据
+
+已完成：
+
+- 新增 `hermes_agent/domain/session_deletion.py`，由
+  `SessionDeletionService` 接管 session destructive lifecycle：
+  `sessions` 行删除、`session_index` 清理、`messages` 删除、
+  `session_lineage` 断链、`session_branch_requests` 清理，以及
+  `HERMES_HOME/sessions` 下 transcript/request dump 文件清理。
+- `SessionDeletionService` 刻意不放入 `SessionRepoImpl`：
+  deletion 跨越 session metadata、message transcript、branch lineage、
+  sidebar index 和文件系统，属于 destructive domain service，不是单一
+  repository aggregate 的 CRUD 方法。
+- `tui_gateway.methods.session` 的 `session.delete` 不再调用
+  `db.delete_session` 或 `db.delete_session_index`；active-session fail-closed
+  检查仍在 gateway 入口执行，真正删除交给 `SessionDeletionService`。
+- `tests/test_tui_gateway_server.py` 的 `session.delete` 用例从 fake legacy DB
+  method 迁到真实 SQLite/service 链路；成功路径断言 `sessions`、
+  `session_index` 和 transcript 文件均被清理。
+- 新增 `tests/domain/test_session_deletion.py`，覆盖完整 graph/file cleanup、
+  orphan `session_index` cleanup，以及 minimal legacy schema。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/domain/session_deletion.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/domain/test_session_deletion.py
+.venv/bin/pytest tests/domain/test_session_deletion.py tests/test_tui_gateway_server.py -k session_delete -q
+.venv/bin/ruff check hermes_agent/domain/session_deletion.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/domain/test_session_deletion.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_delete or session_status or session_title" tests/repositories/test_session_repo_impl.py tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session deletion domain/gateway 定向测试：`8 passed`
+- Session delete/status/title/repo 组合测试：`20 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.usage/resume/messages` 仍有 legacy DB facade 依赖。
+- `SessionDB.delete_session/delete_session_index` 旧方法仍存在，待所有直接
+  production 调用者迁移后删除。
+- `session.status` 的 run-state projection 仍经 `run_control`，后续应在
+  RunState owner slice 中统一收口。
+
+## Checkpoint 8 证据
+
+已完成：
+
+- `SessionRepoImpl` 新增 `resolve_resume_session_id()`，接管
+  compression-continuation tip 解析和“空 parent 沿 child 找到首个有消息
+  session”的 resume target 语义。
+- `SessionRepoImpl.reopen()` 改为 schema-aware：真实旧库缺少
+  `updated_at/end_reason` 时仍能通过 `last_active/ended_at` 安全 reopen，
+  不再依赖 legacy `SessionDB.reopen_session`。
+- `tui_gateway.methods.session` 的 `session.resume` 不再调用
+  `db.get_session`、`db.get_session_by_title`、`db.resolve_resume_session_id`
+  或 `db.reopen_session`；stored metadata、title lookup、resume target
+  re-anchor 和 reopen 均由 `SessionRepoImpl` 负责。
+- 本 checkpoint 明确不迁 transcript/message reader：`history_reader` 仍暂时
+  读取 legacy message projection，后续由 message read-model slice 统一接管。
+- `tests/test_tui_gateway_server.py` 和 `tests/tui_gateway/test_protocol.py`
+  的 `session.resume` 用例从 fake legacy DB 方法迁到真实 SQLite +
+  `SessionRepoImpl` 链路。
+- `tests/repositories/test_session_repo_impl.py` 增加 resume target 和 legacy
+  reopen schema 回归测试。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_resume -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py -k session_resume -q
+.venv/bin/pytest tests/repositories/test_session_repo_impl.py -q
+.venv/bin/pytest tests/test_tui_gateway_server.py -k "session_resume or session_status or session_title or session_delete" tests/tui_gateway/test_protocol.py -k "session_resume or session_status or session_title" tests/gateway/test_session_list_allowed_sources.py::test_session_status_reads_stored_profile_session_without_runtime -q
+.venv/bin/ruff check hermes_agent/repositories/session_repo.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/repositories/test_session_repo_impl.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- `session.resume` gateway/protocol 定向测试：`6 passed`
+- `SessionRepoImpl` 完整测试：`21 passed`
+- Session resume/status/title/delete 组合测试：`19 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session.messages` / resume display history / prompt history reader 仍使用
+  legacy message projection，需要独立 message read-model owner。
+- `session.usage` 本身不依赖 DB，不是当前 P2 storage owner blocker。
+- `gateway/run.py`、`cli.py`、`run_agent.py` 仍存在直接 `SessionDB` 生产路径，
+  属于 P2 后续垂直切片。
+
+## Checkpoint 9 证据
+
+已完成：
+
+- `tui_gateway.methods.session_history` 新增 repo-backed session row resolver，
+  `session.messages`、`session.events`、`session.message_metadata.merge` 和
+  stored `session.recall_turn` 不再调用 `db.get_session` /
+  `db.get_session_by_title` 做 session identity 解析。
+- 该 checkpoint 只迁 session identity owner，不迁 message projection：
+  `get_messages_page_as_conversation`、`list_run_events`、
+  `merge_message_metadata`、`replace_messages` 仍属于后续 message/event
+  read/write owner slice。
+- 相关测试从 fake legacy session metadata DB 迁到真实 SQLite +
+  `SessionRepoImpl`，保留 message/run-event reader fake 作为测试关注点。
+- 修正一次 helper 命名，避免新增 legacy identity alias inventory
+  offender。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/methods/session_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py -k session_messages -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py -k "session_messages or message_metadata or recall" -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_messages_are_not_proxied_to_runtime_worker -q
+.venv/bin/ruff check tui_gateway/methods/session_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session history / protocol / profile-data / ws-dispatch 组合测试：
+  `122 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `session_history` 的 message page、message metadata merge、stored recall
+  rewrite 仍需要迁到 message read/write owner。
+- `session.history` 和 `session.resume` 的 display/history hydration 仍经
+  legacy message projection。
+
+## Checkpoint 10 证据
+
+已完成：
+
+- 新增 `hermes_agent/read_models/message_history.py`，由
+  `MessageHistoryReadModel` 接管普通 conversation message page projection：
+  storage cursor、`pageInfo`、message row -> conversation message 转换、
+  ancestor replay 去重，以及 selected page turn-boundary 扩展。
+- `tui_gateway.methods.session_history` 的 `session.messages` 不再调用
+  legacy message page facade；普通 message page 读取改为
+  `MessageHistoryReadModel.page_as_conversation()`。
+- 本 checkpoint 不迁 team transcript projector/backfill，不迁
+  `session.history` / `session.resume` display-history hydration，不迁
+  message metadata merge 和 stored recall rewrite；这些分别属于后续
+  team message projection 和 message write owner slice。
+- `tests/gateway/test_session_list_allowed_sources.py` 和
+  `tests/tui_gateway/test_profile_data_context.py` 从 fake page reader 迁到
+  真实 SQLite `messages` row。
+- 新增 `tests/read_models/test_message_history.py`，覆盖 storage cursor、
+  turn-boundary 扩展和 ancestor duplicate user replay 去重。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tests/read_models/test_message_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/read_models/test_message_history.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py -k "message_history or session_messages" -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_ws_dispatch.py::test_control_plane_session_messages_are_not_proxied_to_runtime_worker tests/read_models/test_message_history.py -q
+.venv/bin/ruff check hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tests/read_models/test_message_history.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_profile_data_context.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Message history read-model / session.messages 定向测试：`4 passed`
+- Session protocol/profile/list/ws/read-model 组合测试：`125 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Team transcript page projection 仍需要从 legacy team projector/backfill 中拆出
+  目标 owner。
+- `session.history` / `session.resume` 的 display-history hydration 仍经 legacy
+  message projection。
+- Message metadata merge 和 stored recall rewrite 仍待迁到 message write owner。
+
+## Checkpoint 11 证据
+
+已完成：
+
+- `MessageHistoryReadModel` 新增 full-history projection：
+  `all_as_conversation()` 统一承载普通 transcript 全量读取、ancestor lineage
+  合并、inactive 过滤和 storage metadata 输出。
+- `session.history` 不再通过 legacy message facade 读取普通会话 transcript；
+  现在只从 `MessageHistoryReadModel` 读取，再进入 wire response。
+- `session.resume` 的 ordinary runtime hydration 与 display-history hydration
+  不再调用 legacy conversation message reader；恢复 runtime 所用 history 与
+  前端展示 history 共用同一个 read-model owner。
+- stored `session.recall_turn` 的历史加载改为 read-model；当前 checkpoint
+  只迁读路径，最终写回仍留给后续 message write owner slice。
+- 测试 helper 从 fake history facade 迁到真实 SQLite `messages` row，避免
+  单测继续覆盖旧入口。
+- `MessageHistoryReadModel` 为同一 SQLite connection 加入 read lock，恢复
+  legacy DB handle 曾提供的并发访问保护，覆盖 concurrent resume 场景。
+
+明确未完成：
+
+- Team transcript projector/backfill 仍是后续独立切片，不在本 checkpoint
+  中混合迁移。
+- Message metadata merge 与 stored recall 最终 writeback 仍待 message
+  write owner 接管。
+- P2 总门禁仍未关闭。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/message_history.py tui_gateway/methods/session_history.py tui_gateway/methods/session.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/test_tui_gateway_server.py -k session_resume tests/tui_gateway/test_protocol.py -k "session_resume or recall" tests/read_models/test_message_history.py -q
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py -q
+.venv/bin/ruff check hermes_agent/read_models/message_history.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/test_tui_gateway_server.py tests/tui_gateway/test_protocol.py tests/read_models/test_message_history.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Session resume/recall/read-model 定向测试：`10 passed`
+- Session protocol/profile/list/read-model 组合测试：`124 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+下一步：
+
+- 继续拆 team transcript projection owner，或进入 message write owner
+  切片以接管 metadata merge / recall rewrite 写路径；二者完成后再回到
+  P2 production grep gate。
+
+## Checkpoint 12 证据
+
+已完成：
+
+- 新增 `tui_gateway.services.message_history`，作为 gateway/service 层唯一的
+  DB handle -> `MessageHistoryReadModel` 接线入口。
+- `session.py` 和 `session_history.py` 删除本地重复 read-model 构造逻辑，
+  统一通过 service helper 进入 canonical read model。
+- `tui_gateway.services.agent_runner` 的 worker runtime hydration 不再读取
+  legacy message facade；worker 运行时上下文恢复现在直接使用
+  `MessageHistoryReadModel`。
+- `tui_gateway.services.worker_frame_router` 的 activity terminal last-message
+  提取不再读取 legacy message facade。
+- `tests/gateway/test_agent_runner.py` 从 fake DB reader 改为真实 SQLite
+  `messages` row，确保测试穿过 read-model。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/message_history.py tui_gateway/services/agent_runner.py tui_gateway/services/worker_frame_router.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/gateway/test_agent_runner.py
+.venv/bin/pytest tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py tests/test_member_perspective_transform_via_ipc.py tests/read_models/test_message_history.py -q
+.venv/bin/ruff check tui_gateway/services/message_history.py tui_gateway/services/agent_runner.py tui_gateway/services/worker_frame_router.py tui_gateway/methods/session.py tui_gateway/methods/session_history.py tests/gateway/test_agent_runner.py
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Agent runner / worker frame router / member perspective / read-model
+  定向测试：`31 passed`
+- Session protocol/profile/list/read-model/agent-runner/router 组合测试：
+  `149 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Team transcript projector/backfill 仍需要目标 owner。
+- Message metadata merge 与 stored recall final rewrite 仍待 message write
+  owner 接管。
+- Event read side 仍有 `list_run_events` 直连，需要 run-event read-model
+  切片继续削减旧 DB facade。
+
+## Checkpoint 13 证据
+
+已完成：
+
+- `MessageRepository` 接管普通 message mutation：
+  metadata merge 与 transcript rewrite 不再由 gateway 调用 legacy DB facade。
+- 新增共享 SQLite connection lock，read model 与 write repo 使用同一把
+  per-connection lock，避免同一 connection 的并发 read/write 竞争。
+- stored `session.recall_turn` 和 live rewrite 持久化改为
+  `MessageRepository.replace_conversation()`。
+- `session.message_metadata.merge` 改为 `MessageRepository.merge_metadata()`。
+- rewrite 保留已有 message timestamp；只有缺失 timestamp 的新消息才使用
+  fallback 时间，避免历史消息被 rewrite 刷成当前时间。
+- 保留既有 `MessageRepo` aggregate contract，避免破坏 repository package
+  对外导出。
+- 相关测试不再断言 fake replace hook，而是读取真实 SQLite `messages` row
+  验证 rewrite 结果与历史 timestamp。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/storage/sqlite_connection_lock.py hermes_agent/repositories/message_repo.py hermes_agent/read_models/message_history.py tui_gateway/services/message_history.py tui_gateway/methods/session_history.py
+.venv/bin/pytest tests/tui_gateway/test_protocol.py -k "message_metadata or recall" tests/read_models/test_message_history.py -q
+.venv/bin/ruff check hermes_agent/storage/sqlite_connection_lock.py hermes_agent/repositories/message_repo.py hermes_agent/read_models/message_history.py tui_gateway/services/message_history.py tui_gateway/methods/session_history.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Recall / metadata merge / read-model 定向测试：`4 passed`
+- Session protocol/profile/list/read-model/agent-runner/router 组合测试：
+  `149 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- Team transcript projector/backfill 仍需要目标 owner。
+- Event read side 仍有 `list_run_events` 直连，需要 run-event read-model
+  切片继续削减旧 DB facade。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 14 证据
+
+已完成：
+
+- 新增 `RunEventReadModel`，由 `EventLedger` 查询物理 row，并在新 owner
+  内完成 event decode、reference payload rehydrate、participant/activity
+  projection。
+- 新增 `tui_gateway.services.run_events`，作为 gateway 层唯一 run-event
+  read-model 接线入口。
+- `session.messages` 的 `include_run_events` 和 `session.events` 不再调用
+  legacy DB event reader，改走 `RunEventReadModel`。
+- `run.events` 不再通过 subscription replay 间接触发 legacy DB event reader；
+  纯 replay 直接从 `RunEventReadModel` 读取。
+- `subagent.runs.*` 使用的 filtered event helper 不再调用 legacy filtered
+  reader，改走 `RunEventReadModel.list_filtered()`。
+- 新 read model 没有新增 legacy module import；P2 identity alias baseline
+  从 `1201` 降到 `1200`。
+- 相关测试从 fake event reader 改为真实 SQLite `run_events` row。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tui_gateway/methods/run.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py
+.venv/bin/pytest tests/test_pr2_session_cursor.py tests/tui_gateway/test_protocol.py -k "run_events_replays or session_events or session_messages" tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py::test_session_messages_returns_paged_transcript -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tui_gateway/methods/run.py tests/gateway/test_session_list_allowed_sources.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/test_pr2_session_cursor.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_profile_data_context.py tests/gateway/test_session_list_allowed_sources.py tests/read_models/test_message_history.py tests/gateway/test_agent_runner.py tests/gateway/test_worker_frame_router.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Run-event cursor/replay/profile/list 定向测试：`16 passed`
+- Session/run/profile/list/read-model/agent-runner/router 组合测试：
+  `163 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 18 证据
+
+已完成：
+
+- `run_control` 的 in-memory run/event cursor 不再以裸 `run_id` /
+  stable session id 作为全局 key；新增 DB/profile scoped memory key：
+  `_memory_scope_key()`、`_memory_run_key()`、`_memory_session_key()`。
+- `_run_state_by_id`、`_run_ids_by_session`、`_events_by_session`、
+  `_last_seq_by_session` 的生产读写路径按 DB scope 隔离，wire/state dict
+  内仍保留原始 `run_id` 与 `stored_session_id`，不改变外部协议。
+- 修复真实暴露的跨 DB/profile 污染：不同 SQLite profile 使用相同
+  team-mission mirror `run_id` 时，不再从前一个 profile 的 memory event
+  replay 推进 cursor，导致 terminal `message.complete` 被误判已投递。
+- 保留 `_sync_canonical_frame_seq` 内部 alias 指向
+  `_sync_canonical_frame_identity`，维持已有测试/内部调用语义。
+- P2 identity alias offender baseline 从 `1200` 降到 `1199`。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/run_control.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/test_team_mission_conversation_mirror.py::test_conversation_list_recovers_terminal_mission_with_active_mirror_run tests/test_runtime_activity_subscribe.py tests/test_pr1_event_identity_contract.py -q
+.venv/bin/ruff check tui_gateway/services/run_control.py tests/observability/test_zero_debt_gates.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Team mission terminal recovery / runtime activity subscribe /
+  PR1 event identity contract：`71 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `run_control` terminal write path 仍有 legacy `append_run_event` facade
+  ownership，需要后续 run-event writer repository/domain service 切片。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 17 证据
+
+已完成：
+
+- `InteractionRegistry.list_pending()` 不再调用 `db.list_run_events`，
+  改为通过 `tui_gateway.services.run_events.list_runtime_events()` 读取
+  `include_internal=True` 的 internal lifecycle events。
+- `tests/gateway/test_interaction_persistence.py` 新增防回退测试：
+  monkeypatch `db.list_run_events` 为失败函数后，`pending_interactions()`
+  仍能从 read model 恢复 pending request。
+- 当前 `rg "list_run_events|list_filtered_run_events|list_tool_events_as_canonical"`
+  的生产结果只剩：
+  - `worker_supervisor.py` 的 worker DB proxy 白名单/说明字符串；
+  - `session_history.py` 关于历史 DB cursor 行为的注释；
+  - `run.py` 的 read-model helper 名称 `_list_filtered_run_events`。
+
+已运行：
+
+```bash
+python -m py_compile tui_gateway/services/interaction_registry.py tests/gateway/test_interaction_persistence.py
+.venv/bin/pytest tests/gateway/test_interaction_persistence.py tests/gateway/test_worker_frame_router.py::test_interaction_request_publishes_independent_frame_and_persists_internal tests/gateway/test_worker_frame_router.py::test_interaction_request_persistence_failure_blocks_delivery -q
+.venv/bin/ruff check tui_gateway/services/interaction_registry.py tests/gateway/test_interaction_persistence.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py tests/observability/test_interaction_registry_single_owner.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Interaction persistence/recovery 定向测试：`11 passed`
+- P2 + interaction observability tests：`11 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 16 证据
+
+已完成：
+
+- `RunEventReadModel` 新增 activity replay API：
+  `list_activity_events()` / `list_mission_activity_events()`，复用
+  `EventLedger.list_activity_rows()` / `list_mission_activity_rows()`。
+- `tui_gateway.services.run_events` 暴露对应 gateway-facing accessors。
+- `run_control` session subscription replay/poller 不再调用
+  `db.list_run_events`，改为 `list_runtime_events()`。
+- `runtime.activity.subscribe` 的可用性判断不再依赖
+  `db.list_run_events_by_activity`，改为检查 run-event read model。
+- `team_mission_activity_events` 的 activity/mission replay 不再调用
+  `db.list_run_events_by_activity` / `db.list_run_events_by_mission_activity`，
+  改为 read-model service。
+- `conversation_render_snapshot` 的 mission last-seq 计算不再直连 legacy DB
+  event reader，改为 `list_mission_activity_events(..., reverse=True)`。
+- `hermes_team_mission.state.event_log.event_seq()` 优先识别
+  `runtime_source_seq/runtimeSourceSeq`，避免 run-event canonical seq 覆盖
+  runtime-source seq 后污染 team mission `source_seq`。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py hermes_team_mission/state/event_log.py tui_gateway/services/run_events.py tui_gateway/services/run_control.py tui_gateway/services/team_mission_activity_events.py tui_gateway/methods/activity.py tui_gateway/methods/conversation_render_snapshot.py
+.venv/bin/pytest tests/test_runtime_activity_subscribe.py -q
+.venv/bin/pytest tests/test_team_mission_conversation_mirror.py::test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_stream_tail tests/test_team_mission_conversation_mirror.py::test_team_mission_poll_delivers_domain_projection_for_directly_delivered_node_terminal -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py hermes_team_mission/state/event_log.py tui_gateway/services/run_events.py tui_gateway/services/run_control.py tui_gateway/services/team_mission_activity_events.py tui_gateway/methods/activity.py tui_gateway/methods/conversation_render_snapshot.py
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Runtime activity subscribe：`24 passed`
+- Team mission subscription poll 定向测试：`2 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+额外发现：
+
+- `tests/test_team_mission_conversation_mirror.py::test_conversation_list_recovers_terminal_mission_with_active_mirror_run`
+  参数化组暴露 `run_control` in-memory run state 按裸 `run_id` 全局复用的旧缺陷：
+  每个 case 使用新的 SQLite DB/profile，但复用同一个 mirror `run_id`，后续 case 会被前一个
+  terminal memory state 污染。该问题属于后续 run-state owner/identity scope
+  切片，不混入本次 read-model replay 迁移。
+
+剩余工作：
+
+- `interaction_registry` pending recovery 仍有 legacy event reader，需要迁到
+  interaction/read-model owner。
+- `run_control` terminal publish 与 run-state memory owner 仍待后续写侧切片
+  收口。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。
+
+## Checkpoint 15 证据
+
+已完成：
+
+- `RunEventReadModel` 新增 `list_tool_events()`，由同一个 `EventLedger`
+  物理 row reader 过滤 `tool.*` canonical frames。
+- `tui_gateway.services.run_events` 暴露 gateway-facing tool event read-model
+  accessor，和 runtime/filtered event accessor 共用同一个 owner。
+- `session.messages include_tool_events` 不再调用
+  `list_tool_events_as_canonical` 或 `db.list_tool_events` row-model fallback，
+  改为通过 `RunEventReadModel.list_tool_events()` 返回真实 `run_events.seq`。
+- `tests/test_pr3_tool_events_canonical.py` 的 gateway 级断言改为验证：
+  production 入口不出现 legacy canonical helper，不调用 row-model fallback，
+  并实际经过 `RunEventReadModel`。
+
+已运行：
+
+```bash
+python -m py_compile hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tests/test_pr3_tool_events_canonical.py
+.venv/bin/pytest tests/test_pr3_tool_events_canonical.py tests/test_pr2_session_cursor.py -q
+.venv/bin/pytest tests/observability/test_zero_debt_gates.py -q
+.venv/bin/ruff check hermes_agent/read_models/run_events.py tui_gateway/services/run_events.py tui_gateway/methods/session_history.py tests/test_pr3_tool_events_canonical.py
+python scripts/zero_debt/verdict.py --phase P2 --json
+```
+
+当前验证结果：
+
+- Tool canonical/session cursor 定向测试：`30 passed`
+- P2 observability gate tests：`10 passed`
+- Ruff：通过
+- P2 verdict：仍失败，符合阶段内预期，失败项仍为：
+  - `p2:no_sessiondb_production`
+  - `p2:no_legacy_identity_alias_internal`
+
+剩余工作：
+
+- `run_control` subscription poller、activity/team-mission event replay 仍有
+  legacy event reader，需要后续 subscription/activity 切片。
+- Team transcript projector/backfill 仍需要目标 owner。
+- `run_agent.py` 与 `cli.py` 仍有生产 `SessionDB` 引用，需要后续入口切片。

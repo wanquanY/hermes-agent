@@ -66,9 +66,39 @@ import requests
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 from agent.auxiliary_client import call_llm
+from agent.redact import (
+    _redact_url_query_params,
+    _redact_url_userinfo,
+    redact_sensitive_text,
+)
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
+
+_BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
+    "BROWSERBASE_API_KEY",
+    "BROWSERBASE_PROJECT_ID",
+    "BROWSER_USE_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "FIRECRAWL_BROWSER_TTL",
+)
+
+
+def _browser_subprocess_env() -> dict[str, str]:
+    """Return a stripped child env plus the browser worker's narrow authority."""
+    # Keep browser_tool importable in constrained/plugin discovery contexts
+    # that intentionally install only a skeletal environment backend.  The
+    # security boundary is still mandatory at the actual subprocess boundary:
+    # absence of the canonical policy raises instead of falling back to raw
+    # ``os.environ``.
+    from tools.environments.local import hermes_subprocess_env
+
+    env = hermes_subprocess_env(inherit_credentials=False)
+    for key in _BROWSER_PASSTHROUGH_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
 
 try:
     from tools.website_policy import check_website_access
@@ -79,14 +109,30 @@ try:
     from tools.url_safety import (
         is_safe_url as _is_safe_url,
         is_always_blocked_url as _is_always_blocked_url,
+        normalize_url_for_request as _normalize_url_for_request,
     )
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
-from tools.browser_providers.base import CloudBrowserProvider
-from tools.browser_providers.browserbase import BrowserbaseProvider
-from tools.browser_providers.browser_use import BrowserUseProvider
-from tools.browser_providers.firecrawl import FirecrawlProvider
+    _normalize_url_for_request = lambda url: url  # noqa: E731 — best-effort fallback
+# Browser-provider ABC + registry — PR #25214 moved the per-vendor providers
+# (Browserbase / Browser Use / Firecrawl) out of ``tools/browser_providers/``
+# and into ``plugins/browser/<vendor>/``. The dispatcher consults the
+# registry; the legacy class names are re-exported below as backward-compat
+# shims for callers that import them from this module.
+from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
+from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
+    get_provider as _registry_get_browser_provider,
+)
+from plugins.browser.browserbase.provider import (  # noqa: F401  (legacy import surface)
+    BrowserbaseBrowserProvider as BrowserbaseProvider,
+)
+from plugins.browser.browser_use.provider import (  # noqa: F401
+    BrowserUseBrowserProvider as BrowserUseProvider,
+)
+from plugins.browser.firecrawl.provider import (  # noqa: F401
+    FirecrawlBrowserProvider as FirecrawlProvider,
+)
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 
 # Camofox local anti-detection browser backend (optional).
@@ -144,7 +190,9 @@ def _browser_candidate_path_dirs() -> list[str]:
     """Return ordered browser CLI PATH candidates shared by discovery and execution."""
     hermes_home = get_hermes_home()
     hermes_node_bin = str(hermes_home / "node" / "bin")
-    return [hermes_node_bin, *list(_discover_homebrew_node_dirs()), *_SANE_PATH_DIRS]
+    hermes_node_root = str(hermes_home / "node")
+    hermes_nm_bin = str(hermes_home / "node_modules" / ".bin")
+    return [hermes_node_bin, hermes_node_root, hermes_nm_bin, *list(_discover_homebrew_node_dirs()), *_SANE_PATH_DIRS]
 
 
 def _merge_browser_path(existing_path: str = "") -> str:
@@ -171,8 +219,12 @@ _last_screenshot_cleanup_by_dir: dict[str, float] = {}
 # Default timeout for browser commands (seconds)
 DEFAULT_COMMAND_TIMEOUT = 30
 
-# Max tokens for snapshot content before summarization
-SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
+# Snapshot and web extraction now share the same model-facing text budget.
+SNAPSHOT_SUMMARIZE_THRESHOLD = 15000
+# Full snapshots are stored for paging whenever the model-facing view is
+# lossy. The hard cap prevents hostile pages from growing the cache without
+# bound while preserving far more context than a single tool result can carry.
+MAX_STORED_SNAPSHOT_CHARS = 2_000_000
 
 # Commands that legitimately return empty stdout (e.g. close, record).
 _EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})
@@ -216,6 +268,14 @@ def _get_extraction_model() -> Optional[str]:
     return os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip() or None
 
 
+def _sanitize_url_for_logs(value: object) -> str:
+    """Redact credentials at the CDP endpoint logging boundary."""
+    text = redact_sensitive_text(value, force=True)
+    if not text:
+        return text
+    return _redact_url_userinfo(_redact_url_query_params(text))
+
+
 def _resolve_cdp_override(cdp_url: str) -> str:
     """Normalize a user-supplied CDP endpoint into a concrete connectable URL.
 
@@ -253,15 +313,27 @@ def _resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        logger.warning("Failed to resolve CDP endpoint %s via %s: %s", raw, version_url, exc)
+        logger.warning(
+            "Failed to resolve CDP endpoint %s via %s: %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(version_url),
+            _sanitize_url_for_logs(exc),
+        )
         return raw
 
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
-        logger.info("Resolved CDP endpoint %s -> %s", raw, ws_url)
+        logger.info(
+            "Resolved CDP endpoint %s -> %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(ws_url),
+        )
         return ws_url
 
-    logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", version_url)
+    logger.warning(
+        "CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint",
+        _sanitize_url_for_logs(version_url),
+    )
     return raw
 
 
@@ -387,15 +459,116 @@ def _stop_cdp_supervisor(task_id: str) -> None:
         logger.debug("CDP supervisor stop for task=%s failed (non-fatal): %s", task_id, exc)
 
 
+def _cdp_browser_call(
+    method: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    target_id: Optional[str] = None,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Run a CDP command against the configured native browser endpoint."""
+    from tools.browser_cdp_tool import (  # type: ignore[import-not-found]
+        _WS_AVAILABLE,
+        _cdp_call,
+        _resolve_cdp_endpoint,
+        _run_async,
+    )
+
+    if not _WS_AVAILABLE:
+        raise RuntimeError("The 'websockets' Python package is required for CDP tab operations")
+
+    endpoint = _resolve_cdp_endpoint()
+    if not endpoint:
+        raise RuntimeError("No CDP endpoint is available for native browser tab operations")
+    if not endpoint.startswith(("ws://", "wss://")):
+        raise RuntimeError(f"CDP endpoint is not a WebSocket URL: {endpoint!r}")
+
+    return _run_async(_cdp_call(endpoint, method, params or {}, target_id, timeout))
+
+
+def _cdp_page_targets() -> List[Dict[str, Any]]:
+    result = _cdp_browser_call("Target.getTargets")
+    targets = result.get("targetInfos", [])
+    if not isinstance(targets, list):
+        return []
+    pages: List[Dict[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_type = str(target.get("type") or "")
+        if target_type not in {"page", "webview"}:
+            continue
+        url = str(target.get("url") or "")
+        if url.startswith("devtools://"):
+            continue
+        pages.append(target)
+    return pages
+
+
+def _default_cdp_task_id(task_id: Optional[str] = None) -> str:
+    return task_id or "default"
+
+
+def _active_cdp_target_for_task(task_id: Optional[str] = None) -> Optional[str]:
+    base_task_id = _default_cdp_task_id(task_id)
+    return _active_cdp_targets.get(base_task_id) or _active_cdp_targets.get(_last_session_key(base_task_id))
+
+
+def _set_active_cdp_target(task_id: Optional[str], target_id: str) -> None:
+    normalized = str(target_id or "").strip()
+    if not normalized:
+        return
+    base_task_id = _default_cdp_task_id(task_id)
+    _active_cdp_targets[base_task_id] = normalized
+    _active_cdp_targets[_last_session_key(base_task_id)] = normalized
+
+
+def _activate_cdp_target(task_id: Optional[str], target_id: str) -> None:
+    normalized = str(target_id or "").strip()
+    if not normalized:
+        raise ValueError("tab_id is required")
+    _cdp_browser_call("Target.activateTarget", {"targetId": normalized})
+    _set_active_cdp_target(task_id, normalized)
+
+
+def _activate_current_cdp_target(task_id: str) -> None:
+    if not _get_cdp_override():
+        return
+    target_id = _active_cdp_target_for_task(task_id)
+    if not target_id:
+        return
+    try:
+        _cdp_browser_call("Target.activateTarget", {"targetId": target_id}, timeout=3.0)
+    except Exception as exc:
+        logger.debug("Failed to activate CDP target %s before browser command: %s", target_id, exc)
+
+
 # ============================================================================
 # Cloud Provider Registry
 # ============================================================================
+#
+# Per-vendor browser providers (Browserbase / Browser Use / Firecrawl) live as
+# plugins under ``plugins/browser/<vendor>/`` and self-register through
+# :mod:`agent.browser_registry` at plugin-discovery time. The legacy
+# class-name registry below is preserved as a backward-compat shim so test
+# fixtures that ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)``
+# keep working — but ``_get_cloud_provider()`` now consults
+# :mod:`agent.browser_registry` for the actual lookup.
+#
+# When the test patches ``_PROVIDER_REGISTRY``, we honour it (so the cache
+# unit tests still drive the function); otherwise the registry-backed path
+# wins. This keeps the test surface stable while letting third-party
+# plugins drop in under ``~/.hermes/plugins/browser/<vendor>/``.
 
 _PROVIDER_REGISTRY: Dict[str, type] = {
     "browserbase": BrowserbaseProvider,
     "browser-use": BrowserUseProvider,
     "firecrawl": FirecrawlProvider,
 }
+# Frozen copy of the import-time _PROVIDER_REGISTRY, used by
+# ``_is_legacy_provider_registry_overridden`` to detect test-time
+# monkeypatching. NEVER mutate this dict.
+_DEFAULT_PROVIDER_REGISTRY: Dict[str, type] = dict(_PROVIDER_REGISTRY)
 
 _cached_cloud_provider: Optional[CloudBrowserProvider] = None
 _cloud_provider_resolved = False
@@ -408,6 +581,51 @@ _agent_browser_resolved = False
 # agent-browser v0.25.3+ supports ``--engine lightpanda`` natively.
 _cached_browser_engine: Optional[str] = None
 _browser_engine_resolved = False
+_cached_headed_mode: Optional[bool] = None
+_headed_mode_resolved = False
+
+
+def _is_legacy_provider_registry_overridden() -> bool:
+    """Return True when a test has patched ``_PROVIDER_REGISTRY`` to a custom value.
+
+    Detected by spotting any registered class that *isn't* the canonical
+    plugin-backed class for that name. Tests that
+    ``monkeypatch.setattr(browser_tool, "_PROVIDER_REGISTRY", ...)`` install
+    custom factories (`exploding_factory`, `lambda: fake_provider`, etc.);
+    those entries fail the canonical-class identity check below.
+
+    Note: a future maintainer adding a 4th built-in provider only needs to
+    extend ``_DEFAULT_PROVIDER_REGISTRY`` below — they do NOT need to update
+    a hardcoded set of keys here. The detection just compares each registered
+    value against the corresponding canonical class.
+    """
+    try:
+        for key, default_cls in _DEFAULT_PROVIDER_REGISTRY.items():
+            if _PROVIDER_REGISTRY.get(key) is not default_cls:
+                return True
+        # Extra keys not in the default registry → also an override.
+        return len(_PROVIDER_REGISTRY) != len(_DEFAULT_PROVIDER_REGISTRY)
+    except Exception:
+        return False
+
+
+def _ensure_browser_plugins_loaded() -> None:
+    """Idempotently trigger plugin discovery so the browser registry is populated.
+
+    Normally `model_tools` is imported early in any session and that
+    triggers `discover_plugins()` as a side effect. But `_get_cloud_provider`
+    can be called from contexts that haven't gone through `model_tools` —
+    standalone scripts, certain unit-test paths, the parity-sweep harness.
+    Make discovery idempotent and side-effect-only here so users always
+    see registered plugins regardless of import order. Cheap: subsequent
+    calls early-return inside `_ensure_plugins_discovered`.
+    """
+    try:
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+    except Exception as exc:
+        logger.debug("Browser plugin discovery failed (non-fatal): %s", exc)
 
 
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
@@ -415,8 +633,17 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
 
     Reads ``config["browser"]["cloud_provider"]`` once and caches the result
     for the process lifetime. An explicit ``local`` provider disables cloud
-    fallback. If unset, fall back to Browserbase when direct or managed
-    Browserbase credentials are available.
+    fallback. If unset, fall back to Browser Use (managed Nous gateway or
+    direct API key) and then Browserbase (direct credentials only) — the
+    historic auto-detect order, now expressed as the
+    :data:`agent.browser_registry._LEGACY_PREFERENCE` walk.
+
+    Selection routes through :mod:`agent.browser_registry` so third-party
+    browser plugins (``~/.hermes/plugins/browser/<vendor>/``) participate
+    in explicit-config resolution. Test fixtures that override
+    ``_PROVIDER_REGISTRY`` or ``BrowserUseProvider`` / ``BrowserbaseProvider``
+    on this module still drive the function — see
+    ``_is_legacy_provider_registry_overridden``.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
     if _cloud_provider_resolved:
@@ -436,9 +663,33 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 _cached_cloud_provider = None
                 _cloud_provider_resolved = True
                 return None
-        if provider_key and provider_key in _PROVIDER_REGISTRY:
+        if provider_key:
             try:
-                resolved = _PROVIDER_REGISTRY[provider_key]()
+                if _is_legacy_provider_registry_overridden():
+                    # Test fixture path: honour the patched dict so the
+                    # cache-policy unit tests keep working.
+                    factory = _PROVIDER_REGISTRY.get(provider_key)
+                    if factory is not None:
+                        resolved = factory()
+                else:
+                    # Ensure plugins are discovered so the registry is
+                    # populated. Idempotent — cheap on subsequent calls.
+                    _ensure_browser_plugins_loaded()
+                    resolved = _registry_get_browser_provider(provider_key)
+                    if resolved is None:
+                        # Explicit config name unknown to the registry —
+                        # might be a typo, an uninstalled plugin, or a
+                        # registry-population failure. Warn the user
+                        # (legacy code would have surfaced a typed
+                        # credentials error via direct class instantiation;
+                        # post-migration we surface this WARNING instead).
+                        logger.warning(
+                            "browser.cloud_provider=%r is not a registered "
+                            "browser plugin; falling back to auto-detect "
+                            "(install the corresponding plugin or fix the "
+                            "config key spelling).",
+                            provider_key,
+                        )
             except Exception:
                 logger.warning(
                     "Failed to instantiate explicit cloud_provider %r; will retry on next call",
@@ -452,8 +703,15 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
         logger.debug("Could not read cloud_provider from config: %s", e)
 
     if resolved is None:
-        # Prefer Browser Use (managed Nous gateway or direct API key),
-        # fall back to Browserbase (direct credentials only).
+        # Auto-detect path: Browser Use first (managed Nous gateway or
+        # direct API key), then Browserbase (direct credentials). Uses
+        # the legacy class names imported at the top of this module so
+        # tests that ``monkeypatch.setattr(browser_tool, "BrowserUseProvider", ...)``
+        # keep driving this branch deterministically. Third-party browser
+        # plugins are intentionally NOT reachable from auto-detect — they
+        # participate only via explicit ``browser.cloud_provider: <name>``,
+        # mirroring the firecrawl gate documented on
+        # :data:`agent.browser_registry._LEGACY_PREFERENCE`.
         try:
             fallback_provider = BrowserUseProvider()
             if fallback_provider.is_configured():
@@ -565,6 +823,39 @@ def _get_browser_engine() -> str:
         _cached_browser_engine = "auto"
 
     return _cached_browser_engine
+
+
+def _is_headed_mode() -> bool:
+    """Return whether local Chromium should run with a visible window."""
+    global _cached_headed_mode, _headed_mode_resolved
+    if _headed_mode_resolved:
+        return bool(_cached_headed_mode)
+
+    _headed_mode_resolved = True
+    _cached_headed_mode = False
+    try:
+        from hermes_cli.config import read_raw_config
+
+        config = read_raw_config()
+        browser_config = config.get("browser", {})
+        value = (
+            browser_config.get("headed")
+            if isinstance(browser_config, dict)
+            else None
+        )
+        if value is not None:
+            _cached_headed_mode = str(value).strip().lower() in {
+                "true",
+                "1",
+                "yes",
+            }
+    except Exception as exc:
+        logger.debug("Could not read browser.headed from config: %s", exc)
+
+    if not _cached_headed_mode:
+        env_value = os.environ.get("AGENT_BROWSER_HEADED", "").strip().lower()
+        _cached_headed_mode = env_value in {"true", "1", "yes"}
+    return bool(_cached_headed_mode)
 
 
 def _should_inject_engine(engine: str) -> bool:
@@ -743,7 +1034,8 @@ def _run_chrome_fallback_command(
 
     task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
     os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
-    browser_env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": task_socket_dir}
+    browser_env = _browser_subprocess_env()
+    browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
@@ -1052,6 +1344,11 @@ _recording_sessions: set = set()  # session_keys with active recordings
 # navigation.  Without this, a task that navigated to localhost on the local
 # sidecar would fall back to the cloud session on its next snapshot call.
 _last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
+
+# Tracks the active CDP page target for each task/session key when Hermes is
+# connected to a native browser through BROWSER_CDP_URL.  This is the canonical
+# tab-selection state for the native CDP provider.
+_active_cdp_targets: Dict[str, str] = {}
 _LOCAL_SUFFIX = "::local"
 
 # Flag to track if cleanup has been done
@@ -1234,7 +1531,7 @@ def _reap_orphaned_browser_sessions():
                 owner_pid = int(Path(owner_pid_file).read_text(encoding="utf-8").strip())
                 # ``os.kill(pid, 0)`` is NOT a no-op on Windows (bpo-14484).
                 # Use the cross-platform existence check.
-                from gateway.status import _pid_exists
+                from channels.runtime_status import _pid_exists
                 owner_alive = _pid_exists(owner_pid)
             except (ValueError, OSError):
                 owner_alive = None  # corrupt file — fall through
@@ -1264,7 +1561,7 @@ def _reap_orphaned_browser_sessions():
 
         # Check if the daemon is still alive. ``os.kill(pid, 0)`` on Windows
         # is NOT a no-op — use the handle-based existence check.
-        from gateway.status import _pid_exists
+        from channels.runtime_status import _pid_exists
         if not _pid_exists(daemon_pid):
             shutil.rmtree(socket_dir, ignore_errors=True)
             continue
@@ -1378,6 +1675,57 @@ BROWSER_TOOL_SCHEMAS = [
                 }
             },
             "required": []
+        }
+    },
+    {
+        "name": "browser_tabs",
+        "description": "List browser tabs when the active native Hermes browser provider supports explicit tab enumeration. The default local CDP provider may return unsupported.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_new_tab",
+        "description": "Open a new browser tab when the active native Hermes browser provider supports explicit tab creation. The default local CDP provider may return unsupported.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Optional URL for the new tab. Defaults to about:blank."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_select_tab",
+        "description": "Switch the active browser tab by tab_id from browser_tabs. Returns a compact snapshot of the selected tab.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The tab_id from browser_tabs."
+                }
+            },
+            "required": ["tab_id"]
+        }
+    },
+    {
+        "name": "browser_close_tab",
+        "description": "Close a browser tab by tab_id from browser_tabs. If the active tab is closed, another tab becomes active or a blank tab is created.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tab_id": {
+                    "type": "string",
+                    "description": "The tab_id from browser_tabs."
+                }
+            },
+            "required": ["tab_id"]
         }
     },
     {
@@ -1702,7 +2050,29 @@ def _find_agent_browser() -> str:
         _agent_browser_resolved = True
         return _cached_agent_browser
 
-    # Nothing found — cache the failure so subsequent calls don't re-scan.
+    # Nothing found — try lazy installation before giving up.
+    try:
+        from hermes_cli.dep_ensure import ensure_dependency
+        if ensure_dependency("browser"):
+            recheck = shutil.which("agent-browser")
+            if not recheck and extended_path:
+                recheck = shutil.which("agent-browser", path=extended_path)
+            if not recheck:
+                hermes_nm = str(get_hermes_home() / "node_modules" / ".bin")
+                recheck = shutil.which("agent-browser", path=hermes_nm)
+            if not recheck:
+                hermes_node_bin = str(get_hermes_home() / "node" / "bin")
+                recheck = shutil.which("agent-browser", path=hermes_node_bin)
+            if not recheck:
+                hermes_node_root = str(get_hermes_home() / "node")
+                recheck = shutil.which("agent-browser", path=hermes_node_root)
+            if recheck:
+                _cached_agent_browser = recheck
+                _agent_browser_resolved = True
+                return recheck
+    except Exception:
+        pass
+
     _agent_browser_resolved = True
     raise FileNotFoundError(
         "agent-browser CLI not found. Install it with: "
@@ -1802,6 +2172,9 @@ def _run_browser_command(
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
 
+    if session_info.get("cdp_url"):
+        _activate_current_cdp_target(task_id)
+
     # Build the command with the appropriate backend flag.
     # Cloud mode: --cdp <websocket_url> connects to Browserbase.
     # Local mode: --session <name> launches a local headless Chromium.
@@ -1812,8 +2185,10 @@ def _run_browser_command(
         # --session creates a local browser instance and silently ignores --cdp.
         backend_args = ["--cdp", session_info["cdp_url"]]
     else:
-        # Local mode — launch a headless Chromium instance
+        # Local mode — launch Chromium, visible only when explicitly enabled.
         backend_args = ["--session", session_info["session_name"]]
+        if _is_headed_mode():
+            backend_args.append("--headed")
 
     # Lightpanda engine injection (local mode only, agent-browser v0.25.3+).
     # Use the resolved session backend rather than global cloud-provider state:
@@ -1852,7 +2227,7 @@ def _run_browser_command(
         logger.debug("browser cmd=%s task=%s socket_dir=%s (%d chars)",
                      command, task_id, task_socket_dir, len(task_socket_dir))
 
-        browser_env = {**os.environ}
+        browser_env = _browser_subprocess_env()
 
         # Ensure subprocesses inherit the same browser-specific PATH fallbacks
         # used during CLI discovery.
@@ -2056,14 +2431,54 @@ def _run_browser_command(
     return result
 
 
+def _store_full_snapshot(snapshot_text: str) -> Optional[str]:
+    """Store a redacted, owner-only full snapshot for later paging."""
+    try:
+        import hashlib
+        from hermes_constants import get_hermes_dir
+
+        content = redact_sensitive_text(snapshot_text, force=True)
+        original_length = len(content)
+        if original_length > MAX_STORED_SNAPSHOT_CHARS:
+            content = (
+                content[:MAX_STORED_SNAPSHOT_CHARS]
+                + f"\n\n[... stored copy truncated at "
+                f"{MAX_STORED_SNAPSHOT_CHARS:,} chars of {original_length:,} ...]"
+            )
+        cache_dir = get_hermes_dir("cache/web", "web_cache")
+        cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            cache_dir.chmod(0o700)
+        except (OSError, NotImplementedError):
+            pass
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
+        path = cache_dir / f"browser-snapshot-{digest}.txt"
+        path.write_text(content, encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except (OSError, NotImplementedError):
+            pass
+        return str(path)
+    except Exception as exc:
+        logger.debug("Failed to store full browser snapshot: %s", exc)
+        return None
+
+
 def _extract_relevant_content(
     snapshot_text: str,
     user_task: Optional[str] = None
 ) -> str:
     """Use LLM to extract relevant content from a snapshot based on the user's task.
 
-    Falls back to simple truncation when no auxiliary text model is configured.
+    Stores the full redacted snapshot before returning a lossy summary.
     """
+    stored_path = _store_full_snapshot(snapshot_text)
+    stored_note = (
+        f"\n\n[Summarized from a {len(snapshot_text):,}-char snapshot. Full "
+        f"snapshot saved to: {stored_path} — page it with read_file if needed.]"
+        if stored_path
+        else ""
+    )
     if user_task:
         extraction_prompt = (
             f"You are a content extractor for a browser automation agent.\n\n"
@@ -2105,14 +2520,19 @@ def _extract_relevant_content(
         if model:
             call_kwargs["model"] = model
         response = call_llm(**call_kwargs)
-        extracted = (response.choices[0].message.content or "").strip() or _truncate_snapshot(snapshot_text)
+        extracted = (response.choices[0].message.content or "").strip()
+        if not extracted:
+            return _truncate_snapshot(snapshot_text)
         # Redact any secrets the auxiliary LLM may have echoed back.
-        return redact_sensitive_text(extracted)
+        return redact_sensitive_text(extracted) + stored_note
     except Exception:
         return _truncate_snapshot(snapshot_text)
 
 
-def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
+def _truncate_snapshot(
+    snapshot_text: str,
+    max_chars: int = SNAPSHOT_SUMMARIZE_THRESHOLD,
+) -> str:
     """Structure-aware truncation for snapshots.
 
     Cuts at line boundaries so that accessibility tree elements are never
@@ -2129,23 +2549,100 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
     if len(snapshot_text) <= max_chars:
         return snapshot_text
 
+    stored_path = _store_full_snapshot(snapshot_text)
     lines = snapshot_text.split('\n')
     result: list[str] = []
     chars = 0
     for line in lines:
-        if chars + len(line) + 1 > max_chars - 80:  # reserve space for note
+        if chars + len(line) + 1 > max_chars:
             break
         result.append(line)
         chars += len(line) + 1
-    remaining = len(lines) - len(result)
-    if remaining > 0:
-        result.append(f'\n[... {remaining} more lines truncated, use browser_snapshot for full content]')
+
+    def _truncation_note() -> str:
+        remaining = len(lines) - len(result)
+        if stored_path:
+            return (
+                f'[... {remaining} more lines truncated; full: read_file '
+                f'path="{stored_path}" offset={len(result) + 1} limit=200]'
+            )
+        return (
+            f'[... {remaining} more lines truncated, use browser_snapshot '
+            'for full content]'
+        )
+
+    # Preserve the historical allowance for a short truncation note while
+    # preventing a long absolute cache path from unexpectedly doubling a
+    # small caller-provided budget.
+    output_budget = max_chars + 100
+    note = _truncation_note()
+    while result and len('\n'.join([*result, "", note])) > output_budget:
+        result.pop()
+        note = _truncation_note()
+    if len(result) < len(lines):
+        result.extend(["", note])
     return '\n'.join(result)
+
+
+def _redact_browser_output(value: Any) -> Any:
+    """Force-redact browser-originated values at the model boundary."""
+    if isinstance(value, str):
+        return redact_sensitive_text(value, force=True)
+    if isinstance(value, list):
+        return [_redact_browser_output(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_browser_output(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_browser_output(item) for key, item in value.items()}
+    return value
 
 
 # ============================================================================
 # Browser Tool Functions
 # ============================================================================
+
+def _dovie_browser_bridge() -> Any:
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            return _dovie_browser
+    except Exception as exc:
+        logger.debug("Dovie desktop browser bridge unavailable: %s", exc)
+    return None
+
+
+def _dovie_browser_error(action: str, exc: Exception) -> str:
+    return json.dumps({
+        "success": False,
+        "error": f"Dovie desktop browser {action} failed: {exc}",
+        "provider": "dovie_desktop",
+    }, ensure_ascii=False)
+
+
+def _active_dovie_tab(session: Any) -> Dict[str, Any]:
+    if not isinstance(session, dict):
+        return {}
+    tabs = session.get("tabs")
+    if not isinstance(tabs, list):
+        return {}
+    active_tab_id = str(session.get("activeTabId") or session.get("active_tab_id") or "")
+    for tab in tabs:
+        if isinstance(tab, dict) and active_tab_id and str(tab.get("tabId") or tab.get("tab_id") or "") == active_tab_id:
+            return tab
+    for tab in tabs:
+        if isinstance(tab, dict) and tab.get("active"):
+            return tab
+    return tabs[0] if tabs and isinstance(tabs[0], dict) else {}
+
+
+def _active_tab_url_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("url") or "")
+
+
+def _active_tab_title_from_dovie_session(session: Any) -> str:
+    return str(_active_dovie_tab(session).get("title") or "")
+
 
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
@@ -2166,6 +2663,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     from agent.redact import _PREFIX_RE
     url_decoded = urllib.parse.unquote(url)
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
+        return json.dumps({
+            "success": False,
+            "error": "Blocked: URL contains what appears to be an API key or token. "
+                     "Secrets must not be sent in URLs.",
+        })
+    url = _normalize_url_for_request(url)
+    normalized_decoded = urllib.parse.unquote(url)
+    if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL contains what appears to be an API key or token. "
@@ -2215,6 +2720,28 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": blocked["message"],
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
+
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            session = dovie_browser.navigate(url)
+            observation = dovie_browser.observe(max_nodes=200)
+            snapshot = dovie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(snapshot.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            _last_active_session_key[effective_task_id] = f"dovie:{dovie_browser.browser_session_id()}"
+            return json.dumps({
+                "success": True,
+                "url": snapshot.get("url") or _active_tab_url_from_dovie_session(session) or url,
+                "title": snapshot.get("title") or _active_tab_title_from_dovie_session(session),
+                "snapshot": _redact_browser_output(snapshot_text),
+                "element_count": snapshot.get("element_count", 0),
+                "provider": "dovie_desktop",
+                "browser_session_id": dovie_browser.browser_session_id(),
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("navigate", exc)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -2332,7 +2859,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 refs = snap_data.get("refs", {})
                 if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
                     snapshot_text = _truncate_snapshot(snapshot_text)
-                response["snapshot"] = snapshot_text
+                response["snapshot"] = _redact_browser_output(snapshot_text)
                 response["element_count"] = len(refs) if refs else 0
                 if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
                     _copy_fallback_warning(response, snap_result)
@@ -2363,6 +2890,21 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            observation = dovie_browser.observe(max_nodes=1000 if full else 200)
+            response = dovie_browser.snapshot_payload_from_observation(observation)
+            snapshot_text = str(response.get("snapshot") or "")
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
+                snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+            elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            response["snapshot"] = _redact_browser_output(snapshot_text)
+            return json.dumps(response, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("snapshot", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
@@ -2381,6 +2923,13 @@ def browser_snapshot(
         snapshot_text = data.get("snapshot", "")
         refs = data.get("refs", {})
 
+        blocked = _blocked_private_page_action(
+            effective_task_id,
+            "read a page snapshot",
+        )
+        if blocked is not None:
+            return blocked
+
         # Check if snapshot needs summarization
         if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
             snapshot_text = _extract_relevant_content(snapshot_text, user_task)
@@ -2389,7 +2938,7 @@ def browser_snapshot(
 
         response = {
             "success": True,
-            "snapshot": snapshot_text,
+            "snapshot": _redact_browser_output(snapshot_text),
             "element_count": len(refs) if refs else 0
         }
         _copy_fallback_warning(response, result)
@@ -2416,6 +2965,305 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+def browser_tabs(task_id: Optional[str] = None) -> str:
+    """List tabs in the current browser session."""
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call("browser_use_list_sessions")
+            )
+            if session:
+                return json.dumps(_dovie_browser.tab_payload_from_session(session), ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab list failed; falling back to native CDP: %s", exc)
+
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        active_target = _active_cdp_target_for_task(task_id)
+        if active_target and not any(str(t.get("targetId") or "") == active_target for t in targets):
+            _active_cdp_targets.pop(_default_cdp_task_id(task_id), None)
+            _active_cdp_targets.pop(_last_session_key(_default_cdp_task_id(task_id)), None)
+            active_target = None
+        if not active_target and targets:
+            active_target = str(targets[0].get("targetId") or "")
+            _set_active_cdp_target(task_id, active_target)
+        tabs = []
+        for target in targets:
+            target_id = str(target.get("targetId") or "")
+            tabs.append({
+                "tab_id": target_id,
+                "target_id": target_id,
+                "title": str(target.get("title") or ""),
+                "url": str(target.get("url") or "about:blank"),
+                "active": bool(target_id and target_id == active_target),
+                "attached": bool(target.get("attached")),
+                "type": str(target.get("type") or "page"),
+            })
+        return json.dumps({
+            "success": True,
+            "tabs": tabs,
+            "active_tab_id": active_target,
+            "provider": "native_cdp",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to list native CDP browser tabs: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_new_tab(url: Optional[str] = None, task_id: Optional[str] = None) -> str:
+    """Open a new tab and make it active."""
+    requested_url = str(url or "").strip()
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_create_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "url": requested_url or "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            active_tab_id = str(payload.get("active_tab_id") or "")
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == active_tab_id),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": active_tab_id,
+                "target_id": active_tab_id,
+                "url": str(active_tab.get("url") or requested_url or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser new tab failed; falling back to native CDP: %s", exc)
+
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    try:
+        created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
+        target_id = str(created.get("targetId") or "")
+        if not target_id:
+            raise RuntimeError("Target.createTarget did not return targetId")
+        _activate_cdp_target(task_id, target_id)
+        response: Dict[str, Any] = {
+            "success": True,
+            "tab_id": target_id,
+            "target_id": target_id,
+            "active_tab_id": target_id,
+            "url": "about:blank",
+            "provider": "native_cdp",
+        }
+        if requested_url and requested_url != "about:blank":
+            nav_payload = json.loads(browser_navigate(requested_url, task_id=task_id))
+            response["navigation"] = nav_payload
+            if isinstance(nav_payload, dict):
+                response["url"] = nav_payload.get("url", requested_url)
+                response["title"] = nav_payload.get("title", "")
+                if not nav_payload.get("success"):
+                    response["success"] = False
+                    response["error"] = nav_payload.get("error", "Navigation in new tab failed")
+        return json.dumps(response, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to create native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_select_tab(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Switch to a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_activate_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "tabId": normalized,
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            active_tab = next(
+                (tab for tab in payload.get("tabs", []) if isinstance(tab, dict) and tab.get("tab_id") == normalized),
+                {},
+            )
+            return json.dumps({
+                **payload,
+                "tab_id": normalized,
+                "target_id": normalized,
+                "url": str(active_tab.get("url") or "about:blank"),
+                "title": str(active_tab.get("title") or ""),
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab select failed; falling back to native CDP: %s", exc)
+
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        target = next((t for t in targets if str(t.get("targetId") or "") == normalized), None)
+        if target is None:
+            return json.dumps({
+                "success": False,
+                "error": f"Native CDP browser tab not found: {normalized}",
+            }, ensure_ascii=False)
+        _activate_cdp_target(task_id, normalized)
+        response: Dict[str, Any] = {
+            "success": True,
+            "tab_id": normalized,
+            "target_id": normalized,
+            "active_tab_id": normalized,
+            "title": str(target.get("title") or ""),
+            "url": str(target.get("url") or "about:blank"),
+            "provider": "native_cdp",
+        }
+        try:
+            snap_payload = json.loads(browser_snapshot(full=False, task_id=task_id))
+            response["snapshot"] = snap_payload.get("snapshot", "")
+            response["element_count"] = snap_payload.get("element_count", 0)
+        except Exception as exc:
+            logger.debug("Snapshot after native CDP tab select failed: %s", exc)
+        return json.dumps(response, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to select native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
+
+
+def browser_close_tab(tab_id: str, task_id: Optional[str] = None) -> str:
+    """Close a tab by tab_id."""
+    normalized = str(tab_id or "").strip()
+    if not normalized:
+        return json.dumps({"success": False, "error": "tab_id is required"}, ensure_ascii=False)
+    try:
+        from dovie_extension import browser_bridge as _dovie_browser
+
+        if _dovie_browser.available():
+            session = _dovie_browser.session_from_value(
+                _dovie_browser.call(
+                    "browser_use_close_tab",
+                    {
+                        "request": {
+                            "browserSessionId": _dovie_browser.browser_session_id(),
+                            "tabId": normalized,
+                            "fallbackUrl": "about:blank",
+                        },
+                    },
+                )
+            )
+            payload = _dovie_browser.tab_payload_from_session(session)
+            return json.dumps({
+                **payload,
+                "closed_tab_id": normalized,
+                "closed": True,
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Dovie desktop browser tab close failed; falling back to native CDP: %s", exc)
+
+    if _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations are not supported by the Camofox browser provider.",
+        }, ensure_ascii=False)
+    if not _get_cdp_override():
+        return json.dumps({
+            "success": False,
+            "error": "Explicit multi-tab operations require a native CDP browser endpoint.",
+        }, ensure_ascii=False)
+    try:
+        targets = _cdp_page_targets()
+        if not any(str(t.get("targetId") or "") == normalized for t in targets):
+            return json.dumps({
+                "success": False,
+                "error": f"Native CDP browser tab not found: {normalized}",
+            }, ensure_ascii=False)
+        closed = _cdp_browser_call("Target.closeTarget", {"targetId": normalized})
+        base_task_id = _default_cdp_task_id(task_id)
+        if _active_cdp_targets.get(base_task_id) == normalized:
+            _active_cdp_targets.pop(base_task_id, None)
+        last_key = _last_session_key(base_task_id)
+        if _active_cdp_targets.get(last_key) == normalized:
+            _active_cdp_targets.pop(last_key, None)
+        remaining = [t for t in _cdp_page_targets() if str(t.get("targetId") or "") != normalized]
+        next_active = str(remaining[0].get("targetId") or "") if remaining else ""
+        if next_active:
+            _activate_cdp_target(task_id, next_active)
+        elif not remaining:
+            created = _cdp_browser_call("Target.createTarget", {"url": "about:blank"})
+            next_active = str(created.get("targetId") or "")
+            if next_active:
+                _activate_cdp_target(task_id, next_active)
+        return json.dumps({
+            "success": True,
+            "closed_tab_id": normalized,
+            "closed": bool(closed.get("success", True)),
+            "active_tab_id": next_active or None,
+            "tabs": [
+                {
+                    "tab_id": str(target.get("targetId") or ""),
+                    "target_id": str(target.get("targetId") or ""),
+                    "title": str(target.get("title") or ""),
+                    "url": str(target.get("url") or "about:blank"),
+                    "active": bool(next_active and str(target.get("targetId") or "") == next_active),
+                    "type": str(target.get("type") or "page"),
+                }
+                for target in remaining
+            ],
+            "provider": "native_cdp",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": f"Failed to close native CDP browser tab: {exc}",
+        }, ensure_ascii=False)
+
+
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     """
     Click on an element.
@@ -2427,11 +3275,28 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            dovie_browser.action("click", ref=normalized_ref)
+            return json.dumps({
+                "success": True,
+                "clicked": normalized_ref,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("click", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    blocked = _blocked_private_page_action(effective_task_id, "click")
+    if blocked is not None:
+        return blocked
 
     # Ensure ref starts with @
     if not ref.startswith("@"):
@@ -2465,11 +3330,29 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            normalized_ref = ref if ref.startswith("@") else f"@{ref}"
+            dovie_browser.action("fill", ref=normalized_ref, text=text)
+            return json.dumps({
+                "success": True,
+                "typed": text,
+                "element": normalized_ref,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("type", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    blocked = _blocked_private_page_action(effective_task_id, "type")
+    if blocked is not None:
+        return blocked
 
     # Ensure ref starts with @
     if not ref.startswith("@"):
@@ -2516,6 +3399,21 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            dovie_browser.action(
+                "scroll",
+                delta_y=_SCROLL_PIXELS if direction == "down" else -_SCROLL_PIXELS,
+            )
+            return json.dumps({
+                "success": True,
+                "scrolled": direction,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("scroll", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
         # Camofox REST API doesn't support pixel args; use repeated calls
@@ -2526,6 +3424,10 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
         return result
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    blocked = _blocked_private_page_action(effective_task_id, "scroll")
+    if blocked is not None:
+        return blocked
 
     result = _run_browser_command(effective_task_id, "scroll", [direction, str(_SCROLL_PIXELS)])
     if not result.get("success"):
@@ -2552,6 +3454,18 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            session = dovie_browser.go_back()
+            return json.dumps({
+                "success": True,
+                "url": _active_tab_url_from_dovie_session(session),
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("back", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
@@ -2560,6 +3474,12 @@ def browser_back(task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "back", [])
 
     if result.get("success"):
+        blocked = _blocked_private_page_action(
+            effective_task_id,
+            "return content after browser history navigation",
+        )
+        if blocked is not None:
+            return blocked
         data = result.get("data", {})
         response = {
             "success": True,
@@ -2585,11 +3505,26 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
+    dovie_browser = _dovie_browser_bridge()
+    if dovie_browser is not None:
+        try:
+            dovie_browser.action("press", key=key)
+            return json.dumps({
+                "success": True,
+                "pressed": key,
+                "provider": "dovie_desktop",
+            }, ensure_ascii=False)
+        except Exception as exc:
+            return _dovie_browser_error("press", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(effective_task_id, "press a key")
+    if blocked is not None:
+        return blocked
     result = _run_browser_command(effective_task_id, "press", [key])
 
     if result.get("success"):
@@ -2606,7 +3541,27 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-
+def _blocked_private_page_action(
+    effective_task_id: str,
+    action: str,
+) -> Optional[str]:
+    """Block cloud-browser reads/input after an eval reaches a private URL."""
+    if not _eval_ssrf_guard_active(effective_task_id):
+        return None
+    blocked_url = _current_page_private_url(effective_task_id)
+    if not blocked_url:
+        return None
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                "Blocked: page URL targets a private or internal address "
+                f"({blocked_url}). Refusing to {action} on this page in this "
+                "browser mode."
+            ),
+        },
+        ensure_ascii=False,
+    )
 
 
 def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
@@ -2626,6 +3581,11 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     """
     # --- JS evaluation mode ---
     if expression is not None:
+        from tools.browser_security import evaluate_policy_error
+
+        policy_error = evaluate_policy_error(expression)
+        if policy_error:
+            return json.dumps({"success": False, "error": policy_error}, ensure_ascii=False)
         return _browser_eval(expression, task_id)
 
     # --- Console output mode (original behaviour) ---
@@ -2634,6 +3594,12 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return camofox_console(clear, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(
+        effective_task_id,
+        "read console output",
+    )
+    if blocked is not None:
+        return blocked
 
     console_args = ["--clear"] if clear else []
     error_args = ["--clear"] if clear else []
@@ -2646,7 +3612,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         for msg in console_result.get("data", {}).get("messages", []):
             messages.append({
                 "type": msg.get("type", "log"),
-                "text": msg.get("text", ""),
+                "text": _redact_browser_output(msg.get("text", "")),
                 "source": "console",
             })
 
@@ -2654,7 +3620,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     if errors_result.get("success"):
         for err in errors_result.get("data", {}).get("errors", []):
             errors.append({
-                "message": err.get("message", ""),
+                "message": _redact_browser_output(err.get("message", "")),
                 "source": "exception",
             })
 
@@ -2671,12 +3637,71 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     return json.dumps(response, ensure_ascii=False)
 
 
+def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
+    """Whether this browser session crosses a private-network trust boundary."""
+    return (
+        not _is_local_backend()
+        and not _is_local_sidecar_key(effective_task_id)
+        and not _allow_private_urls()
+    )
+
+
+def _expression_targets_private_url(expression: str) -> Optional[str]:
+    from tools.browser_security import expression_targets_private_url
+
+    return expression_targets_private_url(
+        expression,
+        is_blocked_url=lambda url: (
+            _is_always_blocked_url(url) or not _is_safe_url(url)
+        ),
+    )
+
+
+def _current_page_private_url(effective_task_id: str) -> Optional[str]:
+    """Return the active private/internal URL, or None on safe/probe failure."""
+    try:
+        result = _run_browser_command(
+            effective_task_id,
+            "eval",
+            ["window.location.href"],
+            timeout=5,
+            _engine_override="auto",
+        )
+        if result.get("success"):
+            current_url = str(result.get("data", {}).get("result", ""))
+            current_url = current_url.strip().strip('"').strip("'")
+            if current_url and (
+                _is_always_blocked_url(current_url)
+                or not _is_safe_url(current_url)
+            ):
+                return current_url
+    except Exception as exc:
+        logger.debug("current browser URL safety probe failed: %s", exc)
+    return None
+
+
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
+    effective_task_id = _last_session_key(task_id or "default")
+
+    if _eval_ssrf_guard_active(effective_task_id):
+        blocked_literal = _expression_targets_private_url(expression)
+        if blocked_literal:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "Blocked: JavaScript expression targets a private or "
+                        f"internal address ({blocked_literal}). Reading internal "
+                        "endpoints via browser_console is not permitted in this "
+                        "browser mode."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
-
-    effective_task_id = _last_session_key(task_id or "default")
 
     # --- Fast path: route through the supervisor's persistent CDP WS ---------
     # When a CDPSupervisor is alive for this task_id, ``Runtime.evaluate`` runs
@@ -2699,9 +3724,15 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                         parsed = json.loads(raw_result)
                     except (json.JSONDecodeError, ValueError):
                         pass  # keep as string
+                blocked = _blocked_private_page_action(
+                    effective_task_id,
+                    "return JavaScript evaluation data",
+                )
+                if blocked is not None:
+                    return blocked
                 response = {
                     "success": True,
-                    "result": parsed,
+                    "result": _redact_browser_output(parsed),
                     "result_type": type(parsed).__name__,
                     "method": "cdp_supervisor",
                 }
@@ -2755,10 +3786,38 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
 
     response = {
         "success": True,
-        "result": parsed,
+        "result": _redact_browser_output(parsed),
         "result_type": type(parsed).__name__,
     }
+    blocked = _blocked_private_page_action(
+        effective_task_id,
+        "return JavaScript evaluation data",
+    )
+    if blocked is not None:
+        return blocked
     return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False, default=str)
+
+
+def _camofox_current_page_private_url(
+    tab_id: str,
+    user_id: str,
+) -> Optional[str]:
+    try:
+        from tools.browser_camofox import _post
+
+        data = _post(
+            f"/tabs/{tab_id}/evaluate",
+            body={"expression": "window.location.href", "userId": user_id},
+        )
+        current_url = str(data.get("result") if isinstance(data, dict) else data or "")
+        current_url = current_url.strip().strip('"').strip("'")
+        if current_url and (
+            _is_always_blocked_url(current_url) or not _is_safe_url(current_url)
+        ):
+            return current_url
+    except Exception as exc:
+        logger.debug("Camofox current URL safety probe failed: %s", exc)
+    return None
 
 
 def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
@@ -2767,7 +3826,11 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
     try:
         tab_info = _ensure_tab(task_id or "default")
         tab_id = tab_info.get("tab_id") or tab_info.get("id")
-        resp = _post(f"/tabs/{tab_id}/evaluate", body={"expression": expression, "userId": tab_info["user_id"]})
+        user_id = tab_info["user_id"]
+        resp = _post(
+            f"/tabs/{tab_id}/evaluate",
+            body={"expression": expression, "userId": user_id},
+        )
 
         # Camofox returns the result in a JSON envelope
         raw_result = resp.get("result") if isinstance(resp, dict) else resp
@@ -2778,9 +3841,24 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
             except (json.JSONDecodeError, ValueError):
                 pass
 
+        if _eval_ssrf_guard_active(task_id or "default"):
+            blocked_url = _camofox_current_page_private_url(tab_id, user_id)
+            if blocked_url:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            "Blocked: page URL targets a private or internal "
+                            f"address ({blocked_url}). This may have been caused "
+                            "by JavaScript navigation via browser_console."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+
         return json.dumps({
             "success": True,
-            "result": parsed,
+            "result": _redact_browser_output(parsed),
             "result_type": type(parsed).__name__,
         }, ensure_ascii=False, default=str)
     except Exception as e:
@@ -2860,6 +3938,13 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
 
     effective_task_id = _last_session_key(task_id or "default")
 
+    blocked = _blocked_private_page_action(
+        effective_task_id,
+        "extract page images",
+    )
+    if blocked is not None:
+        return blocked
+
     # Use eval to run JavaScript that extracts images
     js_code = """JSON.stringify(
         [...document.images].map(img => ({
@@ -2885,7 +3970,7 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
 
             response = {
                 "success": True,
-                "images": images,
+                "images": _redact_browser_output(images),
                 "count": len(images)
             }
             return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
@@ -2935,6 +4020,12 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
     screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(
+        effective_task_id,
+        "capture a page screenshot",
+    )
+    if blocked is not None:
+        return blocked
 
     # Lightpanda has no graphical renderer — pre-route screenshots to Chrome
     # via the fallback helper instead of letting the normal path fail with a
@@ -2973,7 +4064,11 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             _lp_prerouted = False
 
     try:
-        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        screenshots_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            screenshots_dir.chmod(0o700)
+        except (OSError, NotImplementedError):
+            pass
 
         # Prune old screenshots (older than 24 hours) to prevent unbounded disk growth
         _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
@@ -3042,6 +4137,11 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                     f"or a stale daemon process."
                 ),
             }, ensure_ascii=False)
+
+        try:
+            screenshot_path.chmod(0o600)
+        except (OSError, NotImplementedError):
+            pass
 
         # Convert screenshot to base64 at full resolution.
         _screenshot_bytes = screenshot_path.read_bytes()
@@ -3334,6 +4434,7 @@ def cleanup_all_browsers() -> None:
     global _cached_command_timeout, _command_timeout_resolved
     global _cached_chromium_installed
     global _cached_browser_engine, _browser_engine_resolved
+    global _cached_headed_mode, _headed_mode_resolved
     _cached_agent_browser = None
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
@@ -3342,6 +4443,8 @@ def cleanup_all_browsers() -> None:
     _cached_chromium_installed = None
     _cached_browser_engine = None
     _browser_engine_resolved = False
+    _cached_headed_mode = None
+    _headed_mode_resolved = False
 
 # ============================================================================
 # Requirements Check
@@ -3590,6 +4693,38 @@ registry.register(
         full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
     check_fn=check_browser_requirements,
     emoji="📸",
+)
+registry.register(
+    name="browser_tabs",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_tabs"],
+    handler=lambda args, **kw: browser_tabs(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🗂️",
+)
+registry.register(
+    name="browser_new_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_new_tab"],
+    handler=lambda args, **kw: browser_new_tab(url=args.get("url"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="➕",
+)
+registry.register(
+    name="browser_select_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_select_tab"],
+    handler=lambda args, **kw: browser_select_tab(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔀",
+)
+registry.register(
+    name="browser_close_tab",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_close_tab"],
+    handler=lambda args, **kw: browser_close_tab(tab_id=args.get("tab_id", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🗙",
 )
 registry.register(
     name="browser_click",

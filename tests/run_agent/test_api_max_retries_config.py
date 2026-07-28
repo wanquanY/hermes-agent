@@ -1,8 +1,9 @@
-"""Tests for agent.api_max_retries config surface.
+"""Tests for the legacy-named ``agent.api_max_retries`` config surface.
 
-Closes #11616 — make the hardcoded ``max_retries = 3`` in the agent's API
-retry loop user-configurable so fallback-provider setups can fail over
-faster on flaky primaries instead of burning ~3x180s on the same stall.
+Closes #11616 — make the API attempt budget in the agent's retry loop
+user-configurable. Its value is the total attempt budget, including
+the initial request, so fallback-provider setups can fail over faster on flaky
+primaries instead of burning the full attempt budget on the same stall.
 """
 from unittest.mock import MagicMock, patch
 
@@ -28,10 +29,10 @@ def _make_agent(api_max_retries=None):
         )
 
 
-def test_default_api_max_retries_is_three():
-    """No config override → legacy default of 3 retries preserved."""
+def test_default_api_max_retries_is_five():
+    """No config override allows up to five total attempts."""
     agent = _make_agent()
-    assert agent._api_max_retries == 3
+    assert agent._api_max_retries == 5
 
 
 def test_api_max_retries_honors_config_override():
@@ -55,11 +56,11 @@ def test_api_max_retries_clamps_below_one_to_one():
 
 
 def test_api_max_retries_falls_back_on_invalid_value():
-    """Garbage values in config don't crash agent init — fall back to 3."""
+    """Garbage values in config don't crash agent init — fall back to 5."""
     agent = _make_agent(api_max_retries="not-a-number")
-    assert agent._api_max_retries == 3
+    assert agent._api_max_retries == 5
 
     agent2 = _make_agent(api_max_retries=None)
-    # None with dict.get default fires → default(3), then int(None) raises
-    # TypeError → except branch sets to 3.
-    assert agent2._api_max_retries == 3
+    # None with dict.get default fires → int(None) raises TypeError, so the
+    # default five-attempt budget is restored.
+    assert agent2._api_max_retries == 5

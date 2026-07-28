@@ -1,4 +1,6 @@
-import type { SessionInfo, SlashCategory, Usage } from './types.js'
+import type { UsageModelData } from '@hermes/shared/billing'
+
+import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
 export interface GatewaySkin {
   banner_hero?: string
@@ -43,11 +45,31 @@ export interface SlashExecResponse {
   warning?: string
 }
 
+// ── Terminal billing ─────────────────────────────────────────────────
+
+export type {
+  BillingAutoReload,
+  BillingCardInfo,
+  BillingChargeResponse,
+  BillingChargeStatusResponse,
+  BillingErrorPayload,
+  BillingMonthlyCap,
+  BillingMutationResponse,
+  BillingStateResponse,
+  SubscriptionPreviewResponse,
+  SubscriptionStateResponse,
+  SubscriptionTierOption,
+  SubscriptionUpgradeResponse,
+  UsageBarData,
+  UsageModelData
+} from '@hermes/shared/billing'
+
 export type CommandDispatchResponse =
   | { output?: string; type: 'exec' | 'plugin' }
   | { target: string; type: 'alias' }
   | { message?: string; name: string; type: 'skill' }
   | { message: string; notice?: string; type: 'send' }
+  | { message: string; notice?: string; type: 'prefill' }
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -96,9 +118,12 @@ export interface ConfigGetValueResponse {
 }
 
 export interface ConfigSetResponse {
+  confirm_message?: string
+  confirm_required?: boolean
   credential_warning?: string
   history_reset?: boolean
   info?: SessionInfo
+  scope?: 'global' | 'session'
   value?: string
   warning?: string
 }
@@ -161,6 +186,7 @@ export interface SessionUndoResponse {
 }
 
 export interface SessionUsageResponse {
+  active_subagents?: number
   cache_read?: number
   cache_write?: number
   calls?: number
@@ -170,10 +196,28 @@ export interface SessionUsageResponse {
   context_used?: number
   cost_status?: 'estimated' | 'exact'
   cost_usd?: number
+  credits_lines?: string[]
   input?: number
   model?: string
   output?: number
   total?: number
+  usage?: UsageModelData
+}
+
+export interface ContextBreakdownCategory {
+  color?: string
+  id: string
+  label: string
+  tokens: number
+}
+
+export interface SessionContextBreakdownResponse {
+  categories?: ContextBreakdownCategory[]
+  context_max?: number
+  context_percent?: number
+  context_used?: number
+  estimated_total?: number
+  model?: string
 }
 
 export interface SessionStatusResponse {
@@ -394,7 +438,7 @@ export interface SubagentEventPayload {
   output_tokens?: number
   parent_id?: null | string
   reasoning_tokens?: number
-  status?: 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
+  status?: SubagentStatus
   subagent_id?: string
   summary?: string
   task_count?: number
@@ -461,8 +505,22 @@ export type GatewayEvent =
   | { payload?: GatewaySkin; session_id?: string; type: 'skin.changed' }
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
+  | { payload?: { kind?: string }; session_id?: string; type: 'reaction' }
   | { payload?: undefined; session_id?: string; type: 'message.start' }
   | { payload?: { kind?: string; text?: string }; session_id?: string; type: 'status.update' }
+  | {
+      payload?: {
+        id?: string
+        key?: string
+        kind?: 'sticky' | 'ttl'
+        level?: 'error' | 'info' | 'success' | 'warn'
+        text?: string
+        ttl_ms?: null | number
+      }
+      session_id?: string
+      type: 'notification.show'
+    }
+  | { payload?: { key?: string }; session_id?: string; type: 'notification.clear' }
   | { payload?: { state?: 'idle' | 'listening' | 'transcribing' }; session_id?: string; type: 'voice.status' }
   | { payload?: { no_speech_limit?: boolean; text?: string }; session_id?: string; type: 'voice.transcript' }
   | { payload: { line: string }; session_id?: string; type: 'gateway.stderr' }
@@ -477,11 +535,11 @@ export type GatewayEvent =
       type: 'gateway.start_timeout'
     }
   | { payload?: { preview?: string }; session_id?: string; type: 'gateway.protocol_error' }
-  | { payload?: { text?: string }; session_id?: string; type: 'reasoning.delta' | 'reasoning.available' }
+  | { payload?: { text?: string; verbose?: boolean }; session_id?: string; type: 'reasoning.delta' | 'reasoning.available' }
   | { payload: { name?: string; preview?: string }; session_id?: string; type: 'tool.progress' }
   | { payload: { name?: string }; session_id?: string; type: 'tool.generating' }
   | {
-      payload: { context?: string; name?: string; tool_id: string; todos?: unknown[] }
+      payload: { args_text?: string; context?: string; name?: string; tool_id: string; todos?: unknown[] }
       session_id?: string
       type: 'tool.start'
     }
@@ -491,6 +549,7 @@ export type GatewayEvent =
         error?: string
         inline_diff?: string
         name?: string
+        result_text?: string
         summary?: string
         tool_id: string
         todos?: unknown[]

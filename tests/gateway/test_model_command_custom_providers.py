@@ -3,10 +3,11 @@
 import yaml
 import pytest
 
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.model_command import model_command_for
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 def _make_runner():
@@ -50,12 +51,12 @@ async def test_handle_model_command_lists_saved_custom_provider(tmp_path, monkey
         encoding="utf-8",
     )
 
-    import gateway.run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda **_kwargs: {})
 
-    result = await _make_runner()._handle_model_command(_make_event())
+    result = await model_command_for(_make_runner()).handle_model_command(_make_event())
 
     assert result is not None
     assert "Local (127.0.0.1:4141)" in result

@@ -34,7 +34,22 @@ import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.tool_generation_events import invoke_tool_generation_callback
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Ensure boto3/botocore are installed before any code in this module runs.
+# Upstream removed boto3 from [all] extras (PRs #24220, #24515); lazy_deps
+# handles on-demand installation so the Bedrock provider still works in the
+# EKS deployment without baking boto3 into the base image.
+# ---------------------------------------------------------------------------
+try:
+    from tools.lazy_deps import ensure
+    ensure("provider.bedrock", prompt=False)
+except Exception:
+    pass  # lazy_deps unavailable or install failed — let downstream imports surface the real error
+
 
 # ---------------------------------------------------------------------------
 # Lazy boto3 import — only loaded when the Bedrock provider is actually used.
@@ -43,19 +58,29 @@ logger = logging.getLogger(__name__)
 
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
+_MIN_BOTO3_VERSION = (1, 34, 59)
 
 
 def _require_boto3():
-    """Import boto3, raising a clear error if not installed."""
+    """Import a boto3 version that supports Converse and ConverseStream."""
     try:
         import boto3
-        return boto3
     except ImportError:
         raise ImportError(
             "The 'boto3' package is required for the AWS Bedrock provider. "
             "Install it with: pip install boto3\n"
             "Or install Hermes with Bedrock support: pip install -e '.[bedrock]'"
         )
+    try:
+        version = tuple(int(part) for part in boto3.__version__.split(".")[:3])
+    except (AttributeError, ValueError):
+        return boto3
+    if version < _MIN_BOTO3_VERSION:
+        raise RuntimeError(
+            f"boto3 {boto3.__version__} does not support converse_stream "
+            f"(minimum 1.34.59 required). Upgrade with: pip install --upgrade boto3"
+        )
+    return boto3
 
 
 def _get_bedrock_runtime_client(region: str):
@@ -193,6 +218,23 @@ def is_stale_connection_error(exc: BaseException) -> bool:
                 return True
 
     return False
+
+
+def is_streaming_access_denied_error(exc: BaseException) -> bool:
+    """Return whether IAM denied InvokeModelWithResponseStream specifically."""
+    message = str(exc).lower()
+    if "invokemodelwithresponsestream" not in message:
+        return False
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        ClientError = None
+    if ClientError is not None and isinstance(exc, ClientError):
+        code = (getattr(exc, "response", None) or {}).get("Error", {}).get(
+            "Code", ""
+        )
+        return code in {"AccessDeniedException", "UnauthorizedException"}
+    return "not authorized" in message or "accessdenied" in message
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +425,10 @@ def is_anthropic_bedrock_model(model_id: str) -> bool:
     """
     model_lower = model_id.lower()
     # Strip regional prefix if present
-    for prefix in ("us.", "global.", "eu.", "ap.", "jp."):
+    for prefix in (
+        "global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.",
+        "ca.", "sa.", "me.", "af.",
+    ):
         if model_lower.startswith(prefix):
             model_lower = model_lower[len(prefix):]
             break
@@ -425,6 +470,18 @@ def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
     return result
 
 
+_EMPTY_TEXT_PLACEHOLDER = "(empty)"
+
+
+def _safe_text(text) -> str:
+    """Return Bedrock-safe text, including for blank and non-string values."""
+    if text is None:
+        return _EMPTY_TEXT_PLACEHOLDER
+    if not isinstance(text, str):
+        text = str(text)
+    return text if text.strip() else _EMPTY_TEXT_PLACEHOLDER
+
+
 def _convert_content_to_converse(content) -> List[Dict]:
     """Convert OpenAI message content (string or list) to Converse content blocks.
 
@@ -432,26 +489,25 @@ def _convert_content_to_converse(content) -> List[Dict]:
       - Plain text strings → [{"text": "..."}]
       - Content arrays with text/image_url parts → mixed text/image blocks
 
-    Filters out empty text blocks — Bedrock's Converse API rejects messages
-    where a text content block has an empty ``text`` field (ValidationException:
-    "text content blocks must be non-empty"). Ref: issue #9486.
+    Empty and whitespace-only text is replaced with a non-whitespace
+    placeholder because Bedrock rejects both forms. Ref: issue #9486.
     """
     if content is None:
-        return [{"text": " "}]
+        return [{"text": _safe_text(content)}]
     if isinstance(content, str):
-        return [{"text": content}] if content.strip() else [{"text": " "}]
+        return [{"text": _safe_text(content)}]
     if isinstance(content, list):
         blocks = []
         for part in content:
             if isinstance(part, str):
-                blocks.append({"text": part})
+                blocks.append({"text": _safe_text(part)})
                 continue
             if not isinstance(part, dict):
                 continue
             part_type = part.get("type", "")
             if part_type == "text":
                 text = part.get("text", "")
-                blocks.append({"text": text if text else " "})
+                blocks.append({"text": _safe_text(text)})
             elif part_type == "image_url":
                 image_url = part.get("image_url", {})
                 url = image_url.get("url", "") if isinstance(image_url, dict) else ""
@@ -463,18 +519,24 @@ def _convert_content_to_converse(content) -> List[Dict]:
                         mime_part = header[5:].split(";")[0]
                         if mime_part:
                             media_type = mime_part
+                    import base64
+
+                    try:
+                        raw_bytes = base64.b64decode(data)
+                    except Exception:
+                        raw_bytes = data.encode("utf-8")
                     blocks.append({
                         "image": {
                             "format": media_type.split("/")[-1] if "/" in media_type else "jpeg",
-                            "source": {"bytes": data},
+                            "source": {"bytes": raw_bytes},
                         }
                     })
                 else:
                     # Remote URL — Converse doesn't support URLs directly,
                     # include as text reference for the model.
                     blocks.append({"text": f"[Image: {url}]"})
-        return blocks if blocks else [{"text": " "}]
-    return [{"text": str(content)}]
+        return blocks if blocks else [{"text": _EMPTY_TEXT_PLACEHOLDER}]
+    return [{"text": _safe_text(content)}]
 
 
 def convert_messages_to_converse(
@@ -504,14 +566,17 @@ def convert_messages_to_converse(
         content = msg.get("content")
 
         if role == "system":
-            # System messages become the system prompt
+            # Blank system parts are omitted instead of manufacturing a
+            # meaningless placeholder-only system prompt.
             if isinstance(content, str) and content.strip():
                 system_blocks.append({"text": content})
             elif isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
-                        system_blocks.append({"text": part.get("text", "")})
-                    elif isinstance(part, str):
+                        text = part.get("text", "")
+                        if isinstance(text, str) and text.strip():
+                            system_blocks.append({"text": text})
+                    elif isinstance(part, str) and part.strip():
                         system_blocks.append({"text": part})
             continue
 
@@ -522,7 +587,7 @@ def convert_messages_to_converse(
             tool_result_block = {
                 "toolResult": {
                     "toolUseId": tool_call_id,
-                    "content": [{"text": result_content}],
+                    "content": [{"text": _safe_text(result_content)}],
                 }
             }
             # In Converse, tool results go in a "user" role message
@@ -561,7 +626,7 @@ def convert_messages_to_converse(
                 })
 
             if not content_blocks:
-                content_blocks = [{"text": " "}]
+                content_blocks = [{"text": _EMPTY_TEXT_PLACEHOLDER}]
 
             # Merge with previous assistant message if needed (strict alternation)
             if converse_msgs and converse_msgs[-1]["role"] == "assistant":
@@ -587,11 +652,16 @@ def convert_messages_to_converse(
 
     # Converse requires the first message to be from the user
     if converse_msgs and converse_msgs[0]["role"] != "user":
-        converse_msgs.insert(0, {"role": "user", "content": [{"text": " "}]})
+        converse_msgs.insert(
+            0,
+            {"role": "user", "content": [{"text": _EMPTY_TEXT_PLACEHOLDER}]},
+        )
 
     # Converse requires the last message to be from the user
     if converse_msgs and converse_msgs[-1]["role"] != "user":
-        converse_msgs.append({"role": "user", "content": [{"text": " "}]})
+        converse_msgs.append(
+            {"role": "user", "content": [{"text": _EMPTY_TEXT_PLACEHOLDER}]}
+        )
 
     return (system_blocks if system_blocks else None, converse_msgs)
 
@@ -715,6 +785,7 @@ def stream_converse_with_callbacks(
     on_tool_start=None,
     on_reasoning_delta=None,
     on_interrupt_check=None,
+    on_event=None,
 ) -> SimpleNamespace:
     """Process a Bedrock ConverseStream event stream with real-time callbacks.
 
@@ -727,13 +798,16 @@ def stream_converse_with_callbacks(
         on_text_delta: Called with each text chunk as it arrives. Only fires
             when no tool_use blocks have been seen (same semantics as the
             Anthropic and chat_completions streaming paths).
-        on_tool_start: Called with the tool name when a toolUse block begins.
-            Lets the TUI show a spinner while tool arguments are generated.
+        on_tool_start: Called with the tool name and toolUse ID when a toolUse
+            block begins. Lets structured clients create a stable in-progress
+            row while arguments are still being generated.
         on_reasoning_delta: Called with reasoning/thinking text chunks.
             Bedrock surfaces thinking via ``reasoning`` content block deltas
             on supported models (Claude 4.6+).
         on_interrupt_check: Called on each event. Should return True if the
             agent has been interrupted and streaming should stop.
+        on_event: Called for every wire event, including metadata and tool
+            events. Used by the transport liveness watchdog.
 
     Returns:
         An OpenAI-compatible SimpleNamespace response, identical in shape to
@@ -749,6 +823,8 @@ def stream_converse_with_callbacks(
     usage_data: Dict[str, int] = {}
 
     for event in event_stream.get("stream", []):
+        if on_event:
+            on_event()
         # Check for interrupt
         if on_interrupt_check and on_interrupt_check():
             break
@@ -767,7 +843,11 @@ def stream_converse_with_callbacks(
                     "input_json": "",
                 }
                 if on_tool_start:
-                    on_tool_start(current_tool["name"])
+                    invoke_tool_generation_callback(
+                        on_tool_start,
+                        current_tool["name"],
+                        current_tool["toolUseId"],
+                    )
 
         elif "contentBlockDelta" in event:
             delta = event["contentBlockDelta"].get("delta", {})
@@ -990,6 +1070,14 @@ def call_converse_stream(
     try:
         response = client.converse_stream(**kwargs)
     except Exception as exc:
+        if is_streaming_access_denied_error(exc):
+            logger.info(
+                "bedrock: streaming denied by IAM (region=%s, model=%s); "
+                "falling back to converse()",
+                region,
+                model,
+            )
+            return normalize_converse_response(client.converse(**kwargs))
         if is_stale_connection_error(exc):
             logger.warning(
                 "bedrock: stale-connection error on converse_stream(region=%s, "
@@ -1230,9 +1318,15 @@ def classify_bedrock_error(error_message: str) -> str:
 # detection is unavailable.
 
 BEDROCK_CONTEXT_LENGTHS: Dict[str, int] = {
-    # Anthropic Claude models on Bedrock
-    "anthropic.claude-opus-4-6":     200_000,
-    "anthropic.claude-sonnet-4-6":   200_000,
+    # Anthropic Claude models on Bedrock. Longest-substring matching keeps
+    # specific versions ahead of the generic family fallbacks.
+    "anthropic.claude-fable-5":      1_000_000,
+    "anthropic.claude-fable":        1_000_000,
+    "anthropic.claude-sonnet-5":     1_000_000,
+    "anthropic.claude-opus-4-8":     1_000_000,
+    "anthropic.claude-opus-4-7":     1_000_000,
+    "anthropic.claude-opus-4-6":     1_000_000,
+    "anthropic.claude-sonnet-4-6":   1_000_000,
     "anthropic.claude-sonnet-4-5":   200_000,
     "anthropic.claude-haiku-4-5":    200_000,
     "anthropic.claude-opus-4":       200_000,
@@ -1258,10 +1352,12 @@ BEDROCK_CONTEXT_LENGTHS: Dict[str, int] = {
 
 # Default for unknown Bedrock models
 BEDROCK_DEFAULT_CONTEXT_LENGTH = 128_000
+_BEDROCK_PROBE_TIERS = (1_300_000, 2_200_000)
+_WORDS_PER_TOKEN = 0.9
 
 
-def get_bedrock_context_length(model_id: str) -> int:
-    """Look up the context window size for a Bedrock model.
+def _static_bedrock_context_length(model_id: str) -> int:
+    """Look up a Bedrock context window in the maintained fallback table.
 
     Uses substring matching so versioned IDs like
     ``anthropic.claude-sonnet-4-6-20250514-v1:0`` resolve correctly.
@@ -1274,3 +1370,56 @@ def get_bedrock_context_length(model_id: str) -> int:
             best_key = key
             best_val = val
     return best_val
+
+
+def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
+    """Discover the real window from Bedrock's pre-inference length error."""
+    try:
+        from agent.model_metadata import parse_context_limit_from_error
+
+        client = _get_bedrock_runtime_client(region)
+    except Exception as exc:
+        logger.debug("Bedrock context probe unavailable for %s: %s", model_id, exc)
+        return None
+
+    last_error = ""
+    for target_tokens in _BEDROCK_PROBE_TIERS:
+        oversized_prompt = "data " * int(target_tokens / _WORDS_PER_TOKEN)
+        try:
+            client.converse(
+                modelId=model_id,
+                messages=[
+                    {"role": "user", "content": [{"text": oversized_prompt}]}
+                ],
+                inferenceConfig={"maxTokens": 8},
+            )
+            return target_tokens
+        except Exception as exc:
+            last_error = str(exc)
+            limit = parse_context_limit_from_error(last_error)
+            if limit and limit >= 1024:
+                logger.info(
+                    "Probed Bedrock context window for %s: %s tokens",
+                    model_id,
+                    f"{limit:,}",
+                )
+                return limit
+    logger.debug(
+        "Bedrock context probe returned no parseable limit for %s: %s",
+        model_id,
+        last_error[:200],
+    )
+    return None
+
+
+def get_bedrock_context_length(
+    model_id: str,
+    region: str = "",
+    probe: bool = True,
+) -> int:
+    """Resolve live Bedrock context when possible, otherwise use the table."""
+    if probe and region:
+        probed = probe_bedrock_context_length(model_id, region)
+        if probed:
+            return probed
+    return _static_bedrock_context_length(model_id)

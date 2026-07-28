@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import platform
+import secrets
 import shlex
 import signal
 import socket
@@ -44,6 +45,8 @@ import threading
 import time
 import uuid
 
+from tools.thread_context import propagate_context_to_thread
+
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +55,15 @@ from typing import Any, Dict, List, Optional
 # ``_use_tcp_rpc`` in ``_execute_local`` below.  That makes execute_code
 # available on every platform Hermes itself runs on.
 logger = logging.getLogger(__name__)
+
+
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from channels.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
 
 SANDBOX_AVAILABLE = True
 
@@ -78,10 +90,16 @@ MAX_STDERR_BYTES = 10_000    # 10 KB
 # match either a safe prefix or, on Windows, an OS-essential name.
 _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                       "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
-                      "HERMES_")
+                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
 _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH")
+                      "PASSWD", "AUTH", "DSN", "WEBHOOK",
+                      "CREDS", "BEARER", "APIKEY")
+_HERMES_CHILD_ALLOWED = frozenset({
+    "HERMES_HOME",
+    "HERMES_PROFILE",
+    "HERMES_CONFIG",
+    "HERMES_ENV",
+})
 
 # Windows-only: a handful of variables are required by the OS/CRT itself.
 # Without them, even stdlib calls like ``socket.socket()`` fail with
@@ -139,6 +157,7 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         is_windows = _IS_WINDOWS
 
     scrubbed = {}
+    dropped_hermes = []
     for k, v in source_env.items():
         if is_passthrough(k):
             scrubbed[k] = v
@@ -148,8 +167,22 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         if any(k.startswith(p) for p in _SAFE_ENV_PREFIXES):
             scrubbed[k] = v
             continue
+        if k in _HERMES_CHILD_ALLOWED:
+            scrubbed[k] = v
+            continue
         if is_windows and k.upper() in _WINDOWS_ESSENTIAL_ENV_VARS:
             scrubbed[k] = v
+            continue
+        if k.startswith("HERMES_"):
+            dropped_hermes.append(k)
+    if dropped_hermes:
+        logger.debug(
+            "execute_code: dropped %d non-allowlisted HERMES_* var(s) from "
+            "the sandbox child env (%s). Declare legitimate values via "
+            "env_passthrough.",
+            len(dropped_hermes),
+            ", ".join(sorted(dropped_hermes)),
+        )
     return scrubbed
 
 
@@ -343,7 +376,11 @@ def _connect():
 
 def _call(tool_name, args):
     """Send a tool call to the parent process and return the parsed result."""
-    request = json.dumps({"tool": tool_name, "args": args}) + "\\n"
+    request = json.dumps({
+        "tool": tool_name,
+        "args": args,
+        "token": os.environ.get("HERMES_RPC_TOKEN", ""),
+    }) + "\\n"
     with _call_lock:
         conn = _connect()
         conn.sendall(request.encode())
@@ -396,7 +433,12 @@ def _call(tool_name, args):
     # non-ASCII chars in tool args when encoding them as JSON.
     tmp = req_file + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"tool": tool_name, "args": args, "seq": seq}, f)
+        json.dump({
+            "tool": tool_name,
+            "args": args,
+            "seq": seq,
+            "token": os.environ.get("HERMES_RPC_TOKEN", ""),
+        }, f)
     os.rename(tmp, req_file)
 
     # Wait for response with adaptive polling
@@ -443,6 +485,8 @@ def _rpc_server_loop(
     tool_call_counter: list,   # mutable [int] so the thread can increment
     max_tool_calls: int,
     allowed_tools: frozenset,
+    stop_event: threading.Event,
+    rpc_token: str,
 ):
     """
     Accept one client connection and dispatch tool-call requests until
@@ -452,8 +496,15 @@ def _rpc_server_loop(
 
     conn = None
     try:
-        server_sock.settimeout(5)
-        conn, _ = server_sock.accept()
+        server_sock.settimeout(0.05)
+        while not stop_event.is_set():
+            try:
+                conn, _ = server_sock.accept()
+                break
+            except socket.timeout:
+                continue
+        if conn is None:
+            return
         conn.settimeout(300)
 
         buf = b""
@@ -479,6 +530,14 @@ def _rpc_server_loop(
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     resp = tool_error(f"Invalid RPC request: {exc}")
                     conn.sendall((resp + "\n").encode())
+                    continue
+
+                if not rpc_token or not secrets.compare_digest(
+                    str(request.get("token") or "").encode(),
+                    rpc_token.encode(),
+                ):
+                    response = json.dumps({"error": "Unauthorized RPC request"})
+                    conn.sendall((response + "\n").encode())
                     continue
 
                 tool_name = request.get("tool", "")
@@ -705,6 +764,7 @@ def _rpc_poll_loop(
     max_tool_calls: int,
     allowed_tools: frozenset,
     stop_event: threading.Event,
+    rpc_token: str,
 ):
     """Poll the remote filesystem for tool call requests and dispatch them.
 
@@ -755,6 +815,14 @@ def _rpc_poll_loop(
                 except (json.JSONDecodeError, ValueError):
                     logger.debug("Malformed RPC request in %s", req_file)
                     # Remove bad request to avoid infinite retry
+                    env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
+                    continue
+
+                if not rpc_token or not secrets.compare_digest(
+                    str(request.get("token") or "").encode(),
+                    rpc_token.encode(),
+                ):
+                    logger.debug("Unauthorized RPC request in %s", req_file)
                     env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
                     continue
 
@@ -897,6 +965,8 @@ def _execute_remote(
             f"mkdir -p {quoted_rpc_dir}", cwd="/", timeout=10,
         )
 
+        rpc_token = secrets.token_urlsafe(32)
+
         # Generate and ship files
         tools_src = generate_hermes_tools_module(
             list(sandbox_tools), transport="file",
@@ -906,11 +976,11 @@ def _execute_remote(
 
         # Start RPC polling thread
         rpc_thread = threading.Thread(
-            target=_rpc_poll_loop,
+            target=propagate_context_to_thread(_rpc_poll_loop),
             args=(
                 env, f"{sandbox_dir}/rpc", effective_task_id,
                 tool_call_log, tool_call_counter, max_tool_calls,
-                sandbox_tools, stop_event,
+                sandbox_tools, stop_event, rpc_token,
             ),
             daemon=True,
         )
@@ -919,11 +989,12 @@ def _execute_remote(
         # Build environment variable prefix for the script
         env_prefix = (
             f"HERMES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
+            f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
-            env_prefix += f" TZ={tz}"
+            env_prefix += f" TZ={shlex.quote(tz)}"
 
         # Execute the script on the remote backend
         logger.info("Executing code on %s backend (task %s)...",
@@ -1064,8 +1135,32 @@ def execute_code(
         return tool_error("No code provided.")
 
     # Dispatch: remote backends use file-based RPC, local uses UDS
-    from tools.terminal_tool import _get_env_config
-    env_type = _get_env_config()["env_type"]
+    from tools.terminal_tool import _docker_has_host_access, _get_env_config
+
+    env_config = _get_env_config()
+    env_type = env_config["env_type"]
+    from tools.approval import check_execute_code_guard
+
+    guard = check_execute_code_guard(
+        code,
+        env_type,
+        has_host_access=_docker_has_host_access(env_config),
+    )
+    if not guard.get("approved", False):
+        return json.dumps(
+            {
+                "status": "error",
+                "error": guard.get("message")
+                or "execute_code blocked by approval guard.",
+                "tool_calls_made": 0,
+                "duration_seconds": 0,
+            },
+            ensure_ascii=False,
+        )
+    if guard.get("user_approved"):
+        from tools.interrupt import clear_current_thread_interrupt
+
+        clear_current_thread_interrupt()
     if env_type != "local":
         return _execute_remote(code, task_id, enabled_tools)
 
@@ -1112,6 +1207,7 @@ def execute_code(
     tool_call_counter = [0]  # mutable so the RPC thread can increment
     exec_start = time.monotonic()
     server_sock = None
+    stop_event = threading.Event()
 
     try:
         # Write the auto-generated hermes_tools module.
@@ -1152,11 +1248,14 @@ def execute_code(
             os.chmod(sock_path, 0o600)
         server_sock.listen(1)
 
+        rpc_token = secrets.token_urlsafe(32)
+
         rpc_thread = threading.Thread(
-            target=_rpc_server_loop,
+            target=propagate_context_to_thread(_rpc_server_loop),
             args=(
                 server_sock, task_id, tool_call_log,
                 tool_call_counter, max_tool_calls, sandbox_tools,
+                stop_event, rpc_token,
             ),
             daemon=True,
         )
@@ -1174,6 +1273,7 @@ def execute_code(
         # or spawn a subprocess.  See ``_scrub_child_env`` for the rules.
         child_env = _scrub_child_env(os.environ)
         child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
+        child_env["HERMES_RPC_TOKEN"] = rpc_token
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
         # Force UTF-8 for the child's stdio and default file encoding.
         #
@@ -1238,6 +1338,7 @@ def execute_code(
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
         )
 
         # --- Poll loop: watch for exit, timeout, and interrupt ---
@@ -1362,6 +1463,7 @@ def execute_code(
         duration = round(time.monotonic() - exec_start, 2)
 
         # Wait for RPC thread to finish
+        stop_event.set()
         server_sock.close()  # break accept() so thread exits promptly
         server_sock = None  # prevent double close in finally
         rpc_thread.join(timeout=3)
@@ -1433,6 +1535,7 @@ def execute_code(
 
     finally:
         # Cleanup temp dir and socket
+        stop_event.set()
         if server_sock is not None:
             try:
                 server_sock.close()
@@ -1568,6 +1671,8 @@ def _is_usable_python(python_path: str) -> bool:
              "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
             timeout=5,
             capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            stdin=subprocess.DEVNULL,
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
@@ -1595,10 +1700,19 @@ def _resolve_child_python(mode: str) -> str:
         exe_names = ("python", "python3")
         subdirs = ("bin",)
 
-    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
-        root = os.environ.get(var, "").strip()
+    # VIRTUAL_ENV is the active Python environment contract and takes strict
+    # precedence over an ambient CONDA_PREFIX inherited from the parent shell.
+    # If that explicit venv is broken, fall back to Hermes' interpreter rather
+    # than silently executing in a different Conda environment.
+    virtual_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    candidates = (
+        (("VIRTUAL_ENV", virtual_env),)
+        if virtual_env
+        else (("CONDA_PREFIX", os.environ.get("CONDA_PREFIX", "").strip()),)
+    )
+    for var, root in candidates:
         if not root:
-            continue
+            break
         for subdir in subdirs:
             for exe in exe_names:
                 candidate = os.path.join(root, subdir, exe)
@@ -1622,17 +1736,20 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
 
     - ``strict``: the staging tmpdir (today's behavior).
     - ``project``: the session's TERMINAL_CWD (same as the terminal tool), or
-      ``os.getcwd()`` if TERMINAL_CWD is unset or doesn't point at a real dir.
-      Falls back to the staging tmpdir as a last resort so we never invoke
-      Popen with a nonexistent cwd.
+      Dovie's configured workspace root when running under the Dovie gateway.
+      Non-Dovie callers keep the legacy process-cwd fallback. Falls back to the
+      staging tmpdir as a last resort so we never invoke Popen with a nonexistent
+      cwd.
     """
     if mode != "project":
         return staging_dir
-    raw = os.environ.get("TERMINAL_CWD", "").strip()
+    raw = _session_env("TERMINAL_CWD", "").strip() or os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):
             return expanded
+    if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+        return staging_dir
     here = os.getcwd()
     if os.path.isdir(here):
         return here

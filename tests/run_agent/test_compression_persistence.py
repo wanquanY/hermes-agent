@@ -56,11 +56,11 @@ class TestFlushAfterCompression:
         After the fix, conversation_history is cleared to None after compression,
         so flush_from = max(0, 0) = 0, and ALL compressed messages are written.
         """
-        from hermes_state import SessionDB
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
@@ -73,12 +73,12 @@ class TestFlushAfterCompression:
 
             # First, flush original messages to the original session
             agent._flush_messages_to_session_db(original_history, [])
-            original_rows = db.get_messages("original-session")
+            original_rows = db.messages.list("original-session")
             assert len(original_rows) == 200
 
             # Now simulate compression: new session, reset idx, shorter messages
             agent.session_id = "compressed-session"
-            db.create_session(session_id="compressed-session", source="test")
+            db.sessions.create(session_id="compressed-session", source="test")
             agent._last_flushed_db_idx = 0
 
             # The compressed messages (summary + tail + new turn)
@@ -95,25 +95,25 @@ class TestFlushAfterCompression:
             # After the fix, conversation_history should be None.
             agent._flush_messages_to_session_db(compressed_messages, None)
 
-            new_rows = db.get_messages("compressed-session")
+            new_rows = db.messages.list("compressed-session")
             assert len(new_rows) == 5, (
                 f"Expected 5 compressed messages in new session, got {len(new_rows)}. "
                 f"Compression persistence bug: messages not written to SQLite."
             )
 
-    def test_flush_with_stale_history_loses_messages(self):
-        """Demonstrates the bug condition: stale conversation_history causes data loss."""
-        from hermes_state import SessionDB
+    def test_flush_with_stale_history_uses_db_boundary_instead_of_losing_messages(self):
+        """A stale conversation_history must not suppress the current buffer."""
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = open_cli_session_store(db_path=db_path)
 
             agent = self._make_agent(db)
 
             # Simulate compression reset
             agent.session_id = "new-session"
-            db.create_session(session_id="new-session", source="test")
+            db.sessions.create(session_id="new-session", source="test")
             agent._last_flushed_db_idx = 0
 
             compressed = [
@@ -121,17 +121,13 @@ class TestFlushAfterCompression:
                 {"role": "assistant", "content": "continuing..."},
             ]
 
-            # Bug: passing a conversation_history longer than compressed messages
+            # Passing a conversation_history longer than the current messages
+            # must fall back to the current buffer instead of jumping past it.
             stale_history = [{"role": "user", "content": f"msg{i}"} for i in range(100)]
             agent._flush_messages_to_session_db(compressed, stale_history)
 
-            rows = db.get_messages("new-session")
-            # With the stale history, flush_from = max(100, 0) = 100
-            # But compressed only has 2 entries → messages[100:] = empty
-            assert len(rows) == 0, (
-                "Expected 0 messages with stale conversation_history "
-                "(this test verifies the bug condition exists)"
-            )
+            rows = db.messages.list("new-session")
+            assert [row["content"] for row in rows] == ["summary", "continuing..."]
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +141,7 @@ class TestGatewayHistoryOffsetAfterSplit:
 
     def test_history_offset_zero_on_session_split(self):
         """When agent.session_id differs from the original, history_offset must be 0."""
-        # This tests the logic in gateway/run.py run_sync():
+        # This tests the logic in hermes_gateway/runner.py run_sync():
         # _session_was_split = agent.session_id != session_id
         # _effective_history_offset = 0 if _session_was_split else len(agent_history)
 

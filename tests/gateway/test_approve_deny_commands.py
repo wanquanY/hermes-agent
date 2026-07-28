@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -41,7 +41,7 @@ def _make_event(text: str) -> MessageEvent:
 
 
 def _make_runner():
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -319,6 +319,35 @@ class TestDenyCommand:
         assert all(e.result == "deny" for e in [e1, e2])
 
     @pytest.mark.asyncio
+    async def test_deny_reason_is_relayed_without_treating_reason_all_as_batch(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entry = _ApprovalEntry({"command": "test"})
+        _gateway_queues[session_key] = [entry]
+
+        await runner._handle_deny_command(_make_event("/deny not at all safe"))
+
+        assert entry.result == "deny"
+        assert entry.reason == "not at all safe"
+
+    @pytest.mark.asyncio
+    async def test_deny_all_relays_same_reason_to_every_entry(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entries = (_ApprovalEntry({"command": "one"}), _ApprovalEntry({"command": "two"}))
+        _gateway_queues[session_key] = list(entries)
+
+        await runner._handle_deny_command(_make_event("/deny all use staging"))
+
+        assert [entry.reason for entry in entries] == ["use staging", "use staging"]
+
+    @pytest.mark.asyncio
     async def test_deny_no_pending(self):
         """/deny with no pending approval returns helpful message."""
         runner = _make_runner()
@@ -362,11 +391,23 @@ class TestBlockingApprovalE2E:
 
     def setup_method(self):
         _clear_approval_state()
+        # This class verifies queueing/blocking semantics, not Tirith binary
+        # installation. Keep the external scanner out of the timing window so
+        # the worker is guaranteed to reach the approval queue deterministically.
+        self._tirith_patch = patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "allow", "findings": [], "summary": ""},
+        )
+        self._tirith_patch.start()
         os.environ.pop("HERMES_YOLO_MODE", None)
         os.environ.pop("HERMES_INTERACTIVE", None)
         os.environ.pop("HERMES_GATEWAY_SESSION", None)
         os.environ.pop("HERMES_EXEC_ASK", None)
         os.environ.pop("HERMES_SESSION_KEY", None)
+
+    def teardown_method(self):
+        self._tirith_patch.stop()
+        _clear_approval_state()
 
     def test_blocking_approval_approve_once(self):
         """check_all_command_guards blocks until resolve_gateway_approval is called."""
@@ -628,9 +669,21 @@ class TestFallbackNoCallback:
     def setup_method(self):
         _clear_approval_state()
 
-    def test_no_callback_returns_approval_required(self):
-        """Without a registered callback, the old approval_required path is used."""
+    def test_no_callback_returns_approval_required(self, monkeypatch):
+        """Without a registered callback, the fallback returns pending_approval.
+
+        PR #6d495d9e7 renamed the LLM-visible status from ``approval_required``
+        to ``pending_approval`` to make the state distinguishable from a
+        failed tool call.
+        """
         from tools.approval import check_all_command_guards, _pending
+
+        # This test owns the no-callback approval contract, not the optional
+        # Tirith binary lifecycle.  Keep the guard deterministic and offline.
+        monkeypatch.setattr(
+            "tools.tirith_security.check_command_security",
+            lambda _command: {"action": "allow", "findings": [], "summary": ""},
+        )
 
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = "no-callback-test"
@@ -641,4 +694,5 @@ class TestFallbackNoCallback:
             os.environ.pop("HERMES_SESSION_KEY", None)
 
         assert result["approved"] is False
-        assert result.get("status") == "approval_required"
+        assert result.get("status") == "pending_approval"
+        assert result.get("approval_pending") is True

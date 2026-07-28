@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from acp_adapter import session as acp_session
 from acp_adapter.session import SessionManager, SessionState
-from hermes_state import SessionDB
+from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
 def _mock_agent():
@@ -76,6 +76,50 @@ class TestCreateSession:
 
     def test_get_nonexistent_session_returns_none(self, manager):
         assert manager.get_session("does-not-exist") is None
+
+    def test_make_agent_stamps_session_cwd_for_codex_runtime(self, monkeypatch):
+        class FakeAgent:
+            model = "fake-model"
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "acp_adapter.session.load_config",
+            lambda: {
+                "model": {
+                    "default": "fake-model",
+                    "provider": "fake-provider",
+                },
+                "mcp_servers": {},
+            },
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {
+                "model": {
+                    "default": "fake-model",
+                    "provider": "fake-provider",
+                },
+                "mcp_servers": {},
+            },
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda requested=None: {
+                "provider": requested,
+                "api_mode": "codex_app_server",
+                "base_url": "https://example.invalid",
+                "api_key": "test-key",
+            },
+        )
+        monkeypatch.setattr("acp_adapter.session._register_task_cwd", lambda task_id, cwd: None)
+
+        state = SessionManager(db=None).create_session(cwd="/tmp/project")
+
+        assert state.agent.session_cwd == "/tmp/project"
 
 
 
@@ -210,7 +254,7 @@ class TestListAndCleanup:
         manager.save_session(state.session_id)
 
         db = manager._get_db()
-        messages = db.get_messages_as_conversation(state.session_id)
+        messages = db.messages.all_as_conversation(state.session_id)
         assert messages == [{"role": "user", "content": "original"}]
 
     def test_cleanup_clears_all(self, manager):
@@ -231,12 +275,12 @@ class TestListAndCleanup:
 
 
 # ---------------------------------------------------------------------------
-# persistence — sessions survive process restarts (via SessionDB)
+# persistence — sessions survive process restarts (via CliSessionStore)
 # ---------------------------------------------------------------------------
 
 
 class TestPersistence:
-    """Verify that sessions are persisted to SessionDB and can be restored."""
+    """Verify that sessions are persisted to CliSessionStore and can be restored."""
 
     def test_create_session_includes_registered_mcp_toolsets(self, tmp_path, monkeypatch):
         captured = {}
@@ -267,7 +311,7 @@ class TestPersistence:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        db = SessionDB(tmp_path / "state.db")
+        db = open_cli_session_store(tmp_path / "state.db")
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
@@ -279,7 +323,7 @@ class TestPersistence:
         state = manager.create_session(cwd="/project")
         db = manager._get_db()
         assert db is not None
-        row = db.get_session(state.session_id)
+        row = db.sessions.get(state.session_id)
         assert row is not None
         assert row["source"] == "acp"
         # cwd stored in model_config JSON
@@ -316,26 +360,26 @@ class TestPersistence:
         manager.save_session(state.session_id)
 
         db = manager._get_db()
-        messages = db.get_messages_as_conversation(state.session_id)
+        messages = db.messages.all_as_conversation(state.session_id)
         assert len(messages) == 1
         assert messages[0]["content"] == "test"
 
     def test_remove_session_deletes_from_db(self, manager):
         state = manager.create_session()
         db = manager._get_db()
-        assert db.get_session(state.session_id) is not None
+        assert db.sessions.get(state.session_id) is not None
         manager.remove_session(state.session_id)
-        assert db.get_session(state.session_id) is None
+        assert db.sessions.get(state.session_id) is None
 
     def test_cleanup_removes_all_from_db(self, manager):
         s1 = manager.create_session()
         s2 = manager.create_session()
         db = manager._get_db()
-        assert db.get_session(s1.session_id) is not None
-        assert db.get_session(s2.session_id) is not None
+        assert db.sessions.get(s1.session_id) is not None
+        assert db.sessions.get(s2.session_id) is not None
         manager.cleanup()
-        assert db.get_session(s1.session_id) is None
-        assert db.get_session(s2.session_id) is None
+        assert db.sessions.get(s1.session_id) is None
+        assert db.sessions.get(s2.session_id) is None
 
     def test_list_sessions_includes_db_only(self, manager):
         """Sessions only in DB (not in memory) appear in list_sessions."""
@@ -376,12 +420,12 @@ class TestPersistence:
         state.history.append({"role": "user", "content": "Investigate broken ACP history in Zed"})
         manager.save_session(state.session_id)
         db = manager._get_db()
-        db.set_session_title(state.session_id, "Fix Zed ACP history")
+        db.sessions.set_title(state.session_id, "Fix Zed ACP history")
 
         listing = manager.list_sessions(cwd="/named")
         assert listing[0]["title"] == "Fix Zed ACP history"
 
-        db.set_session_title(state.session_id, "")
+        db.sessions.set_title(state.session_id, "")
         listing = manager.list_sessions(cwd="/named")
         assert listing[0]["title"].startswith("Investigate broken ACP history")
 
@@ -414,6 +458,26 @@ class TestPersistence:
         assert len(forked.history) == 1
         assert forked.history[0]["content"] == "context"
         assert forked.session_id != original.session_id
+        db = manager._get_db()
+        lineage = db.branches.get_session_branch_info(forked.session_id)
+        row = db.sessions.get(forked.session_id)
+        assert lineage is not None
+        assert lineage["parent_session_id"] == original.session_id
+        assert lineage["branch_origin"] == "acp_fork"
+        assert json.loads(row["model_config"])["cwd"] == "/fork"
+
+    def test_fork_empty_session_persists_branch_lineage(self, manager):
+        original = manager.create_session(cwd="/source")
+
+        forked = manager.fork_session(original.session_id, cwd="/empty-fork")
+
+        assert forked is not None
+        assert forked.history == []
+        db = manager._get_db()
+        lineage = db.branches.get_session_branch_info(forked.session_id)
+        assert lineage is not None
+        assert lineage["parent_session_id"] == original.session_id
+        assert db.messages.list(forked.session_id) == []
 
     def test_update_cwd_restores_from_db(self, manager):
         state = manager.create_session(cwd="/old")
@@ -428,7 +492,7 @@ class TestPersistence:
 
         # Should also be persisted in DB.
         db = manager._get_db()
-        row = db.get_session(sid)
+        row = db.sessions.get(sid)
         mc = json.loads(row["model_config"])
         assert mc["cwd"] == "/new"
 
@@ -436,19 +500,19 @@ class TestPersistence:
         """get_session should not restore non-ACP sessions from DB."""
         db = manager._get_db()
         # Manually create a CLI session in the DB.
-        db.create_session(session_id="cli-session-123", source="cli", model="test")
+        db.sessions.create(session_id="cli-session-123", source="cli", model="test")
         # Should not be found via ACP SessionManager.
         assert manager.get_session("cli-session-123") is None
 
     def test_sessions_searchable_via_fts(self, manager):
-        """ACP sessions stored in SessionDB are searchable via FTS5."""
+        """ACP sessions stored in CliSessionStore are searchable via FTS5."""
         state = manager.create_session()
         state.history.append({"role": "user", "content": "how do I configure nginx"})
         state.history.append({"role": "assistant", "content": "Here is the nginx config..."})
         manager.save_session(state.session_id)
 
         db = manager._get_db()
-        results = db.search_messages("nginx")
+        results = db.messages.search("nginx")
         assert len(results) > 0
         session_ids = {r["session_id"] for r in results}
         assert state.session_id in session_ids
@@ -543,7 +607,7 @@ class TestPersistence:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        db = SessionDB(tmp_path / "state.db")
+        db = open_cli_session_store(tmp_path / "state.db")
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
@@ -583,7 +647,7 @@ class TestPersistence:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        db = SessionDB(tmp_path / "state.db")
+        db = open_cli_session_store(tmp_path / "state.db")
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)

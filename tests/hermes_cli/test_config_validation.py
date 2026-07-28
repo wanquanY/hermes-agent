@@ -2,7 +2,13 @@
 
 import pytest
 
-from hermes_cli.config import validate_config_structure, ConfigIssue
+from hermes_cli.config import (
+    DEFAULT_CONFIG,
+    _EXTRA_KNOWN_ROOT_KEYS,
+    _KNOWN_ROOT_KEYS,
+    ConfigIssue,
+    validate_config_structure,
+)
 
 
 class TestCustomProvidersValidation:
@@ -206,3 +212,51 @@ class TestConfigIssueDataclass:
         a = ConfigIssue("error", "msg", "hint")
         b = ConfigIssue("error", "msg", "hint")
         assert a == b
+
+
+class TestUnknownTopLevelKeys:
+    def test_arbitrary_roots_do_not_trigger_closed_world_warning(self):
+        issues = validate_config_structure(
+            {
+                "model": {"provider": "openrouter"},
+                "skillz": {"enabled": True},
+                "secrity": {"redact": True},
+            }
+        )
+
+        assert not any(
+            "Unknown top-level config key" in issue.message for issue in issues
+        )
+
+    def test_known_roots_are_derived_from_defaults_and_extras(self):
+        assert _KNOWN_ROOT_KEYS == (
+            frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
+        )
+
+    @pytest.mark.parametrize("root", sorted(_EXTRA_KNOWN_ROOT_KEYS))
+    def test_real_optional_root_does_not_warn_as_unknown(self, root):
+        value = {}
+        if root == "custom_providers":
+            value = []
+        issues = validate_config_structure({root: value})
+
+        assert not any(
+            "Unknown top-level config key" in issue.message for issue in issues
+        )
+
+    def test_provider_like_roots_keep_specific_misplacement_guidance(self):
+        issues = validate_config_structure(
+            {"base_url": "https://example.test/v1", "api_key": "fake"}
+        )
+
+        assert all(
+            "looks misplaced" in issue.message
+            for issue in issues
+            if issue.severity == "warning"
+        )
+        assert not any("Unknown top-level" in issue.message for issue in issues)
+
+    def test_private_internal_root_is_ignored(self):
+        issues = validate_config_structure({"_runtime_scratch": True})
+
+        assert not any("_runtime_scratch" in issue.message for issue in issues)

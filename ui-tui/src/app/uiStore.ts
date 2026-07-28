@@ -17,6 +17,7 @@ const buildUiState = (): UiState => ({
   info: null,
   inlineDiffs: true,
   mouseTracking: MOUSE_TRACKING,
+  notice: null,
   sections: {},
   showCost: false,
   showReasoning: false,

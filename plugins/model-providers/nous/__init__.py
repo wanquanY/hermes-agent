@@ -10,10 +10,36 @@ from providers.base import ProviderProfile
 class NousProfile(ProviderProfile):
     """Nous Portal — product tags, reasoning with Nous-specific omission."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "reasoning_efforts": [
+                "none",
+                "enabled",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "reasoning_details",
+        }
+
     def build_extra_body(
         self, *, session_id: str | None = None, **context
     ) -> dict[str, Any]:
-        return {"tags": nous_portal_tags()}
+        body: dict[str, Any] = {"tags": nous_portal_tags(session_id=session_id)}
+        provider_preferences = context.get("provider_preferences")
+        if provider_preferences:
+            body["provider"] = provider_preferences
+        return body
 
     def build_api_kwargs_extras(
         self,
@@ -47,7 +73,7 @@ nous = NousProfile(
         "hermes-3-405b",
         "hermes-3-70b",
     ),
-    base_url="https://inference.nousresearch.com/v1",
+    base_url="https://inference-api.nousresearch.com/v1",
     auth_type="oauth_device_code",
 )
 

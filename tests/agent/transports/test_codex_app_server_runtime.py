@@ -241,3 +241,168 @@ class TestSpawnEnvIsolation:
         assert captured["env"].get("CODEX_HOME") == "/tmp/profile/codex"
         # And HOME still passes through unchanged
         assert captured["env"].get("HOME") == "/users/alice"
+
+    def test_kanban_worker_adds_only_kanban_writable_root(self, monkeypatch):
+        """Codex-runtime Kanban workers need to write board state outside
+        their scratch/worktree workspace, but should not fall back to
+        danger-full-access. Hermes passes a narrow app-server config override
+        for the Kanban root only.
+        """
+        import subprocess
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        monkeypatch.setenv("HOME", "/users/alice")
+        monkeypatch.setenv("HERMES_HOME", "/users/alice/.hermes/profiles/backend-worker")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_smoke")
+        monkeypatch.setenv(
+            "HERMES_KANBAN_DB",
+            "/users/alice/.hermes/kanban/boards/smoke/kanban.db",
+        )
+
+        client = cas.CodexAppServerClient(codex_bin="codex")
+        client._closed = True
+
+        cmd = captured["cmd"]
+        assert cmd[:2] == ["codex", "app-server"]
+        assert 'sandbox_mode="workspace-write"' in cmd
+        assert (
+            'sandbox_workspace_write.writable_roots=["/users/alice/.hermes/kanban/boards/smoke"]'
+            in cmd
+        )
+        assert "sandbox_workspace_write.network_access=false" in cmd
+        assert all("danger" not in part for part in cmd)
+
+    def test_kanban_worker_writable_root_does_not_require_raw_db_path(self, monkeypatch):
+        """Normal dispatcher workers derive the sandbox root from board pins."""
+        import subprocess
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_smoke")
+        monkeypatch.setenv("HERMES_KANBAN_HOME", "/users/alice/.hermes")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "smoke")
+
+        client = cas.CodexAppServerClient(codex_bin="codex")
+        client._closed = True
+
+        cmd = captured["cmd"]
+        assert (
+            'sandbox_workspace_write.writable_roots=["/users/alice/.hermes/kanban/boards/smoke"]'
+            in cmd
+        )
+        assert "HERMES_KANBAN_DB" not in captured["env"]
+
+
+class TestSpawnEnvSecretStripping:
+    """Codex receives model authority, never Hermes control-plane secrets."""
+
+    @staticmethod
+    def _capture_spawn_env(monkeypatch):
+        import subprocess
+
+        from agent.transports import codex_app_server as cas
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+        client = cas.CodexAppServerClient(codex_bin="codex")
+        client._closed = True
+        return captured["env"]
+
+    def test_control_plane_and_dynamic_secrets_are_stripped(self, monkeypatch):
+        secret_names = {
+            "GH_TOKEN": "ghp-secret",
+            "TELEGRAM_BOT_TOKEN": "bot-secret",
+            "MODAL_TOKEN_SECRET": "modal-secret",
+            "HERMES_DASHBOARD_SESSION_TOKEN": "dashboard-secret",
+            "AUXILIARY_VISION_API_KEY": "aux-secret",
+            "GATEWAY_RELAY_SECRET": "relay-secret",
+            "GATEWAY_RELAY_ID": "relay-id",
+            "GATEWAY_RELAY_DELIVERY_KEY": "relay-delivery",
+        }
+        for name, value in secret_names.items():
+            monkeypatch.setenv(name, value)
+
+        env = self._capture_spawn_env(monkeypatch)
+
+        assert not secret_names.keys() & env.keys()
+
+    def test_provider_credentials_and_real_home_are_preserved(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+        monkeypatch.setenv("HOME", "/users/alice")
+
+        env = self._capture_spawn_env(monkeypatch)
+
+        assert env["OPENAI_API_KEY"] == "provider-secret"
+        assert env["HOME"] == "/users/alice"

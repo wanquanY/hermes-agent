@@ -47,6 +47,46 @@ class TestRegisterAndDispatch:
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
 
+    def test_dispatch_preserves_supported_multimodal_result(self):
+        reg = ToolRegistry()
+        multimodal = {
+            "_multimodal": True,
+            "content": [{"type": "text", "text": "captured"}],
+            "text_summary": "captured",
+        }
+        reg.register(
+            name="capture",
+            toolset="computer_use",
+            schema=_make_schema("capture"),
+            handler=lambda args, **kw: multimodal,
+        )
+
+        assert reg.dispatch("capture", {}) is multimodal
+
+    def test_dispatch_rejects_unsupported_handler_results(self):
+        for invalid in ({"ok": True}, b"bytes", None, 42):
+            reg = ToolRegistry()
+            reg.register(
+                name="bad_result",
+                toolset="core",
+                schema=_make_schema("bad_result"),
+                handler=lambda args, _invalid=invalid, **kw: _invalid,
+            )
+
+            raw = reg.dispatch("bad_result", {})
+            result = json.loads(raw)
+
+            assert isinstance(raw, str)
+            assert result == {
+                "error": (
+                    "Tool handler returned unsupported result type: "
+                    f"{type(invalid).__name__}"
+                ),
+                "error_type": "tool_result_contract",
+                "tool": "bad_result",
+                "result_type": type(invalid).__name__,
+            }
+
 
 class TestGetDefinitions:
     def test_returns_openai_format(self):
@@ -289,6 +329,21 @@ class TestCheckFnExceptionHandling:
 
 
 class TestBuiltinDiscovery:
+    def test_text_prefilter_skips_ast_for_helper_module(self, tmp_path):
+        helper = tmp_path / "helper.py"
+        helper.write_text("VALUE = 1\n", encoding="utf-8")
+
+        with patch("tools.registry.ast.parse") as parse:
+            assert _module_registers_tools(helper) is False
+
+        parse.assert_not_called()
+
+    def test_text_prefilter_preserves_loader_adapter(self, tmp_path):
+        adapter = tmp_path / "adapter.py"
+        adapter.write_text("TOOL_LOADER_MODULE = True\n", encoding="utf-8")
+
+        assert _module_registers_tools(adapter) is True
+
     def test_discovers_all_real_self_registering_builtin_tool_modules(self):
         tools_dir = Path(__file__).resolve().parents[2] / "tools"
         expected = [

@@ -27,14 +27,14 @@ IDEMPOTENT_TOOL_NAMES = frozenset(
         "browser_snapshot",
         "browser_console",
         "browser_get_images",
-        "mcp_filesystem_read_file",
-        "mcp_filesystem_read_text_file",
-        "mcp_filesystem_read_multiple_files",
-        "mcp_filesystem_list_directory",
-        "mcp_filesystem_list_directory_with_sizes",
-        "mcp_filesystem_directory_tree",
-        "mcp_filesystem_get_file_info",
-        "mcp_filesystem_search_files",
+        "mcp__filesystem__read_file",
+        "mcp__filesystem__read_text_file",
+        "mcp__filesystem__read_multiple_files",
+        "mcp__filesystem__list_directory",
+        "mcp__filesystem__list_directory_with_sizes",
+        "mcp__filesystem__directory_tree",
+        "mcp__filesystem__get_file_info",
+        "mcp__filesystem__search_files",
     }
 )
 
@@ -336,10 +336,7 @@ class ToolCallGuardrailController:
                 return ToolGuardrailDecision(
                     action="warn",
                     code="same_tool_failure_warning",
-                    message=(
-                        f"{tool_name} has failed {same_count} times this turn. "
-                        "This looks like a loop; change approach before retrying."
-                    ),
+                    message=_tool_failure_recovery_hint(tool_name, same_count),
                     tool_name=tool_name,
                     count=same_count,
                     signature=signature,
@@ -406,6 +403,26 @@ def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> s
     return (result or "") + suffix
 
 
+def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
+    """Action-oriented guidance for recovering from repeated tool failures."""
+    common = (
+        f"{tool_name} has failed {count} times this turn. This looks like a loop. "
+        "Do not switch to text-only replies; keep using tools, but diagnose before retrying. "
+        "First inspect the latest error/output and verify your assumptions. "
+    )
+    if tool_name == "terminal":
+        return common + (
+            "For terminal failures, run a small diagnostic such as `pwd && ls -la` "
+            "in the same tool, then try an absolute path, a simpler command, a different "
+            "working directory, or a different tool such as read_file/write_file/patch."
+        )
+    return common + (
+        "Try different arguments, a narrower query/path, an absolute path when relevant, "
+        "or a different tool that can make progress. If the blocker is external, report "
+        "the blocker after one diagnostic attempt instead of repeating the same failing path."
+    )
+
+
 def _coerce_args(args: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return args if isinstance(args, Mapping) else {}
 
@@ -455,4 +472,7 @@ def _positive_int(value: Any, default: int) -> int:
 
 
 def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    # Tool-produced text can contain an unpaired UTF-16 surrogate. Hashing
+    # only needs stable bytes, so preserve it deterministically instead of
+    # letting strict UTF-8 encoding abort the conversation loop.
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()

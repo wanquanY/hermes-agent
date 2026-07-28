@@ -42,7 +42,27 @@ uv pip install mcp
 
 ## Quick Start
 
-Add MCP servers to `~/.hermes/config.yaml` under the `mcp_servers` key:
+Prefer the reviewed catalog when the desired integration is present:
+
+```bash
+hermes mcp catalog
+hermes mcp install <name>
+hermes mcp configure <name>
+```
+
+The default `hermes mcp` command opens the unified picker for catalog entries
+and custom configured servers. Catalog installation handles transport,
+credentials or OAuth guidance, and a per-tool allowlist. It writes the same
+`mcp_servers` config used by manual setup; there is no separate runtime.
+
+For a custom server, add it with `hermes mcp add` or configure
+`~/.hermes/config.yaml` directly:
+
+```bash
+hermes mcp add time --command uvx --args mcp-server-time
+```
+
+Equivalent YAML:
 
 ```yaml
 mcp_servers:
@@ -58,6 +78,25 @@ Restart Hermes Agent. On startup it will:
 4. Inject them into all platform toolsets
 
 You can then use the tools naturally -- just ask the agent to get the current time.
+
+### Figma
+
+Figma is available through the reviewed local Desktop integration:
+
+```bash
+hermes mcp install figma-desktop
+```
+
+Figma Desktop must be running on the same machine with its MCP server enabled
+in Dev Mode. Hermes starts with read-first design-context, metadata,
+screenshot, variables, Code Connect inspection, and FigJam tools. Do not
+enable mutation tools unless the user explicitly needs them; review the live
+surface with `hermes mcp configure figma-desktop`.
+
+Do not present Figma's remote endpoint as a guaranteed setup path. Figma
+currently accepts remote clients only through its own MCP client catalog, and
+Hermes is not listed there. A user may add the remote URL manually after Figma
+grants the client access.
 
 ## Configuration Reference
 

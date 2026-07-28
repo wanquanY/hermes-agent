@@ -251,6 +251,261 @@ def test_main_top_level_tui_accepts_toolsets(monkeypatch, main_mod):
     assert captured == {"toolsets": "web,terminal", "tui": True}
 
 
+def test_termux_fast_tui_launch_uses_light_parser(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setattr(
+        sys, "argv", ["hermes", "--tui", "--toolsets", "web,terminal"]
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "cmd_chat",
+        lambda args: captured.update({"toolsets": args.toolsets, "tui": args.tui}),
+    )
+
+    assert main_mod._try_termux_fast_tui_launch() is True
+    assert captured == {"toolsets": "web,terminal", "tui": True}
+
+
+def test_termux_fast_tui_launch_skips_help(monkeypatch, main_mod):
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setattr(sys, "argv", ["hermes", "--tui", "--help"])
+
+    assert main_mod._try_termux_fast_tui_launch() is False
+
+
+def test_fast_tui_launch_is_termux_only(monkeypatch, main_mod):
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    monkeypatch.setenv("PREFIX", "/usr")
+    monkeypatch.setattr(sys, "argv", ["hermes", "--tui"])
+
+    assert main_mod._try_termux_fast_tui_launch() is False
+
+
+def test_termux_fast_cli_launch_chat_uses_light_parser(monkeypatch, main_mod):
+    captured = {}
+    prepared = []
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.delenv("HERMES_TUI", raising=False)
+    monkeypatch.setattr(
+        sys, "argv", ["hermes", "chat", "-q", "hello", "--toolsets", "web,terminal"]
+    )
+    monkeypatch.setattr(
+        main_mod, "_prepare_agent_startup", lambda args: prepared.append(args.command)
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "cmd_chat",
+        lambda args: captured.update(
+            {"query": args.query, "toolsets": args.toolsets, "command": args.command}
+        ),
+    )
+
+    assert main_mod._try_termux_fast_cli_launch() is True
+    assert prepared == ["chat"]
+    assert captured == {
+        "query": "hello",
+        "toolsets": "web,terminal",
+        "command": "chat",
+    }
+
+
+def test_termux_fast_cli_launch_oneshot_uses_light_parser(monkeypatch, main_mod):
+    captured = {}
+    prepared = []
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.delenv("HERMES_TUI", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hermes", "-z", "hello", "--model", "gpt-test", "--provider", "openai"],
+    )
+    monkeypatch.setattr(
+        main_mod, "_prepare_agent_startup", lambda args: prepared.append(args.command)
+    )
+    def fake_run_and_exit(prompt, **kwargs):
+        captured.update({"prompt": prompt, **kwargs})
+        raise SystemExit(17)
+
+    monkeypatch.setattr(main_mod, "_run_and_exit_oneshot", fake_run_and_exit)
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._try_termux_fast_cli_launch()
+
+    assert exc.value.code == 17
+    assert prepared == [None]
+    assert captured == {
+        "prompt": "hello",
+        "model": "gpt-test",
+        "provider": "openai",
+        "toolsets": None,
+        "usage_file": None,
+    }
+
+
+def test_termux_fast_cli_launch_version_skips_update_check(monkeypatch, main_mod):
+    captured = []
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.delenv("HERMES_TUI", raising=False)
+    monkeypatch.setattr(sys, "argv", ["hermes", "version"])
+    monkeypatch.setattr(
+        main_mod, "_print_version_info", lambda *, check_updates: captured.append(check_updates)
+    )
+
+    assert main_mod._try_termux_fast_cli_launch() is True
+    assert captured == [False]
+
+
+def test_termux_fast_cli_launch_skips_help(monkeypatch, main_mod):
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.delenv("HERMES_TUI", raising=False)
+    monkeypatch.setattr(sys, "argv", ["hermes", "chat", "--help"])
+
+    assert main_mod._try_termux_fast_cli_launch() is False
+
+
+def test_termux_fast_cli_launch_can_be_disabled(monkeypatch, main_mod):
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setenv("HERMES_TERMUX_DISABLE_FAST_CLI", "1")
+    monkeypatch.delenv("HERMES_TUI", raising=False)
+    monkeypatch.setattr(sys, "argv", ["hermes", "version"])
+
+    assert main_mod._try_termux_fast_cli_launch() is False
+
+
+def test_termux_bundled_skills_stamp_controls_sync(monkeypatch, tmp_path, main_mod):
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setattr(main_mod, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(main_mod, "_termux_bundled_skills_fingerprint", lambda: "fp1")
+
+    assert main_mod._termux_bundled_skills_sync_needed() is True
+    main_mod._mark_termux_bundled_skills_synced()
+    assert main_mod._termux_bundled_skills_sync_needed() is False
+
+    monkeypatch.setenv("HERMES_TERMUX_FORCE_SKILLS_SYNC", "1")
+    assert main_mod._termux_bundled_skills_sync_needed() is True
+
+
+def test_termux_skips_bundled_skill_sync_when_stamp_fresh(monkeypatch, tmp_path, main_mod):
+    calls = []
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setattr(main_mod, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(main_mod, "_termux_bundled_skills_fingerprint", lambda: "fp1")
+    main_mod._mark_termux_bundled_skills_synced()
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.skills_sync",
+        types.SimpleNamespace(sync_skills=lambda quiet: calls.append(quiet)),
+    )
+
+    assert main_mod._sync_bundled_skills_for_startup() is False
+    assert calls == []
+
+
+def test_termux_forced_bundled_skill_sync_runs(monkeypatch, tmp_path, main_mod):
+    calls = []
+
+    monkeypatch.setenv("TERMUX_VERSION", "1")
+    monkeypatch.setenv("HERMES_TERMUX_FORCE_SKILLS_SYNC", "1")
+    monkeypatch.setattr(main_mod, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(main_mod, "_termux_bundled_skills_fingerprint", lambda: "fp1")
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.skills_sync",
+        types.SimpleNamespace(sync_skills=lambda quiet: calls.append(quiet)),
+    )
+
+    assert main_mod._sync_bundled_skills_for_startup() is True
+    assert calls == [True]
+
+
+def test_read_git_revision_fingerprint_resolves_packed_refs(tmp_path, main_mod):
+    repo = tmp_path / "repo"
+    git_dir = repo / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    packed_sha = "1234567890abcdef1234567890abcdef12345678"
+    (git_dir / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        f"{packed_sha} refs/heads/main\n"
+        "abcdef0000000000000000000000000000000000 refs/tags/v1.0\n"
+        "^99999999aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        encoding="utf-8",
+    )
+
+    fingerprint = main_mod._read_git_revision_fingerprint(repo)
+
+    assert fingerprint == f"git:refs/heads/main:{packed_sha}"
+
+
+def test_read_git_revision_fingerprint_packed_refs_in_worktree_common_dir(
+    tmp_path, main_mod
+):
+    main_repo = tmp_path / "repo"
+    common_git = main_repo / ".git"
+    common_git.mkdir(parents=True)
+    packed_sha = "fedcba9876543210fedcba9876543210fedcba98"
+    (common_git / "packed-refs").write_text(
+        f"{packed_sha} refs/heads/main\n",
+        encoding="utf-8",
+    )
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    wt_gitdir = common_git / "worktrees" / "wt"
+    wt_gitdir.mkdir(parents=True)
+    (wt_gitdir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (wt_gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {wt_gitdir}\n", encoding="utf-8")
+
+    fingerprint = main_mod._read_git_revision_fingerprint(worktree)
+
+    assert fingerprint == f"git:refs/heads/main:{packed_sha}"
+
+
+def test_read_git_revision_fingerprint_loose_ref_in_worktree_common_dir(
+    tmp_path, main_mod
+):
+    """`git worktree add -b NAME` writes the new branch ref to the common dir,
+    not the per-worktree gitdir. The fingerprint must still resolve it."""
+    main_repo = tmp_path / "repo"
+    common_git = main_repo / ".git"
+    common_git.mkdir(parents=True)
+    loose_sha = "0123456789abcdef0123456789abcdef01234567"
+    (common_git / "refs" / "heads").mkdir(parents=True)
+    (common_git / "refs" / "heads" / "feature").write_text(
+        loose_sha + "\n", encoding="utf-8"
+    )
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    wt_gitdir = common_git / "worktrees" / "wt"
+    wt_gitdir.mkdir(parents=True)
+    (wt_gitdir / "HEAD").write_text("ref: refs/heads/feature\n", encoding="utf-8")
+    (wt_gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    (worktree / ".git").write_text(f"gitdir: {wt_gitdir}\n", encoding="utf-8")
+
+    fingerprint = main_mod._read_git_revision_fingerprint(worktree)
+
+    assert fingerprint == f"git:refs/heads/feature:{loose_sha}"
+
+
+def test_read_git_revision_fingerprint_unresolved_ref_is_stable(tmp_path, main_mod):
+    repo = tmp_path / "repo"
+    git_dir = repo / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/missing\n", encoding="utf-8")
+
+    fingerprint = main_mod._read_git_revision_fingerprint(repo)
+
+    assert fingerprint == "git:refs/heads/missing:unresolved"
+
+
 def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
     captured = {}
 
@@ -278,16 +533,11 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
             register_from_config=lambda _cfg, accept_hooks=False: None
         ),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "hermes_cli.oneshot",
-        types.SimpleNamespace(
-            run_oneshot=lambda prompt, **kwargs: captured.update(
-                {"prompt": prompt, **kwargs}
-            )
-            or 0
-        ),
-    )
+    def fake_run_and_exit(prompt, **kwargs):
+        captured.update({"prompt": prompt, **kwargs})
+        raise SystemExit(0)
+
+    monkeypatch.setattr(main_mod, "_run_and_exit_oneshot", fake_run_and_exit)
 
     with pytest.raises(SystemExit) as exc:
         main_mod.main()
@@ -298,6 +548,7 @@ def test_main_top_level_oneshot_accepts_toolsets(monkeypatch, main_mod):
         "model": None,
         "provider": None,
         "toolsets": "web,terminal",
+        "usage_file": None,
     }
 
 
@@ -419,12 +670,12 @@ def test_oneshot_distinguishes_disabled_mcp_from_unknown(monkeypatch, capsys):
     assert "mcp-off" in err
 
 
-def test_oneshot_wires_session_db_for_recall(monkeypatch):
-    """hermes -z bypasses HermesCLI, but recall still needs SessionDB."""
+def test_oneshot_wires_session_store_for_recall(monkeypatch):
+    """hermes -z bypasses HermesCLI, but recall still needs storage."""
     from hermes_cli.oneshot import _run_agent
 
     captured = {}
-    sentinel_db = object()
+    sentinel_store = object()
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -433,13 +684,15 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
             self.stream_delta_callback = object()
             self.tool_gen_callback = object()
 
-        def chat(self, prompt):
+        def run_conversation(self, prompt):
             captured["prompt"] = prompt
-            return "ok"
+            return {"final_response": "ok", "completed": True}
 
-    class FakeSessionDB:
-        def __new__(cls):
-            return sentinel_db
+        def shutdown_memory_provider(self, *_args):
+            captured["memory_shutdown"] = True
+
+        def close(self):
+            captured["agent_closed"] = True
 
     def mod(name, **attrs):
         module = types.ModuleType(name)
@@ -448,7 +701,14 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
         return module
 
     monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
-    monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=FakeSessionDB))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_agent.composition.cli_session_store",
+        mod(
+            "hermes_agent.composition.cli_session_store",
+            open_cli_session_store=lambda: sentinel_store,
+        ),
+    )
     monkeypatch.setitem(
         sys.modules,
         "hermes_cli.config",
@@ -479,10 +739,15 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
         mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: {"session_search"}),
     )
 
-    assert _run_agent("recall this") == "ok"
-    assert captured["session_db"] is sentinel_db
+    response, result = _run_agent("recall this")
+
+    assert response == "ok"
+    assert result["completed"] is True
+    assert captured["session_db"] is sentinel_store
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+    assert captured["memory_shutdown"] is True
+    assert captured["agent_closed"] is True
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
@@ -503,6 +768,9 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
         return 1
 
     monkeypatch.setattr(main_mod.subprocess, "call", fake_call)
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "gateway-secret")
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "auxiliary-secret")
 
     with pytest.raises(SystemExit):
         main_mod._launch_tui(
@@ -521,13 +789,109 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+    assert env["OPENAI_API_KEY"] == "provider-secret"
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert "AUXILIARY_VISION_API_KEY" not in env
+
+
+def test_launch_tui_exit_code_42_relaunches_update(monkeypatch, main_mod):
+    from unittest.mock import patch
+
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(main_mod.subprocess, "call", lambda *args, **kwargs: 42)
+
+    with patch("hermes_cli.relaunch.relaunch") as mock_relaunch:
+        with pytest.raises(SystemExit) as exc:
+            main_mod._launch_tui()
+
+    assert exc.value.code == 42
+    mock_relaunch.assert_called_once_with(["update"], preserve_inherited=False)
+
+
+def test_launch_tui_drops_stale_resume_env_without_resume_arg(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.setenv("HERMES_TUI_RESUME", "stale-missing-session")
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "call",
+        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod._launch_tui()
+
+    assert "HERMES_TUI_RESUME" not in captured["env"]
+
+
+def test_launch_tui_sets_resume_env_from_resume_arg(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.setenv("HERMES_TUI_RESUME", "stale-missing-session")
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "call",
+        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod._launch_tui(resume_session_id="20260518_000000_goodid")
+
+    assert captured["env"]["HERMES_TUI_RESUME"] == "20260518_000000_goodid"
+
+
+def test_make_tui_argv_dev_prebuilds_hermes_ink(monkeypatch, main_mod, tmp_path):
+    tui_dir = tmp_path / "ui-tui"
+    tsx = tui_dir / "node_modules" / ".bin" / "tsx"
+    ink_dir = tui_dir / "packages" / "hermes-ink"
+    tsx.parent.mkdir(parents=True)
+    ink_dir.mkdir(parents=True)
+    tsx.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    monkeypatch.setattr(main_mod, "_ensure_tui_node", lambda: None)
+    monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _tui_dir: False)
+    monkeypatch.delenv("HERMES_TUI_DIR", raising=False)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda bin_name: f"/usr/bin/{bin_name}")
+
+    calls = []
+
+    def fake_run(cmd, cwd=None, **_kwargs):
+        calls.append((cmd, cwd))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+
+    argv, cwd = main_mod._make_tui_argv(tui_dir, tui_dev=True)
+
+    assert argv == [str(tsx), "src/entry.tsx"]
+    assert cwd == tui_dir
+    assert calls == [(["/usr/bin/npm", "run", "build"], str(ink_dir))]
 
 
 def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, capsys):
     import hermes_cli.main as main_mod
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             assert session_id == "20260409_000001_abc123"
             return {
                 "message_count": 2,
@@ -538,15 +902,13 @@ def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, ca
                 "reasoning_tokens": 1,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "demo title"
 
         def close(self):
             return None
 
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("20260409_000001_abc123")
     out = capsys.readouterr().out
@@ -565,7 +927,12 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
     seen = []
 
     class _FakeDB:
-        def get_session(self, session_id):
+        sessions = None
+
+        def __init__(self):
+            self.sessions = self
+
+        def get(self, session_id):
             seen.append(session_id)
             return {
                 "message_count": 1,
@@ -576,7 +943,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
                 "reasoning_tokens": 0,
             }
 
-        def get_session_title(self, _session_id):
+        def get_title(self, _session_id):
             return "actual"
 
         def close(self):
@@ -584,9 +951,7 @@ def test_print_tui_exit_summary_prefers_actual_active_session_file(
 
     active = tmp_path / "active.json"
     active.write_text('{"session_id":"actual_session"}', encoding="utf-8")
-    monkeypatch.setitem(
-        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda: _FakeDB())
-    )
+    monkeypatch.setattr(main_mod, "open_cli_session_store", lambda: _FakeDB())
 
     main_mod._print_tui_exit_summary("startup_resume", str(active))
     out = capsys.readouterr().out

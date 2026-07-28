@@ -6,7 +6,7 @@ Before the fix, ``_run_cleanup`` called
 ``shutdown_memory_provider(getattr(agent, 'conversation_history', None) or [])``.
 ``AIAgent`` has no ``conversation_history`` attribute — so the ``or []``
 branch always fired and providers got an empty list on CLI exit. This
-mirrors the gateway bug fixed in the same commit (gateway/run.py uses
+mirrors the gateway bug fixed in the same commit (hermes_gateway/runner.py uses
 ``_session_messages``, which IS set on ``AIAgent``).
 
 The fix reads ``_session_messages`` (same attribute the gateway path uses)
@@ -16,7 +16,10 @@ other tests keep their existing no-arg behaviour.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
+
+from agent.turn_message_buffer import TurnMessageBuffer
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -109,3 +112,72 @@ def test_cleanup_provider_exception_is_swallowed(mock_invoke_hook):
         cli_mod._cleanup_done = False
 
     agent.shutdown_memory_provider.assert_called_once()
+
+
+def test_close_snapshot_persists_pending_cli_input_once():
+    """Accepted input is durable even when close wins before worker start."""
+    import cli as cli_mod
+
+    pending = {"role": "user", "content": "accepted input"}
+
+    class Agent:
+        def __init__(self):
+            self._session_db = object()
+            self._session_messages = [
+                {"role": "assistant", "content": "previous"}
+            ]
+            self._pending_cli_user_message = pending
+            self._session_persist_lock = threading.RLock()
+            self._cached_system_prompt = "prompt"
+            self.persisted = []
+            self.ensure_calls = 0
+
+        def _ensure_db_session(self):
+            self.ensure_calls += 1
+
+        def _persist_session(self, messages, conversation_history=None):
+            self.persisted.append(
+                (list(messages), messages.persist_from_index, conversation_history)
+            )
+
+    agent = Agent()
+
+    assert cli_mod._persist_active_agent_snapshot(agent) is True
+
+    persisted, boundary, history = agent.persisted[0]
+    assert agent.ensure_calls == 1
+    assert persisted == [
+        {"role": "assistant", "content": "previous"},
+        pending,
+    ]
+    assert persisted.count(pending) == 1
+    assert boundary == 1
+    assert history == agent._session_messages
+
+
+def test_close_snapshot_fallback_flushes_pending_already_in_cli_history():
+    """The history fallback keeps the pending row on the writable side."""
+    import cli as cli_mod
+
+    pending = {"role": "user", "content": "accepted input"}
+    history = [{"role": "assistant", "content": "previous"}, pending]
+
+    class Agent:
+        def __init__(self):
+            self._session_db = object()
+            self._pending_cli_user_message = pending
+            self._session_persist_lock = threading.RLock()
+            self._cached_system_prompt = "prompt"
+            self.persisted = None
+
+        def _ensure_db_session(self):
+            pass
+
+        def _persist_session(self, messages, conversation_history=None):
+            assert isinstance(messages, TurnMessageBuffer)
+            self.persisted = (list(messages), messages.persist_from_index)
+
+    agent = Agent()
+
+    assert cli_mod._persist_active_agent_snapshot(agent, history) is True
+    assert agent.persisted == (history, 1)

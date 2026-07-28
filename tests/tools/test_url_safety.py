@@ -6,13 +6,41 @@ from unittest.mock import patch
 from tools.url_safety import (
     is_safe_url,
     is_always_blocked_url,
+    normalize_url_for_request,
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
+    redirect_target_from_response,
 )
 
 import ipaddress
 import pytest
+
+
+class TestNormalizeUrlForRequest:
+    def test_percent_encodes_non_ascii_path(self):
+        assert (
+            normalize_url_for_request("https://wttr.in/Köln")
+            == "https://wttr.in/K%C3%B6ln"
+        )
+
+    def test_preserves_existing_percent_escapes(self):
+        assert (
+            normalize_url_for_request("https://wttr.in/K%C3%B6ln")
+            == "https://wttr.in/K%C3%B6ln"
+        )
+
+    def test_preserves_reserved_query_syntax(self):
+        assert (
+            normalize_url_for_request("https://example.com/search?q=Köln&lang=de")
+            == "https://example.com/search?q=K%C3%B6ln&lang=de"
+        )
+
+    def test_idna_encodes_hostname(self):
+        assert (
+            normalize_url_for_request("https://münich.example/Köln")
+            == "https://xn--mnich-kva.example/K%C3%B6ln"
+        )
 
 
 class TestIsSafeUrl:
@@ -21,6 +49,14 @@ class TestIsSafeUrl:
             (2, 1, 6, "", ("93.184.216.34", 0)),
         ]):
             assert is_safe_url("https://example.com/image.png") is True
+
+    def test_ftp_scheme_blocked(self):
+        """Only http/https should be allowed for fetch tools."""
+        assert is_safe_url("ftp://example.com/file.txt") is False
+
+    def test_missing_scheme_blocked(self):
+        """Bare host/path should be rejected to avoid ambiguous handling."""
+        assert is_safe_url("example.com/path") is False
 
     def test_localhost_blocked(self):
         with patch("socket.getaddrinfo", return_value=[
@@ -66,6 +102,25 @@ class TestIsSafeUrl:
             (10, 1, 6, "", ("::1", 0, 0, 0)),
         ]):
             assert is_safe_url("http://[::1]:8080/") is False
+
+    def test_ipv6_scope_id_is_stripped_before_link_local_classification(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("fe80::1%en0", 0, 0, 4)),
+        ]):
+            assert is_safe_url("http://scope.example/") is False
+
+    def test_unparseable_resolved_address_fails_closed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("not-an-ip%en0", 0, 0, 4)),
+        ]):
+            assert is_safe_url("http://scope.example/") is False
+
+    def test_mixed_public_and_private_dns_answers_fail_closed(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]):
+            assert is_safe_url("https://mixed-answer.example/") is False
 
     def test_dns_failure_blocked(self):
         """DNS failures now fail closed — block the request."""
@@ -474,3 +529,98 @@ class TestIsAlwaysBlockedUrl:
         """security.allow_private_urls can NOT unblock cloud metadata."""
         monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
         assert is_always_blocked_url("http://169.254.169.254/") is True
+
+
+class TestIPv4MappedIPv6SSRF:
+    """Regression tests for SSRF bypass via IPv4-mapped IPv6 addresses.
+
+    DNS resolvers may return ``::ffff:x.x.x.x`` for IPv4-only hosts.
+    Python's ipaddress module treats these as distinct from the plain
+    IPv4 address, so ``ip in frozenset({IPv4Address(...)})`` and
+    ``ip in IPv4Network(...)`` both return False.  Without explicit
+    handling, an attacker could use IPv4-mapped addresses to bypass
+    all SSRF protections.
+    """
+
+    # ── _is_blocked_ip direct tests ──
+
+    @pytest.mark.parametrize("ip_str", [
+        "::ffff:100.64.0.1",       # CGNAT start
+        "::ffff:100.100.100.200",  # Alibaba Cloud metadata (in CGNAT range)
+        "::ffff:100.127.255.254",  # CGNAT end
+        "::ffff:169.254.42.99",    # Link-local (non-metadata)
+        "::ffff:0.0.0.0",          # Unspecified
+        "::ffff:224.0.0.1",        # Multicast
+    ])
+    def test_ipv4_mapped_blocked_ips(self, ip_str):
+        """IPv4-mapped IPv6 addresses that should be blocked."""
+        ip = ipaddress.ip_address(ip_str)
+        assert _is_blocked_ip(ip) is True, f"{ip_str} should be blocked"
+
+    @pytest.mark.parametrize("ip_str", [
+        "::ffff:8.8.8.8",          # Public DNS
+        "::ffff:93.184.216.34",    # example.com
+        "::ffff:100.0.0.1",        # Not in CGNAT range
+    ])
+    def test_ipv4_mapped_allowed_ips(self, ip_str):
+        """IPv4-mapped IPv6 addresses that should be allowed."""
+        ip = ipaddress.ip_address(ip_str)
+        assert _is_blocked_ip(ip) is False, f"{ip_str} should be allowed"
+
+    # ── is_safe_url integration tests: always-blocked metadata IPs ──
+
+    def test_ipv4_mapped_aws_metadata_blocked(self):
+        """::ffff:169.254.169.254 (AWS metadata) must always be blocked."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("::ffff:169.254.169.254", 0, 0, 0)),
+        ]):
+            assert is_safe_url("http://aws-metadata.internal/") is False
+
+    def test_ipv4_mapped_ecs_metadata_blocked(self):
+        """::ffff:169.254.170.2 (AWS ECS task metadata) must always be blocked."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("::ffff:169.254.170.2", 0, 0, 0)),
+        ]):
+            assert is_safe_url("http://ecs-metadata.internal/") is False
+
+    def test_ipv4_mapped_azure_wire_server_blocked(self):
+        """::ffff:169.254.169.253 (Azure IMDS wire server) must always be blocked."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("::ffff:169.254.169.253", 0, 0, 0)),
+        ]):
+            assert is_safe_url("http://azure-metadata.internal/") is False
+
+    def test_ipv4_mapped_alibaba_metadata_blocked(self):
+        """::ffff:100.100.100.200 (Alibaba Cloud metadata) must always be blocked."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("::ffff:100.100.100.200", 0, 0, 0)),
+        ]):
+            assert is_safe_url("http://aliyun-metadata.internal/") is False
+
+
+class TestRedirectTargetFromResponse:
+    def test_location_header_works_when_next_request_is_missing(self):
+        response = type("Response", (), {
+            "is_redirect": True,
+            "url": "https://public.example/images/start",
+            "headers": {"location": "/private/next"},
+            "next_request": None,
+        })()
+        assert redirect_target_from_response(response) == "https://public.example/private/next"
+
+    def test_falls_back_to_next_request_without_location(self):
+        request = type("Request", (), {"url": "https://next.example/file"})()
+        response = type("Response", (), {
+            "is_redirect": True,
+            "url": "https://public.example/start",
+            "headers": {},
+            "next_request": request,
+        })()
+        assert redirect_target_from_response(response) == "https://next.example/file"
+
+    def test_non_redirect_has_no_target(self):
+        response = type("Response", (), {
+            "is_redirect": False,
+            "headers": {"location": "http://169.254.169.254/"},
+        })()
+        assert redirect_target_from_response(response) is None

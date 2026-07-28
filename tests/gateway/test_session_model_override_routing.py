@@ -14,9 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
-from gateway.config import Platform
-from gateway.session import SessionSource
+import hermes_gateway.runner as gateway_run
+import hermes_gateway.gateway_runtime_config as gateway_runtime_config
+from hermes_gateway.config import Platform
+from hermes_gateway.session import SessionSource
 
 
 class _CapturingAgent:
@@ -83,9 +84,9 @@ def _explode_runtime_resolution():
 
 
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
+    monkeypatch.setattr(gateway_runtime_config, "resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CapturingAgent
@@ -128,8 +129,8 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_background_task_prefers_session_override_over_global_runtime(monkeypatch):
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
+    monkeypatch.setattr("hermes_gateway.model_command._load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_runtime_config, "resolve_runtime_agent_kwargs", _explode_runtime_resolution)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CapturingAgent
@@ -184,13 +185,22 @@ fallback_providers:
 """.lstrip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    import hermes_gateway.runner as gateway_run
 
-    def fake_resolve_runtime_provider(*, requested=None, explicit_base_url=None, explicit_api_key=None):
-        if requested in (None, "", "openai-codex"):
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
+
+    def fake_resolve_runtime_provider(
+        *,
+        requested=None,
+        target_model=None,
+        explicit_base_url=None,
+        explicit_api_key=None,
+    ):
+        if requested in {None, "", "openai-codex"}:
             from hermes_cli.auth import AuthError
             raise AuthError("No Codex credentials stored. Run `hermes auth` to authenticate.")
         assert requested == "openrouter"
+        assert target_model == "minimax/minimax-m2.7"
         return {
             "api_key": "sk-openrouter",
             "base_url": "https://openrouter.ai/api/v1",
@@ -206,7 +216,7 @@ fallback_providers:
     monkeypatch.setattr(runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
 
     runner = _make_runner()
-    model, runtime_kwargs = runner._resolve_session_agent_runtime(
+    model, runtime_kwargs = gateway_runtime_config.runtime_config_for(runner).resolve_session_agent_runtime(
         session_key="agent:main:telegram:group:-1003715515980:63",
         user_config={
             "model": {"default": "gpt-5.5", "provider": "openai-codex"},
@@ -217,4 +227,3 @@ fallback_providers:
     assert model == "minimax/minimax-m2.7"
     assert runtime_kwargs["provider"] == "openrouter"
     assert runtime_kwargs["api_key"] == "sk-openrouter"
-

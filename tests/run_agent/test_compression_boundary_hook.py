@@ -21,6 +21,7 @@ import pytest
 
 class TestCompressionBoundaryHook:
     def _make_agent(self, session_db):
+        session_db.sessions.create("original-session", source="cli")
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
             from run_agent import AIAgent
             return AIAgent(
@@ -35,10 +36,10 @@ class TestCompressionBoundaryHook:
             )
 
     def test_on_session_start_called_with_compression_boundary(self):
-        from hermes_state import SessionDB
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")
             agent = self._make_agent(db)
 
             # Stub the context compressor: we only need to observe the hook.
@@ -52,6 +53,11 @@ class TestCompressionBoundaryHook:
             compressor.last_completion_tokens = 0
             # Avoid the summary-error warning path
             compressor._last_summary_error = None
+            # MagicMock auto-creates truthy attrs; explicitly clear the abort
+            # flag so the post-compress abort branch in
+            # conversation_compression.py does not short-circuit before the
+            # session-id rotation we are asserting on.
+            compressor._last_compress_aborted = False
             agent.context_compressor = compressor
 
             original_sid = agent.session_id
@@ -125,10 +131,10 @@ class TestCompressionBoundaryHook:
 
     def test_hook_failure_does_not_break_compression(self):
         """If the context engine raises from on_session_start, compression still completes."""
-        from hermes_state import SessionDB
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            db = open_cli_session_store(db_path=Path(tmpdir) / "test.db")
             agent = self._make_agent(db)
 
             compressor = MagicMock()
@@ -137,6 +143,7 @@ class TestCompressionBoundaryHook:
             compressor.last_prompt_tokens = 0
             compressor.last_completion_tokens = 0
             compressor._last_summary_error = None
+            compressor._last_compress_aborted = False
 
             # Raise only on the compression-boundary call, not on earlier calls.
             def _raise_on_compression(*args, **kwargs):

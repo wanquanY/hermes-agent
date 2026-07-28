@@ -476,3 +476,63 @@ class TestIterCacheFiles:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         assert iter_cache_files() == []
+
+
+class TestMasterCredentialStoresAreNeverMountable:
+    @staticmethod
+    def _home(tmp_path):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        (home / ".env").write_text("OPENAI_API_KEY=sk-secret\n")
+        (home / "auth.json").write_text('{"providers": {}}')
+        (home / ".anthropic_oauth.json").write_text('{"refresh_token": "rt"}')
+        (home / "webhook_subscriptions.json").write_text("{}")
+        (home / "cache").mkdir()
+        (home / "cache" / "bws_cache.json").write_text("{}")
+        (home / "mcp-tokens").mkdir()
+        (home / "mcp-tokens" / "server.json").write_text(
+            '{"access_token": "token"}'
+        )
+        (home / "google_token.json").write_text("{}")
+        return home
+
+    @pytest.mark.parametrize(
+        "relative_path",
+        [
+            ".env",
+            "auth.json",
+            ".anthropic_oauth.json",
+            "webhook_subscriptions.json",
+            "cache/bws_cache.json",
+            "mcp-tokens/server.json",
+        ],
+    )
+    def test_master_store_is_refused(self, tmp_path, monkeypatch, relative_path):
+        home = self._home(tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        assert register_credential_file(relative_path) is False
+        assert get_credential_file_mounts() == []
+
+    def test_per_service_token_still_mounts(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        assert register_credential_file("google_token.json") is True
+        assert get_credential_file_mounts() == [
+            {
+                "host_path": str(home / "google_token.json"),
+                "container_path": "/root/.hermes/google_token.json",
+            }
+        ]
+
+    def test_refused_entry_does_not_block_batch(self, tmp_path, monkeypatch):
+        home = self._home(tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        missing = register_credential_files([".env", "google_token.json"])
+
+        assert missing == [".env"]
+        assert [
+            mount["container_path"] for mount in get_credential_file_mounts()
+        ] == ["/root/.hermes/google_token.json"]

@@ -1,6 +1,21 @@
 """Tests for agent-settings copy in the interactive setup wizard."""
 
-from hermes_cli.setup import setup_agent_settings
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
+from hermes_cli.setup import _apply_default_agent_settings, setup_agent_settings
+
+
+def test_apply_default_agent_settings_uses_default_compression_threshold(monkeypatch):
+    config = {}
+    saved_configs = []
+
+    monkeypatch.setattr("hermes_cli.setup.remove_env_value", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hermes_cli.setup.save_config", lambda value: saved_configs.append(value.copy()))
+
+    _apply_default_agent_settings(config)
+
+    assert config["compression"]["enabled"] is True
+    assert config["compression"]["threshold"] == DEFAULT_COMPRESSION_THRESHOLD
+    assert saved_configs[-1]["compression"]["threshold"] == DEFAULT_COMPRESSION_THRESHOLD
 
 
 def test_setup_agent_settings_uses_displayed_max_iterations_value(tmp_path, monkeypatch, capsys):

@@ -3,7 +3,13 @@
 import json
 import logging
 import urllib.request
+from typing import Any
 
+from agent.anthropic_thinking import (
+    supports_adaptive_thinking,
+    supports_xhigh_effort,
+)
+from hermes_cli.urllib_security import open_credentialed_url
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -13,10 +19,31 @@ logger = logging.getLogger(__name__)
 class AnthropicProfile(ProviderProfile):
     """Native Anthropic — uses x-api-key header, not Bearer."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(model or "").strip().lower()
+        if not normalized or "haiku" in normalized:
+            return {"reasoning_enabled": False}
+        efforts = ["none", "low", "medium", "high", "max"]
+        if supports_adaptive_thinking(normalized) and supports_xhigh_effort(normalized):
+            efforts.append("xhigh")
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": efforts,
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "thinking_blocks",
+        }
+
     def fetch_models(
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
         """Anthropic uses x-api-key header and anthropic-version."""
@@ -27,7 +54,7 @@ class AnthropicProfile(ProviderProfile):
             req.add_header("x-api-key", api_key)
             req.add_header("anthropic-version", "2023-06-01")
             req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             return [
                 m["id"]

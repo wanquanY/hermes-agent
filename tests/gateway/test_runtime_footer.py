@@ -1,4 +1,4 @@
-"""Unit tests for gateway.runtime_footer — the opt-in runtime-metadata footer
+"""Unit tests for hermes_gateway.runtime_footer — the opt-in runtime-metadata footer
 appended to final gateway replies."""
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from gateway.runtime_footer import (
+from hermes_gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
     build_footer_line,
@@ -203,7 +203,7 @@ def test_resolve_ignores_malformed_config():
 
 
 # ---------------------------------------------------------------------------
-# build_footer_line — top-level entry point used by gateway/run.py
+# build_footer_line — top-level entry point used by hermes_gateway/runner.py
 # ---------------------------------------------------------------------------
 
 def test_build_footer_empty_when_disabled():

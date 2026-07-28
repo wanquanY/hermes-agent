@@ -13,6 +13,28 @@ from providers.base import ProviderProfile
 class VercelAIGatewayProfile(ProviderProfile):
     """Vercel AI Gateway — attribution headers + reasoning passthrough."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "reasoning_efforts": [
+                "none",
+                "enabled",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ],
+            "default_reasoning_effort": "medium",
+            "reasoning_format": "reasoning_details",
+        }
+
     def build_api_kwargs_extras(
         self,
         *,

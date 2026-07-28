@@ -47,9 +47,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
+from dovie_extension.capability_policy import (
+    is_managed_dovie_bundled_plugin_allowed,
+    is_managed_dovie_runtime,
+)
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled
 from hermes_cli.config import cfg_get
+from hermes_cli.plugin_assets import (
+    McpCatalogAssetDeclaration,
+    PluginAssetRegistry,
+    RegisteredPluginSkill,
+    SkillAssetDeclaration,
+    parse_asset_declarations,
+)
+from hermes_cli.plugin_registrations import PluginContextRegistrationsMixin
 
 
 def get_bundled_plugins_dir() -> Path:
@@ -70,6 +82,10 @@ except ImportError:  # pragma: no cover – yaml is optional at import time
     yaml = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+class PluginToolOverrideError(PermissionError):
+    """A plugin requested privileged tool replacement without authorization."""
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +152,15 @@ VALID_HOOKS: Set[str] = {
     "transform_llm_output",
     "pre_llm_call",
     "post_llm_call",
+    "pre_verify",
     "pre_api_request",
     "post_api_request",
+    "api_request_error",
     "on_session_start",
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    "subagent_start",
     "subagent_stop",
     # Gateway pre-dispatch hook. Fired once per incoming MessageEvent
     # after the internal-event guard but BEFORE auth/pairing and agent
@@ -165,6 +184,9 @@ VALID_HOOKS: Set[str] = {
     #   choice: "once" | "session" | "always" | "deny" | "timeout"
     "pre_approval_request",
     "post_approval_response",
+    "kanban_task_claimed",
+    "kanban_task_completed",
+    "kanban_task_blocked",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -227,7 +249,14 @@ def _get_enabled_plugins() -> Optional[set]:
 # Data classes
 # ---------------------------------------------------------------------------
 
-_VALID_PLUGIN_KINDS: Set[str] = {"standalone", "backend", "exclusive", "platform", "model-provider"}
+_VALID_PLUGIN_KINDS: Set[str] = {
+    "standalone",
+    "backend",
+    "capability",
+    "exclusive",
+    "platform",
+    "model-provider",
+}
 
 
 @dataclass
@@ -241,6 +270,9 @@ class PluginManifest:
     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
     provides_tools: List[str] = field(default_factory=list)
     provides_hooks: List[str] = field(default_factory=list)
+    capabilities: frozenset[str] = field(default_factory=frozenset)
+    skill_assets: tuple[SkillAssetDeclaration, ...] = field(default_factory=tuple)
+    mcp_catalog_assets: tuple[McpCatalogAssetDeclaration, ...] = field(default_factory=tuple)
     source: str = ""        # "user", "project", or "entrypoint"
     path: Optional[str] = None
     # Plugin kind — see plugins.py module docstring for semantics.
@@ -258,6 +290,8 @@ class PluginManifest:
     #              available out of the box; user-installed platform plugins
     #              in ~/.hermes/plugins/ still gated by ``plugins.enabled``
     #              (untrusted code).
+    # ``capability``: declarative Skill/MCP bundle. Bundled capability plugins
+    #                 auto-load; external capability plugins remain opt-in.
     kind: str = "standalone"
     # Registry key — path-derived, used by ``plugins.enabled``/``disabled``
     # lookups and by ``hermes plugins list``. For a flat plugin at
@@ -276,6 +310,9 @@ class LoadedPlugin:
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
     commands_registered: List[str] = field(default_factory=list)
+    middleware_registered: List[str] = field(default_factory=list)
+    skills_registered: List[str] = field(default_factory=list)
+    mcp_catalog_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
 
@@ -284,7 +321,7 @@ class LoadedPlugin:
 # PluginContext  – handed to each plugin's ``register()`` function
 # ---------------------------------------------------------------------------
 
-class PluginContext:
+class PluginContext(PluginContextRegistrationsMixin):
     """Facade given to plugins so they can register tools and hooks."""
 
     def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
@@ -325,11 +362,18 @@ class PluginContext:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
+        override: bool = False,
     ) -> None:
-        """Register a tool in the global registry **and** track it as plugin-provided."""
+        """Register a tool in the global registry **and** track it as plugin-provided.
+
+        Pass ``override=True`` to replace an existing built-in tool with the
+        same name (e.g. swap the default ``browser_navigate`` for a custom
+        CDP-backed implementation). Without it, attempting to register a name
+        already claimed by a different toolset is rejected.
+        """
         from tools.registry import registry
 
-        registry.register(
+        registered = registry.register(
             name=name,
             toolset=toolset,
             schema=schema,
@@ -339,9 +383,29 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            override=override,
         )
+        if not registered:
+            return
         self._manager._plugin_tool_names.add(name)
-        logger.debug("Plugin %s registered tool: %s", self.manifest.name, name)
+        logger.debug(
+            "Plugin %s registered tool: %s%s",
+            self.manifest.name, name, " (override)" if override else "",
+        )
+
+    def _tool_override_allowed(self) -> bool:
+        if "tool_override" not in self.manifest.capabilities:
+            return False
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+        except Exception:
+            return False
+        plugin_id = self.manifest.key or self.manifest.name
+        entries = (config.get("plugins") or {}).get("entries") or {}
+        entry = entries.get(plugin_id) or {}
+        return entry.get("allow_tool_override") is True
 
     # -- message injection --------------------------------------------------
 
@@ -597,6 +661,38 @@ class PluginContext:
             self.manifest.name, provider.name,
         )
 
+    # -- browser provider registration ---------------------------------------
+
+    def register_browser_provider(self, provider) -> None:
+        """Register a cloud browser backend.
+
+        ``provider`` must be an instance of
+        :class:`agent.browser_provider.BrowserProvider`. The
+        ``provider.name`` attribute is what ``browser.cloud_provider`` in
+        ``config.yaml`` matches against when routing cloud-mode
+        ``browser_*`` tool calls.
+
+        Mirrors :meth:`register_web_search_provider` exactly — same
+        registration shape, same gating, same logging. The browser
+        subsystem's dispatcher (:func:`tools.browser_tool._get_cloud_provider`)
+        consults the registry built up by these calls.
+        """
+        from agent.browser_provider import BrowserProvider
+        from agent.browser_registry import register_provider as _register_browser_provider
+
+        if not isinstance(provider, BrowserProvider):
+            logger.warning(
+                "Plugin '%s' tried to register a browser provider that does "
+                "not inherit from BrowserProvider. Ignoring.",
+                self.manifest.name,
+            )
+            return
+        _register_browser_provider(provider)
+        logger.info(
+            "Plugin '%s' registered browser provider: %s",
+            self.manifest.name, provider.name,
+        )
+
     # -- platform adapter registration ---------------------------------------
 
     def register_platform(
@@ -631,7 +727,7 @@ class PluginContext:
                 setup_fn=irc_interactive_setup,
             )
         """
-        from gateway.platform_registry import platform_registry, PlatformEntry
+        from channels.platform_registry import platform_registry, PlatformEntry
 
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry = PlatformEntry(
@@ -692,31 +788,49 @@ class PluginContext:
             ValueError: if *name* contains ``':'`` or invalid characters.
             FileNotFoundError: if *path* does not exist.
         """
-        from agent.skill_utils import _NAMESPACE_RE
-
-        if ":" in name:
-            raise ValueError(
-                f"Skill name '{name}' must not contain ':' "
-                f"(the namespace is derived from the plugin name "
-                f"'{self.manifest.name}' automatically)."
-            )
-        if not name or not _NAMESPACE_RE.match(name):
-            raise ValueError(
-                f"Invalid skill name '{name}'. Must match [a-zA-Z0-9_-]+."
-            )
-        if not path.exists():
-            raise FileNotFoundError(f"SKILL.md not found at {path}")
-
-        qualified = f"{self.manifest.name}:{name}"
-        self._manager._plugin_skills[qualified] = {
-            "path": path,
-            "plugin": self.manifest.name,
-            "bare_name": name,
-            "description": description,
-        }
+        plugin_root = None
+        if self.manifest.source in {"bundled", "user", "project"} and self.manifest.path:
+            plugin_root = Path(self.manifest.path)
+        entry = self._manager._assets.register_skill(
+            plugin_name=self.manifest.name,
+            plugin_key=self.manifest.key or self.manifest.name,
+            plugin_root=plugin_root,
+            name=name,
+            path=path,
+            description=description,
+        )
         logger.debug(
             "Plugin %s registered skill: %s",
-            self.manifest.name, qualified,
+            self.manifest.name, entry.qualified_name,
+        )
+
+    def register_mcp_catalog(self, manifest_path: Path) -> None:
+        """Register one MCP catalog manifest owned by this plugin.
+
+        Directory plugins should prefer the declarative ``mcp_catalog`` block
+        in ``plugin.yaml``.  This method exists for entry-point plugins whose
+        packaged asset path is only known after importing the distribution.
+        """
+        plugin_root = None
+        if self.manifest.source in {"bundled", "user", "project"} and self.manifest.path:
+            plugin_root = Path(self.manifest.path)
+        if plugin_root is None:
+            plugin_root = manifest_path.resolve().parent
+        self._manager._assets.register_manifest_assets(
+            plugin_name=self.manifest.name,
+            plugin_key=self.manifest.key or self.manifest.name,
+            plugin_root=plugin_root,
+            skills=(),
+            mcp_catalog=(
+                McpCatalogAssetDeclaration(
+                    path=str(manifest_path.resolve().relative_to(plugin_root.resolve()))
+                ),
+            ),
+        )
+        logger.debug(
+            "Plugin %s registered MCP catalog manifest: %s",
+            self.manifest.name,
+            manifest_path,
         )
 
 
@@ -730,6 +844,7 @@ class PluginManager:
     def __init__(self) -> None:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
+        self._middleware: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
@@ -737,8 +852,9 @@ class PluginManager:
         self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
-        # Plugin skill registry: qualified name → metadata dict.
-        self._plugin_skills: Dict[str, Dict[str, Any]] = {}
+        self._assets = PluginAssetRegistry()
+        self._aux_tasks: Dict[str, Dict[str, Any]] = {}
+        self._slack_action_handlers: List[tuple] = []
 
     # -----------------------------------------------------------------------
     # Public
@@ -756,10 +872,14 @@ class PluginManager:
         if force:
             self._plugins.clear()
             self._hooks.clear()
+            self._middleware.clear()
             self._plugin_tool_names.clear()
+            self._plugin_platform_names.clear()
             self._cli_commands.clear()
             self._plugin_commands.clear()
-            self._plugin_skills.clear()
+            self._assets.clear()
+            self._aux_tasks.clear()
+            self._slack_action_handlers.clear()
             self._context_engine = None
         self._discovered = True
 
@@ -841,6 +961,24 @@ class PluginManager:
                 logger.debug("Skipping disabled plugin '%s'", lookup_key)
                 continue
 
+            # Dovie owns its desktop Plugin catalog. Hermes bundled Plugins
+            # remain available to Hermes CLI users, but are never imported in
+            # a Dovie-managed gateway/profile process even if old config still
+            # contains an enable token.
+            if (
+                manifest.source == "bundled"
+                and is_managed_dovie_runtime()
+                and not is_managed_dovie_bundled_plugin_allowed(
+                    lookup_key,
+                    manifest.name,
+                )
+            ):
+                loaded = LoadedPlugin(manifest=manifest, enabled=False)
+                loaded.error = "retired from the Dovie capability catalog"
+                self._plugins[lookup_key] = loaded
+                logger.debug("Skipping Hermes bundled plugin for Dovie: '%s'", lookup_key)
+                continue
+
             # Exclusive plugins (memory providers) have their own
             # discovery/activation path. The general loader records the
             # manifest for introspection but does not load the module.
@@ -879,7 +1017,11 @@ class PluginManager:
             # Bundled platform plugins (gateway adapters like IRC) auto-load
             # for the same reason: every platform Hermes ships must be
             # available out of the box without the user having to opt in.
-            if manifest.source == "bundled" and manifest.kind in {"backend", "platform"}:
+            if manifest.source == "bundled" and manifest.kind in {
+                "backend",
+                "capability",
+                "platform",
+            }:
                 self._load_plugin(manifest)
                 continue
 
@@ -1068,6 +1210,12 @@ class PluginManager:
                 "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s",
                 key, name, kind, source, plugin_dir,
             )
+            raw_capabilities = data.get("capabilities", [])
+            if not isinstance(raw_capabilities, list) or not all(
+                isinstance(capability, str) for capability in raw_capabilities
+            ):
+                raise ValueError("plugin capabilities must be a list of strings")
+            skill_assets, mcp_catalog_assets = parse_asset_declarations(data)
             return PluginManifest(
                 name=name,
                 version=str(data.get("version", "")),
@@ -1076,6 +1224,9 @@ class PluginManager:
                 requires_env=data.get("requires_env", []),
                 provides_tools=data.get("provides_tools", []),
                 provides_hooks=data.get("provides_hooks", []),
+                capabilities=frozenset(raw_capabilities),
+                skill_assets=skill_assets,
+                mcp_catalog_assets=mcp_catalog_assets,
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
@@ -1129,59 +1280,130 @@ class PluginManager:
             manifest.key or manifest.name, manifest.source, manifest.kind, manifest.path,
         )
 
+        plugin_id = manifest.key or manifest.name
+        if manifest.source in {"user", "project", "bundled"}:
+            slug = plugin_id.replace("/", "__").replace("-", "_")
+            module_namespace = f"{_NS_PARENT}.{slug}"
+        else:
+            module_namespace = str(manifest.path or "").partition(":")[0].strip()
+        if module_namespace:
+            from tools.registry import registry as _registry
+
+            _registry.register_plugin_override_policy(
+                module_namespace,
+                plugin_id=plugin_id,
+                capability_declared="tool_override" in manifest.capabilities,
+                operator_opt_in=PluginContext(manifest, self)._tool_override_allowed(),
+            )
+
         try:
+            module: Optional[types.ModuleType] = None
+            has_declared_assets = bool(
+                manifest.skill_assets or manifest.mcp_catalog_assets
+            )
             if manifest.source in {"user", "project", "bundled"}:
-                module = self._load_directory_module(manifest)
+                init_file = Path(manifest.path or "") / "__init__.py"
+                if init_file.is_file():
+                    module = self._load_directory_module(manifest)
+                elif not has_declared_assets:
+                    raise FileNotFoundError(f"No __init__.py in {init_file.parent}")
             else:
                 module = self._load_entrypoint_module(manifest)
 
             loaded.module = module
 
-            # Call register()
-            register_fn = getattr(module, "register", None)
-            if register_fn is None:
-                loaded.error = "no register() function"
-                logger.warning("Plugin '%s' has no register() function", manifest.name)
-            else:
+            # Imperative registration remains available for tools, hooks, and
+            # entry-point assets. Pure declarative capability plugins need no
+            # __init__.py and therefore execute no plugin code.
+            register_fn = getattr(module, "register", None) if module else None
+            if register_fn is not None:
                 ctx = PluginContext(manifest, self)
                 register_fn(ctx)
-                loaded.tools_registered = [
-                    t for t in self._plugin_tool_names
-                    if t not in {
-                        n
-                        for name, p in self._plugins.items()
-                        for n in p.tools_registered
-                    }
-                ]
-                loaded.hooks_registered = list(
-                    {
-                        h
-                        for h, cbs in self._hooks.items()
-                        if cbs  # non-empty
-                    }
-                    - {
-                        h
-                        for name, p in self._plugins.items()
-                        for h in p.hooks_registered
-                    }
-                )
-                loaded.commands_registered = [
-                    c for c in self._plugin_commands
-                    if self._plugin_commands[c].get("plugin") == manifest.name
-                ]
-                loaded.enabled = True
-                logger.debug(
-                    "  registered: %d tool(s), %d hook(s), %d slash command(s), %d CLI command(s)",
-                    len(loaded.tools_registered),
-                    len(loaded.hooks_registered),
-                    len(loaded.commands_registered),
-                    sum(
-                        1 for c in self._cli_commands
-                        if self._cli_commands[c].get("plugin") == manifest.name
-                    ),
+            elif module is not None and not has_declared_assets:
+                loaded.error = "no register() function"
+                logger.warning("Plugin '%s' has no register() function", manifest.name)
+                self._plugins[manifest.key or manifest.name] = loaded
+                return
+
+            if has_declared_assets:
+                if manifest.source not in {"user", "project", "bundled"}:
+                    raise ValueError(
+                        "entry-point plugins must register packaged assets through PluginContext"
+                    )
+                self._assets.register_manifest_assets(
+                    plugin_name=manifest.name,
+                    plugin_key=manifest.key or manifest.name,
+                    plugin_root=Path(manifest.path or ""),
+                    skills=manifest.skill_assets,
+                    mcp_catalog=manifest.mcp_catalog_assets,
                 )
 
+            loaded.tools_registered = [
+                t for t in self._plugin_tool_names
+                if t not in {
+                    n
+                    for name, plugin in self._plugins.items()
+                    for n in plugin.tools_registered
+                }
+            ]
+            loaded.hooks_registered = list(
+                {
+                    hook_name
+                    for hook_name, callbacks in self._hooks.items()
+                    if callbacks
+                }
+                - {
+                    hook_name
+                    for name, plugin in self._plugins.items()
+                    for hook_name in plugin.hooks_registered
+                }
+            )
+            loaded.middleware_registered = list(
+                {
+                    kind
+                    for kind, callbacks in self._middleware.items()
+                    if callbacks
+                }
+                - {
+                    kind
+                    for plugin in self._plugins.values()
+                    for kind in plugin.middleware_registered
+                }
+            )
+            loaded.commands_registered = [
+                command
+                for command in self._plugin_commands
+                if self._plugin_commands[command].get("plugin") == manifest.name
+            ]
+            loaded.skills_registered = [
+                entry.qualified_name
+                for entry in self._assets.skill_entries(manifest.name)
+                if entry.plugin_key == plugin_id
+            ]
+            loaded.mcp_catalog_registered = [
+                str(entry.path)
+                for entry in self._assets.mcp_manifests()
+                if entry.plugin_key == plugin_id
+            ]
+            loaded.enabled = True
+            logger.debug(
+                "  registered: %d tool(s), %d hook(s), %d middleware, %d skill(s), "
+                "%d MCP manifest(s), "
+                "%d slash command(s), %d CLI command(s)",
+                len(loaded.tools_registered),
+                len(loaded.hooks_registered),
+                len(loaded.middleware_registered),
+                len(loaded.skills_registered),
+                len(loaded.mcp_catalog_registered),
+                len(loaded.commands_registered),
+                sum(
+                    1 for command in self._cli_commands
+                    if self._cli_commands[command].get("plugin") == manifest.name
+                ),
+            )
+
         except Exception as exc:
+            self._assets.remove_plugin(plugin_id)
             loaded.error = str(exc)
             logger.warning(
                 "Failed to load plugin '%s': %s",
@@ -1270,6 +1492,9 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
         """
+        from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION
+
+        kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:
@@ -1285,6 +1510,35 @@ class PluginManager:
                     exc,
                 )
         return results
+
+    def has_hook(self, hook_name: str) -> bool:
+        """Return whether at least one observer callback is registered."""
+        return bool(self._hooks.get(hook_name))
+
+    def has_middleware(self, kind: str) -> bool:
+        """Return whether behavior middleware is registered for *kind*."""
+        return bool(self._middleware.get(kind))
+
+    def invoke_middleware(self, kind: str, **kwargs: Any) -> List[Any]:
+        """Invoke middleware callbacks with per-plugin failure isolation."""
+        results: List[Any] = []
+        for callback in self._middleware.get(kind, []):
+            try:
+                result = callback(**kwargs)
+                if result is not None:
+                    results.append(result)
+            except Exception as exc:
+                logger.warning(
+                    "Middleware '%s' callback %s raised: %s",
+                    kind,
+                    getattr(callback, "__name__", repr(callback)),
+                    exc,
+                )
+        return results
+
+    def get_slack_action_handlers(self) -> List[tuple]:
+        """Return a copy of plugin-registered Slack action handlers."""
+        return list(self._slack_action_handlers)
 
     # -----------------------------------------------------------------------
     # Introspection
@@ -1305,7 +1559,10 @@ class PluginManager:
                     "enabled": loaded.enabled,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
+                    "middleware": len(loaded.middleware_registered),
                     "commands": len(loaded.commands_registered),
+                    "skills": len(loaded.skills_registered),
+                    "mcp_catalog": len(loaded.mcp_catalog_registered),
                     "error": loaded.error,
                 }
             )
@@ -1317,21 +1574,23 @@ class PluginManager:
 
     def find_plugin_skill(self, qualified_name: str) -> Optional[Path]:
         """Return the ``Path`` to a plugin skill's SKILL.md, or ``None``."""
-        entry = self._plugin_skills.get(qualified_name)
-        return entry["path"] if entry else None
+        return self._assets.find_skill(qualified_name)
 
     def list_plugin_skills(self, plugin_name: str) -> List[str]:
         """Return sorted bare names of all skills registered by *plugin_name*."""
-        prefix = f"{plugin_name}:"
-        return sorted(
-            e["bare_name"]
-            for qn, e in self._plugin_skills.items()
-            if qn.startswith(prefix)
-        )
+        return [entry.bare_name for entry in self._assets.skill_entries(plugin_name)]
+
+    def list_plugin_skill_entries(self) -> List[RegisteredPluginSkill]:
+        """Return metadata for all Skills owned by enabled plugins."""
+        return self._assets.skill_entries()
 
     def remove_plugin_skill(self, qualified_name: str) -> None:
         """Remove a stale registry entry (silently ignores missing keys)."""
-        self._plugin_skills.pop(qualified_name, None)
+        self._assets.remove_skill(qualified_name)
+
+    def list_mcp_catalog_manifests(self) -> List[Path]:
+        """Return MCP manifests owned by enabled plugins."""
+        return [entry.path for entry in self._assets.mcp_manifests()]
 
 
 # ---------------------------------------------------------------------------
@@ -1366,6 +1625,61 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
 
 
+def has_hook(hook_name: str) -> bool:
+    """Return whether a hook has registered observers."""
+    return get_plugin_manager().has_hook(hook_name)
+
+
+def get_pre_verify_continue_message(
+    *,
+    session_id: str = "",
+    platform: str = "",
+    model: str = "",
+    coding: bool = False,
+    attempt: int = 0,
+    final_response: str = "",
+    changed_paths: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Resolve the first plugin directive that intentionally blocks stopping.
+
+    Both Hermes' ``action=continue`` shape and Claude Code's stop-hook
+    ``decision=block`` shape mean "continue this turn". Invalid or empty
+    results are ignored and hook failures remain isolated by ``invoke_hook``.
+    """
+    hook_results = invoke_hook(
+        "pre_verify",
+        session_id=session_id,
+        platform=platform,
+        model=model,
+        coding=coding,
+        attempt=attempt,
+        final_response=final_response,
+        changed_paths=list(changed_paths or []),
+    )
+    for result in hook_results:
+        if not isinstance(result, dict):
+            continue
+        action = str(
+            result.get("action") or result.get("decision") or ""
+        ).strip().lower()
+        if action not in {"continue", "block"}:
+            continue
+        message = result.get("message") or result.get("reason")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:
+    """Invoke registered behavior middleware callbacks."""
+    return get_plugin_manager().invoke_middleware(kind, **kwargs)
+
+
+def has_middleware(kind: str) -> bool:
+    """Return whether middleware callbacks are registered for *kind*."""
+    return get_plugin_manager().has_middleware(kind)
+
+
 
 _thread_tool_whitelist = threading.local()
 
@@ -1382,29 +1696,41 @@ def clear_thread_tool_whitelist() -> None:
     _thread_tool_whitelist.allowed = None
 
 
-def get_pre_tool_call_block_message(
+@dataclass(frozen=True)
+class PreToolCallDirective:
+    """Validated policy directive returned by a ``pre_tool_call`` hook."""
+
+    action: Optional[str] = None
+    message: Optional[str] = None
+    rule_key: Optional[str] = None
+
+
+def _get_pre_tool_call_directive(
     tool_name: str,
     args: Optional[Dict[str, Any]],
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
-) -> Optional[str]:
-    """Check ``pre_tool_call`` hooks for a blocking directive.
-
-    Plugins that need to enforce policy (rate limiting, security
-    restrictions, approval workflows) can return::
-
-        {"action": "block", "message": "Reason the tool was blocked"}
-
-    from their ``pre_tool_call`` callback.  The first valid block
-    directive wins.  Invalid or irrelevant hook return values are
-    silently ignored so existing observer-only hooks are unaffected.
-    """
+    turn_id: str = "",
+    api_request_id: str = "",
+    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+) -> PreToolCallDirective:
+    """Validate the first blocking or human-approval plugin directive."""
     allowed = getattr(_thread_tool_whitelist, "allowed", None)
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
-        return fmt.format(tool_name=tool_name)
+        return PreToolCallDirective(
+            action="block",
+            message=fmt.format(tool_name=tool_name),
+        )
 
+    observer_context: Dict[str, Any] = {}
+    if turn_id:
+        observer_context["turn_id"] = turn_id
+    if api_request_id:
+        observer_context["api_request_id"] = api_request_id
+    if middleware_trace:
+        observer_context["middleware_trace"] = list(middleware_trace)
     hook_results = invoke_hook(
         "pre_tool_call",
         tool_name=tool_name,
@@ -1412,18 +1738,134 @@ def get_pre_tool_call_block_message(
         task_id=task_id,
         session_id=session_id,
         tool_call_id=tool_call_id,
+        **observer_context,
     )
-
     for result in hook_results:
         if not isinstance(result, dict):
             continue
-        if result.get("action") != "block":
+        action = result.get("action")
+        if action not in {"block", "approve"}:
             continue
         message = result.get("message")
-        if isinstance(message, str) and message:
-            return message
+        if not isinstance(message, str) or not message.strip():
+            continue
+        rule_key = result.get("rule_key") if action == "approve" else None
+        if isinstance(rule_key, str):
+            rule_key = rule_key.strip() or None
+        else:
+            rule_key = None
+        return PreToolCallDirective(
+            action=action,
+            message=message.strip(),
+            rule_key=rule_key,
+        )
+    return PreToolCallDirective()
 
-    return None
+
+def get_pre_tool_call_directive(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    turn_id: str = "",
+    api_request_id: str = "",
+    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return the validated ``(action, message)`` plugin policy directive."""
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        middleware_trace=middleware_trace,
+    )
+    return directive.action, directive.message
+
+
+def get_pre_tool_call_block_message(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    turn_id: str = "",
+    api_request_id: str = "",
+    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Resolve the unique pre-tool policy seam and return a block if denied.
+
+    Plugins that need to enforce policy (rate limiting, security
+    restrictions, approval workflows) can return::
+
+        {"action": "block", "message": "Reason the tool was blocked"}
+        {"action": "approve", "message": "Why approval is needed",
+         "rule_key": "stable-policy-key"}
+
+    ``approve`` never means allow: it escalates through the same human gate,
+    persistence and fail-closed transport state used by command approval.
+    The historical function name remains as a compatibility ABI.
+    """
+    directive = _get_pre_tool_call_directive(
+        tool_name,
+        args,
+        task_id=task_id,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        middleware_trace=middleware_trace,
+    )
+    if directive.action == "block":
+        return directive.message
+    if directive.action != "approve":
+        return None
+
+    from tools.approval_gate import request_tool_approval
+
+    result = request_tool_approval(
+        tool_name,
+        directive.message or "Plugin policy requires approval.",
+        rule_key=directive.rule_key or "",
+    )
+    if result.get("approved") is True:
+        return None
+    return str(result.get("message") or "BLOCKED: tool approval was not granted.")
+
+
+def resolve_pre_tool_block(
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    turn_id: str = "",
+    api_request_id: str = "",
+    middleware_trace: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Execution-facing wrapper that fails closed on policy seam errors."""
+    try:
+        return get_pre_tool_call_block_message(
+            tool_name,
+            args,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+            middleware_trace=middleware_trace,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "pre_tool_call policy resolution failed for %s: %s",
+            tool_name,
+            exc,
+            exc_info=True,
+        )
+        return "BLOCKED: pre-tool approval policy failed closed."
 
 
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:
@@ -1503,6 +1945,12 @@ def get_plugin_commands() -> Dict[str, dict]:
     before any explicit discover_plugins() call.
     """
     return _ensure_plugins_discovered()._plugin_commands
+
+
+def get_plugin_auxiliary_tasks() -> List[Dict[str, Any]]:
+    """Return plugin-owned auxiliary tasks in deterministic key order."""
+    manager = _ensure_plugins_discovered()
+    return [manager._aux_tasks[key] for key in sorted(manager._aux_tasks)]
 
 
 def get_plugin_toolsets() -> List[tuple]:

@@ -54,7 +54,7 @@ def platform_label(key: str, default: str = "") -> str:
         return info.label
     # Check plugin registry
     try:
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         entry = platform_registry.get(key)
         if entry:
             return f"{entry.emoji}  {entry.label}" if entry.emoji else entry.label
@@ -71,7 +71,7 @@ def get_all_platforms() -> "OrderedDict[str, PlatformInfo]":
     """
     merged = OrderedDict(PLATFORMS)
     try:
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             if entry.name not in merged:
                 merged[entry.name] = PlatformInfo(

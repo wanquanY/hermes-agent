@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hermes_gateway.conversation_editing_commands import conversation_editing_for
+
 
 def _ensure_discord_mock():
     if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
@@ -28,10 +30,10 @@ def _ensure_discord_mock():
     sys.modules.setdefault("discord.ext.commands", commands_mod)
 
 
-import gateway.run as gateway_run
-from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource
+import hermes_gateway.runner as gateway_run
+from hermes_gateway.config import Platform
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionSource
 
 
 class _CapturingAgent:
@@ -58,7 +60,7 @@ def _install_fake_agent(monkeypatch):
 
 def _make_adapter():
     _ensure_discord_mock()
-    from gateway.platforms.discord import DiscordAdapter
+    from channels.platforms.discord import DiscordAdapter
 
     adapter = object.__new__(DiscordAdapter)
     adapter.config = MagicMock()
@@ -202,7 +204,7 @@ async def test_retry_preserves_channel_prompt(monkeypatch):
         channel_prompt="Channel prompt",
     )
 
-    result = await runner._handle_retry_command(event)
+    result = await conversation_editing_for(runner).handle_retry_command(event)
 
     assert result == "ok"
     retried_event = runner._handle_message.await_args.args[0]
@@ -213,6 +215,7 @@ async def test_retry_preserves_channel_prompt(monkeypatch):
 async def test_run_agent_appends_channel_prompt_to_ephemeral_system_prompt(monkeypatch, tmp_path):
     _install_fake_agent(monkeypatch)
     runner = _make_runner()
+    import hermes_gateway.gateway_runtime_config as gateway_runtime_config
 
     (tmp_path / "config.yaml").write_text("agent:\n  system_prompt: Global prompt\n", encoding="utf-8")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -221,9 +224,9 @@ async def test_run_agent_appends_channel_prompt_to_ephemeral_system_prompt(monke
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
     monkeypatch.setattr(
-        gateway_run,
-        "_resolve_runtime_agent_kwargs",
-        lambda: {
+        gateway_runtime_config,
+        "resolve_runtime_agent_kwargs",
+        lambda _home: {
             "provider": "openrouter",
             "api_mode": "chat_completions",
             "base_url": "https://openrouter.ai/api/v1",

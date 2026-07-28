@@ -75,8 +75,8 @@ class TestMinimaxAuxModel:
 
     def test_minimax_aux_is_standard(self):
         from agent.auxiliary_client import _get_aux_model_for_provider
-        assert _get_aux_model_for_provider("minimax") == "MiniMax-M2.7"
-        assert _get_aux_model_for_provider("minimax-cn") == "MiniMax-M2.7"
+        assert _get_aux_model_for_provider("minimax") == "MiniMax-M3"
+        assert _get_aux_model_for_provider("minimax-cn") == "MiniMax-M3"
 
     def test_minimax_aux_not_highspeed(self):
         from agent.auxiliary_client import _get_aux_model_for_provider

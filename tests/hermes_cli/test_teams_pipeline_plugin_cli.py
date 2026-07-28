@@ -179,7 +179,7 @@ def test_token_health_force_refresh(monkeypatch, capsys):
 
 
 def test_validate_accepts_msgraph_credentials_for_graph_delivery(monkeypatch, capsys, tmp_path):
-    from gateway.config import Platform, PlatformConfig
+    from hermes_gateway.config import Platform, PlatformConfig
 
     monkeypatch.setenv("MSGRAPH_TENANT_ID", "tenant")
     monkeypatch.setenv("MSGRAPH_CLIENT_ID", "client")

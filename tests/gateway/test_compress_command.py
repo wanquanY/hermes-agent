@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source() -> SessionSource:
@@ -34,7 +34,7 @@ def _make_history() -> list[dict[str, str]]:
 
 
 def _make_runner(history: list[dict[str, str]]):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -57,6 +57,15 @@ def _make_runner(history: list[dict[str, str]]):
     return runner
 
 
+def _patch_runtime(api_key: str = "test-key"):
+    runtime = MagicMock()
+    runtime.resolve_session_agent_runtime.return_value = (
+        "test-model",
+        {"api_key": api_key},
+    )
+    return patch("hermes_gateway.compress_command.runtime_config_for", return_value=runtime)
+
+
 @pytest.mark.asyncio
 async def test_compress_command_reports_noop_without_success_banner():
     history = _make_history()
@@ -75,8 +84,7 @@ async def test_compress_command_reports_noop_without_success_banner():
         return 100
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("test-key"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
@@ -115,8 +123,7 @@ async def test_compress_command_explains_when_token_estimate_rises():
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("test-key"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
@@ -130,19 +137,15 @@ async def test_compress_command_explains_when_token_estimate_rises():
 
 
 @pytest.mark.asyncio
-async def test_compress_command_appends_warning_when_summary_generation_fails():
-    """When the auxiliary summariser fails and the compressor inserts a static
-    fallback placeholder, /compress must append a visible ⚠️ warning to its
-    reply. Otherwise the failure is silently logged and the user has no idea
-    earlier context is unrecoverable."""
+async def test_compress_command_appends_warning_when_compression_aborts():
+    """When the auxiliary summariser fails and the compressor ABORTS (returns
+    messages unchanged), /compress must append a visible ⚠️ warning to its
+    reply telling the user nothing was dropped and how to retry. Otherwise
+    the failure is silently logged and the user has no idea why nothing
+    happened."""
     history = _make_history()
-    # Compressed shape is irrelevant for this test — we only care that the
-    # warning surfaces. Drop one message so the headline is non-noop.
-    compressed = [
-        history[0],
-        {"role": "assistant", "content": "[fallback placeholder]"},
-        history[-1],
-    ]
+    # Abort path: compressor returns the input messages unchanged.
+    compressed = list(history)
     runner = _make_runner(history)
     agent_instance = MagicMock()
     agent_instance.shutdown_memory_provider = MagicMock()
@@ -150,10 +153,11 @@ async def test_compress_command_appends_warning_when_summary_generation_fails():
     agent_instance._cached_system_prompt = ""
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
-    # Simulate summary-generation failure: fallback flag set, dropped count
-    # populated, error string captured.
-    agent_instance.context_compressor._last_summary_fallback_used = True
-    agent_instance.context_compressor._last_summary_dropped_count = 7
+    # Simulate compression aborting (force=True bypassed cooldown but the
+    # aux LLM is genuinely broken).
+    agent_instance.context_compressor._last_compress_aborted = True
+    agent_instance.context_compressor._last_summary_fallback_used = False
+    agent_instance.context_compressor._last_summary_dropped_count = 0
     agent_instance.context_compressor._last_summary_error = (
         "404 model not found: gemini-3-flash-preview"
     )
@@ -164,27 +168,24 @@ async def test_compress_command_appends_warning_when_summary_generation_fails():
         if messages == history:
             return 100
         if messages == compressed:
-            return 60
+            return 100
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("***"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):
         result = await runner._handle_compress_command(_make_event())
 
-    # The compress reply itself still goes through (the transcript was rewritten).
-    assert "Compressed:" in result
-    # ...but a clearly-marked warning must be appended.
+    # A clearly-marked warning must be appended.
     assert "⚠️" in result
-    assert "Summary generation failed" in result
+    assert "Compression aborted" in result
     # Underlying error must surface so users can fix their config.
     assert "404 model not found" in result
-    # Dropped count must be visible — silently losing N messages is the bug.
-    assert "7" in result
-    assert "historical message(s) were removed" in result
+    # User must be told nothing was dropped — the whole point of the
+    # new behavior is no silent data loss.
+    assert "No messages were dropped" in result
     agent_instance.shutdown_memory_provider.assert_called_once()
     agent_instance.close.assert_called_once()
 
@@ -210,6 +211,7 @@ async def test_compress_command_surfaces_aux_model_failure_even_when_recovered()
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     # Fallback placeholder was NOT used — recovery succeeded.
+    agent_instance.context_compressor._last_compress_aborted = False
     agent_instance.context_compressor._last_summary_fallback_used = False
     agent_instance.context_compressor._last_summary_dropped_count = 0
     agent_instance.context_compressor._last_summary_error = None
@@ -231,8 +233,7 @@ async def test_compress_command_surfaces_aux_model_failure_even_when_recovered()
         raise AssertionError(f"unexpected transcript: {messages!r}")
 
     with (
-        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
-        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        _patch_runtime("***"),
         patch("run_agent.AIAgent", return_value=agent_instance),
         patch("agent.model_metadata.estimate_request_tokens_rough", side_effect=_estimate),
     ):

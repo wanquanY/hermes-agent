@@ -64,6 +64,8 @@ class ProjectionResult:
     messages: list[dict] = field(default_factory=list)
     is_tool_iteration: bool = False
     final_text: Optional[str] = None  # Set when an agentMessage completes
+    content_delta: str = ""
+    reasoning_delta: str = ""
 
 
 class CodexEventProjector:
@@ -80,6 +82,11 @@ class CodexEventProjector:
         only `item/completed` and `turn/completed` materialize messages."""
         method = notification.get("method", "")
         params = notification.get("params", {}) or {}
+
+        if method == "item/agentMessage/delta":
+            return ProjectionResult(content_delta=str(params.get("delta") or ""))
+        if method == "item/reasoning/delta":
+            return ProjectionResult(reasoning_delta=str(params.get("delta") or ""))
 
         # We only materialize messages on `item/completed`. Streaming deltas
         # (`item/<type>/outputDelta`, `item/<type>/delta`) are display-only and
@@ -215,9 +222,16 @@ class CodexEventProjector:
         )
 
     def _project_mcp_tool_call(self, item: dict, item_id: str) -> ProjectionResult:
+        from tools.mcp_identity import canonical_mcp_tool_name
+
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        call_id = _deterministic_call_id(f"mcp_{server}_{tool}", item_id)
+        tool_name = (
+            str(tool)
+            if server == "hermes-tools"
+            else canonical_mcp_tool_name(server, tool)
+        )
+        call_id = _deterministic_call_id(tool_name, item_id)
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}
@@ -229,7 +243,7 @@ class CodexEventProjector:
                     "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": f"mcp.{server}.{tool}",
+                        "name": tool_name,
                         "arguments": _format_tool_args(args),
                     },
                 }

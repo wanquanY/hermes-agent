@@ -42,6 +42,10 @@ class TestNvidiaProfile:
         p = get_provider_profile("nvidia")
         assert "nvidia.com" in p.base_url
 
+    def test_billing_header_not_profile_wide(self):
+        p = get_provider_profile("nvidia")
+        assert p.default_headers == {}
+
 
 class TestKimiProfile:
     def test_temperature_omit(self):
@@ -67,7 +71,7 @@ class TestKimiProfile:
     def test_thinking_enabled(self):
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config={"enabled": True, "effort": "high"})
-        assert eb["thinking"] == {"type": "enabled"}
+        assert "thinking" not in eb
         assert tl["reasoning_effort"] == "high"
 
     def test_thinking_disabled(self):
@@ -76,16 +80,17 @@ class TestKimiProfile:
         assert eb["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in tl
 
-    def test_reasoning_effort_default(self):
+    def test_enabled_without_effort_uses_server_selected_thinking(self):
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config={"enabled": True})
-        assert tl["reasoning_effort"] == "medium"
+        assert eb["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in tl
 
     def test_no_config_defaults(self):
         p = get_provider_profile("kimi")
         eb, tl = p.build_api_kwargs_extras(reasoning_config=None)
         assert eb["thinking"] == {"type": "enabled"}
-        assert tl["reasoning_effort"] == "medium"
+        assert "reasoning_effort" not in tl
 
 
 class TestOpenRouterProfile:

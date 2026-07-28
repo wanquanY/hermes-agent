@@ -98,6 +98,19 @@ class TestModuleSurface:
                 f"{orch_tool!r} missing from codex callback"
             )
 
+    def test_team_mission_worker_handoff_tools_exposed(self):
+        """DoXie Team Mission workers running on codex_app_server must keep
+        the same hidden handoff protocol as the default Hermes runtime."""
+        from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
+
+        for worker_tool in (
+            "team_mission_submit_deliverable",
+            "team_mission_node_heartbeat",
+        ):
+            assert worker_tool in EXPOSED_TOOLS, (
+                f"{worker_tool!r} missing from codex callback"
+            )
+
 
 class TestMain:
     def test_main_returns_2_when_mcp_unavailable(self, monkeypatch):

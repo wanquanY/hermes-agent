@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
+from agent.skill_utils import is_excluded_skill_path
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,16 @@ STATE_ACTIVE = "active"
 STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
+
+# Load-bearing bundled skills that autonomous curation must never mutate,
+# consolidate, or archive. Keep this list intentionally small: broader bundled
+# and hub ownership checks are handled separately.
+PROTECTED_BUILTIN_SKILLS: Set[str] = {"plan"}
+
+
+def is_protected_builtin(skill_name: str) -> bool:
+    """Return whether a skill backs a load-bearing built-in workflow."""
+    return skill_name in PROTECTED_BUILTIN_SKILLS
 
 
 def _skills_dir() -> Path:
@@ -86,7 +97,10 @@ def _usage_file_lock():
         yield
     finally:
         if fcntl:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
         elif msvcrt:
             try:
                 fd.seek(0)
@@ -233,13 +247,12 @@ def list_agent_created_skill_names() -> List[str]:
     names: List[str] = []
     # Top-level SKILL.md files (flat layout) AND nested category/skill/SKILL.md
     for skill_md in base.rglob("SKILL.md"):
-        # Skip anything under .archive or .hub
+        # Skip Hermes metadata, VCS, virtualenv/dependency, and cache dirs
+        if is_excluded_skill_path(skill_md):
+            continue
         try:
             rel = skill_md.relative_to(base)
         except ValueError:
-            continue
-        parts = rel.parts
-        if parts and (parts[0].startswith(".") or parts[0] == "node_modules"):
             continue
         name = _read_skill_name(skill_md, fallback=skill_md.parent.name)
         if name in off_limits:
@@ -288,6 +301,16 @@ def is_agent_created(skill_name: str) -> bool:
     """Whether *skill_name* is neither bundled nor hub-installed."""
     off_limits = _read_bundled_manifest_names() | _read_hub_installed_names()
     return skill_name not in off_limits
+
+
+def is_hub_installed(skill_name: str) -> bool:
+    """Return whether ``skill_name`` is owned by the Skills Hub."""
+    return skill_name in _read_hub_installed_names()
+
+
+def is_bundled(skill_name: str) -> bool:
+    """Return whether ``skill_name`` was seeded from bundled skills."""
+    return skill_name in _read_bundled_manifest_names()
 
 
 def _is_curator_managed_record(record: Any) -> bool:
@@ -482,6 +505,10 @@ def archive_skill(skill_name: str) -> Tuple[bool, str]:
     Returns (ok, message). Never archives bundled or hub skills — callers are
     responsible for checking provenance, but we double-check here as a safety net.
     """
+    if is_protected_builtin(skill_name):
+        return False, (
+            f"skill '{skill_name}' is a protected built-in and is never archived"
+        )
     if not is_agent_created(skill_name):
         return False, f"skill '{skill_name}' is bundled or hub-installed; never archive"
 
@@ -574,11 +601,7 @@ def _find_skill_dir(skill_name: str) -> Optional[Path]:
     if not base.exists():
         return None
     for skill_md in base.rglob("SKILL.md"):
-        try:
-            rel = skill_md.relative_to(base)
-        except ValueError:
-            continue
-        if rel.parts and rel.parts[0].startswith("."):
+        if is_excluded_skill_path(skill_md):
             continue
         if _read_skill_name(skill_md, fallback=skill_md.parent.name) == skill_name:
             return skill_md.parent

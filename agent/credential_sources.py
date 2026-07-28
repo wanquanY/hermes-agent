@@ -149,7 +149,8 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
          EnvironmentFile, launchd plist) → hint them where to unset it
       3. Var lives in both → clear from .env, hint about shell
     """
-    from hermes_cli.config import get_env_path, remove_env_value
+    from hermes_cli.config import _env_line_defines_key, get_env_path
+    from hermes_cli.credential_lifecycle import remove_provider_env_credential
 
     result = RemovalResult()
     env_var = removed.source[len("env:"):]
@@ -163,15 +164,15 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
         env_path = get_env_path()
         if env_path.exists():
             env_in_dotenv = any(
-                line.strip().startswith(f"{env_var}=")
+                _env_line_defines_key(line, env_var)
                 for line in env_path.read_text(errors="replace").splitlines()
             )
     except OSError:
         pass
     shell_exported = env_in_process and not env_in_dotenv
 
-    cleared = remove_env_value(env_var)
-    if cleared:
+    removal = remove_provider_env_credential(env_var)
+    if removal.get("found"):
         result.cleaned.append(f"Cleared {env_var} from .env")
 
     if shell_exported:
@@ -262,6 +263,31 @@ def _remove_minimax_oauth(provider: str, removed) -> RemovalResult:
     result = RemovalResult()
     if _clear_auth_store_provider(provider):
         result.cleaned.append(f"Cleared {provider} OAuth tokens from auth store")
+    return result
+
+
+def _remove_xai_oauth_loopback_pkce(provider: str, removed) -> RemovalResult:
+    """xAI OAuth tokens live in auth.json providers.xai-oauth — clear them.
+
+    Without this step, ``hermes auth remove xai-oauth <N>`` silently undoes
+    itself: the central dispatcher only removes the in-memory pool entry,
+    leaves ``providers.xai-oauth`` in auth.json intact, and on the next
+    ``load_pool("xai-oauth")`` call ``_seed_from_singletons`` re-seeds the
+    entry from the still-present singleton — credentials reappear with no
+    user feedback. Clearing the singleton in step with the suppression set
+    by the central dispatcher makes the removal stick.
+
+    Belt-and-braces against the manual entry path: ``hermes auth add
+    xai-oauth`` produces a ``manual:xai_pkce`` entry whose removal step
+    falls through to "unregistered → nothing to clean up" (correct —
+    manual entries are pool-only).
+    """
+    result = RemovalResult()
+    if _clear_auth_store_provider(provider):
+        result.cleaned.append(f"Cleared {provider} OAuth tokens from auth store")
+    result.hints.append(
+        "Run `hermes model` → xAI Grok OAuth (SuperGrok Subscription) to re-authenticate if needed."
+    )
     return result
 
 
@@ -396,6 +422,11 @@ def _register_all_sources() -> None:
         match_fn=lambda src: src == "device_code" or src.endswith(":device_code"),
         remove_fn=_remove_codex_device_code,
         description="auth.json providers.openai-codex + ~/.codex/auth.json",
+    ))
+    register(RemovalStep(
+        provider="xai-oauth", source_id="loopback_pkce",
+        remove_fn=_remove_xai_oauth_loopback_pkce,
+        description="auth.json providers.xai-oauth",
     ))
     register(RemovalStep(
         provider="qwen-oauth", source_id="qwen-cli",

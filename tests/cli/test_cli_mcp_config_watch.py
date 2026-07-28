@@ -101,3 +101,67 @@ class TestMCPConfigWatch:
             obj._check_config_mcp_changes()  # should not raise
 
         obj._reload_mcp.assert_not_called()
+
+    def test_top_level_optout_detects_change_without_reloading(self, tmp_path, capsys):
+        import yaml
+
+        obj, cfg_file = _make_cli(tmp_path, mcp_servers={})
+        cfg_file.write_text(yaml.dump({
+            "mcp": {"auto_reload_on_config_change": False},
+            "mcp_servers": {"github": {"url": "https://mcp.github.com"}},
+        }))
+        obj._config_mtime = 0.0
+
+        with patch("hermes_cli.config.get_config_path", return_value=cfg_file):
+            obj._check_config_mcp_changes()
+
+        obj._reload_mcp.assert_not_called()
+        assert obj._config_mcp_servers == {
+            "github": {"url": "https://mcp.github.com"}
+        }
+        output = capsys.readouterr().out
+        assert "reload skipped" in output
+        assert "/reload-mcp" in output
+        assert "prompt cache" in output
+
+    def test_auxiliary_mcp_does_not_control_runtime_reload(self, tmp_path):
+        import yaml
+
+        obj, cfg_file = _make_cli(tmp_path, mcp_servers={})
+        cfg_file.write_text(yaml.dump({
+            "auxiliary": {"mcp": {"auto_reload_on_config_change": False}},
+            "mcp_servers": {"github": {"url": "https://mcp.github.com"}},
+        }))
+        obj._config_mtime = 0.0
+
+        with patch("hermes_cli.config.get_config_path", return_value=cfg_file):
+            obj._check_config_mcp_changes()
+
+        obj._reload_mcp.assert_called_once()
+
+    def test_env_templates_do_not_trigger_false_reload(self, tmp_path, monkeypatch):
+        import yaml
+
+        monkeypatch.setenv("MCP_GH_API_KEY", "secret-token")
+        expanded = {
+            "github": {
+                "url": "https://mcp.github.com",
+                "headers": {"Authorization": "Bearer secret-token"},
+            }
+        }
+        obj, cfg_file = _make_cli(tmp_path, mcp_servers=expanded)
+        cfg_file.write_text(yaml.dump({
+            "agent": {"reasoning_effort": "high"},
+            "mcp_servers": {
+                "github": {
+                    "url": "https://mcp.github.com",
+                    "headers": {"Authorization": "Bearer ${MCP_GH_API_KEY}"},
+                }
+            },
+        }))
+        obj._config_mtime = 0.0
+
+        with patch("hermes_cli.config.get_config_path", return_value=cfg_file):
+            obj._check_config_mcp_changes()
+
+        obj._reload_mcp.assert_not_called()

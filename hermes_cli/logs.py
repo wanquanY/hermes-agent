@@ -42,7 +42,7 @@ _LEVEL_RE = re.compile(r"\s(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s")
 
 # Logger name extraction — after level and optional session tag, the next
 # non-space token before ":" is the logger name.
-# Matches: "INFO gateway.run:" or "INFO [sess_abc] tools.terminal_tool:"
+# Matches: "INFO hermes_gateway.runner:" or "INFO [sess_abc] tools.terminal_tool:"
 _LOGGER_NAME_RE = re.compile(
     r"\s(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)"  # level
     r"(?:\s+\[.*?\])?"                           # optional session tag
@@ -101,7 +101,16 @@ def _line_matches_component(line: str, prefixes: Sequence[str]) -> bool:
     name = _extract_logger_name(line)
     if name is None:
         return False
-    return name.startswith(tuple(prefixes))
+    from hermes_logging import COMPONENT_PREFIXES
+
+    expanded: list[str] = []
+    for prefix in prefixes:
+        canonical = COMPONENT_PREFIXES.get(prefix)
+        if canonical:
+            expanded.extend(canonical)
+        else:
+            expanded.append(prefix)
+    return name.startswith(tuple(dict.fromkeys(expanded)))
 
 
 def _matches_filters(

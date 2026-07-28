@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import (
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
@@ -60,10 +60,10 @@ def _ensure_slack_mock():
 _ensure_slack_mock()
 
 # Patch SLACK_AVAILABLE before importing the adapter
-import gateway.platforms.slack as _slack_mod
+import channels.platforms.slack as _slack_mod
 _slack_mod.SLACK_AVAILABLE = True
 
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from channels.platforms.slack import SlackAdapter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ def adapter():
 def _redirect_cache(tmp_path, monkeypatch):
     """Point document cache to tmp_path so tests don't touch ~/.hermes."""
     monkeypatch.setattr(
-        "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
+        "channels.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
 
 
@@ -183,7 +183,7 @@ class TestAppMentionHandler:
              patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client), \
              patch.object(_slack_mod, "AsyncSocketModeHandler", return_value=MagicMock()), \
              patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}), \
-             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("channels.runtime_status.acquire_scoped_lock", return_value=(True, None)), \
              patch("asyncio.create_task"):
             asyncio.run(adapter.connect())
 
@@ -223,8 +223,8 @@ class TestSlackConnectCleanup:
              patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client), \
              patch.object(_slack_mod, "AsyncSocketModeHandler", return_value=MagicMock()), \
              patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}), \
-             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
-             patch("gateway.status.release_scoped_lock") as mock_release:
+             patch("channels.runtime_status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("channels.runtime_status.release_scoped_lock") as mock_release:
             result = await adapter.connect()
 
         assert result is False
@@ -271,8 +271,8 @@ class TestSlackConnectCleanup:
              patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client), \
              patch.object(_slack_mod, "AsyncSocketModeHandler", return_value=second_handler), \
              patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}), \
-             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
-             patch("gateway.status.release_scoped_lock"), \
+             patch("channels.runtime_status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("channels.runtime_status.release_scoped_lock"), \
              patch("asyncio.create_task"):
             result = await adapter.connect()
 
@@ -378,7 +378,7 @@ class TestSlackProxyBehavior:
              patch.object(_slack_mod, "AsyncSocketModeHandler", FakeSocketModeHandler), \
              patch.object(_slack_mod, "_resolve_slack_proxy_url", return_value="http://proxy.example.com:3128"), \
              patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}, clear=False), \
-             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("channels.runtime_status.acquire_scoped_lock", return_value=(True, None)), \
              patch("asyncio.create_task", return_value=MagicMock(name="socket-mode-task")):
             result = await adapter.connect()
 
@@ -461,7 +461,7 @@ class TestSlackProxyBehavior:
              patch.object(_slack_mod, "AsyncSocketModeHandler", FakeSocketModeHandler), \
              patch.object(_slack_mod, "_resolve_slack_proxy_url", return_value=None), \
              patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}, clear=False), \
-             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("channels.runtime_status.acquire_scoped_lock", return_value=(True, None)), \
              patch("asyncio.create_task", return_value=MagicMock(name="socket-mode-task")):
             result = await adapter.connect()
 
@@ -1834,8 +1834,8 @@ class TestReactions:
         assert "1234567890.000001" in adapter._reacting_message_ids
 
         # Simulate the base class calling on_processing_start
-        from gateway.platforms.base import MessageEvent, MessageType, SessionSource
-        from gateway.config import Platform
+        from channels.platforms.base import MessageEvent, MessageType, SessionSource
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1855,7 +1855,7 @@ class TestReactions:
         assert add_calls[0].kwargs["name"] == "eyes"
 
         # Simulate the base class calling on_processing_complete
-        from gateway.platforms.base import ProcessingOutcome
+        from channels.platforms.base import ProcessingOutcome
         await adapter.on_processing_complete(msg_event, ProcessingOutcome.SUCCESS)
 
         add_calls = adapter._app.client.reactions_add.call_args_list
@@ -1874,8 +1874,8 @@ class TestReactions:
         adapter._app.client.reactions_add = AsyncMock()
         adapter._app.client.reactions_remove = AsyncMock()
 
-        from gateway.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
-        from gateway.config import Platform
+        from channels.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1944,8 +1944,8 @@ class TestReactions:
         assert "1234567890.000004" not in adapter._reacting_message_ids
 
         # Hooks should also be no-ops when disabled
-        from gateway.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
-        from gateway.config import Platform
+        from channels.platforms.base import MessageEvent, MessageType, SessionSource, ProcessingOutcome
+        from hermes_gateway.config import Platform
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -2991,7 +2991,7 @@ class TestSlashEphemeralAck:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("gateway.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
+        with patch("channels.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
             result = await adapter.send("C_SLASH", "Queued for the next turn.")
 
         assert result.success is True
@@ -3038,7 +3038,7 @@ class TestSlashEphemeralAck:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("gateway.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
+        with patch("channels.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
             result = await adapter.send("C1", "Some response")
 
         # Still success — the user saw the initial ack already
@@ -3058,7 +3058,7 @@ class TestSlashEphemeralAck:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("gateway.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
+        with patch("channels.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
             result = await adapter.send("C1", "Some response")
 
         assert result.success is True
@@ -3123,7 +3123,7 @@ class TestSlashEphemeralAck:
     async def test_concurrent_users_same_channel_isolates_contexts(self, adapter):
         """Two users slash on the same channel — each gets their own context."""
         import time
-        from gateway.platforms.slack import _slash_user_id
+        from channels.platforms.slack import _slash_user_id
 
         # Simulate two users stashing contexts on the same channel.
         adapter._slash_command_contexts[("C_SHARED", "U_ALICE")] = {
@@ -3163,7 +3163,7 @@ class TestSlashEphemeralAck:
     async def test_no_contextvar_does_not_match_any_context(self, adapter):
         """send() without ContextVar (non-slash path) must not steal contexts."""
         import time
-        from gateway.platforms.slack import _slash_user_id
+        from channels.platforms.slack import _slash_user_id
 
         adapter._slash_command_contexts[("C1", "U1")] = {
             "response_url": "https://hooks.slack.com/test",

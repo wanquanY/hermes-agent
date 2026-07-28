@@ -90,6 +90,43 @@ class TestSetupLogging:
         assert len(error_handlers) == 1
         assert error_handlers[0].level == logging.WARNING
 
+    def test_run_worker_never_opens_shared_rotating_logs(self, hermes_home):
+        """Run workers forward records; only the sidecar owns log files."""
+        with patch("tui_gateway.process_role.IS_WORKER_PROCESS", True):
+            log_dir = hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        assert log_dir == hermes_home / "logs"
+        assert not log_dir.exists()
+        assert not any(
+            isinstance(handler, RotatingFileHandler)
+            for handler in logging.getLogger().handlers
+        )
+        assert any(
+            getattr(handler, "_hermes_worker_fallback", False)
+            for handler in logging.getLogger().handlers
+        )
+
+    def test_run_worker_uses_forwarder_without_stderr_fallback(self, hermes_home):
+        forwarder = logging.NullHandler()
+        forwarder._hermes_worker_forwarder = True
+        logging.getLogger().addHandler(forwarder)
+
+        with patch("tui_gateway.process_role.IS_WORKER_PROCESS", True):
+            hermes_logging.setup_logging(
+                hermes_home=hermes_home,
+                log_level="DEBUG",
+            )
+
+        assert forwarder.level == logging.DEBUG
+        assert not any(
+            getattr(handler, "_hermes_worker_fallback", False)
+            for handler in logging.getLogger().handlers
+        )
+        assert not any(
+            isinstance(handler, RotatingFileHandler)
+            for handler in logging.getLogger().handlers
+        )
+
     def test_idempotent_no_duplicate_handlers(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
         hermes_logging.setup_logging(hermes_home=hermes_home)  # second call — should be no-op
@@ -301,7 +338,7 @@ class TestGatewayMode:
         """gateway.log captures records from gateway.* loggers."""
         hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
 
-        gw_logger = logging.getLogger("gateway.platforms.telegram")
+        gw_logger = logging.getLogger("channels.platforms.telegram")
         gw_logger.info("telegram connected")
 
         for h in logging.getLogger().handlers:
@@ -497,16 +534,20 @@ class TestComponentFilter:
     """Unit tests for _ComponentFilter."""
 
     def test_passes_matching_prefix(self):
-        f = hermes_logging._ComponentFilter(("gateway",))
+        f = hermes_logging._ComponentFilter(
+            hermes_logging.COMPONENT_PREFIXES["gateway"]
+        )
         record = logging.LogRecord(
             "gateway.run", logging.INFO, "", 0, "msg", (), None
         )
         assert f.filter(record) is True
 
     def test_passes_nested_matching_prefix(self):
-        f = hermes_logging._ComponentFilter(("gateway",))
+        f = hermes_logging._ComponentFilter(
+            hermes_logging.COMPONENT_PREFIXES["gateway"]
+        )
         record = logging.LogRecord(
-            "gateway.platforms.telegram", logging.INFO, "", 0, "msg", (), None
+            "channels.platforms.telegram", logging.INFO, "", 0, "msg", (), None
         )
         assert f.filter(record) is True
 
@@ -538,7 +579,15 @@ class TestComponentPrefixes:
 
     def test_gateway_prefix(self):
         assert "gateway" in hermes_logging.COMPONENT_PREFIXES
-        assert ("gateway",) == hermes_logging.COMPONENT_PREFIXES["gateway"]
+        # The gateway component captures both core gateway logs and the
+        # hermes_plugins facility (plugin-installed gateway adapters log
+        # under that prefix).
+        assert (
+            "gateway",
+            "hermes_gateway",
+            "channels",
+            "hermes_plugins",
+        ) == hermes_logging.COMPONENT_PREFIXES["gateway"]
 
     def test_agent_prefix(self):
         prefixes = hermes_logging.COMPONENT_PREFIXES["agent"]

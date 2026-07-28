@@ -30,6 +30,7 @@ model:
   #   "ollama-cloud" - Ollama Cloud (requires: OLLAMA_API_KEY — https://ollama.com/settings)
   #   "kilocode"     - KiloCode gateway (requires: KILOCODE_API_KEY)
   #   "ai-gateway"   - Vercel AI Gateway (requires: AI_GATEWAY_API_KEY)
+  #   "azure-foundry" - Microsoft Foundry / Azure OpenAI (API key or Entra ID)
   #   "lmstudio"     - LM Studio local server (optional: LM_API_KEY, defaults to http://127.0.0.1:1234/v1)
   #
   # Local servers (LM Studio, Ollama, vLLM, llama.cpp):
@@ -44,6 +45,14 @@ model:
   # API configuration (falls back to OPENROUTER_API_KEY env var)
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
   base_url: "https://openrouter.ai/api/v1"
+
+  # Azure Foundry keyless auth example:
+  # provider: "azure-foundry"
+  # base_url: "https://<resource>.openai.azure.com/openai/v1"
+  # auth_mode: "entra_id"      # DefaultAzureCredential: az login, managed identity, workload identity, etc.
+  # default: "gpt-4o"          # Deployment/model name
+  # entra:
+  #   scope: "https://ai.azure.com/.default"  # Optional; this is the default.
 
   # ── Token limits — two settings, easy to confuse ──────────────────────────
   #
@@ -63,6 +72,20 @@ model:
   #   Set only if you want to deliberately limit individual response length.
   #
 # max_tokens: 8192
+
+  # ── Custom request headers (optional) ─────────────────────────────────────
+  #
+  # default_headers: extra HTTP headers sent on every request to an
+  #   OpenAI-compatible endpoint. User values take precedence over the
+  #   provider/SDK defaults, so this is the supported way to override the
+  #   OpenAI Python SDK's identifying headers (User-Agent: OpenAI/Python ...,
+  #   X-Stainless-*) when a custom provider sits behind a gateway/WAF that
+  #   rejects them — e.g. an upstream that returns "502 Upstream access
+  #   forbidden" for the SDK default User-Agent but accepts a plain one.
+  #   Applies on the OpenAI wire only (not native Anthropic / Bedrock).
+  #
+  # default_headers:
+  #   User-Agent: "curl/8.7.1"
 
 # Named provider overrides (optional)
 # Use this for per-provider request timeouts, non-stream stale timeouts,
@@ -341,20 +364,20 @@ tool_loop_guardrails:
 # 6. Inserts summary as a user message, continues conversation seamlessly
 #
 # Post-compression tail budget is target_ratio × threshold × context_length:
-#   200K context, threshold 0.50, ratio 0.20 → 20K tokens of recent tail preserved
-#   1M   context, threshold 0.50, ratio 0.20 → 100K tokens of recent tail preserved
+#   200K context, threshold 0.85, ratio 0.20 → 34K tokens of recent tail preserved
+#   1M   context, threshold 0.85, ratio 0.20 → 170K tokens of recent tail preserved
 #
 compression:
   # Enable automatic context compression (default: true)
   # Set to false if you prefer to manage context manually or want errors on overflow
   enabled: true
   
-  # Trigger compression at this % of model's context limit (default: 0.50 = 50%)
+  # Trigger compression at this % of model's context limit (default: 0.85 = 85%)
   # Lower values = more aggressive compression, higher values = compress later
-  threshold: 0.50
+  threshold: 0.85
   
   # Fraction of the threshold to preserve as recent tail (default: 0.20 = 20%)
-  # e.g. 20% of 50% threshold = 10% of total context kept as recent messages.
+  # e.g. 20% of 85% threshold = 17% of total context kept as recent messages.
   # Summary output is separately capped at 12K tokens (Gemini output limit).
   # Range: 0.10 - 0.80
   target_ratio: 0.20
@@ -375,6 +398,13 @@ compression:
   # Default 3 preserves the system prompt plus the first three non-system
   # head messages, matching the pre-feature behaviour.
   protect_first_n: 3
+
+  # Codex app-server owns its actual thread context. "native" lets Codex
+  # compact automatically and disables duplicate Hermes threshold compaction;
+  # "hermes" lets Hermes thresholds initiate thread/compact/start; "off"
+  # disables automatic initiation. Manual /compress always uses native thread
+  # compaction and never calls the legacy auxiliary summarizer.
+  codex_app_server_auto: native
 
   # To pin a specific model/provider for compression summaries, use the
   # auxiliary section below (auxiliary.compression.provider / model).
@@ -457,7 +487,7 @@ prompt_caching:
 # Two stores: MEMORY.md (agent's notes) and USER.md (user profile).
 # Character limits keep the memory small and focused. The agent manages
 # pruning -- when at the limit, it must consolidate or replace entries.
-# Disabled by default in batch_runner and RL environments.
+# Disabled by default in batch_runner.
 #
 memory:
   # Agent's personal notes: environment facts, conventions, things learned
@@ -551,6 +581,17 @@ skills:
 # Agent Behavior
 # =============================================================================
 agent:
+  # Persist edit/verification evidence per conversation + workspace. When a
+  # coding turn has unverified edits, Hermes may continue internally once to
+  # run a known test/lint/type/build command before accepting a final answer.
+  # The requirement is API-call-only and never appears as a fake transcript
+  # user/system message. "auto" enables it for coding/programmatic surfaces and
+  # disables it for human messaging surfaces; true/false force either policy.
+  # Set max_attempts to 0 to keep evidence without gating.
+  verification:
+    completion_guard: auto
+    max_attempts: 1
+
   # Maximum tool-calling iterations per conversation
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
@@ -575,9 +616,10 @@ agent:
   # Max app-level retry attempts for API errors (connection drops, provider
   # timeouts, 5xx, etc.) before the agent surfaces the failure. Lower this
   # to 1 if you use fallback providers and want fast failover on flaky
-  # primaries (default 3). The OpenAI SDK does its own low-level retries
+  # primaries (default 5 total attempts, including the initial request). The
+  # OpenAI SDK does its own low-level retries
   # underneath this wrapper — this is the Hermes-level loop.
-  # api_max_retries: 3
+  # api_max_retries: 5
   
   # Enable verbose logging
   verbose: false
@@ -715,10 +757,9 @@ platform_toolsets:
 #   todo         - todo (in-memory task planning, no deps)
 #   tts          - text_to_speech  (Edge TTS free, or ELEVENLABS/OPENAI/MINIMAX/MISTRAL key)
 #   cronjob      - cronjob (create/list/update/pause/resume/run/remove scheduled tasks)
-#   rl           - rl_list_environments, rl_start_training, etc. (requires TINKER_API_KEY)
 #
 # PRESETS (curated bundles):
-#   hermes-cli       - All of the above except rl + send_message
+#   hermes-cli       - All of the above except send_message
 #   hermes-telegram  - terminal, file, web, vision, image_gen, tts, browser,
 #                      skills, todo, cronjob, send_message
 #   hermes-discord   - Same as hermes-telegram
@@ -744,7 +785,6 @@ platform_toolsets:
 #   session_search - Search and recall past conversations (FTS5 + Gemini Flash summarization)
 #   tts          - Text-to-speech (Edge TTS free, ElevenLabs, OpenAI, MiniMax, Mistral)
 #   cronjob      - Schedule and manage automated tasks (CLI-only)
-#   rl           - RL training tools (Tinker-Atropos)
 #
 # Composite toolsets:
 #   debugging    - terminal + web + file (for troubleshooting)
@@ -775,6 +815,10 @@ platform_toolsets:
 # Optional per-server settings:
 #   timeout: tool call timeout in seconds (default: 120)
 #   connect_timeout: initial connection timeout (default: 60)
+#   keepalive_interval: liveness ping cadence in seconds (default: 180).
+#     Lower it below the server's session TTL for servers that expire idle
+#     sessions quickly (e.g. Unreal Engine editor MCP, ~15s), otherwise idle
+#     tool calls hit an expired session and pay a slow reconnect. Floored at 5s.
 #
 # mcp_servers:
 #   time:

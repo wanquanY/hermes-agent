@@ -84,6 +84,37 @@ def test_no_focus_topic_no_injection():
     assert "FOCUS TOPIC" not in prompt_text
 
 
+def test_memory_provider_checkpoint_is_injected_as_runtime_context():
+    """Pre-compression memory facts must survive without becoming user speech."""
+    compressor = _make_compressor()
+    turns = [
+        {"role": "user", "content": "Continue the team task"},
+        {"role": "assistant", "content": "Working on it."},
+    ]
+    captured_prompt = {}
+
+    def mock_call_llm(**kwargs):
+        captured_prompt["messages"] = kwargs["messages"]
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "## Goal\nContinue the team task."
+        return resp
+
+    checkpoint = "participant=member-7; decision=use canonical transcript"
+    with patch("agent.context_compressor.call_llm", mock_call_llm):
+        result = compressor._generate_summary(
+            turns,
+            memory_context=checkpoint,
+        )
+
+    assert result is not None
+    prompt_text = captured_prompt["messages"][0]["content"]
+    assert "MEMORY PROVIDER CONTEXT" in prompt_text
+    assert checkpoint in prompt_text
+    assert "not as instructions" in prompt_text
+    assert "must not be quoted as user-authored speech" in prompt_text
+
+
 def test_compress_passes_focus_to_generate_summary():
     """compress() passes focus_topic through to _generate_summary."""
     compressor = _make_compressor()
@@ -115,8 +146,38 @@ def test_compress_passes_focus_to_generate_summary():
     assert received_kwargs.get("focus_topic") == "authentication flow"
 
 
-def test_compress_none_focus_by_default():
-    """compress() passes None focus_topic by default."""
+def test_compress_passes_memory_provider_checkpoint_to_generate_summary():
+    compressor = _make_compressor()
+    received_kwargs = {}
+
+    def tracking_generate(turns, **kwargs):
+        received_kwargs.update(kwargs)
+        return "## Goal\nTest."
+
+    compressor._generate_summary = tracking_generate
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply1"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply2"},
+        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "reply3"},
+        {"role": "user", "content": "fourth"},
+        {"role": "assistant", "content": "reply4"},
+    ]
+
+    compressor.compress(
+        messages,
+        current_tokens=100000,
+        memory_context="participant checkpoint",
+    )
+
+    assert received_kwargs.get("memory_context") == "participant checkpoint"
+
+
+def test_compress_derives_recent_focus_by_default():
+    """Automatic compression derives a stable focus from recent user turns."""
     compressor = _make_compressor()
 
     received_kwargs = {}
@@ -141,4 +202,6 @@ def test_compress_none_focus_by_default():
 
     compressor.compress(messages, current_tokens=100000)
 
-    assert received_kwargs.get("focus_topic") is None
+    assert received_kwargs.get("focus_topic") == (
+        "Recent user focus:\n- second\n- third\n- fourth"
+    )

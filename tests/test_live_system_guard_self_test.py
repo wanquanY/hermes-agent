@@ -18,14 +18,25 @@ the guard? Add a test here too.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
+import sys
 
 import pytest
 
 # A guaranteed-foreign PID: PID 1 (init).  Owned by root, not us, and
 # always exists. A sane guard refuses to signal it.
 FOREIGN_PID = 1
+
+
+def _install_systemctl_stub(tmp_path, monkeypatch) -> None:
+    """Install a harmless executable so pass-through tests are host-independent."""
+    executable_name = "systemctl.exe" if os.name == "nt" else "systemctl"
+    stub = tmp_path / executable_name
+    shutil.copyfile(sys.executable, stub)
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), os.environ.get("PATH", ""))))
 
 
 # ──────────────────── kill primitives ─────────────────────────
@@ -204,9 +215,10 @@ def test_subprocess_killall_hermes_blocked():
 # ──────────────────── pass-through cases (must NOT raise) ──────
 
 
-def test_systemctl_status_passes_through():
+def test_systemctl_status_passes_through(tmp_path, monkeypatch):
     """Read-only systemctl probes (status/show/list-units) are fine."""
     # Run with check=False so we don't fail on the gateway's exit code.
+    _install_systemctl_stub(tmp_path, monkeypatch)
     r = subprocess.run(
         ["systemctl", "--user", "status", "hermes-gateway", "--no-pager"],
         capture_output=True,
@@ -216,7 +228,8 @@ def test_systemctl_status_passes_through():
     assert r is not None  # Did not raise — the guard let it through.
 
 
-def test_systemctl_show_passes_through():
+def test_systemctl_show_passes_through(tmp_path, monkeypatch):
+    _install_systemctl_stub(tmp_path, monkeypatch)
     r = subprocess.run(
         ["systemctl", "--user", "show", "hermes-gateway", "--no-pager"],
         capture_output=True,
@@ -226,7 +239,8 @@ def test_systemctl_show_passes_through():
     assert r is not None
 
 
-def test_systemctl_list_units_passes_through():
+def test_systemctl_list_units_passes_through(tmp_path, monkeypatch):
+    _install_systemctl_stub(tmp_path, monkeypatch)
     r = subprocess.run(
         ["systemctl", "--user", "list-units", "fake-not-real-unit*", "--no-pager"],
         capture_output=True,
@@ -236,12 +250,13 @@ def test_systemctl_list_units_passes_through():
     assert r is not None
 
 
-def test_systemctl_unrelated_unit_passes_through():
+def test_systemctl_unrelated_unit_passes_through(tmp_path, monkeypatch):
     """systemctl restart of a non-hermes unit is allowed (we only protect hermes)."""
     # Use --dry-run so we don't actually try to restart anything; just
     # verify the guard doesn't block the call. systemctl supports
     # --dry-run via the privileged API; on user scope it usually fails
     # quickly without side effects.
+    _install_systemctl_stub(tmp_path, monkeypatch)
     r = subprocess.run(
         ["systemctl", "--user", "show", "fake-not-real-unit"],
         capture_output=True,
@@ -259,7 +274,7 @@ def test_kill_own_subtree_passes_through():
     finally:
         p.wait(timeout=2)
     # SIGTERM = 15; subprocess returncode is -15 on POSIX.
-    assert p.returncode in (-signal.SIGTERM, 128 + int(signal.SIGTERM))
+    assert p.returncode in {-signal.SIGTERM, 128 + int(signal.SIGTERM)}
 
 
 def test_subprocess_pkill_with_unrelated_pattern_passes_through():

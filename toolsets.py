@@ -32,15 +32,16 @@ _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
     # Terminal + process management
-    "terminal", "process",
+    "terminal", "process", "list_terminals", "read_terminal", "write_terminal", "close_terminal",
     # File manipulation
-    "read_file", "write_file", "patch", "search_files",
+    "read_file", "parse_document", "write_file", "patch", "search_files",
     # Vision + image generation
     "vision_analyze", "image_generate",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
     "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_tabs", "browser_new_tab", "browser_select_tab", "browser_close_tab",
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
@@ -53,9 +54,10 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
-    # Cronjob management
-    "cronjob",
+    "execute_code", "delegate_task", "invoke_subagent", "dispatch_agent_async", "dispatch_team_async", "get_activity",
+    # Dovie automation task management
+    "dovie_automation_task_create", "dovie_automation_task_list",
+    "dovie_automation_task_update", "dovie_automation_task_remove",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -82,10 +84,60 @@ TOOLSETS = {
         "tools": ["web_search", "web_extract"],
         "includes": []  # No other toolsets included
     },
+
+    "dovie_web": {
+        "description": "Dovie-managed SERPER search and webpage parsing tools",
+        "tools": ["serper_search_tool", "jina_web_parser_tool"],
+        "includes": []
+    },
+
+    "dovie_image": {
+        "description": "Dovie-managed image generation tools",
+        "tools": ["dovie_image_generate"],
+        "includes": []
+    },
+
+    "dovie_video": {
+        "description": "Dovie-managed video generation tools",
+        "tools": ["dovie_video_generate"],
+        "includes": []
+    },
+
+    "dovie_presentation": {
+        "description": "Dovie desktop-native PowerPoint generation and local export",
+        "tools": [
+            "dovie_presentation_generate",
+            "dovie_presentation_regenerate_slide",
+        ],
+        "includes": []
+    },
+
+    "dovie_task_hub": {
+        "description": "Internal conversation-scoped Dovie Task Hub read tools",
+        "tools": [
+            "task_hub_search",
+            "task_hub_get_details",
+            "task_hub_prepare_changes",
+            "task_hub_list_my_tasks",
+            "task_hub_open_source",
+        ],
+        "includes": []
+    },
     
     "search": {
         "description": "Web search only (no content extraction/scraping)",
         "tools": ["web_search"],
+        "includes": []
+    },
+
+    "x_search": {
+        "description": (
+            "Search X (Twitter) posts and threads via xAI's built-in "
+            "x_search Responses tool. Available when xAI credentials are "
+            "configured (SuperGrok OAuth or XAI_API_KEY). Off by default; "
+            "enable in `hermes tools` → X (Twitter) Search."
+        ),
+        "tools": ["x_search"],
         "includes": []
     },
     
@@ -107,6 +159,54 @@ TOOLSETS = {
         "includes": []
     },
 
+    "dovie": {
+        "description": "Dovie product tools for profile design, creation, and desktop-native workflows",
+        "tools": ["design_agent_profile", "test_agent_profile"],
+        "includes": []
+    },
+
+    "team_mission_read": {
+        "description": "Internal DoXie team task read-only context tools",
+        "tools": [
+            "team_mission_status",
+            "team_mission_team_profile",
+        ],
+        "includes": []
+    },
+
+    "team_mission_planning": {
+        "description": "Internal DoXie team task graph planning tools for Leader planning runs",
+        "tools": [
+            "team_mission_node_create",
+            "team_mission_edge_create",
+            "team_mission_plan_complete",
+        ],
+        "includes": ["team_mission_read"]
+    },
+
+    "team_mission_handoff": {
+        "description": "Internal DoXie team task worker handoff tools",
+        "tools": [
+            "team_mission_submit_deliverable",
+            "team_mission_node_heartbeat",
+        ],
+        "includes": []
+    },
+
+    "team_mission_conversation_leader": {
+        "description": "DoXie team Leader conversation tools that may start new team tasks",
+        "tools": [
+            "team_mission_start_task",
+        ],
+        "includes": ["team_mission_read"]
+    },
+
+    "team_mission_leader": {
+        "description": "Compatibility alias for DoXie team Leader conversation tools",
+        "tools": [],
+        "includes": ["team_mission_conversation_leader"]
+    },
+
     "video_gen": {
         "description": (
             "Video generation tools. Single ``video_generate`` tool covers "
@@ -114,8 +214,14 @@ TOOLSETS = {
             "image_url) — the active backend auto-routes. Configure via "
             "``hermes tools`` → Video Generation."
         ),
-        "tools": ["video_generate"],
+        "tools": ["video_generate", "xai_video_edit", "xai_video_extend"],
         "includes": []
+    },
+
+    "project": {
+        "description": "Desktop Projects — create and switch named workspaces",
+        "tools": ["project_list", "project_create", "project_switch"],
+        "includes": [],
     },
 
     "computer_use": {
@@ -150,6 +256,7 @@ TOOLSETS = {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
         "tools": [
             "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_tabs", "browser_new_tab", "browser_select_tab", "browser_close_tab",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp",
@@ -159,8 +266,13 @@ TOOLSETS = {
     },
     
     "cronjob": {
-        "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
-        "tools": ["cronjob"],
+        "description": "Dovie automation task tools - create, list, update, and remove scheduled tasks bound to the active Dovie agent/session context",
+        "tools": [
+            "dovie_automation_task_create",
+            "dovie_automation_task_list",
+            "dovie_automation_task_update",
+            "dovie_automation_task_remove",
+        ],
         "includes": []
     },
     
@@ -169,22 +281,17 @@ TOOLSETS = {
         "tools": ["send_message"],
         "includes": []
     },
-    
-    "rl": {
-        "description": "RL training tools for running reinforcement learning on Tinker-Atropos",
-        "tools": [
-            "rl_list_environments", "rl_select_environment",
-            "rl_get_current_config", "rl_edit_config",
-            "rl_start_training", "rl_check_status",
-            "rl_stop_training", "rl_get_results",
-            "rl_list_runs", "rl_test_inference"
-        ],
-        "includes": []
-    },
+
     
     "file": {
-        "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
-        "tools": ["read_file", "write_file", "patch", "search_files"],
+        "description": "File manipulation tools: read, parse documents, write, patch (with fuzzy matching), and search (content + files)",
+        "tools": ["read_file", "parse_document", "write_file", "patch", "search_files"],
+        "includes": []
+    },
+
+    "file_readonly": {
+        "description": "Read-only subset of the file toolset: inspect workspace files (read, parse, search) without mutating anything. Used by the team Leader during planning to keep the design phase strictly non-executing.",
+        "tools": ["read_file", "parse_document", "search_files"],
         "includes": []
     },
     
@@ -227,6 +334,12 @@ TOOLSETS = {
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
         "tools": ["delegate_task"],
+        "includes": []
+    },
+
+    "subagent": {
+        "description": "Invoke or dispatch another Hermes profile",
+        "tools": ["invoke_subagent", "dispatch_agent_async", "dispatch_team_async", "get_activity"],
         "includes": []
     },
 
@@ -320,6 +433,33 @@ TOOLSETS = {
         "tools": [],
         "includes": ["web", "vision", "image_gen"]
     },
+
+    # Coding posture (base Hermes — CLI/TUI/desktop/ACP). Auto-selected in a
+    # code workspace; see agent/coding_context.py. Keeps everything you reach
+    # for while pairing on code and drops the rest (messaging, tts, image_gen,
+    # spotify, home-assistant, cron, computer-use).
+    "coding": {
+        "description": "Coding-focused toolset: files, terminal, search, web docs, skills, todo, delegate, vision, browser",
+        "tools": [
+            "web_search", "web_extract",
+            "terminal", "process", "list_terminals", "read_terminal", "write_terminal", "close_terminal",
+            "read_file", "write_file", "patch", "search_files",
+            "vision_analyze",
+            "skills_list", "skill_view", "skill_manage",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images",
+            "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
+            "todo", "memory",
+            "session_search", "clarify",
+            "execute_code", "delegate_task",
+        ],
+        "includes": [],
+        # Posture toolset: selected per-session by agent/coding_context.py,
+        # never auto-recovered into per-platform tool config (see the
+        # non-configurable-toolset recovery loop in hermes_cli/tools_config.py).
+        "posture": True,
+    },
     
     # ==========================================================================
     # Full Hermes toolsets (CLI + messaging platforms)
@@ -333,7 +473,7 @@ TOOLSETS = {
         "tools": [
             "web_search", "web_extract",
             "terminal", "process",
-            "read_file", "write_file", "patch", "search_files",
+            "read_file", "parse_document", "write_file", "patch", "search_files",
             "vision_analyze",
             "skills_list", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
@@ -355,7 +495,7 @@ TOOLSETS = {
             # Terminal + process management
             "terminal", "process",
             # File manipulation
-            "read_file", "write_file", "patch", "search_files",
+            "read_file", "parse_document", "write_file", "patch", "search_files",
             # Vision + image generation
             "vision_analyze", "image_generate",
             # Skills
@@ -371,8 +511,9 @@ TOOLSETS = {
             "session_search",
             # Code execution + delegation
             "execute_code", "delegate_task",
-            # Cronjob management
-            "cronjob",
+            # Dovie automation task management
+            "dovie_automation_task_create", "dovie_automation_task_list",
+            "dovie_automation_task_update", "dovie_automation_task_remove",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 
@@ -390,7 +531,7 @@ TOOLSETS = {
         # Mirrors hermes-cli so cron's "default" toolset is the same set of
         # core tools users see interactively — then `hermes tools` filters
         # them down per the platform config. _DEFAULT_OFF_TOOLSETS (moa,
-        # homeassistant, rl) are excluded by _get_platform_tools() unless
+        # homeassistant) are excluded by _get_platform_tools() unless
         # the user explicitly enables them.
         "description": "Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`",
         "tools": _HERMES_CORE_TOOLS,
@@ -534,6 +675,22 @@ TOOLSETS = {
     }
 }
 
+INTERNAL_TOOLSETS = {
+    "dovie",
+    "dovie_task_hub",
+    "team_mission_read",
+    "team_mission_planning",
+    "team_mission_handoff",
+}
+
+
+def is_internal_toolset(name: str) -> bool:
+    return str(name or "").strip() in INTERNAL_TOOLSETS
+
+
+def get_internal_toolsets() -> Set[str]:
+    return set(INTERNAL_TOOLSETS)
+
 
 
 def get_toolset(name: str) -> Optional[Dict[str, Any]]:
@@ -631,7 +788,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
         if name.startswith("hermes-"):
             platform_name = name[len("hermes-"):]
             try:
-                from gateway.platform_registry import platform_registry
+                from channels.platform_registry import platform_registry
                 if platform_registry.is_registered(platform_name):
                     plugin_tools = set(_HERMES_CORE_TOOLS)
                     try:

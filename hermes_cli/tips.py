@@ -31,7 +31,7 @@ TIPS = [
     "/skin changes the CLI theme — try ares, mono, slate, poseidon, or charizard.",
     "/statusbar toggles a persistent bar showing model, tokens, context fill %, cost, and duration.",
     "/tools disable browser temporarily removes browser tools for the current session.",
-    "/browser connect attaches browser tools to your running Chrome instance via CDP.",
+    "/browser connect attaches browser tools to your running Chromium-family browser via CDP.",
     "/plugins lists installed plugins and their status.",
     "/cron manages scheduled tasks — set up recurring prompts with delivery to any platform.",
     "/reload-mcp hot-reloads MCP server configuration without restarting.",
@@ -111,7 +111,7 @@ TIPS = [
     "Set display.compact: true to reduce whitespace in output for denser information.",
     "Set display.busy_input_mode: queue to queue messages instead of interrupting the agent, or steer to inject them mid-run via /steer.",
     "Set display.resume_display: minimal to skip the full conversation recap on session resume.",
-    "Set compression.threshold: 0.50 to control when auto-compression fires (default: 50% of context).",
+    "Set compression.threshold: 0.85 to control when auto-compression fires (default: 85% of context).",
     "Set agent.max_turns: 200 to let the agent take more tool-calling steps per turn.",
     "Set file_read_max_chars: 200000 to increase the max content per read_file call.",
     "Set approvals.mode: smart to let an LLM auto-approve safe commands and auto-deny dangerous ones.",
@@ -290,7 +290,7 @@ TIPS = [
     "When a provider returns HTTP 402 (payment required), the auxiliary client auto-falls back to the next one.",
     "agent.tool_use_enforcement steers models that describe actions instead of calling tools — auto for GPT/Codex.",
     "agent.restart_drain_timeout (default 60s) lets running agents finish before a gateway restart takes effect.",
-    "agent.api_max_retries (default 3) controls how many times the agent retries a failed API call before surfacing the error — lower it for fast fallback.",
+    "agent.api_max_retries (default 5; legacy name) controls total API attempts, including the initial request — lower it for fast fallback.",
     "The gateway caches AIAgent instances per session — destroying this cache breaks Anthropic prompt caching.",
     "Any website can expose skills via /.well-known/skills/index.json — the skills hub discovers them automatically.",
     "The skills audit log at ~/.hermes/skills/.hub/audit.log tracks every install and removal operation.",
@@ -300,7 +300,7 @@ TIPS = [
     "Container mode: place .container-mode in HERMES_HOME and the host CLI auto-execs into the container.",
     "Ctrl+C has 5 priority tiers: cancel recording → cancel prompts → cancel picker → interrupt agent → exit.",
     "Every interrupt during an agent run is logged to ~/.hermes/interrupt_debug.log with timestamps.",
-    "BROWSER_CDP_URL connects browser tools to any running Chrome — accepts WebSocket, HTTP, or host:port.",
+    "BROWSER_CDP_URL connects browser tools to any running Chromium-family browser — accepts WebSocket, HTTP, or host:port.",
     "BROWSERBASE_ADVANCED_STEALTH=true enables advanced anti-detection with custom Chromium (Scale Plan).",
     "The CLI auto-switches to compact mode in terminals narrower than 80 columns.",
     "Quick commands support two types: exec (run shell command directly) and alias (redirect to another command).",
@@ -458,8 +458,6 @@ TIPS = [
     'image_gen.model in config.yaml picks the FAL model: flux-2/klein, gpt-image-2, nano-banana-pro, and more.',
     'image_gen.provider routes image generation through a plugin (OpenAI Images, Codex, FAL) instead of the default.',
     'AUXILIARY_VISION_BASE_URL + AUXILIARY_VISION_API_KEY point vision analysis at any OpenAI-compatible endpoint.',
-    'auxiliary.session_search.max_concurrency bounds how many matched sessions are summarized in parallel (default 3).',
-    'auxiliary.session_search.extra_body forwards provider-specific OpenAI-compatible fields on summarization calls.',
 
     # --- Security ---
     'security.tirith_fail_open: false makes Hermes block commands when the tirith scanner itself errors out.',
@@ -483,5 +481,3 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-
-

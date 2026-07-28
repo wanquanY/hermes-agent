@@ -57,7 +57,7 @@ class TestNvidiaParity:
 
 
 class TestKimiParity:
-    """Kimi: OMIT temperature, max_tokens=32000, thinking + reasoning_effort."""
+    """Kimi: OMIT temperature, max_tokens=32000, XOR thinking/effort controls."""
 
     def test_temperature_omitted(self, transport):
         kw = transport.build_kwargs(
@@ -87,7 +87,8 @@ class TestKimiParity:
             provider_profile=get_provider_profile("kimi-coding"),
             reasoning_config={"enabled": True, "effort": "high"},
         )
-        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "thinking" not in kw.get("extra_body", {})
+        assert kw["reasoning_effort"] == "high"
 
     def test_thinking_disabled(self, transport):
         kw = transport.build_kwargs(
@@ -111,7 +112,7 @@ class TestKimiParity:
         assert kw.get("reasoning_effort") == "high"
         assert "reasoning_effort" not in kw.get("extra_body", {})
 
-    def test_reasoning_effort_default_medium(self, transport):
+    def test_enabled_without_effort_uses_server_selected_thinking(self, transport):
         kw = transport.build_kwargs(
             model="kimi-k2",
             messages=_simple_messages(),
@@ -119,7 +120,8 @@ class TestKimiParity:
             provider_profile=get_provider_profile("kimi-coding"),
             reasoning_config={"enabled": True},
         )
-        assert kw.get("reasoning_effort") == "medium"
+        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kw
 
 
 class TestOpenRouterParity:
@@ -128,7 +130,7 @@ class TestOpenRouterParity:
     def test_provider_preferences(self, transport):
         prefs = {"allow": ["anthropic"], "sort": "price"}
         kw = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6",
+            model="deepseek/deepseek-chat",
             messages=_simple_messages(),
             tools=None,
             provider_profile=get_provider_profile("openrouter"),
@@ -140,7 +142,7 @@ class TestOpenRouterParity:
         """OpenRouter passes the FULL reasoning_config dict, not just effort."""
         rc = {"enabled": True, "effort": "high"}
         kw = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6",
+            model="deepseek/deepseek-chat",
             messages=_simple_messages(),
             tools=None,
             provider_profile=get_provider_profile("openrouter"),
@@ -152,7 +154,7 @@ class TestOpenRouterParity:
     def test_default_reasoning_when_no_config(self, transport):
         """When supports_reasoning=True but no config, adds default."""
         kw = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6",
+            model="deepseek/deepseek-chat",
             messages=_simple_messages(),
             tools=None,
             provider_profile=get_provider_profile("openrouter"),
@@ -236,7 +238,7 @@ class TestQwenParity:
 
 
 class TestCustomOllamaParity:
-    """Custom/Ollama: num_ctx, think=false — now tested via profile."""
+    """Custom/Ollama: num_ctx, thinking controls — now tested via profile."""
 
     def test_ollama_num_ctx(self, transport):
         kw = transport.build_kwargs(

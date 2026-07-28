@@ -55,7 +55,7 @@ class TestCLIStatsPercentClamp:
 
 
 class TestGatewayStatsPercentClamp:
-    """gateway/run.py — _format_usage_stats percentage"""
+    """hermes_gateway/runner.py — _format_usage_stats percentage"""
 
     def test_over_context_clamped_at_100(self):
         last_prompt_tokens = 210_000
@@ -77,14 +77,14 @@ class TestSourceLinesAreClamped:
     def _read_file(rel_path: str) -> str:
         import os
         base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        with open(os.path.join(base, rel_path)) as f:
+        with open(os.path.join(base, rel_path), encoding="utf-8") as f:
             return f.read()
 
     def test_gateway_run_clamped(self):
-        src = self._read_file("gateway/run.py")
+        src = self._read_file("hermes_gateway/usage_command.py")
         # Check that the stats handler has min(100, ...)
         assert "min(100, ctx.last_prompt_tokens" in src, (
-            "gateway/run.py stats pct is not clamped with min(100, ...)"
+            "hermes_gateway/usage_command.py stats pct is not clamped with min(100, ...)"
         )
 
     def test_cli_clamped(self):

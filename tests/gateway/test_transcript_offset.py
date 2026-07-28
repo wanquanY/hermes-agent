@@ -14,7 +14,7 @@ to ``_run_agent``'s return dict and uses it for the slice.
 
 import pytest
 
-from gateway.run import _preserve_queued_followup_history_offset
+from hermes_gateway.resume_pending import preserve_queued_followup_history_offset
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ def _filter_history(history: list) -> list:
         role = msg.get("role")
         if not role:
             continue
-        if role in ("session_meta",):
+        if role in {"session_meta",}:
             continue
         if role == "system":
             continue
@@ -304,7 +304,7 @@ class TestTranscriptHistoryOffset:
             ),
         }
 
-        merged = _preserve_queued_followup_history_offset(
+        merged = preserve_queued_followup_history_offset(
             current_result,
             followup_result,
         )
@@ -318,7 +318,7 @@ class TestTranscriptHistoryOffset:
         current_result = {"history_offset": 4}
         followup_result = {"history_offset": 3, "messages": []}
 
-        merged = _preserve_queued_followup_history_offset(
+        merged = preserve_queued_followup_history_offset(
             current_result,
             followup_result,
         )

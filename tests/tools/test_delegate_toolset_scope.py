@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 from tools.delegate_tool import _strip_blocked_tools
+from tools.delegate_tool import DELEGATE_BLOCKED_TOOLS
+from tools.delegate_tool_access import resolve_child_tool_access
 
 
 class TestToolsetIntersection:
@@ -64,3 +66,37 @@ class TestToolsetIntersection:
         scoped = [t for t in requested if t in parent_toolsets]
 
         assert scoped == []
+
+    def test_resolver_never_grants_tools_missing_from_parent(self):
+        parent = SimpleNamespace(
+            enabled_toolsets=["terminal"],
+            valid_tool_names={"terminal", "process"},
+        )
+
+        child_toolsets, child_tool_names = resolve_child_tool_access(
+            parent,
+            ["web", "browser", "delegate_task"],
+            role="orchestrator",
+            blocked_tools=DELEGATE_BLOCKED_TOOLS,
+            default_toolsets=["terminal", "file", "web"],
+        )
+
+        assert child_toolsets == []
+        assert child_tool_names == []
+
+    def test_orchestrator_keeps_delegation_only_when_parent_has_it(self):
+        parent = SimpleNamespace(
+            enabled_toolsets=["terminal", "delegation"],
+            valid_tool_names={"terminal", "process", "delegate_task"},
+        )
+
+        child_toolsets, child_tool_names = resolve_child_tool_access(
+            parent,
+            ["terminal", "delegation"],
+            role="orchestrator",
+            blocked_tools=DELEGATE_BLOCKED_TOOLS,
+            default_toolsets=["terminal", "file", "web"],
+        )
+
+        assert "delegate_task" in child_tool_names
+        assert "delegation" in child_toolsets

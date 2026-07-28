@@ -4,7 +4,7 @@ Coverage:
   _tavily_request() — API key handling, endpoint construction, error propagation.
   _normalize_tavily_search_results() — search response normalization.
   _normalize_tavily_documents() — extract/crawl response normalization, failed_results.
-  web_search_tool / web_extract_tool / web_crawl_tool — Tavily dispatch paths.
+  web_search_tool / web_extract_tool plus provider-level crawl behavior.
 """
 
 import json
@@ -12,6 +12,8 @@ import os
 import asyncio
 import pytest
 from unittest.mock import patch, MagicMock
+
+from tests.tools.conftest import register_all_web_providers
 
 
 # ─── _tavily_request ─────────────────────────────────────────────────────────
@@ -163,6 +165,15 @@ class TestNormalizeTavilyDocuments:
 class TestWebSearchTavily:
     """Test web_search_tool dispatch to Tavily."""
 
+    _register_providers = staticmethod(register_all_web_providers)
+
+    @pytest.fixture(autouse=True)
+    def _populate_web_registry(self):
+        self._register_providers()
+        yield
+        from agent.web_search_registry import _reset_for_tests
+        _reset_for_tests()
+
     def test_search_dispatches_to_tavily(self):
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -186,6 +197,15 @@ class TestWebSearchTavily:
 class TestWebExtractTavily:
     """Test web_extract_tool dispatch to Tavily."""
 
+    _register_providers = staticmethod(register_all_web_providers)
+
+    @pytest.fixture(autouse=True)
+    def _populate_web_registry(self):
+        self._register_providers()
+        yield
+        from agent.web_search_registry import _reset_for_tests
+        _reset_for_tests()
+
     def test_extract_dispatches_to_tavily(self):
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -206,10 +226,19 @@ class TestWebExtractTavily:
             assert result["results"][0]["url"] == "https://example.com"
 
 
-# ─── web_crawl_tool (Tavily dispatch) ─────────────────────────────────────────
+# ─── Tavily provider crawl ────────────────────────────────────────────────────
 
-class TestWebCrawlTavily:
-    """Test web_crawl_tool dispatch to Tavily."""
+class TestTavilyProviderCrawl:
+    """The provider retains crawl capability even though core exposes no tool."""
+
+    _register_providers = staticmethod(register_all_web_providers)
+
+    @pytest.fixture(autouse=True)
+    def _populate_web_registry(self):
+        self._register_providers()
+        yield
+        from agent.web_search_registry import _reset_for_tests
+        _reset_for_tests()
 
     def test_crawl_dispatches_to_tavily(self):
         mock_response = MagicMock()
@@ -221,16 +250,12 @@ class TestWebCrawlTavily:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("tools.web_tools._get_backend", return_value="tavily"), \
-             patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
-             patch("tools.web_tools.httpx.post", return_value=mock_response), \
-             patch("tools.web_tools.check_website_access", return_value=None), \
-             patch("tools.web_tools.is_safe_url", return_value=True), \
+        raw = mock_response.json.return_value
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider._tavily_request", return_value=raw), \
              patch("tools.interrupt.is_interrupted", return_value=False):
-            from tools.web_tools import web_crawl_tool
-            result = json.loads(asyncio.get_event_loop().run_until_complete(
-                web_crawl_tool("https://example.com", use_llm_processing=False)
-            ))
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+            result = TavilyWebSearchProvider().crawl("https://example.com")
             assert "results" in result
             assert len(result["results"]) == 2
             assert result["results"][0]["title"] == "Page 1"
@@ -241,17 +266,13 @@ class TestWebCrawlTavily:
         mock_response.json.return_value = {"results": []}
         mock_response.raise_for_status = MagicMock()
 
-        with patch("tools.web_tools._get_backend", return_value="tavily"), \
-             patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
-             patch("tools.web_tools.httpx.post", return_value=mock_response) as mock_post, \
-             patch("tools.web_tools.check_website_access", return_value=None), \
-             patch("tools.web_tools.is_safe_url", return_value=True), \
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider._tavily_request", return_value={"results": []}) as request, \
              patch("tools.interrupt.is_interrupted", return_value=False):
-            from tools.web_tools import web_crawl_tool
-            asyncio.get_event_loop().run_until_complete(
-                web_crawl_tool("https://example.com", instructions="Find docs", use_llm_processing=False)
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+            TavilyWebSearchProvider().crawl(
+                "https://example.com", instructions="Find docs"
             )
-            call_kwargs = mock_post.call_args
-            payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+            payload = request.call_args.args[1]
             assert payload["instructions"] == "Find docs"
             assert payload["url"] == "https://example.com"

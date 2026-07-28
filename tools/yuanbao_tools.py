@@ -12,7 +12,7 @@ yuanbao_tools.py - 元宝平台工具集
 LLM 应先用 search_sticker 找到合适的 sticker_id（或直接传中文 name），再用 send_sticker
 发送。不要在文本中夹杂裸的 Unicode emoji 当作贴纸。
 
-The active adapter singleton lives in ``gateway.platforms.yuanbao`` and is
+The active adapter singleton lives in ``channels.platforms.yuanbao`` and is
 accessed via ``get_active_adapter()``.
 """
 
@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_active_adapter():
-    """Lazy import to avoid ImportError when gateway.platforms.yuanbao is unavailable."""
+    """Lazy import to avoid ImportError when channels.platforms.yuanbao is unavailable."""
     try:
-        from gateway.platforms.yuanbao import get_active_adapter
+        from channels.platforms.yuanbao import get_active_adapter
         return get_active_adapter()
     except ImportError:
         return None
@@ -176,7 +176,7 @@ async def search_sticker(query: str = "", limit: int = 10) -> dict:
     返回每条候选的 sticker_id / name / description / package_id，
     供 LLM 选择后传给 send_sticker。空 query 时返回前 N 条。
     """
-    from gateway.platforms.yuanbao_sticker import search_stickers
+    from channels.platforms.yuanbao_sticker import search_stickers
 
     try:
         safe_limit = max(1, min(50, int(limit) if limit else 10))
@@ -221,8 +221,8 @@ async def send_sticker(
 
     Returns: ``{"success": bool, ...}``
     """
-    from gateway.session_context import get_session_env
-    from gateway.platforms.yuanbao_sticker import (
+    from channels.session_context import get_session_env
+    from channels.platforms.yuanbao_sticker import (
         get_sticker_by_id,
         get_sticker_by_name,
         get_random_sticker,
@@ -420,7 +420,7 @@ from tools.registry import registry, tool_result  # noqa: E402
 def _check_yuanbao():
     """Toolset availability check — True when running in a yuanbao gateway session."""
     try:
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
         if get_session_env("HERMES_SESSION_PLATFORM", "") == "yuanbao":
             return True
     except Exception:
@@ -448,7 +448,7 @@ async def _handle_yb_send_dm(args, **kw):
     group_code = args.get("group_code", "")
     if not group_code:
         try:
-            from gateway.session_context import get_session_env
+            from channels.session_context import get_session_env
             chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
             # chat_id format: "group:<code>" → extract the code part
             if chat_id.startswith("group:"):
@@ -468,10 +468,11 @@ async def _handle_yb_send_dm(args, **kw):
     # Extract MEDIA:<path> tags embedded in the message text (LLM often puts
     # file paths there instead of using the media_files parameter).
     message = args.get("message", "")
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
     embedded_media, message = BasePlatformAdapter.extract_media(message)
     if embedded_media:
         media_files.extend(embedded_media)
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
     return tool_result(await send_dm(
         group_code=group_code,        name=args.get("name", ""),

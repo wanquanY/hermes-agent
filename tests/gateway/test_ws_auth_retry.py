@@ -17,7 +17,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 class TestMattermostWSAuthRetry:
-    """gateway/platforms/mattermost.py — _ws_loop()"""
+    """channels/platforms/mattermost.py — _ws_loop()"""
 
     def test_401_handshake_stops_reconnect(self):
         """A WSServerHandshakeError with status 401 should stop the loop."""
@@ -31,7 +31,7 @@ class TestMattermostWSAuthRetry:
             headers=MagicMock(),
         )
 
-        from gateway.platforms.mattermost import MattermostAdapter
+        from channels.platforms.mattermost import MattermostAdapter
         adapter = MattermostAdapter.__new__(MattermostAdapter)
         adapter._closing = False
 
@@ -61,7 +61,7 @@ class TestMattermostWSAuthRetry:
             headers=MagicMock(),
         )
 
-        from gateway.platforms.mattermost import MattermostAdapter
+        from channels.platforms.mattermost import MattermostAdapter
         adapter = MattermostAdapter.__new__(MattermostAdapter)
         adapter._closing = False
 
@@ -79,7 +79,7 @@ class TestMattermostWSAuthRetry:
 
     def test_transient_error_retries(self):
         """A transient ConnectionError should retry (not stop immediately)."""
-        from gateway.platforms.mattermost import MattermostAdapter
+        from channels.platforms.mattermost import MattermostAdapter
         adapter = MattermostAdapter.__new__(MattermostAdapter)
         adapter._closing = False
 
@@ -111,7 +111,7 @@ class TestMattermostWSAuthRetry:
 # ---------------------------------------------------------------------------
 
 class TestMatrixSyncAuthRetry:
-    """gateway/platforms/matrix.py — _sync_loop()"""
+    """channels/platforms/matrix.py — _sync_loop()"""
 
     def test_unknown_token_sync_error_stops_loop(self):
         """A SyncError with M_UNKNOWN_TOKEN should stop syncing."""
@@ -124,7 +124,7 @@ class TestMatrixSyncAuthRetry:
 
         nio_mock.SyncError = SyncError
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
         adapter._closing = False
 
@@ -155,7 +155,7 @@ class TestMatrixSyncAuthRetry:
 
     def test_exception_with_401_stops_loop(self):
         """An exception containing '401' should stop syncing."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
         adapter._closing = False
 
@@ -190,7 +190,7 @@ class TestMatrixSyncAuthRetry:
 
     def test_transient_error_retries(self):
         """A transient error should retry (not stop immediately)."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
         adapter._closing = False
 

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
@@ -33,7 +33,8 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms import telegram as tg_adapter  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +42,7 @@ def _no_auto_discovery(monkeypatch):
     """Disable DoH auto-discovery so connect() uses the plain builder chain."""
     async def _noop():
         return []
-    monkeypatch.setattr("gateway.platforms.telegram.discover_fallback_ips", _noop)
+    monkeypatch.setattr("channels.platforms.telegram.discover_fallback_ips", _noop)
 
 
 def _make_adapter() -> TelegramAdapter:
@@ -118,9 +119,10 @@ async def test_reconnect_does_not_self_schedule_when_fatal_error_set():
 
 
 @pytest.mark.asyncio
-async def test_reconnect_success_resets_error_count():
+async def test_reconnect_start_does_not_claim_polling_health():
     """
-    When start_polling() succeeds, _polling_network_error_count should reset to 0.
+    start_polling() returning is not a getUpdates health signal. The retry
+    counter resets only when the instrumented polling request reports progress.
     """
     adapter = _make_adapter()
     adapter._polling_network_error_count = 3
@@ -138,7 +140,8 @@ async def test_reconnect_success_resets_error_count():
     with patch("asyncio.sleep", new_callable=AsyncMock):
         await adapter._handle_polling_network_error(Exception("Bad Gateway"))
 
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 4
+    assert adapter._send_path_degraded is True
 
     # Clean up the heartbeat-probe task scheduled after a successful reconnect.
     pending = [t for t in adapter._background_tasks if not t.done()]
@@ -224,7 +227,7 @@ async def test_reconnect_drains_polling_request_only():
 
     # Reconnect must still succeed
     mock_app.updater.start_polling.assert_called_once()
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 2
 
 
 @pytest.mark.asyncio
@@ -244,7 +247,7 @@ async def test_reconnect_continues_if_drain_fails():
 
     # start_polling must still be called despite drain failure
     mock_app.updater.start_polling.assert_called_once()
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 2
 
 
 @pytest.mark.asyncio
@@ -267,6 +270,62 @@ async def test_initialize_still_runs_when_shutdown_fails():
     # initialize MUST be called even though shutdown raised
     mock_polling_req.initialize.assert_called_once()
     mock_app.updater.start_polling.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_continues_if_drain_hangs(monkeypatch):
+    adapter = _make_adapter()
+    adapter._polling_network_error_count = 1
+    mock_app, mock_polling_req = _make_mock_app()
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    mock_polling_req.shutdown = AsyncMock(side_effect=hang)
+    mock_polling_req.initialize = AsyncMock(side_effect=hang)
+    adapter._app = mock_app
+    monkeypatch.setattr(tg_adapter, "_DRAIN_TIMEOUT", 0.01)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await asyncio.wait_for(
+            adapter._handle_polling_network_error(Exception("Timed out")),
+            timeout=5,
+        )
+
+    mock_app.updater.start_polling.assert_called_once()
+    assert adapter._polling_error_task is None or adapter._polling_error_task.done()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_force_escalates_wedged_recovery_task(monkeypatch):
+    adapter = _make_adapter()
+
+    async def wedged():
+        await asyncio.Event().wait()
+
+    wedged_task = asyncio.create_task(wedged())
+    adapter._polling_error_task = wedged_task
+    mock_bot = MagicMock()
+    mock_bot.get_me = AsyncMock()
+    mock_app = MagicMock()
+    mock_app.bot = mock_bot
+    adapter._app = mock_app
+    adapter._probe_pending_updates = AsyncMock()
+    adapter._notify_fatal_error = AsyncMock()
+    clock = [1000.0]
+
+    async def advance_clock(*_args, **_kwargs):
+        clock[0] += 200.0
+
+    monkeypatch.setattr(tg_adapter.time, "monotonic", lambda: clock[0])
+    with patch("asyncio.sleep", new=AsyncMock(side_effect=advance_clock)):
+        await asyncio.wait_for(adapter._polling_heartbeat_loop(), timeout=5)
+
+    assert adapter.has_fatal_error
+    adapter._notify_fatal_error.assert_awaited()
+    wedged_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wedged_task
 
 
 @pytest.mark.asyncio
@@ -379,7 +438,7 @@ async def test_heartbeat_probe_reenters_ladder_when_get_me_times_out():
         raise asyncio.TimeoutError()
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
-        with patch("gateway.platforms.telegram.asyncio.wait_for", new=fast_wait_for):
+        with patch("channels.platforms.telegram.asyncio.wait_for", new=fast_wait_for):
             await adapter._verify_polling_after_reconnect()
 
     adapter._handle_polling_network_error.assert_awaited_once()

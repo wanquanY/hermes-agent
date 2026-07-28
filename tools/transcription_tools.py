@@ -81,6 +81,18 @@ _HAS_MISTRAL = _safe_find_spec("mistralai")
 DEFAULT_PROVIDER = "local"
 DEFAULT_LOCAL_MODEL = "base"
 DEFAULT_LOCAL_STT_LANGUAGE = "en"
+
+# Native dispatcher names. Kept in sync with
+# ``agent.transcription_registry._BUILTIN_NAMES`` so plugins cannot shadow
+# implementations owned by this module.
+BUILTIN_STT_PROVIDERS = frozenset({
+    "local",
+    "local_command",
+    "groq",
+    "openai",
+    "mistral",
+    "xai",
+})
 DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
 DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
@@ -266,10 +278,12 @@ def _get_provider(stt_config: dict) -> str:
             return "none"
 
         if provider == "xai":
-            if get_env_value("XAI_API_KEY"):
+            from tools.xai_http import resolve_xai_http_credentials
+
+            if resolve_xai_http_credentials().get("api_key"):
                 return "xai"
             logger.warning(
-                "STT provider 'xai' configured but XAI_API_KEY not set"
+                "STT provider 'xai' configured but no xAI credentials are available"
             )
             return "none"
 
@@ -289,9 +303,14 @@ def _get_provider(stt_config: dict) -> str:
     if _HAS_OPENAI and _has_openai_audio_backend():
         logger.info("No local STT available, using OpenAI Whisper API")
         return "openai"
-    if get_env_value("XAI_API_KEY"):
-        logger.info("No local STT available, using xAI Grok STT API")
-        return "xai"
+    try:
+        from tools.xai_http import resolve_xai_http_credentials
+
+        if resolve_xai_http_credentials().get("api_key"):
+            logger.info("No local STT available, using xAI Grok STT API")
+            return "xai"
+    except Exception:
+        pass
     return "none"
 
 # ---------------------------------------------------------------------------
@@ -465,7 +484,13 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
     command = [ffmpeg, "-y", "-i", file_path, converted_path]
 
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
         return converted_path, None
     except subprocess.CalledProcessError as e:
         details = e.stderr.strip() or e.stdout.strip() or str(e)
@@ -508,9 +533,22 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             # User-provided templates (env var) may contain shell syntax; auto-detected commands are safe for list mode.
             use_shell = bool(os.getenv(LOCAL_STT_COMMAND_ENV, "").strip())
             if use_shell:
-                subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+                subprocess.run(
+                    command,
+                    shell=True,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
             else:
-                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True)
+                subprocess.run(
+                    shlex.split(command),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
             
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
@@ -704,15 +742,23 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
     Supports Inverse Text Normalization, diarization, and word-level timestamps.
     Requires ``XAI_API_KEY`` environment variable.
     """
-    api_key = get_env_value("XAI_API_KEY")
+    from tools.xai_http import resolve_xai_http_credentials
+
+    creds = resolve_xai_http_credentials()
+    api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
-        return {"success": False, "transcript": "", "error": "XAI_API_KEY not set"}
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "No xAI credentials found. Configure xAI OAuth in `hermes model` or set XAI_API_KEY",
+        }
 
     stt_config = _load_stt_config()
     xai_config = stt_config.get("xai", {})
     base_url = str(
         xai_config.get("base_url")
         or get_env_value("XAI_STT_BASE_URL")
+        or creds.get("base_url")
         or XAI_STT_BASE_URL
     ).strip().rstrip("/")
     language = str(
@@ -864,6 +910,21 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
 
+    from tools.voice_plugin_dispatch import dispatch_transcription_plugin
+
+    provider_config = stt_config.get(provider, {})
+    if not isinstance(provider_config, dict):
+        provider_config = {}
+    plugin_result = dispatch_transcription_plugin(
+        file_path=file_path,
+        provider=provider,
+        builtin_names=BUILTIN_STT_PROVIDERS,
+        model=model or provider_config.get("model") or provider_config.get("model_id"),
+        language=provider_config.get("language") or provider_config.get("language_code"),
+    )
+    if plugin_result is not None:
+        return plugin_result
+
     # No provider available
     return {
         "success": False,
@@ -872,7 +933,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             "No STT provider available. Install faster-whisper for free local "
             f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
             "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
-            "Voxtral Transcribe, set XAI_API_KEY for xAI Grok STT, or set VOICE_TOOLS_OPENAI_KEY "
+            "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, or set VOICE_TOOLS_OPENAI_KEY "
             "or OPENAI_API_KEY for the OpenAI Whisper API."
         ),
     }

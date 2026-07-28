@@ -6,11 +6,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
+import hermes_gateway.gateway_runtime_config as gateway_runtime_config
+import hermes_gateway.lifecycle_home as lifecycle_home
+import hermes_gateway.restart_lifecycle as restart_lifecycle
 from agent.i18n import t
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-from gateway.session import SessionEntry, build_session_key
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+from hermes_gateway.session import SessionEntry, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
 
@@ -33,7 +37,16 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
 
     result = await runner._handle_message(event)
 
-    assert result == t("gateway.draining", count=1)
+    expected = t("gateway.draining", count=1)
+    assert result == expected
+    # Guard against the silent-degradation regression in #22266: if the i18n
+    # catalog cannot be resolved (e.g. xdist workers losing the locales path)
+    # then ``t("gateway.draining", count=1)`` returns the bare key
+    # ``"gateway.draining"`` instead of the formatted English string, and both
+    # sides of the equality above would still match. Assert on the catalog
+    # output explicitly so a broken locale resolution fails loudly here.
+    assert expected != "gateway.draining"
+    assert "Draining" in expected and "1" in expected
     running_agent.interrupt.assert_not_called()
     runner.request_restart.assert_called_once_with(detached=True, via_service=False)
 
@@ -81,54 +94,54 @@ async def test_draining_rejects_new_session_messages():
 
 
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
     monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
 
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
     (tmp_path / "config.yaml").write_text(
         "display:\n  busy_input_mode: queue\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "queue"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "queue"
 
     (tmp_path / "config.yaml").write_text(
         "display:\n  busy_input_mode: steer\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "steer"
 
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "interrupt")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "steer")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "steer"
 
     # Unknown values fall through to the safe default
     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "bogus")
-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_busy_input_mode() == "interrupt"
 
 
 def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
     tmp_path, monkeypatch, caplog
 ):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
     monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
 
     assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
+        gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout()
         == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     )
 
     (tmp_path / "config.yaml").write_text(
         "agent:\n  restart_drain_timeout: 12\n", encoding="utf-8"
     )
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 12.0
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout() == 12.0
 
     monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "7")
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 7.0
+    assert gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout() == 7.0
 
     monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "invalid")
     assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
+        gateway_runtime_config.GatewayRuntimeConfigService.load_restart_drain_timeout()
         == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     )
     assert "Invalid restart_drain_timeout" in caplog.text
@@ -155,7 +168,7 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
     runner, _adapter = make_restart_runner()
     popen_calls = []
 
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
+    monkeypatch.setattr(restart_lifecycle, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/setsid" if cmd == "setsid" else None)
 
@@ -165,7 +178,7 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    await runner._launch_detached_restart_command()
+    await restart_lifecycle_for(runner).launch_detached_restart_command()
 
     assert len(popen_calls) == 1
     cmd, kwargs = popen_calls[0]
@@ -236,7 +249,7 @@ async def test_shutdown_notification_skipped_when_no_active_agents():
 @pytest.mark.asyncio
 async def test_shutdown_notification_ignores_pending_sentinels():
     """Pending sentinels (not-yet-started agents) don't trigger notifications."""
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    from hermes_gateway.runner import _AGENT_PENDING_SENTINEL
 
     runner, adapter = make_restart_runner()
     runner._running_agents["agent:main:telegram:dm:999"] = _AGENT_PENDING_SENTINEL
@@ -261,7 +274,7 @@ async def test_shutdown_notification_send_failure_does_not_block():
 @pytest.mark.asyncio
 async def test_shutdown_notification_suppressed_when_flag_disabled():
     """Active-session ping is muted when gateway_restart_notification=False on the platform."""
-    from gateway.config import Platform
+    from hermes_gateway.config import Platform
 
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
@@ -277,7 +290,7 @@ async def test_shutdown_notification_suppressed_when_flag_disabled():
 @pytest.mark.asyncio
 async def test_shutdown_notification_home_channel_suppressed_when_flag_disabled():
     """Home-channel ping during shutdown is muted when the flag is False."""
-    from gateway.config import HomeChannel, Platform
+    from hermes_gateway.config import HomeChannel, Platform
 
     runner, adapter = make_restart_runner()
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(

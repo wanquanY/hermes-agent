@@ -57,13 +57,13 @@ def test_frontmatter_slug_matched_even_when_dir_name_differs(
     agent actually registers). The old dir-name-based check would have
     compared ``stable-diffusion`` to the typed command and missed.
     """
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     _write_skill(tmp_skills, "mlops/stable-diffusion", "Stable Diffusion Image Generation")
 
     # Config disables by declared name (matches what `hermes skills config` writes).
     monkeypatch.setattr(
-        "gateway.run._get_disabled_skill_names",
+        "hermes_gateway.runner._get_disabled_skill_names",
         lambda: {"Stable Diffusion Image Generation"},
         raising=False,
     )
@@ -88,7 +88,7 @@ def test_unknown_command_still_returns_none(
     tmp_skills: Path,
 ) -> None:
     """A command that matches no on-disk skill still returns None."""
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     _write_skill(tmp_skills, "creative/ascii-art", "ascii-art")
 
@@ -104,7 +104,7 @@ def test_matched_but_not_disabled_returns_none(
     tmp_skills: Path,
 ) -> None:
     """A skill that exists and isn't disabled shouldn't produce a hint."""
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     _write_skill(tmp_skills, "creative/ascii-art", "ascii-art")
 
@@ -120,7 +120,7 @@ def test_slug_normalization_strips_non_alnum(
     tmp_skills: Path,
 ) -> None:
     """Frontmatter ``C++ Code Review`` → slug ``c-code-review`` (``+`` stripped)."""
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     _write_skill(tmp_skills, "software-development/cpp-review", "C++ Code Review")
 
@@ -146,7 +146,7 @@ def test_optional_skill_uses_frontmatter_slug(
     with frontmatter ``Stable Diffusion Image Generation`` returned None
     when the user typed the real slug.
     """
-    from gateway import run as gateway_run
+    import hermes_gateway.runner as gateway_run
 
     # Build an isolated optional-skills dir
     optional = tmp_path / "optional-skills"

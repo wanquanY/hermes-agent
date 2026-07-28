@@ -30,7 +30,7 @@ class TestParseReasoningConfig(unittest.TestCase):
         self.assertEqual(result, {"enabled": False})
 
     def test_valid_levels(self):
-        for level in ("low", "medium", "high", "xhigh", "minimal"):
+        for level in ("low", "medium", "high", "xhigh", "max", "ultra", "minimal"):
             result = self._parse(level)
             self.assertIsNotNone(result)
             self.assertTrue(result.get("enabled"))
@@ -41,7 +41,6 @@ class TestParseReasoningConfig(unittest.TestCase):
         self.assertIsNone(self._parse("  "))
 
     def test_unknown_returns_none(self):
-        self.assertIsNone(self._parse("ultra"))
         self.assertIsNone(self._parse("turbo"))
 
     def test_case_insensitive(self):
@@ -70,7 +69,7 @@ class TestHandleReasoningCommand(unittest.TestCase):
         stub = self._make_cli(show_reasoning=False)
         # Simulate /reasoning show
         arg = "show"
-        if arg in ("show", "on"):
+        if arg in {"show", "on"}:
             stub.show_reasoning = True
             stub.agent.reasoning_callback = lambda x: None
         self.assertTrue(stub.show_reasoning)
@@ -79,7 +78,7 @@ class TestHandleReasoningCommand(unittest.TestCase):
         stub = self._make_cli(show_reasoning=True)
         # Simulate /reasoning hide
         arg = "hide"
-        if arg in ("hide", "off"):
+        if arg in {"hide", "off"}:
             stub.show_reasoning = False
             stub.agent.reasoning_callback = None
         self.assertFalse(stub.show_reasoning)
@@ -88,14 +87,14 @@ class TestHandleReasoningCommand(unittest.TestCase):
     def test_on_enables_display(self):
         stub = self._make_cli(show_reasoning=False)
         arg = "on"
-        if arg in ("show", "on"):
+        if arg in {"show", "on"}:
             stub.show_reasoning = True
         self.assertTrue(stub.show_reasoning)
 
     def test_off_disables_display(self):
         stub = self._make_cli(show_reasoning=True)
         arg = "off"
-        if arg in ("hide", "off"):
+        if arg in {"hide", "off"}:
             stub.show_reasoning = False
         self.assertFalse(stub.show_reasoning)
 
@@ -382,8 +381,8 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
         cli.show_reasoning = show_reasoning
         cli.streaming_enabled = streaming_enabled
         cli.verbose = verbose
-        cli._stream_reasoning_delta = lambda text: ("stream", text)
-        cli._on_reasoning = lambda text: ("preview", text)
+        cli._stream_reasoning_delta = MagicMock()
+        cli._on_reasoning = MagicMock()
         return cli
 
     def test_show_reasoning_non_streaming_uses_final_box_only(self):
@@ -396,14 +395,16 @@ class TestReasoningDisplayModeSelection(unittest.TestCase):
 
         callback = cli._current_reasoning_callback()
         self.assertIsNotNone(callback)
-        self.assertEqual(callback("x"), ("stream", "x"))
+        self.assertIsNone(callback("x"))
+        cli._stream_reasoning_delta.assert_called_once_with("x")
 
     def test_verbose_without_show_reasoning_uses_preview_callback(self):
         cli = self._make_cli(show_reasoning=False, streaming_enabled=False, verbose=True)
 
         callback = cli._current_reasoning_callback()
         self.assertIsNotNone(callback)
-        self.assertEqual(callback("x"), ("preview", "x"))
+        self.assertIsNone(callback("x"))
+        cli._on_reasoning.assert_called_once_with("x")
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +551,7 @@ class TestConfigDefault(unittest.TestCase):
         from hermes_cli.config import DEFAULT_CONFIG
         display = DEFAULT_CONFIG.get("display", {})
         self.assertIn("show_reasoning", display)
-        self.assertFalse(display["show_reasoning"])
+        self.assertTrue(display["show_reasoning"])
 
 
 class TestCommandRegistered(unittest.TestCase):

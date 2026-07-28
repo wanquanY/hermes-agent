@@ -4,7 +4,7 @@ import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } 
 import unicodeSpinners from 'unicode-animations'
 
 import { $delegationState } from '../app/delegationStore.js'
-import type { IndicatorStyle } from '../app/interfaces.js'
+import type { IndicatorStyle, Notice } from '../app/interfaces.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import { $uiState } from '../app/uiStore.js'
 import { FACES } from '../content/faces.js'
@@ -143,6 +143,22 @@ function ctxBarColor(pct: number | undefined, t: Theme) {
   return t.color.statusGood
 }
 
+function noticeColor(level: Notice['level'], t: Theme): string {
+  if (level === 'error') {
+    return t.color.error
+  }
+
+  if (level === 'warn') {
+    return t.color.warn
+  }
+
+  if (level === 'success') {
+    return t.color.statusGood
+  }
+
+  return t.color.accent
+}
+
 function ctxBar(pct: number | undefined, w = 10) {
   const p = Math.max(0, Math.min(100, pct ?? 0))
   const filled = Math.round((p / 100) * w)
@@ -279,6 +295,7 @@ export function StatusRule({
   model,
   modelFast,
   modelReasoningEffort,
+  notice,
   usage,
   bgCount,
   sessionStartedAt,
@@ -306,6 +323,8 @@ export function StatusRule({
           {'─ '}
           {busy ? (
             <FaceTicker color={statusColor} startedAt={turnStartedAt} />
+          ) : notice?.text ? (
+            <Text color={noticeColor(notice.level, t)}>{notice.text}</Text>
           ) : (
             <Text color={statusColor}>{status}</Text>
           )}
@@ -461,6 +480,7 @@ interface StatusRuleProps {
   model: string
   modelFast?: boolean
   modelReasoningEffort?: string
+  notice?: Notice | null
   sessionStartedAt?: null | number
   showCost: boolean
   status: string

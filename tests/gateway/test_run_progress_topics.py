@@ -9,9 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, StreamingConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform, PlatformConfig, StreamingConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from hermes_gateway.session import SessionSource
+from hermes_gateway.session_runtime_state import session_runtime_state_for
 
 
 class ProgressCaptureAdapter(BasePlatformAdapter):
@@ -58,6 +59,62 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+class SmallLimitProgressAdapter(ProgressCaptureAdapter):
+    """Adapter with a tiny platform limit to exercise progress rollover."""
+
+    MAX_MESSAGE_LENGTH = 180
+
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self._next_id = 0
+        self.oversized_edits = []
+        self.oversized_sends = []
+
+    def _mint_id(self):
+        self._next_id += 1
+        return f"progress-{self._next_id}"
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        if len(content) > self.MAX_MESSAGE_LENGTH:
+            self.oversized_sends.append(content)
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=self._mint_id())
+
+    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+        if len(content) > self.MAX_MESSAGE_LENGTH:
+            self.oversized_edits.append(content)
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+
+class MetadataEditProgressCaptureAdapter(ProgressCaptureAdapter):
+    async def edit_message(
+        self, chat_id, message_id, content, *, finalize: bool = False, metadata=None
+    ) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+
 class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
     SUPPORTS_MESSAGE_EDITING = False
 
@@ -69,7 +126,7 @@ class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
         # freeze it — production now assigns tool_progress_callback after
-        # construction (see gateway/run.py around the agent-cache hit),
+        # construction (see hermes_gateway/runner.py around the agent-cache hit),
         # so we must read it at call time, not at init.
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
@@ -123,6 +180,31 @@ class DelayedProgressAgent:
         }
 
 
+class ManyProgressLinesAgent:
+    """Emits enough tool-progress lines to exceed a single platform bubble."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        assert cb is not None
+        cb("tool.started", "terminal", "first-short", {})
+        # Let the progress task create the first editable bubble, then enqueue
+        # the rest quickly.  The cancellation drain must roll them into fresh
+        # editable bubbles instead of trying to edit the first one past limit.
+        time.sleep(0.35)
+        for idx in range(1, 8):
+            cb("tool.started", "terminal", f"overflow-line-{idx}-" + "x" * 45, {})
+        time.sleep(0.1)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class DelayedInterimAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -141,7 +223,7 @@ class DelayedInterimAgent:
 
 
 def _make_runner(adapter):
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     runner = object.__new__(GatewayRunner)
@@ -164,12 +246,29 @@ def _make_runner(adapter):
     return runner
 
 
+def _patch_gateway_runtime_config(monkeypatch, gateway_run, *, api_key: str = "***"):
+    runtime = SimpleNamespace(
+        resolve_session_agent_runtime=lambda **_kwargs: (
+            "test-model",
+            {"api_key": api_key},
+        ),
+        resolve_session_reasoning_config=lambda **_kwargs: None,
+        resolve_turn_agent_config=lambda _message, model, runtime_kwargs: {
+            "model": model,
+            "runtime": runtime_kwargs,
+            "request_overrides": {},
+        },
+    )
+    monkeypatch.setattr(gateway_run, "runtime_config_for", lambda _runner: runtime)
+
+
 @pytest.mark.asyncio
 async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -179,9 +278,9 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
 
     adapter = ProgressCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="fake")
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
@@ -212,12 +311,52 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_run_agent_progress_edits_keep_originating_topic_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    adapter = MetadataEditProgressCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("hermes_gateway.runner")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="fake")
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+        thread_id="17585",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-progress-edit-topic",
+        session_key="agent:main:telegram:group:-1001:17585",
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.edits
+    assert all(call["metadata"] == {"thread_id": "17585"} for call in adapter.edits)
+
+
+@pytest.mark.asyncio
 async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(monkeypatch, tmp_path):
     """Telegram DM progress must not reuse event message id as thread metadata."""
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -226,9 +365,9 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
 
     adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.TELEGRAM,
@@ -268,6 +407,7 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -276,9 +416,9 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
 
     adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.SLACK,
@@ -310,6 +450,7 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -318,9 +459,9 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
 
     adapter = ProgressCaptureAdapter(platform=Platform.FEISHU)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.FEISHU,
@@ -366,6 +507,7 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -378,9 +520,9 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
 
     adapter = ProgressCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.TELEGRAM,
@@ -576,6 +718,7 @@ async def _run_with_agent(
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -584,11 +727,11 @@ async def _run_with_agent(
 
     adapter = adapter_cls(platform=platform)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     if config_data and "streaming" in config_data:
         runner.config.streaming = StreamingConfig.from_dict(config_data["streaming"])
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
     source = SessionSource(
         platform=platform,
         chat_id=chat_id,
@@ -615,6 +758,39 @@ async def _run_with_agent(
         session_key=session_key,
     )
     return adapter, result
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rolls_progress_bubble_before_platform_limit(monkeypatch, tmp_path):
+    """Tool progress should start a second editable bubble before Telegram's limit.
+
+    Regression: once the first progress bubble grew past the platform limit,
+    the gateway kept trying to edit that same oversized full transcript.  The
+    Telegram adapter then split-and-sent a fresh continuation on every update,
+    causing a noisy trail of one-line messages instead of a new editable bubble.
+    """
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ManyProgressLinesAgent,
+        session_id="sess-progress-overflow-rollover",
+        config_data={
+            "display": {
+                "tool_progress": "all",
+                "interim_assistant_messages": False,
+                "tool_preview_length": 60,
+            }
+        },
+        adapter_cls=SmallLimitProgressAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert isinstance(adapter, SmallLimitProgressAdapter)
+    assert len(adapter.sent) >= 2, "expected a fresh progress bubble after the first filled"
+    assert adapter.oversized_sends == []
+    assert adapter.oversized_edits == []
+    all_bubbles = [call["content"] for call in adapter.sent + adapter.edits]
+    assert all(len(text) <= adapter.MAX_MESSAGE_LENGTH for text in all_bubbles)
 
 
 @pytest.mark.asyncio
@@ -879,6 +1055,7 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -888,9 +1065,9 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
 
     adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -908,7 +1085,10 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if "first command" in content and not invalidated["done"]:
             invalidated["done"] = True
-            runner._invalidate_session_run_generation(session_key, reason="test_stop")
+            session_runtime_state_for(runner).invalidate_session_run_generation(
+                session_key,
+                reason="test_stop",
+            )
         return result
 
     adapter.send = send_and_invalidate
@@ -941,6 +1121,7 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    fake_dotenv.dotenv_values = lambda *args, **kwargs: {}
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
@@ -949,9 +1130,9 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
 
     adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
     runner = _make_runner(adapter)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+    _patch_gateway_runtime_config(monkeypatch, gateway_run, api_key="***")
 
     source = SessionSource(
         platform=Platform.DISCORD,
@@ -969,7 +1150,10 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if content == "first interim" and not invalidated["done"]:
             invalidated["done"] = True
-            runner._invalidate_session_run_generation(session_key, reason="test_stop")
+            session_runtime_state_for(runner).invalidate_session_run_generation(
+                session_key,
+                reason="test_stop",
+            )
         return result
 
     adapter.send = send_and_invalidate

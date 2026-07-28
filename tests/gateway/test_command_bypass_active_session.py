@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +423,7 @@ class TestNoActiveSessionNormalDispatch:
 
 
 class TestPendingCommandSafetyNet:
-    """The safety net in gateway/run.py _run_agent must discard command text
+    """The safety net in hermes_gateway/runner.py _run_agent must discard command text
     that leaks into the pending queue via interrupt_message fallback."""
 
     def test_stop_command_detected(self):

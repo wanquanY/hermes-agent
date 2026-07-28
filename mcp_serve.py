@@ -68,13 +68,14 @@ def _get_sessions_dir() -> Path:
         return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "sessions"
 
 
-def _get_session_db():
-    """Get a SessionDB instance for reading message transcripts."""
+def _get_message_history_store():
+    """Get the storage-backed reader for message transcripts."""
     try:
-        from hermes_state import SessionDB
-        return SessionDB()
+        from hermes_agent.composition.cli_session_store import open_cli_session_store
+
+        return open_cli_session_store()
     except Exception as e:
-        logger.debug("SessionDB unavailable: %s", e)
+        logger.debug("Message history store unavailable: %s", e)
         return None
 
 
@@ -185,7 +186,7 @@ def _extract_attachments(msg: dict) -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Event Bridge — polls SessionDB for new messages, maintains event queue
+# Event Bridge — polls message storage for new messages, maintains event queue
 # ---------------------------------------------------------------------------
 
 QUEUE_LIMIT = 1000
@@ -202,7 +203,7 @@ class QueueEvent:
 
 
 class EventBridge:
-    """Background poller that watches SessionDB for new messages and
+    """Background poller that watches message storage for new messages and
     maintains an in-memory event queue with waiter support.
 
     This is the Hermes equivalent of OpenClaw's WebSocket gateway bridge.
@@ -330,20 +331,20 @@ class EventBridge:
         self._new_event.set()
 
     def _poll_loop(self):
-        """Background loop: poll SessionDB for new messages."""
-        db = _get_session_db()
-        if not db:
-            logger.warning("EventBridge: SessionDB unavailable, event polling disabled")
+        """Background loop: poll durable storage for new messages."""
+        store = _get_message_history_store()
+        if not store:
+            logger.warning("EventBridge: message history unavailable, event polling disabled")
             return
 
         while self._running:
             try:
-                self._poll_once(db)
+                self._poll_once(store)
             except Exception as e:
                 logger.debug("EventBridge poll error: %s", e)
             time.sleep(POLL_INTERVAL)
 
-    def _poll_once(self, db):
+    def _poll_once(self, store):
         """Check for new messages across all sessions.
 
         Uses mtime checks on sessions.json and state.db to skip work
@@ -386,7 +387,7 @@ class EventBridge:
             last_seen = self._last_poll_timestamps.get(session_key, 0.0)
 
             try:
-                messages = db.get_messages(session_id)
+                messages = store.messages.list(session_id)
             except Exception:
                 continue
 
@@ -582,12 +583,12 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         if not session_id:
             return json.dumps({"error": "No session ID for this conversation"})
 
-        db = _get_session_db()
-        if not db:
-            return json.dumps({"error": "Session database unavailable"})
+        store = _get_message_history_store()
+        if not store:
+            return json.dumps({"error": "Message history unavailable"})
 
         try:
-            all_messages = db.get_messages(session_id)
+            all_messages = store.messages.list(session_id)
         except Exception as e:
             return json.dumps({"error": f"Failed to read messages: {e}"})
 
@@ -638,12 +639,12 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         if not session_id:
             return json.dumps({"error": "No session ID for this conversation"})
 
-        db = _get_session_db()
-        if not db:
-            return json.dumps({"error": "Session database unavailable"})
+        store = _get_message_history_store()
+        if not store:
+            return json.dumps({"error": "Message history unavailable"})
 
         try:
-            all_messages = db.get_messages(session_id)
+            all_messages = store.messages.list(session_id)
         except Exception as e:
             return json.dumps({"error": f"Failed to read messages: {e}"})
 

@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_discord_mock():
@@ -45,8 +45,8 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-import gateway.platforms.discord as discord_platform  # noqa: E402
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+import channels.platforms.discord as discord_platform  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
 
 class FakeDMChannel:
@@ -285,7 +285,7 @@ async def test_no_thread_with_auto_thread_disabled_is_noop(adapter, monkeypatch)
 
 
 def test_config_bridges_ignored_channels(monkeypatch, tmp_path):
-    """gateway/config.py bridges discord.ignored_channels to env var."""
+    """Discord channel policy stays in profile-local adapter config."""
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump({
@@ -298,15 +298,17 @@ def test_config_bridges_ignored_channels(monkeypatch, tmp_path):
     # the var doesn't exist yet — load_gateway_config will overwrite it.
     monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "")
 
-    from gateway.config import load_gateway_config
-    load_gateway_config()
+    from hermes_gateway.config import Platform, load_gateway_config
+    config = load_gateway_config()
 
-    import os
-    assert os.getenv("DISCORD_IGNORED_CHANNELS") == "111,222"
+    assert config.platforms[Platform.DISCORD].extra["ignored_channels"] == [
+        "111",
+        "222",
+    ]
 
 
 def test_config_bridges_no_thread_channels(monkeypatch, tmp_path):
-    """gateway/config.py bridges discord.no_thread_channels to env var."""
+    """No-thread policy stays in profile-local adapter config."""
     import yaml
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump({
@@ -317,11 +319,12 @@ def test_config_bridges_no_thread_channels(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", "")
 
-    from gateway.config import load_gateway_config
-    load_gateway_config()
+    from hermes_gateway.config import Platform, load_gateway_config
+    config = load_gateway_config()
 
-    import os
-    assert os.getenv("DISCORD_NO_THREAD_CHANNELS") == "333"
+    assert config.platforms[Platform.DISCORD].extra["no_thread_channels"] == [
+        "333"
+    ]
 
 
 def test_config_env_var_takes_precedence(monkeypatch, tmp_path):
@@ -336,7 +339,7 @@ def test_config_env_var_takes_precedence(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "999")
 
-    from gateway.config import load_gateway_config
+    from hermes_gateway.config import load_gateway_config
     load_gateway_config()
 
     import os

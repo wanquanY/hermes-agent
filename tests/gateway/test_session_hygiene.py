@@ -18,9 +18,9 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from agent.model_metadata import estimate_messages_tokens_rough
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.session import SessionEntry, SessionSource
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
+from hermes_gateway.session import SessionEntry, SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ class TestEstimatedTokenThreshold:
     threshold to 85% * 1.4 = 119% of context, which exceeded the model's
     limit and prevented hygiene from ever firing for ~200K models (GLM-5).
     The fix removed the multiplier entirely — the 85% threshold already
-    provides ample headroom over the agent's 50% compressor.
+    provides ample request headroom without a separate estimate multiplier.
     """
 
     def test_threshold_below_context_for_200k_model(self):
@@ -254,8 +254,7 @@ class TestEstimatedTokenThreshold:
     def test_overestimate_fires_early_but_safely(self):
         """If rough estimate is 50% inflated, hygiene fires at ~57% actual usage.
 
-        That's between the agent's 50% threshold and the model's limit —
-        safe and harmless.
+        That still leaves substantial request headroom below the model's limit.
         """
         context_length = 200_000
         threshold = int(context_length * 0.85)  # 170K
@@ -263,7 +262,7 @@ class TestEstimatedTokenThreshold:
         # Hygiene fires when estimate hits 170K, actual is ~113K = 57% of ctx
         actual_when_fires = threshold / 1.5
         assert actual_when_fires > context_length * 0.50, (
-            "Early fire should still be above agent's 50% threshold"
+            "Early fire should still be above half the context window"
         )
         assert actual_when_fires < context_length, (
             "Early fire must be well below model limit"
@@ -324,7 +323,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     fake_run_agent.AIAgent = FakeCompressAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -396,11 +395,12 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_session_hygiene_warns_user_when_summary_generation_fails(monkeypatch, tmp_path):
+async def test_session_hygiene_warns_user_when_compression_aborts(monkeypatch, tmp_path):
     """When auxiliary compression's summary LLM call fails, the compressor
-    inserts a static fallback and the dropped turns are unrecoverable.
-    Gateway must surface a visible ⚠️ warning to the user, including
-    thread_id metadata so it lands in the originating topic/thread."""
+    ABORTS — returns messages unchanged, sets _last_compress_aborted=True,
+    and drops nothing.  Gateway must surface a visible ⚠️ warning to the
+    user (including thread_id metadata so it lands in the originating
+    topic/thread) saying the conversation is unchanged and how to retry."""
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
@@ -415,23 +415,24 @@ async def test_session_hygiene_warns_user_when_summary_generation_fails(monkeypa
             self.shutdown_memory_provider = MagicMock()
             self.close = MagicMock()
             # Simulate a compressor that hit summary-generation failure
-            # and inserted the static fallback placeholder.
+            # and ABORTED — no fallback inserted, no messages dropped.
             self.context_compressor = SimpleNamespace(
-                _last_summary_fallback_used=True,
-                _last_summary_dropped_count=42,
+                _last_compress_aborted=True,
+                _last_summary_fallback_used=False,
+                _last_summary_dropped_count=0,
                 _last_summary_error="404 model not found: gemini-3-flash-preview",
             )
             type(self).last_instance = self
 
         def _compress_context(self, messages, *_args, **_kwargs):
-            self.session_id = f"{self.session_id}_compressed"
-            return ([{"role": "assistant", "content": "compressed"}], None)
+            # Abort path: messages preserved unchanged, session NOT rotated.
+            return (messages, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = FakeCompressAgentWithSummaryFailure
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -494,16 +495,17 @@ async def test_session_hygiene_warns_user_when_summary_generation_fails(monkeypa
     result = await runner._handle_message(event)
 
     assert result == "ok"
-    # The compressor reported summary-failure → exactly one warning
-    # message must have been delivered to the user.
-    warning_messages = [s for s in adapter.sent if "Context compression summary failed" in s["content"]]
+    # The compressor reported abort → exactly one warning message must
+    # have been delivered to the user.
+    warning_messages = [s for s in adapter.sent if "Context compression aborted" in s["content"]]
     assert len(warning_messages) == 1, (
-        f"Expected 1 compression-failure warning, got {len(warning_messages)}: {adapter.sent}"
+        f"Expected 1 compression-aborted warning, got {len(warning_messages)}: {adapter.sent}"
     )
     warn = warning_messages[0]
-    # Warning must include the dropped count and the underlying error.
-    assert "42" in warn["content"]
+    # Warning must include the underlying error and tell the user nothing
+    # was dropped.
     assert "404" in warn["content"]
+    assert "No messages were dropped" in warn["content"]
     # Warning must land in the originating topic/thread, not the main channel.
     assert warn["chat_id"] == "-1001"
     assert warn["metadata"] == {"thread_id": "17585"}
@@ -550,7 +552,7 @@ async def test_session_hygiene_informs_user_when_aux_model_fails_but_recovers(mo
     fake_run_agent.AIAgent = FakeCompressAgentWithAuxRecovery
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -677,7 +679,7 @@ async def test_session_hygiene_honors_configurable_hard_message_limit(
         "  hygiene_hard_message_limit: 10\n"
     )
 
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()
@@ -782,7 +784,7 @@ async def test_session_hygiene_default_hard_message_limit_does_not_fire_at_12_me
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     # No config.yaml — use defaults (hard_limit=400)
-    gateway_run = importlib.import_module("gateway.run")
+    gateway_run = importlib.import_module("hermes_gateway.runner")
     GatewayRunner = gateway_run.GatewayRunner
 
     adapter = HygieneCaptureAdapter()

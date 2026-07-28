@@ -13,8 +13,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform
-from gateway.run import GatewayRunner
+from hermes_gateway.config import Platform
+from hermes_gateway.voice_runtime import GatewayVoiceService, voice_runtime_for
+from hermes_gateway.runner import GatewayRunner
 
 
 class TestVoiceKeyHelper:
@@ -23,16 +24,16 @@ class TestVoiceKeyHelper:
     def test_voice_key_format(self):
         """_voice_key returns 'platform:chat_id' format."""
         runner = _make_runner()
-        assert runner._voice_key(Platform.TELEGRAM, "123") == "telegram:123"
-        assert runner._voice_key(Platform.SLACK, "456") == "slack:456"
-        assert runner._voice_key(Platform.DISCORD, "789") == "discord:789"
+        assert voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123") == "telegram:123"
+        assert voice_runtime_for(runner).voice_key(Platform.SLACK, "456") == "slack:456"
+        assert voice_runtime_for(runner).voice_key(Platform.DISCORD, "789") == "discord:789"
 
     def test_voice_key_different_platforms_same_chat_id(self):
         """Same chat_id on different platforms yields different keys."""
         runner = _make_runner()
-        key_telegram = runner._voice_key(Platform.TELEGRAM, "123")
-        key_slack = runner._voice_key(Platform.SLACK, "123")
-        key_discord = runner._voice_key(Platform.DISCORD, "123")
+        key_telegram = voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123")
+        key_slack = voice_runtime_for(runner).voice_key(Platform.SLACK, "123")
+        key_discord = voice_runtime_for(runner).voice_key(Platform.DISCORD, "123")
         assert key_telegram != key_slack
         assert key_slack != key_discord
         assert key_telegram == "telegram:123"
@@ -48,18 +49,18 @@ class TestVoiceModePlatformIsolation:
         runner = _make_runner()
 
         # Enable voice mode for Telegram chat '123'
-        runner._voice_mode[runner._voice_key(Platform.TELEGRAM, "123")] = "all"
+        runner._voice_mode[voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123")] = "all"
         # Enable voice mode for Slack chat '123' to a different mode
-        runner._voice_mode[runner._voice_key(Platform.SLACK, "123")] = "voice_only"
+        runner._voice_mode[voice_runtime_for(runner).voice_key(Platform.SLACK, "123")] = "voice_only"
 
         # Verify they are independent
-        assert runner._voice_mode.get(runner._voice_key(Platform.TELEGRAM, "123")) == "all"
-        assert runner._voice_mode.get(runner._voice_key(Platform.SLACK, "123")) == "voice_only"
+        assert runner._voice_mode.get(voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123")) == "all"
+        assert runner._voice_mode.get(voice_runtime_for(runner).voice_key(Platform.SLACK, "123")) == "voice_only"
 
         # Disabling Telegram should not affect Slack
-        runner._voice_mode[runner._voice_key(Platform.TELEGRAM, "123")] = "off"
-        assert runner._voice_mode.get(runner._voice_key(Platform.TELEGRAM, "123")) == "off"
-        assert runner._voice_mode.get(runner._voice_key(Platform.SLACK, "123")) == "voice_only"
+        runner._voice_mode[voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123")] = "off"
+        assert runner._voice_mode.get(voice_runtime_for(runner).voice_key(Platform.TELEGRAM, "123")) == "off"
+        assert runner._voice_mode.get(voice_runtime_for(runner).voice_key(Platform.SLACK, "123")) == "voice_only"
 
 
 class TestLegacyKeyMigration:
@@ -81,9 +82,9 @@ class TestLegacyKeyMigration:
             voice_path = Path(tmpdir) / "gateway_voice_mode.json"
             voice_path.write_text(json.dumps(legacy_data))
 
-            with patch.object(runner, "_VOICE_MODE_PATH", voice_path):
-                with patch("gateway.run.logger") as mock_logger:
-                    result = runner._load_voice_modes()
+            runner._VOICE_MODE_PATH = voice_path
+            with patch("hermes_gateway.voice_runtime.logger") as mock_logger:
+                result = voice_runtime_for(runner).load_voice_modes()
 
             # Legacy keys without ':' should be skipped
             assert "123" not in result
@@ -109,8 +110,8 @@ class TestLegacyKeyMigration:
             voice_path = Path(tmpdir) / "gateway_voice_mode.json"
             voice_path.write_text(json.dumps(persisted_data))
 
-            with patch.object(runner, "_VOICE_MODE_PATH", voice_path):
-                result = runner._load_voice_modes()
+            runner._VOICE_MODE_PATH = voice_path
+            result = voice_runtime_for(runner).load_voice_modes()
 
         assert result.get("telegram:123") == "all"
         assert result.get("slack:456") == "voice_only"
@@ -130,8 +131,8 @@ class TestLegacyKeyMigration:
             voice_path = Path(tmpdir) / "gateway_voice_mode.json"
             voice_path.write_text(json.dumps(data))
 
-            with patch.object(runner, "_VOICE_MODE_PATH", voice_path):
-                result = runner._load_voice_modes()
+            runner._VOICE_MODE_PATH = voice_path
+            result = voice_runtime_for(runner).load_voice_modes()
 
         assert result.get("telegram:123") == "all"
         assert "telegram:456" not in result
@@ -158,7 +159,7 @@ class TestSyncVoiceModeStateToAdapter:
         mock_adapter.platform = Platform.TELEGRAM
         mock_adapter._auto_tts_disabled_chats = set()
 
-        runner._sync_voice_mode_state_to_adapter(mock_adapter)
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter(mock_adapter)
 
         # Only telegram:123 should be in disabled_chats (mode="off" for telegram)
         assert mock_adapter._auto_tts_disabled_chats == {"123"}
@@ -175,7 +176,7 @@ class TestSyncVoiceModeStateToAdapter:
         mock_adapter.platform = Platform.TELEGRAM
         mock_adapter._auto_tts_disabled_chats = {"old_chat_id", "another_old"}
 
-        runner._sync_voice_mode_state_to_adapter(mock_adapter)
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter(mock_adapter)
 
         # Old entries should be cleared
         assert mock_adapter._auto_tts_disabled_chats == {"123"}
@@ -189,7 +190,7 @@ class TestSyncVoiceModeStateToAdapter:
         mock_adapter.platform = None
         mock_adapter._auto_tts_disabled_chats = {"old"}
 
-        runner._sync_voice_mode_state_to_adapter(mock_adapter)
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter(mock_adapter)
 
         # disabled_chats should not be modified
         assert mock_adapter._auto_tts_disabled_chats == {"old"}
@@ -202,7 +203,7 @@ class TestSyncVoiceModeStateToAdapter:
         mock_adapter = MagicMock(spec=[])  # No _auto_tts_disabled_chats attribute
 
         # Should not raise
-        runner._sync_voice_mode_state_to_adapter(mock_adapter)
+        voice_runtime_for(runner).sync_voice_mode_state_to_adapter(mock_adapter)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +212,7 @@ class TestSyncVoiceModeStateToAdapter:
 
 def _make_runner() -> GatewayRunner:
     """Create a minimal GatewayRunner for testing."""
-    with patch("gateway.run.GatewayRunner._load_voice_modes", return_value={}):
+    with patch("hermes_gateway.voice_runtime.GatewayVoiceService.load_voice_modes", return_value={}):
         runner = GatewayRunner.__new__(GatewayRunner)
         runner._voice_mode = {}
         runner.adapters = {}

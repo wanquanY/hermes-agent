@@ -21,8 +21,8 @@ from unittest.mock import patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, SessionResetPolicy
-from gateway.session import SessionEntry, SessionStore
+from hermes_gateway.config import GatewayConfig, Platform, SessionResetPolicy
+from hermes_gateway.session import SessionEntry, SessionStore
 
 
 def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
@@ -31,7 +31,7 @@ def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
         default_reset_policy=SessionResetPolicy(mode="none"),
         session_store_max_age_days=max_age_days,
     )
-    with patch("gateway.session.SessionStore._ensure_loaded"):
+    with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(
             sessions_dir=tmp_path,
             config=config,
@@ -121,7 +121,7 @@ class TestPruneBasics:
 
         The callback is keyed by session_key — matching what
         process_registry.has_active_for_session() actually consumes in
-        gateway/run.py.  Prior to the fix this test passed the callback a
+        hermes_gateway/runner.py.  Prior to the fix this test passed the callback a
         session_id, which silently matched an implementation bug where
         prune_old_entries was also passing session_id; real-world usage
         (via process_registry) takes a session_key and never matched, so
@@ -173,7 +173,7 @@ class TestPruneBasics:
         store._entries["fresh2"] = _entry("fresh2", age_days=2)
 
         save_calls = []
-        store._save = lambda: save_calls.append(1)
+        store._write_index_snapshot = lambda *_args: save_calls.append(1)
 
         assert store.prune_old_entries(max_age_days=90) == 0
         assert save_calls == []
@@ -184,7 +184,7 @@ class TestPruneBasics:
         store._entries["fresh"] = _entry("fresh", age_days=1)
 
         save_calls = []
-        store._save = lambda: save_calls.append(1)
+        store._write_index_snapshot = lambda *_args: save_calls.append(1)
 
         store.prune_old_entries(max_age_days=90)
         assert save_calls == [1]

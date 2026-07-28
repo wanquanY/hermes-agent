@@ -6,7 +6,7 @@ When ``PRAGMA journal_mode=WAL`` raises ``OperationalError("locking protocol")``
 
 Without this fallback, users on NFS-mounted ``HERMES_HOME`` silently lose
 ``/resume``, ``/title``, ``/history``, ``/branch``, session search, and the
-kanban dispatcher — because ``SessionDB()`` init propagates the error and
+kanban dispatcher - because session-store initialization propagates the error and
 every caller swallows it, leaving ``_session_db = None``.
 
 See: https://www.sqlite.org/wal.html — "WAL does not work over a network
@@ -18,13 +18,14 @@ from unittest.mock import patch
 
 import pytest
 
-import hermes_state
-from hermes_state import (
-    SessionDB,
-    apply_wal_with_fallback,
+from hermes_agent.composition.cli_session_store import open_cli_session_store
+from hermes_agent.storage import session_store_health
+from hermes_agent.storage.session_store_health import (
     format_session_db_unavailable,
     get_last_init_error,
 )
+from hermes_agent.storage.sqlite_wal import apply_wal_with_fallback
+from hermes_agent.storage.sqlite_wal import wal_fallback_warned_paths
 
 
 # ``sqlite3.Connection.execute`` is a C-level slot and can't be monkeypatched
@@ -58,17 +59,17 @@ def _open_blocking(path, reason="locking protocol", **kwargs):
 @pytest.fixture(autouse=True)
 def _reset_last_init_error():
     """Reset the module-global last-error before and after each test."""
-    hermes_state._set_last_init_error(None)
+    session_store_health.set_last_init_error(None)
     yield
-    hermes_state._set_last_init_error(None)
+    session_store_health.set_last_init_error(None)
 
 
 @pytest.fixture(autouse=True)
 def _reset_wal_fallback_warned_paths():
     """Reset the WAL-fallback warned-paths set so dedup doesn't leak between tests."""
-    hermes_state._wal_fallback_warned_paths.clear()
+    wal_fallback_warned_paths.clear()
     yield
-    hermes_state._wal_fallback_warned_paths.clear()
+    wal_fallback_warned_paths.clear()
 
 
 class TestApplyWalWithFallback:
@@ -84,7 +85,7 @@ class TestApplyWalWithFallback:
     def test_falls_back_to_delete_on_locking_protocol(self, tmp_path, caplog):
         """NFS-style ``locking protocol`` error → DELETE mode + one WARNING."""
         conn, _ = _open_blocking(tmp_path / "nfs.db", isolation_level=None)
-        with caplog.at_level("WARNING", logger="hermes_state"):
+        with caplog.at_level("WARNING", logger="hermes_agent.storage.sqlite_wal"):
             mode = apply_wal_with_fallback(conn, db_label="test.db")
 
         assert mode == "delete"
@@ -139,7 +140,7 @@ class TestApplyWalWithFallback:
         on every kb.connect() call; without dedup, errors.log fills with
         hundreds of identical warnings per hour.
         """
-        with caplog.at_level("WARNING", logger="hermes_state"):
+        with caplog.at_level("WARNING", logger="hermes_agent.storage.sqlite_wal"):
             # Three separate connections to "the same DB" via the same label
             for i in range(3):
                 conn, _ = _open_blocking(
@@ -161,7 +162,7 @@ class TestApplyWalWithFallback:
 
     def test_warning_fires_independently_per_db_label(self, tmp_path, caplog):
         """Different db_labels each get their own one warning (not globally dedup'd)."""
-        with caplog.at_level("WARNING", logger="hermes_state"):
+        with caplog.at_level("WARNING", logger="hermes_agent.storage.sqlite_wal"):
             conn1, _ = _open_blocking(tmp_path / "a.db", isolation_level=None)
             apply_wal_with_fallback(conn1, db_label="state.db")
             conn1.close()
@@ -182,17 +183,17 @@ class TestApplyWalWithFallback:
 
 class TestGetLastInitError:
     def test_none_on_successful_init(self, tmp_path):
-        """Happy-path SessionDB init does NOT clear a stale error from a prior thread.
+        """A successful store open does not clear a stale error from another thread.
 
         We deliberately don't clear on success so that in multi-threaded
-        callers (gateway / web_server per-request SessionDB()), a concurrent
+        callers (gateway / web_server per-request store opens), a concurrent
         successful open racing past a different thread's failure won't
         erase the cause string the failing thread's /resume is about to
         format.  The caller or test fixture is responsible for explicitly
         calling _set_last_init_error(None) to reset.
         """
         # Autouse fixture starts at None — success-path leaves it None
-        db = SessionDB(db_path=tmp_path / "ok.db")
+        db = open_cli_session_store(tmp_path / "ok.db")
         try:
             assert get_last_init_error() is None
         finally:
@@ -205,21 +206,23 @@ class TestGetLastInitError:
         thread B succeeds concurrently.  thread A's /resume handler must
         still see A's cause — not B's None.
         """
-        hermes_state._set_last_init_error("OperationalError: locking protocol")
+        session_store_health.set_last_init_error(
+            "OperationalError: locking protocol"
+        )
         # Now a "successful" init happens on another path — must NOT clear
-        db = SessionDB(db_path=tmp_path / "ok2.db")
+        db = open_cli_session_store(tmp_path / "ok2.db")
         try:
             assert get_last_init_error() == "OperationalError: locking protocol"
         finally:
             db.close()
 
     def test_captures_cause_on_failed_init(self, tmp_path):
-        """When SessionDB() raises, the cause is preserved for slash commands.
+        """When canonical store bootstrap raises, preserve the cause for callers.
 
         Simulates a filesystem where BOTH WAL and DELETE journal modes fail —
         e.g. a read-only mount where no ``PRAGMA journal_mode=X`` works.  The
         fallback tries DELETE and also gets rejected; the exception bubbles
-        out of ``SessionDB.__init__`` and the cause is captured.
+        out of the canonical connection bootstrap and the cause is captured.
         """
         target = tmp_path / "broken.db"
         real_connect = sqlite3.connect
@@ -233,11 +236,19 @@ class TestGetLastInitError:
                 return super().execute(sql, *args, **kwargs)
 
         def gated_connect(*args, **kwargs):
-            return real_connect(str(target), factory=_BothPragmasFailConnection, **kwargs)
+            kwargs.pop("factory", None)
+            return real_connect(
+                str(target),
+                factory=_BothPragmasFailConnection,
+                **kwargs,
+            )
 
-        with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
+        with patch(
+            "hermes_agent.composition.session_repository_db.sqlite3.connect",
+            side_effect=gated_connect,
+        ):
             with pytest.raises(sqlite3.OperationalError):
-                SessionDB(db_path=target)
+                open_cli_session_store(target)
 
         cause = get_last_init_error()
         assert cause is not None
@@ -248,12 +259,14 @@ class TestGetLastInitError:
 class TestFormatSessionDbUnavailable:
     def test_bare_message_when_no_cause(self):
         """No init error recorded → generic message."""
-        hermes_state._set_last_init_error(None)
+        session_store_health.set_last_init_error(None)
         assert format_session_db_unavailable() == "Session database not available."
 
     def test_includes_cause(self):
         """Cause is surfaced for slash-command error strings."""
-        hermes_state._set_last_init_error("OperationalError: generic SQLite error")
+        session_store_health.set_last_init_error(
+            "OperationalError: generic SQLite error"
+        )
         msg = format_session_db_unavailable()
         assert "generic SQLite error" in msg
         assert msg.startswith("Session database not available:")
@@ -261,7 +274,9 @@ class TestFormatSessionDbUnavailable:
 
     def test_adds_nfs_hint_for_locking_protocol(self):
         """Locking-protocol cause gets an NFS/SMB pointer for the user."""
-        hermes_state._set_last_init_error("OperationalError: locking protocol")
+        session_store_health.set_last_init_error(
+            "OperationalError: locking protocol"
+        )
         msg = format_session_db_unavailable()
         assert "locking protocol" in msg
         assert "NFS/SMB" in msg
@@ -269,14 +284,16 @@ class TestFormatSessionDbUnavailable:
 
     def test_custom_prefix(self):
         """Callers can customize the prefix for context-specific messages."""
-        hermes_state._set_last_init_error("OperationalError: locking protocol")
+        session_store_health.set_last_init_error(
+            "OperationalError: locking protocol"
+        )
         msg = format_session_db_unavailable(prefix="Cannot /resume")
         assert msg.startswith("Cannot /resume:")
 
 
-class TestSessionDbUsesWalFallback:
-    def test_sessiondb_works_when_wal_unavailable(self, tmp_path):
-        """E2E: SessionDB initializes and performs a write on a WAL-blocked FS."""
+class TestSessionStoreUsesWalFallback:
+    def test_session_store_works_when_wal_unavailable(self, tmp_path):
+        """The canonical store remains writable when WAL is unavailable."""
         target = tmp_path / "nfs_style.db"
 
         real_connect = sqlite3.connect
@@ -284,19 +301,23 @@ class TestSessionDbUsesWalFallback:
         factory = _make_blocking_factory("locking protocol", attempts)
 
         def gated_connect(*args, **kwargs):
+            kwargs.pop("factory", None)
             return real_connect(str(target), factory=factory, **kwargs)
 
-        with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
-            db = SessionDB(db_path=target)
+        with patch(
+            "hermes_agent.composition.session_repository_db.sqlite3.connect",
+            side_effect=gated_connect,
+        ):
+            db = open_cli_session_store(target)
 
         try:
             # WAL was attempted and rejected — fallback kicked in
             assert attempts[0] >= 1, (
                 "WAL pragma was never executed — check the patch target"
             )
-            # SessionDB is usable end-to-end: create a session, read it back
-            db.create_session(session_id="s1", source="cli", model="test")
-            sess = db.get_session("s1")
+            # The canonical store is usable end-to-end.
+            db.sessions.create(session_id="s1", source="cli", model="test")
+            sess = db.sessions.get("s1")
             assert sess is not None
             assert sess["source"] == "cli"
             # No init error was recorded since init succeeded via the fallback

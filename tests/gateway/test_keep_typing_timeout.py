@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     Platform,
     PlatformConfig,

@@ -7,12 +7,16 @@ import argparse
 import contextlib
 import io
 import json
+import logging
 import os
 import sys
 
 import cli as cli_mod
 from cli import HermesCLI
 from rich.console import Console
+from tui_gateway._stdin_recovery import iter_stdin_lines
+
+logger = logging.getLogger(__name__)
 
 
 def _run(cli: HermesCLI, command: str) -> str:
@@ -52,10 +56,22 @@ def main():
     os.environ["HERMES_SESSION_KEY"] = args.session_key
     os.environ["HERMES_INTERACTIVE"] = "1"
 
+    # Slash workers are profile-local processes and must discover against
+    # their own HERMES_HOME before /tools takes its registry snapshot.
+    from hermes_cli.mcp_startup import start_background_mcp_discovery
+
+    start_background_mcp_discovery(
+        logger=logger,
+        thread_name="slash-worker-mcp-discovery",
+    )
+
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
 
-    for raw in sys.stdin:
+    def _log_stdin(reason: str) -> None:
+        print(f"[slash-worker] {reason}", file=sys.stderr, flush=True)
+
+    for raw in iter_stdin_lines(sys.stdin, log=_log_stdin):
         line = raw.strip()
         if not line:
             continue

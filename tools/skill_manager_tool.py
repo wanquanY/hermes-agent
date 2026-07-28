@@ -38,14 +38,51 @@ import os
 import re
 import shutil
 import tempfile
+import contextvars as _ctxvars
 from pathlib import Path
-from hermes_constants import get_hermes_home, display_hermes_home
+from hermes_constants import ensure_directory_path, get_hermes_home, display_hermes_home
 from typing import Dict, Any, Optional, Tuple
 
 from utils import atomic_replace, is_truthy_value
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
+
+_background_review_read_paths: "_ctxvars.ContextVar[frozenset[str]]" = (
+    _ctxvars.ContextVar("background_review_read_paths", default=frozenset())
+)
+
+
+def mark_background_review_skill_read(path: Path) -> None:
+    """Record an exact skill file read by the active review fork."""
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return
+    except Exception:
+        return
+
+    try:
+        resolved = str(path.resolve())
+    except Exception:
+        resolved = str(path)
+    current = set(_background_review_read_paths.get())
+    current.add(resolved)
+    _background_review_read_paths.set(frozenset(current))
+
+
+def _background_review_has_read(path: Path) -> bool:
+    try:
+        resolved = str(path.resolve())
+    except Exception:
+        resolved = str(path)
+    return resolved in _background_review_read_paths.get()
+
+
+def _reset_background_review_read_marks() -> None:
+    """Clear read-before-write evidence for the current review context."""
+    _background_review_read_paths.set(frozenset())
 
 # Import security scanner — external hub installs always get scanned;
 # agent-created skills only get scanned when skills.guard_agent_created is on.
@@ -134,6 +171,80 @@ def _containing_skills_root(skill_path: Path) -> Path:
     return SKILLS_DIR
 
 
+def _is_path_redirect(path: Path) -> bool:
+    """True when ``path`` is a symlink or (on Windows) a directory junction.
+
+    Either form lets a poisoned skills tree redirect a subsequent
+    ``shutil.rmtree`` to content outside the skills root. ``is_junction``
+    only exists on Python 3.12+ Windows; gate with ``hasattr``.
+    """
+    try:
+        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    except OSError:
+        return False
+
+
+def _validate_delete_target(skill_dir: Path) -> Optional[str]:
+    """Last-line guard before ``shutil.rmtree(skill_dir)`` in ``_delete_skill``.
+
+    ``_find_skill`` already restricts ``skill_dir`` to a real ``SKILL.md``
+    parent discovered by walking the skills roots, so the agent cannot inject
+    an arbitrary path the way Kilo Code's HTTP endpoint could (their issue
+    #11227: a built-in-skill sentinel resolved to the server cwd and a
+    recursive delete wiped the user's entire working directory). This is the
+    matching defense-in-depth for our agent-facing ``skill_manage`` delete
+    path: even if discovery or a poisoned tree hands us a bad directory, never
+    recursively delete
+
+      1. a path that is not strictly *inside* one of the known skills roots,
+      2. a skills root itself (would wipe every installed skill), or
+      3. a directory reached via a symlink / junction (``rmtree`` would follow
+         it into content outside the skills tree).
+
+    Returns an error string to refuse on, or ``None`` when the delete is safe.
+    """
+    from agent.skill_utils import get_all_skills_dirs
+
+    # (3) Reject symlink/junction redirects on the skill directory itself.
+    if _is_path_redirect(skill_dir):
+        return (
+            f"Refusing to delete '{skill_dir}': the skill directory is a "
+            f"symlink/junction. Remove the link target manually if intended."
+        )
+
+    try:
+        resolved = skill_dir.resolve()
+    except OSError as exc:
+        return f"Refusing to delete '{skill_dir}': could not resolve path ({exc})."
+
+    roots = []
+    for root in get_all_skills_dirs():
+        try:
+            roots.append(root.resolve())
+        except OSError:
+            continue
+
+    for root in roots:
+        # (2) Never rmtree a skills root itself.
+        if resolved == root:
+            return (
+                f"Refusing to delete '{skill_dir}': resolves to the skills root "
+                f"itself, which would remove every installed skill."
+            )
+        # (1) Must be strictly inside a known root.
+        try:
+            rel = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if rel.parts:  # at least one component below the root
+            return None
+
+    return (
+        f"Refusing to delete '{skill_dir}': path does not resolve inside any "
+        f"known skills root."
+    )
+
+
 def _pinned_guard(name: str) -> Optional[str]:
     """Return a refusal message if *name* is pinned, else None.
 
@@ -159,6 +270,145 @@ def _pinned_guard(name: str) -> Optional[str]:
     except Exception:
         logger.debug("pinned-guard lookup failed for %s", name, exc_info=True)
     return None
+
+
+def _background_review_write_guard(
+    name: str,
+    skill_dir: Path,
+    action: str,
+) -> Optional[Dict[str, Any]]:
+    """Restrict autonomous review writes to local curator-owned skills.
+
+    Foreground, user-directed mutations retain their existing behavior. The
+    background review has no user present to consent, so pinned, external,
+    bundled, hub-installed, and load-bearing built-in skills are read-only.
+    """
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return None
+    except Exception:
+        return None
+
+    try:
+        from tools import skill_usage
+
+        if skill_usage.get_record(name).get("pinned"):
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing background curator {action} for pinned skill "
+                    f"'{name}': pinned skills are off-limits to autonomous "
+                    "maintenance. Ask the user to unpin it before review."
+                ),
+            }
+    except Exception:
+        logger.debug("background pinned guard failed for %s", name, exc_info=True)
+
+    try:
+        from agent.skill_utils import is_external_skill_path
+
+        if is_external_skill_path(skill_dir):
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing background curator {action} for skill '{name}': "
+                    "the skill lives in skills.external_dirs and is read-only "
+                    "to autonomous curation."
+                ),
+            }
+    except Exception:
+        logger.debug("background external guard failed for %s", name, exc_info=True)
+
+    try:
+        from tools import skill_usage
+
+        if skill_usage.is_protected_builtin(name):
+            owner = "protected built-in"
+        elif skill_usage.is_hub_installed(name):
+            owner = "hub-installed"
+        elif skill_usage.is_bundled(name):
+            owner = "bundled"
+        else:
+            owner = None
+        if owner:
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing background curator {action} for {owner} skill "
+                    f"'{name}'."
+                ),
+            }
+    except Exception:
+        logger.debug("background ownership guard failed for %s", name, exc_info=True)
+    return None
+
+
+def _background_review_read_before_write_guard(
+    name: str,
+    target: Path,
+    action: str,
+    file_label: str,
+) -> Optional[Dict[str, Any]]:
+    """Require autonomous review to read the exact target before writing."""
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return None
+    except Exception:
+        return None
+
+    if _background_review_has_read(target):
+        return None
+    return {
+        "success": False,
+        "error": (
+            f"Refusing background curator {action} for skill '{name}': the "
+            f"current {file_label} content has not been loaded in this review "
+            "turn. Call skill_view for that exact file, then retry."
+        ),
+        "_read_before_write_required": True,
+    }
+
+
+def _background_review_preflight(
+    action: str, name: str
+) -> Optional[Dict[str, Any]]:
+    """Apply ownership checks before any mutation side effects or gates."""
+    if action not in {"edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    existing = _find_skill(name)
+    if not existing:
+        return None
+    return _background_review_write_guard(name, existing["path"], action)
+
+
+def _curator_consolidation_delete_guard(
+    name: str, absorbed_into: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Fail closed on autonomous deletes without consolidation evidence."""
+    try:
+        from tools.skill_provenance import is_background_review
+
+        if not is_background_review():
+            return None
+    except Exception:
+        return None
+
+    if isinstance(absorbed_into, str) and absorbed_into.strip():
+        return None
+    return {
+        "success": False,
+        "error": (
+            f"Refusing background curator delete of skill '{name}': the review "
+            "may only archive a skill after its content was absorbed into an "
+            "existing umbrella declared with absorbed_into. Deterministic "
+            "staleness pruning is handled separately."
+        ),
+        "_fail_closed": True,
+    }
 
 
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
@@ -283,12 +533,12 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
     """
-    from agent.skill_utils import EXCLUDED_SKILL_DIRS, get_all_skills_dirs
+    from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
         for skill_md in skills_dir.rglob("SKILL.md"):
-            if any(part in EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            if is_excluded_skill_path(skill_md):
                 continue
             if skill_md.parent.name == name:
                 return {"path": skill_md.parent}
@@ -307,9 +557,18 @@ def _validate_file_path(file_path: str) -> Optional[str]:
 
     normalized = Path(file_path)
 
-    # Prevent path traversal
+    # Prevent path traversal (checked before any allow-listing so the SKILL.md
+    # exception below can never be reached by a traversal-laden path).
     if has_traversal_component(file_path):
         return "Path traversal ('..') is not allowed."
+
+    # SKILL.md is the canonical skill file and lives at the skill root, not
+    # under an allowed subdirectory. Accept its two natural spellings —
+    # 'SKILL.md' and '<skill-name>/SKILL.md' — so callers can target the main
+    # file. The traversal guard above still applies, so this can't escape.
+    if normalized.parts and normalized.name == "SKILL.md":
+        if len(normalized.parts) == 1 or len(normalized.parts) == 2:
+            return None
 
     # Must be under an allowed subdirectory
     if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
@@ -347,7 +606,7 @@ def _atomic_write_text(file_path: Path, content: str, encoding: str = "utf-8") -
         content: Content to write
         encoding: Text encoding (default: utf-8)
     """
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(file_path.parent)
     fd, temp_path = tempfile.mkstemp(
         dir=str(file_path.parent),
         prefix=f".{file_path.name}.tmp.",
@@ -380,6 +639,13 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     err = _validate_category(category)
     if err:
         return {"success": False, "error": err}
+    try:
+        from tools.dovie_skill_categories import validate_dovie_skill_category
+        err = validate_dovie_skill_category(category)
+        if err:
+            return {"success": False, "error": err}
+    except Exception as exc:
+        return {"success": False, "error": f"Dovie skill category validation failed: {exc}"}
 
     # Validate content
     err = _validate_frontmatter(content)
@@ -400,7 +666,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(skill_dir)
 
     # Write SKILL.md atomically
     skill_md = skill_dir / "SKILL.md"
@@ -440,8 +706,16 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Use skills_list() to see available skills."}
+    guard = _background_review_write_guard(name, existing["path"], "edit")
+    if guard:
+        return guard
 
     skill_md = existing["path"] / "SKILL.md"
+    read_guard = _background_review_read_before_write_guard(
+        name, skill_md, "edit", "SKILL.md"
+    )
+    if read_guard:
+        return read_guard
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
@@ -482,6 +756,9 @@ def _patch_skill(
         return {"success": False, "error": f"Skill '{name}' not found."}
 
     skill_dir = existing["path"]
+    guard = _background_review_write_guard(name, skill_dir, "patch")
+    if guard:
+        return guard
 
     if file_path:
         # Patching a supporting file
@@ -491,12 +768,22 @@ def _patch_skill(
         target, err = _resolve_skill_target(skill_dir, file_path)
         if err:
             return {"success": False, "error": err}
+        assert target is not None
     else:
         # Patching SKILL.md
         target = skill_dir / "SKILL.md"
 
     if not target.exists():
         return {"success": False, "error": f"File not found: {target.relative_to(skill_dir)}"}
+
+    read_guard = _background_review_read_before_write_guard(
+        name,
+        target,
+        "patch",
+        "SKILL.md" if not file_path else file_path,
+    )
+    if read_guard:
+        return read_guard
 
     content = target.read_text(encoding="utf-8")
 
@@ -569,14 +856,27 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
+    guard = _background_review_write_guard(name, existing["path"], "delete")
+    if guard:
+        return guard
+
+    fail_closed = _curator_consolidation_delete_guard(name, absorbed_into)
+    if fail_closed:
+        return fail_closed
 
     pinned_err = _pinned_guard(name)
     if pinned_err:
         return {"success": False, "error": pinned_err}
 
+    absorbed_target = (
+        absorbed_into.strip()
+        if absorbed_into is not None and isinstance(absorbed_into, str)
+        else ""
+    )
+    is_consolidation = bool(absorbed_target)
     # Validate absorbed_into target when declared non-empty
-    if absorbed_into is not None and isinstance(absorbed_into, str) and absorbed_into.strip():
-        target_name = absorbed_into.strip()
+    if is_consolidation:
+        target_name = absorbed_target
         if target_name == name:
             return {
                 "success": False,
@@ -594,6 +894,34 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
 
     skill_dir = existing["path"]
     skills_root = _containing_skills_root(skill_dir)
+
+    # Defense-in-depth before the recursive delete (port of Kilo Code #11240).
+    unsafe = _validate_delete_target(skill_dir)
+    if unsafe:
+        return {"success": False, "error": unsafe}
+
+    # Autonomous consolidations are recoverable. Foreground user-directed
+    # deletes retain their existing hard-delete semantics.
+    try:
+        from tools.skill_provenance import is_background_review
+
+        curator_pass = is_background_review()
+    except Exception:
+        curator_pass = False
+    if curator_pass:
+        try:
+            from tools.skill_usage import archive_skill
+
+            ok, archive_message = archive_skill(name)
+        except Exception as exc:
+            return {"success": False, "error": f"failed to archive '{name}': {exc}"}
+        if not ok:
+            return {"success": False, "error": archive_message}
+        message = f"Skill '{name}' archived ({archive_message})."
+        if is_consolidation:
+            message += f" Content absorbed into '{absorbed_target}'."
+        return {"success": True, "message": message, "_archived": True}
+
     shutil.rmtree(skill_dir)
 
     # Clean up empty category directories (don't remove the skills root itself)
@@ -602,8 +930,8 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
         parent.rmdir()
 
     message = f"Skill '{name}' deleted."
-    if absorbed_into is not None and isinstance(absorbed_into, str) and absorbed_into.strip():
-        message += f" Content absorbed into '{absorbed_into.strip()}'."
+    if is_consolidation:
+        message += f" Content absorbed into '{absorbed_target}'."
 
     return {
         "success": True,
@@ -638,11 +966,21 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Create it first with action='create'."}
+    guard = _background_review_write_guard(name, existing["path"], "write_file")
+    if guard:
+        return guard
 
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
-    target.parent.mkdir(parents=True, exist_ok=True)
+    assert target is not None
+    if target.exists():
+        read_guard = _background_review_read_before_write_guard(
+            name, target, "write_file", file_path
+        )
+        if read_guard:
+            return read_guard
+    ensure_directory_path(target.parent)
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)
@@ -674,10 +1012,14 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
         return {"success": False, "error": f"Skill '{name}' not found."}
 
     skill_dir = existing["path"]
+    guard = _background_review_write_guard(name, skill_dir, "remove_file")
+    if guard:
+        return guard
 
     target, err = _resolve_skill_target(skill_dir, file_path)
     if err:
         return {"success": False, "error": err}
+    assert target is not None
     if not target.exists():
         # List what's actually there for the model to see
         available = []
@@ -692,6 +1034,12 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
             "error": f"File '{file_path}' not found in skill '{name}'.",
             "available_files": available if available else None,
         }
+
+    read_guard = _background_review_read_before_write_guard(
+        name, target, "remove_file", file_path
+    )
+    if read_guard:
+        return read_guard
 
     target.unlink()
 
@@ -710,6 +1058,143 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 # Main entry point
 # =============================================================================
 
+# ContextVar bypass: set while replaying an already-approved staged skill write
+# so skill_manage() does not re-gate (and re-stage) it.
+_skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
+    "skill_gate_bypass", default=False
+)
+
+
+def _validate_skill_write_request(
+    action: str,
+    name: str,
+    *,
+    content: Optional[str],
+    category: Optional[str],
+    file_path: Optional[str],
+    file_content: Optional[str],
+    old_string: Optional[str],
+    new_string: Optional[str],
+) -> Optional[str]:
+    """Reject structurally invalid mutations before they enter the queue."""
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    error = _validate_name(name)
+    if error:
+        return error
+    if action in {"create", "edit"}:
+        if not content:
+            return f"content is required for '{action}'. Provide the full SKILL.md text."
+        error = _validate_frontmatter(content) or _validate_content_size(content)
+        if error:
+            return error
+    if action == "create":
+        error = _validate_category(category)
+        if error:
+            return error
+    if action == "patch":
+        if not old_string:
+            return "old_string is required for 'patch'. Provide the text to find."
+        if new_string is None:
+            return "new_string is required for 'patch'. Use empty string to delete matched text."
+        if file_path:
+            error = _validate_file_path(file_path)
+            if error:
+                return error
+    if action == "write_file":
+        if not file_path:
+            return "file_path is required for 'write_file'. Example: 'references/api-guide.md'"
+        if file_content is None:
+            return "file_content is required for 'write_file'."
+        error = _validate_file_path(file_path)
+        if error:
+            return error
+    if action == "remove_file":
+        if not file_path:
+            return "file_path is required for 'remove_file'."
+        error = _validate_file_path(file_path)
+        if error:
+            return error
+    return None
+
+
+def _apply_skill_write_gate(action, name, **payload_kwargs):
+    """Evaluate the skill write gate before any persistent mutation.
+
+    Returns a JSON tool-result string when the write is staged or blocked, or
+    ``None`` when the caller may perform the real write. Approved pending
+    records bypass the gate exactly once through ``_skill_gate_bypass``.
+    """
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    if _skill_gate_bypass.get():
+        return None
+
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        logger.exception("skill write-approval module unavailable; preserving legacy write behavior")
+        return None
+
+    decision = wa.evaluate_gate(wa.SKILLS)
+    if decision.allow:
+        return None
+    if decision.blocked:
+        return tool_error(decision.message, success=False)
+
+    payload = {"action": action, "name": name}
+    payload.update({key: value for key, value in payload_kwargs.items() if value is not None})
+    gist = wa.skill_gist(
+        action,
+        name,
+        content=payload_kwargs.get("content") or "",
+        file_path=payload_kwargs.get("file_path") or "",
+        old_string=payload_kwargs.get("old_string") or "",
+        new_string=payload_kwargs.get("new_string") or "",
+    )
+    try:
+        record = wa.stage_write(
+            wa.SKILLS,
+            payload,
+            summary=gist,
+            origin=wa.current_origin(),
+        )
+    except Exception as exc:
+        return tool_error(
+            f"Skill write was not saved: approval staging failed ({exc}).",
+            success=False,
+        )
+    return json.dumps(
+        {
+            "success": True,
+            "staged": True,
+            "pending_id": record["id"],
+            "gist": gist,
+            "message": decision.message,
+        },
+        ensure_ascii=False,
+    )
+
+
+def apply_skill_pending(payload: Dict[str, Any]) -> str:
+    """Replay one approved skill write without staging it again."""
+    token = _skill_gate_bypass.set(True)
+    try:
+        return skill_manage(
+            action=payload.get("action", ""),
+            name=payload.get("name", ""),
+            content=payload.get("content"),
+            category=payload.get("category"),
+            file_path=payload.get("file_path"),
+            file_content=payload.get("file_content"),
+            old_string=payload.get("old_string"),
+            new_string=payload.get("new_string"),
+            replace_all=payload.get("replace_all", False),
+            absorbed_into=payload.get("absorbed_into"),
+        )
+    finally:
+        _skill_gate_bypass.reset(token)
+
 def skill_manage(
     action: str,
     name: str,
@@ -727,6 +1212,42 @@ def skill_manage(
 
     Returns JSON string with results.
     """
+    preflight = _background_review_preflight(action, name)
+    if preflight is not None:
+        return json.dumps(preflight, ensure_ascii=False)
+
+    validation_error = _validate_skill_write_request(
+        action,
+        name,
+        content=content,
+        category=category,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+    )
+    if validation_error:
+        return tool_error(validation_error, success=False)
+
+    # Stage structurally valid persistent mutations when approval is enabled.
+    # The action helpers intentionally validate again during approval replay so
+    # state drift (deleted target, changed patch context, new name collision)
+    # fails closed instead of applying against assumptions from staging time.
+    gate_result = _apply_skill_write_gate(
+        action,
+        name,
+        content=content,
+        category=category,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        absorbed_into=absorbed_into,
+    )
+    if gate_result is not None:
+        return gate_result
+
     if action == "create":
         if not content:
             return tool_error("content is required for 'create'. Provide the full SKILL.md text (frontmatter + body).", success=False)
@@ -783,7 +1304,10 @@ def skill_manage(
             elif action in {"patch", "edit", "write_file", "remove_file"}:
                 bump_patch(name)
             elif action == "delete":
-                forget(name)
+                # Recoverable autonomous archives retain their lifecycle
+                # record so status and restore remain coherent.
+                if not result.get("_archived"):
+                    forget(name)
         except Exception:
             pass
 
@@ -873,7 +1397,9 @@ SKILL_MANAGE_SCHEMA = {
                 "description": (
                     "Optional category/domain for organizing the skill (e.g., 'devops', "
                     "'data-science', 'mlops'). Creates a subdirectory grouping. "
-                    "Only used with 'create'."
+                    "Only used with 'create'. In Dovie runtimes this is required "
+                    "and must be one of the Dovie skill category slugs returned "
+                    "by design_agent_profile(inspect_context)."
                 )
             },
             "file_path": {

@@ -60,6 +60,17 @@ class TestSanitizeApiMessages:
         assert stub["role"] == "tool"
         assert stub["tool_call_id"] == "c2"
         assert stub["content"]
+        assert stub["effect_disposition"] == "unknown"
+
+    def test_orphaned_read_only_call_records_no_effect(self):
+        msgs = [
+            {
+                "role": "assistant",
+                "tool_calls": [assistant_dict_call("c_read", "web_search")],
+            },
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        assert out[1]["effect_disposition"] == "none"
 
     def test_clean_messages_pass_through(self):
         msgs = [

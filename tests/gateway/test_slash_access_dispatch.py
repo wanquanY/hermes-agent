@@ -1,4 +1,4 @@
-"""Integration tests for slash command access control gating in gateway/run.py.
+"""Integration tests for slash command access control gating in hermes_gateway/runner.py.
 
 Drives the real ``GatewayRunner._handle_message`` path with a stub session
 store so we exercise the actual gate inserted at the dispatch site (not a
@@ -24,9 +24,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+from hermes_gateway.voice_runtime import voice_runtime_for
+from hermes_gateway.runtime_status_command import runtime_status_command_for
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_source(
@@ -51,7 +54,7 @@ def _make_event(text: str, source: SessionSource) -> MessageEvent:
 
 def _make_runner(*, platform_extra: dict | None = None,
                  platform: Platform = Platform.DISCORD):
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -103,8 +106,8 @@ def _make_runner(*, platform_extra: dict | None = None,
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
     return runner
@@ -337,7 +340,7 @@ async def test_running_agent_fastpath_blocks_non_admin_command():
     )
     src = _make_source(user_id="999")
     # Mark the session as having an in-flight agent so the fast-path runs.
-    from gateway.session import build_session_key
+    from hermes_gateway.session import build_session_key
     sk = build_session_key(src)
     runner._running_agents[sk] = MagicMock()
     runner._running_agents_ts[sk] = 0  # not stale (epoch + small delta on this machine)
@@ -361,12 +364,12 @@ async def test_running_agent_fastpath_allows_admin_command():
         }
     )
     src = _make_source(user_id="111")  # admin
-    from gateway.session import build_session_key
+    from hermes_gateway.session import build_session_key
     sk = build_session_key(src)
     runner._running_agents[sk] = MagicMock()
     runner._running_agents_ts[sk] = 0
     # Mock the restart handler so it doesn't actually try to restart anything.
-    runner._handle_restart_command = AsyncMock(return_value="restart-handled")
+    restart_lifecycle_for(runner).handle_restart_command = AsyncMock(return_value="restart-handled")
 
     result = await runner._handle_message(_make_event("/restart", src))
     assert result == "restart-handled"
@@ -384,11 +387,13 @@ async def test_running_agent_fastpath_status_always_works():
         }
     )
     src = _make_source(user_id="999")  # non-admin
-    from gateway.session import build_session_key
+    from hermes_gateway.session import build_session_key
     sk = build_session_key(src)
     runner._running_agents[sk] = MagicMock()
     runner._running_agents_ts[sk] = 0
-    runner._handle_status_command = AsyncMock(return_value="status-handled")
+    runtime_status_command_for(runner).handle_status_command = AsyncMock(
+        return_value="status-handled"
+    )
 
     result = await runner._handle_message(_make_event("/status", src))
     assert result == "status-handled"
@@ -487,8 +492,8 @@ async def test_dm_admin_blocked_in_group_with_separate_admin_list():
 async def test_gating_isolated_per_platform():
     """When Discord is gated and Telegram isn't, the same user_id on
     Telegram must be unrestricted."""
-    from gateway.run import GatewayRunner
-    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from hermes_gateway.runner import GatewayRunner
+    from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
@@ -547,8 +552,8 @@ async def test_gating_isolated_per_platform():
     runner._show_reasoning = False
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
-    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_args, **_kwargs: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
 

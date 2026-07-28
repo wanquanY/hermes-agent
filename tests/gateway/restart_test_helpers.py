@@ -2,11 +2,13 @@ import asyncio
 from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
-from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from hermes_gateway.busy_session_runtime import busy_session_runtime_for
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
+from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+from hermes_gateway.restart_lifecycle import restart_lifecycle_for
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource
 
 
 class RestartTestAdapter(BasePlatformAdapter):
@@ -78,35 +80,16 @@ def make_restart_runner(
     runner._session_sources = OrderedDict()
     runner._session_sources_max = 512
     runner._shutdown_all_gateway_honcho = lambda: None
-    runner._update_runtime_status = MagicMock()
-    runner._queue_or_replace_pending_event = GatewayRunner._queue_or_replace_pending_event.__get__(
-        runner, GatewayRunner
-    )
     runner._session_key_for_source = GatewayRunner._session_key_for_source.__get__(
-        runner, GatewayRunner
-    )
-    runner._handle_active_session_busy_message = (
-        GatewayRunner._handle_active_session_busy_message.__get__(runner, GatewayRunner)
-    )
-    runner._handle_restart_command = GatewayRunner._handle_restart_command.__get__(
         runner, GatewayRunner
     )
     runner._handle_set_home_command = GatewayRunner._handle_set_home_command.__get__(
         runner, GatewayRunner
     )
-    runner._send_restart_notification = GatewayRunner._send_restart_notification.__get__(
-        runner, GatewayRunner
-    )
-    runner._send_home_channel_startup_notifications = (
-        GatewayRunner._send_home_channel_startup_notifications.__get__(runner, GatewayRunner)
-    )
     runner._status_action_label = GatewayRunner._status_action_label.__get__(
         runner, GatewayRunner
     )
     runner._status_action_gerund = GatewayRunner._status_action_gerund.__get__(
-        runner, GatewayRunner
-    )
-    runner._queue_during_drain_enabled = GatewayRunner._queue_during_drain_enabled.__get__(
         runner, GatewayRunner
     )
     runner._running_agent_count = GatewayRunner._running_agent_count.__get__(
@@ -124,9 +107,6 @@ def make_restart_runner(
     runner._get_cached_session_source = GatewayRunner._get_cached_session_source.__get__(
         runner, GatewayRunner
     )
-    runner._launch_detached_restart_command = GatewayRunner._launch_detached_restart_command.__get__(
-        runner, GatewayRunner
-    )
     runner.request_restart = GatewayRunner.request_restart.__get__(runner, GatewayRunner)
     runner._is_user_authorized = lambda _source: True
     runner.hooks = MagicMock()
@@ -138,6 +118,8 @@ def make_restart_runner(
 
     platform_adapter = adapter or RestartTestAdapter()
     platform_adapter.set_message_handler(AsyncMock(return_value=None))
-    platform_adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
+    platform_adapter.set_busy_session_handler(
+        busy_session_runtime_for(runner).handle_active_session_busy_message
+    )
     runner.adapters = {Platform.TELEGRAM: platform_adapter}
     return runner, platform_adapter

@@ -1,0 +1,16 @@
+[importlinter]
+root_packages =
+    hermes_agent
+
+[importlinter:contract:layered-skeleton]
+name = Hermes v3 layered skeleton
+type = layers
+layers =
+    hermes_agent.transport
+    hermes_agent.gateway
+    hermes_agent.orchestration
+    hermes_agent.composition
+    hermes_agent.application
+    hermes_agent.repositories
+    hermes_agent.storage
+    hermes_agent.domain

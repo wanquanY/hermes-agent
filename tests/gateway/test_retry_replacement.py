@@ -1,24 +1,35 @@
 """Regression tests for /retry replacement semantics."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionStore
+from hermes_gateway.config import GatewayConfig
+from hermes_gateway.conversation_editing_commands import conversation_editing_for
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionStore
+from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
+
+
+def _session_store_with_storage(tmp_path):
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    repo = SessionRepoImpl(conn)
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=repo,
+        storage_conn=conn,
+    ), repo
 
 
 @pytest.mark.asyncio
 async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
+    store, repo = _session_store_with_storage(tmp_path)
     config = GatewayConfig()
-    with patch("gateway.session.SessionStore._ensure_loaded"):
-        store = SessionStore(sessions_dir=tmp_path, config=config)
-    store._db = None
-    store._loaded = True
-
     session_id = "retry_session"
+    repo.create(SessionSpec(session_id=session_id, source="test"))
     for msg in [
         {"role": "session_meta", "tools": []},
         {"role": "user", "content": "first question"},
@@ -48,7 +59,7 @@ async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
 
     gw._handle_message = AsyncMock(side_effect=fake_handle_message)
 
-    result = await gw._handle_retry_command(
+    result = await conversation_editing_for(gw).handle_retry_command(
         MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
     )
 
@@ -90,7 +101,7 @@ async def test_gateway_retry_replays_original_text_not_retry_command(tmp_path):
 
     gw._handle_message = AsyncMock(side_effect=fake_handle_message)
 
-    await gw._handle_retry_command(
+    await conversation_editing_for(gw).handle_retry_command(
         MessageEvent(text="/retry", message_type=MessageType.TEXT, source=MagicMock())
     )
 

@@ -9,7 +9,7 @@
  *      rendered into the transcript.
  *   3. If `slash.exec` errors (command rejected, unknown, or needs client
  *      behaviour), fall back to `command.dispatch` which returns a typed
- *      directive: `exec` | `plugin` | `alias` | `skill` | `send`.
+ *      directive: `exec` | `plugin` | `alias` | `skill` | `send` | `prefill`.
  *   4. Each directive is dispatched to the appropriate callback.
  *
  * Keeping the pipeline here (instead of inline in ChatPage) lets future
@@ -28,13 +28,16 @@ export type CommandDispatchResponse =
   | { type: "exec" | "plugin"; output?: string }
   | { type: "alias"; target: string }
   | { type: "skill"; name: string; message?: string }
-  | { type: "send"; message: string };
+  | { type: "send"; message: string; notice?: string }
+  | { type: "prefill"; message: string; notice?: string };
 
 export interface SlashExecCallbacks {
   /** Render a transcript system message. */
   sys(text: string): void;
   /** Submit a user message to the agent (prompt.submit). */
   send(message: string): Promise<void> | void;
+  /** Replace the current composer text without submitting. */
+  prefill?(message: string): void;
 }
 
 export interface SlashExecOptions {
@@ -56,7 +59,7 @@ export async function executeSlash({
   command,
   sessionId,
   gw,
-  callbacks: { sys, send },
+  callbacks: { sys, send, prefill },
 }: SlashExecOptions): Promise<SlashExecResult> {
   const { name, arg } = parseSlash(command);
 
@@ -103,7 +106,7 @@ export async function executeSlash({
           command: `/${d.target}${arg ? ` ${arg}` : ""}`,
           sessionId,
           gw,
-          callbacks: { sys, send },
+          callbacks: { sys, send, prefill },
         });
 
       case "skill":
@@ -116,8 +119,24 @@ export async function executeSlash({
           return "error";
         }
         if (d.type === "skill") sys(`⚡ loading skill: ${d.name}`);
+        if (d.type === "send" && d.notice?.trim()) sys(d.notice);
         await send(msg);
         return "sent";
+      }
+
+      case "prefill": {
+        const msg = d.message ?? "";
+        if (!msg.trim()) {
+          sys(`/${name}: empty prefill`);
+          return "error";
+        }
+        if (d.notice?.trim()) sys(d.notice);
+        if (!prefill) {
+          sys(`/${name}: prefill is not available in this client`);
+          return "error";
+        }
+        prefill(msg);
+        return "done";
       }
     }
   } catch (err) {
@@ -154,7 +173,12 @@ function parseCommandDispatch(raw: unknown): CommandDispatchResponse | null {
 
     case "send":
       return typeof r.message === "string"
-        ? { type: "send", message: r.message }
+        ? { type: "send", message: r.message, notice: str(r.notice) }
+        : null;
+
+    case "prefill":
+      return typeof r.message === "string"
+        ? { type: "prefill", message: r.message, notice: str(r.notice) }
         : null;
 
     default:

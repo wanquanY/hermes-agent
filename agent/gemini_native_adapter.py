@@ -27,11 +27,17 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
+from agent.bounded_response import read_streaming_error_body
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+# Gemini native generateContent applies a small internal default when this
+# field is absent. Hermes uses None to mean "use the model ceiling", so the
+# adapter must translate None explicitly to avoid truncated tool calls.
+GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
 
 
 def is_native_gemini_base_url(base_url: str) -> bool:
@@ -412,8 +418,11 @@ def build_gemini_request(
     generation_config: Dict[str, Any] = {}
     if temperature is not None:
         generation_config["temperature"] = temperature
-    if max_tokens is not None:
-        generation_config["maxOutputTokens"] = max_tokens
+    generation_config["maxOutputTokens"] = (
+        max_tokens
+        if max_tokens is not None
+        else GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
+    )
     if top_p is not None:
         generation_config["topP"] = top_p
     if stop:
@@ -697,14 +706,18 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
     return chunks
 
 
-def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
+def gemini_http_error(
+    response: httpx.Response,
+    *,
+    body_text: str | None = None,
+) -> GeminiAPIError:
     status = response.status_code
-    body_text = ""
     body_json: Dict[str, Any] = {}
-    try:
-        body_text = response.text
-    except Exception:
-        body_text = ""
+    if body_text is None:
+        try:
+            body_text = response.text
+        except Exception:
+            body_text = ""
     if body_text:
         try:
             parsed = json.loads(body_text)
@@ -922,8 +935,8 @@ class GeminiNativeClient:
             try:
                 with self._http.stream("POST", url, json=request, headers=stream_headers, timeout=timeout) as response:
                     if response.status_code != 200:
-                        response.read()
-                        raise gemini_http_error(response)
+                        body_text = read_streaming_error_body(response)
+                        raise gemini_http_error(response, body_text=body_text)
                     tool_call_indices: Dict[str, Dict[str, Any]] = {}
                     for event in _iter_sse_events(response):
                         for chunk in translate_stream_event(event, model, tool_call_indices):

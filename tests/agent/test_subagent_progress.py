@@ -9,6 +9,7 @@ Verifies that:
 """
 
 import io
+import logging
 import sys
 import time
 import threading
@@ -73,12 +74,55 @@ class TestPrintAbove:
 class TestBuildChildProgressCallback:
     """Tests for child progress callback builder."""
 
+    def test_persisted_execution_identity_overrides_parent_turn_origin(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent._hermes_active_run_id = "run-parent"
+        parent._hermes_active_turn_id = "turn-parent"
+        parent._hermes_active_activity_id = "activity-parent"
+        parent.tool_progress_callback = MagicMock()
+
+        callback = _build_child_progress_callback(
+            0,
+            "inspect repository",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+        callback._bind_execution_identity(
+            activity_id="activity-child",
+            delegation_activity_id="activity-dispatch",
+            owner_activity_id="activity-parent",
+        )
+        callback("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        event = parent.tool_progress_callback.call_args
+        assert event.args[:4] == (
+            "subagent.tool",
+            "terminal",
+            "pwd",
+            {"command": "pwd"},
+        )
+        assert event.kwargs["activity_id"] == "activity-child"
+        assert event.kwargs["delegation_activity_id"] == "activity-dispatch"
+        assert event.kwargs["owner_activity_id"] == "activity-parent"
+
     def test_returns_none_when_no_display(self):
         """Should return None when parent has no spinner or callback."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent.tool_progress_callback = None
         
+        cb = _build_child_progress_callback(0, "test goal", parent)
+        assert cb is None
+
+    def test_returns_none_when_progress_is_explicitly_suppressed(self):
+        """Sandboxed internal executions can opt out of subagent UI events."""
+        parent = MagicMock()
+        parent._delegate_spinner = KawaiiSpinner("delegating")
+        parent.tool_progress_callback = MagicMock()
+        parent._delegate_child_progress_suppressed = True
+
         cb = _build_child_progress_callback(0, "test goal", parent)
         assert cb is None
 
@@ -145,6 +189,117 @@ class TestBuildChildProgressCallback:
         summary_text = summary_call.kwargs.get("preview") or summary_call.args[2]
         assert "tool_0" in summary_text
         assert "tool_4" in summary_text
+
+    def test_trace_logs_structural_event_without_changing_relay(self, monkeypatch, caplog):
+        monkeypatch.setenv("DOVIE_STREAM_TRACE", "1")
+        parent = MagicMock()
+        parent.session_id = "session-1"
+        parent._hermes_active_run_id = "run-1"
+        parent._hermes_active_turn_id = "turn-1"
+        parent._delegate_spinner = None
+        parent.tool_progress_callback = MagicMock()
+
+        cb = _build_child_progress_callback(
+            0,
+            "test goal",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+        with caplog.at_level(logging.INFO, logger="tools.delegation_tracing"):
+            cb("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        parent.tool_progress_callback.assert_called_once()
+        assert parent.tool_progress_callback.call_args.args[:4] == (
+            "subagent.tool",
+            "terminal",
+            "pwd",
+            {"command": "pwd"},
+        )
+        assert "[dovie-subagent-event-source]" in caplog.text
+        assert "event_type=subagent.tool" in caplog.text
+        assert "run_id=run-1" in caplog.text
+        assert "turn_id=turn-1" in caplog.text
+        assert "status=running" in caplog.text
+        assert "payload_bytes=" in caplog.text
+
+    def test_async_terminal_event_keeps_dispatch_origin_after_parent_turn_changes(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent._hermes_active_run_id = "run-original"
+        parent._hermes_active_turn_id = "turn-original"
+        parent._hermes_active_client_message_id = "client-original"
+        parent._hermes_active_runtime_scope_key = "profile:original"
+        parent.tool_progress_callback = MagicMock()
+
+        callback = _build_child_progress_callback(
+            0,
+            "finish later",
+            parent,
+            subagent_id="subagent-1",
+            delegate_call_id="delegate-1",
+        )
+
+        # The parent turn has finished and a newer turn now owns the session.
+        parent._hermes_active_run_id = "run-new"
+        parent._hermes_active_turn_id = "turn-new"
+        parent._hermes_active_client_message_id = "client-new"
+        parent._hermes_active_runtime_scope_key = "profile:new"
+        callback(
+            "subagent.complete",
+            preview="done",
+            status="completed",
+            summary="done",
+        )
+
+        terminal = parent.tool_progress_callback.call_args
+        assert terminal.args[0] == "subagent.complete"
+        assert terminal.kwargs["run_id"] == "run-original"
+        assert terminal.kwargs["turn_id"] == "turn-original"
+        assert terminal.kwargs["client_message_id"] == "client-original"
+        assert terminal.kwargs["runtime_scope_key"] == "profile:original"
+        assert terminal.kwargs["status"] == "completed"
+
+    def test_task_descriptor_is_emitted_once_on_lifecycle_start(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent.tool_progress_callback = MagicMock()
+
+        cb = _build_child_progress_callback(
+            0,
+            "review the repository",
+            parent,
+            subagent_id="subagent-1",
+            parent_id="leader-1",
+            depth=1,
+            model="test-model",
+            toolsets=["terminal"],
+            role="reviewer",
+            context="large immutable task context",
+            delegate_call_id="delegate-1",
+            agent_name="Reviewer",
+        )
+        cb("subagent.start")
+        cb("tool.started", "terminal", "pwd", {"command": "pwd"})
+
+        start_payload = parent.tool_progress_callback.call_args_list[0].kwargs
+        tool_payload = parent.tool_progress_callback.call_args_list[1].kwargs
+        assert start_payload["goal"] == "review the repository"
+        assert start_payload["context"] == "large immutable task context"
+        assert start_payload["dispatch_message"] == (
+            "review the repository\n\nlarge immutable task context"
+        )
+        assert start_payload["model"] == "test-model"
+        assert start_payload["toolsets"] == ["terminal"]
+
+        assert tool_payload["subagent_id"] == "subagent-1"
+        assert tool_payload["delegate_call_id"] == "delegate-1"
+        assert tool_payload["parent_id"] == "leader-1"
+        assert "goal" not in tool_payload
+        assert "context" not in tool_payload
+        assert "dispatch_message" not in tool_payload
+        assert "model" not in tool_payload
+        assert "toolsets" not in tool_payload
 
     def test_thinking_relayed_to_gateway(self):
         """Thinking events are relayed as subagent.thinking events."""
@@ -231,35 +386,22 @@ class TestThinkingCallback:
     """Tests for the _thinking callback in AIAgent conversation loop."""
 
     def _simulate_thinking_callback(self, content, callback, delegate_depth=1):
-        """Simulate the exact code path from run_agent.py for the thinking callback.
+        """Simulate the run_agent.py plain assistant-content path.
         
         delegate_depth: simulates self._delegate_depth.
-            0 = main agent (should NOT fire), >=1 = subagent (should fire).
+            Plain assistant output should not be relabeled as thinking for
+            either the main agent or delegated subagents.
         """
-        import re
-        if (content and callback and delegate_depth > 0):
-            _think_text = content.strip()
-            _think_text = re.sub(
-                r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
-            ).strip()
-            first_line = _think_text.split('\n')[0][:80] if _think_text else ""
-            if first_line:
-                try:
-                    callback("_thinking", first_line)
-                except Exception:
-                    pass
+        _ = (content, callback, delegate_depth)
 
-    def test_thinking_callback_fires_on_content(self):
-        """tool_progress_callback should receive _thinking event
-        when assistant message has content."""
+    def test_thinking_callback_not_fired_for_plain_content(self):
+        """Plain assistant content must not be relayed as thinking."""
         calls = []
         self._simulate_thinking_callback(
             "I'll research quantum computing first, then summarize.",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert calls[0][0] == "_thinking"
-        assert "quantum computing" in calls[0][1]
+        assert len(calls) == 0
 
     def test_thinking_callback_skipped_when_no_content(self):
         """Should not fire when assistant has no content."""
@@ -270,15 +412,14 @@ class TestThinkingCallback:
         )
         assert len(calls) == 0
 
-    def test_thinking_callback_truncates_long_content(self):
-        """Should truncate long content to 80 chars."""
+    def test_thinking_callback_skips_long_plain_content(self):
+        """Long plain assistant content must remain normal output."""
         calls = []
         self._simulate_thinking_callback(
             "A" * 200 + "\nSecond line should be ignored",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert len(calls[0][1]) == 80
+        assert len(calls) == 0
 
     def test_thinking_callback_skipped_for_main_agent(self):
         """Main agent (delegate_depth=0) should NOT fire thinking events.
@@ -291,27 +432,23 @@ class TestThinkingCallback:
         )
         assert len(calls) == 0
 
-    def test_thinking_callback_strips_reasoning_scratchpad(self):
-        """REASONING_SCRATCHPAD tags should be stripped before display."""
+    def test_thinking_callback_does_not_relabel_reasoning_scratchpad(self):
+        """XML-tagged assistant content is not relabeled as subagent thinking."""
         calls = []
         self._simulate_thinking_callback(
             "<REASONING_SCRATCHPAD>I need to analyze this carefully</REASONING_SCRATCHPAD>",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert "<REASONING_SCRATCHPAD>" not in calls[0][1]
-        assert "analyze this carefully" in calls[0][1]
+        assert len(calls) == 0
 
-    def test_thinking_callback_strips_think_tags(self):
-        """<think> tags should be stripped before display."""
+    def test_thinking_callback_does_not_relabel_think_tags(self):
+        """<think> assistant content is not relabeled as subagent thinking."""
         calls = []
         self._simulate_thinking_callback(
             "<think>Let me think about this problem</think>",
             lambda name, preview=None: calls.append((name, preview))
         )
-        assert len(calls) == 1
-        assert "<think>" not in calls[0][1]
-        assert "think about this problem" in calls[0][1]
+        assert len(calls) == 0
 
     def test_thinking_callback_empty_after_strip(self):
         """Should not fire when content is only XML tags."""
@@ -386,4 +523,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

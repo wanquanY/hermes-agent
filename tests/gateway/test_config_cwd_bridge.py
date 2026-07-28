@@ -1,10 +1,10 @@
-"""Tests for the config.yaml → env var bridge logic in gateway/run.py.
+"""Tests for the config.yaml → env var bridge logic in hermes_gateway/runner.py.
 
 Specifically tests that top-level `cwd:` and `backend:` in config.yaml
 are correctly bridged to TERMINAL_CWD / TERMINAL_ENV env vars as
 convenience aliases for `terminal.cwd` / `terminal.backend`.
 
-The bridge logic is module-level code in gateway/run.py, so we test
+The bridge logic is module-level code in hermes_gateway/runner.py, so we test
 the semantics by reimplementing the relevant config bridge snippet and
 asserting the expected env var outcomes.
 """
@@ -15,7 +15,7 @@ import pytest
 
 
 def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
-    """Simulate the gateway config bridge logic from gateway/run.py.
+    """Simulate the gateway config bridge logic from hermes_gateway/runner.py.
 
     Returns the resulting env dict (only TERMINAL_* and MESSAGING_CWD keys).
     """
@@ -43,8 +43,8 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
             if cfg_key in terminal_cfg:
                 val = terminal_cfg[cfg_key]
                 # Skip cwd placeholder values — don't overwrite already-resolved
-                # TERMINAL_CWD.  Mirrors the fix in gateway/run.py.
-                if cfg_key == "cwd" and str(val) in (".", "auto", "cwd"):
+                # TERMINAL_CWD.  Mirrors the fix in hermes_gateway/runner.py.
+                if cfg_key == "cwd" and str(val) in {".", "auto", "cwd"}:
                     continue
                 # Expand shell tilde so subprocess.Popen never receives a literal
                 # "~/" which the kernel rejects.
@@ -70,7 +70,7 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
 
     # --- Replicate lines 144-147: MESSAGING_CWD fallback ---
     configured_cwd = env.get("TERMINAL_CWD", "")
-    if not configured_cwd or configured_cwd in (".", "auto", "cwd"):
+    if not configured_cwd or configured_cwd in {".", "auto", "cwd"}:
         messaging_cwd = env.get("MESSAGING_CWD") or "/root"  # Path.home() for root
         env["TERMINAL_CWD"] = messaging_cwd
 

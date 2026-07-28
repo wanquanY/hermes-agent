@@ -130,7 +130,7 @@ def test_terminal_output_transform_still_runs_strip_and_redact(monkeypatch, tmp_
     assert "\x1b" not in result["output"]
     assert secret not in result["output"]
     assert "OPENAI_API_KEY=" in result["output"]
-    assert "***" in result["output"]
+    assert "sk-pro...o345" in result["output"]
 
 
 def test_terminal_output_transform_hook_exception_falls_back(monkeypatch, tmp_path):

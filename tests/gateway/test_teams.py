@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from gateway.config import Platform, PlatformConfig, HomeChannel
+from hermes_gateway.config import Platform, PlatformConfig, HomeChannel
 from plugins.teams_pipeline.models import TeamsMeetingRef, TeamsMeetingSummaryPayload
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
 
@@ -282,6 +282,17 @@ class TestTeamsAdapterInit:
         monkeypatch.setenv("TEAMS_PORT", "5000")
         adapter = TeamsAdapter(_make_config(client_id="id", client_secret="secret", tenant_id="tenant"))
         assert adapter._port == 5000
+
+    def test_invalid_port_from_extra_falls_back_to_default(self):
+        adapter = TeamsAdapter(
+            _make_config(client_id="id", client_secret="secret", tenant_id="tenant", port="abc")
+        )
+        assert adapter._port == 3978
+
+    def test_invalid_port_from_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("TEAMS_PORT", "abc")
+        adapter = TeamsAdapter(_make_config(client_id="id", client_secret="secret", tenant_id="tenant"))
+        assert adapter._port == 3978
 
     def test_platform_value(self):
         adapter = TeamsAdapter(_make_config(client_id="id", client_secret="secret", tenant_id="tenant"))
@@ -752,7 +763,7 @@ def _install_fake_aiohttp(monkeypatch, session):
     """Replace ``aiohttp`` in ``sys.modules`` so ``import aiohttp as _aiohttp``
     inside ``_standalone_send`` picks up our fake."""
     fake_aiohttp = types.SimpleNamespace(
-        ClientSession=lambda timeout=None: session,
+        ClientSession=lambda timeout=None, **kwargs: session,
         ClientTimeout=lambda total=None: None,
     )
     monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)

@@ -40,12 +40,85 @@ What you'll see:
 | Command | What it does |
 |---|---|
 | `/goal <text>` | Set (or replace) the standing goal. Kicks off the first turn immediately so you don't need to send a separate message. |
+| `/goal draft <text>` | Draft a structured completion contract from a plain-language objective, then set it. See [Completion contracts](#completion-contracts). |
+| `/goal show` | Print the active goal's completion contract. |
 | `/goal` or `/goal status` | Show the current goal, its status, and turns used. |
 | `/goal pause` | Stop the auto-continuation loop without clearing the goal. |
 | `/goal resume` | Resume the loop (resets the turn counter back to zero). |
 | `/goal clear` | Drop the goal entirely. |
+| `/goal wait <pid> [reason]` | Park the loop on a background process — it stops re-poking the agent every turn while the process runs, and auto-resumes when it exits. |
+| `/goal unwait` | Drop the wait barrier and resume the loop immediately. |
 
 Works identically on the CLI and every gateway platform (Telegram, Discord, Slack, Matrix, Signal, WhatsApp, SMS, iMessage, Webhook, API server, and the web dashboard).
+
+## Completion contracts
+
+A bare `/goal <text>` works, but a vague goal makes for vague judging. A durable objective works best when it names what done means, how to prove it, what not to break, what's in scope, and when to stop. Hermes models those requirements as an optional completion contract layered on top of the goal loop.
+
+A contract has five optional fields:
+
+| Field | Meaning |
+|---|---|
+| `outcome` | The single end state that must be true when done. |
+| `verification` | The test, command, or artifact that proves the outcome. |
+| `constraints` | What must not change or regress. |
+| `boundaries` | Which files, directories, tools, or systems are in scope. |
+| `stop_when` | The condition under which Hermes should stop and ask for input. |
+
+When a contract is set, the continuation prompt targets the verification surface and respects the constraints. The judge marks the goal `done` only when the verification criterion is met with concrete evidence, rather than accepting a loose completion claim.
+
+### Two ways to set a contract
+
+Let Hermes draft it through the `goal_judge` auxiliary model:
+
+```
+/goal draft Migrate the auth service from session cookies to JWT
+```
+
+Hermes shows the drafted contract for review. If the auxiliary model is unavailable, setting the goal still succeeds as a free-form goal.
+
+Or write recognized fields inline:
+
+```
+/goal Migrate auth to JWT
+verify: pytest tests/auth passes
+constraints: keep the /login response shape unchanged
+boundaries: only touch services/auth and its tests
+stop when: a DB schema migration is required
+```
+
+The non-field line is the goal headline. Recognized prefixes such as `verify:`, `verified by:`, `constraints:`, `preserve:`, `boundaries:`, `scope:`, `stop when:`, and `blocked:` populate the contract. Incidental colons in ordinary prose are left untouched.
+
+Use `/goal show` to review the active contract. Contracts persist in the shared session store and survive `/resume`; pre-contract goal records load unchanged. Contracts compose with `/subgoal`, so every subgoal becomes an additional criterion that must also pass.
+
+## Adding criteria mid-goal: `/subgoal`
+
+While a goal is active you can append extra acceptance criteria with `/subgoal <text>` without resetting the loop. Each call adds one numbered item to the goal's subgoal list; the **continuation prompt** the agent sees on the next turn includes the original goal plus an "Additional criteria the user added mid-loop" block, and the **judge prompt** is rewritten so the verdict must consider every subgoal — the goal isn't marked done until the original objective **and** every subgoal are met.
+
+| Command | What it does |
+|---|---|
+| `/subgoal <text>` | Append a new criterion to the active goal. Requires an active `/goal`. |
+| `/subgoal` (no args) | Show the current numbered subgoal list. |
+| `/subgoal remove <N>` | Remove the Nth subgoal (1-based). |
+| `/subgoal clear` | Drop every subgoal but keep the original goal intact. |
+
+Subgoals are persisted alongside the goal in the shared session store, so they survive `/resume`. Setting a new `/goal <text>` replaces the goal and clears the subgoal list; `/goal clear` does the same.
+
+Use this when you start a loop ("fix the failing tests") and notice partway through that you also want it to "and add a regression test for the bug you just patched" — `/subgoal add a regression test` tightens the success criteria without breaking the running loop.
+
+## Parking on background work: automatic, with a manual override
+
+Some goals are gated on work that runs on its own: CI, a long build, a test matrix, a deploy, or a rate-limit cooldown. Re-poking the agent every turn while that work runs only creates busy-work.
+
+Hermes handles this automatically. Every turn, the judge receives the live background-process registry, including pid, session id, command, uptime, recent output, and watch/notification triggers. When progress is genuinely gated on one of them, the judge returns `wait` instead of `continue`. The loop then parks without another judge call, continuation, or consumed turn until the barrier is satisfied. `/goal status` shows the parked state.
+
+The judge selects the barrier that matches the process signal:
+
+- `wait_on_session <id>` releases when a background session exits or its configured watch pattern fires, which supports long-lived watchers that may not exit.
+- `wait_on_pid <pid>` releases only when the process exits.
+- `wait_for_seconds <n>` releases after a fixed backoff or cooldown.
+
+The manual override is `/goal wait <pid> [reason]`; `/goal unwait` releases it immediately. Wait barriers persist with the goal. Pause, resume, and clear drop the barrier, and stale process references never wedge the loop.
 
 ## Behavior details
 
@@ -79,11 +152,11 @@ Any real message you send while a goal is active takes priority over the continu
 
 ### Mid-run safety (gateway)
 
-While an agent is already running, `/goal status`, `/goal pause`, and `/goal clear` are safe to run — they only touch control-plane state and don't interrupt the current turn. Setting a **new** goal mid-run (`/goal <new text>`) is rejected with a message telling you to `/stop` first, so the old continuation can't race the new one.
+While an agent is already running, `/goal status`, `/goal pause`, `/goal clear`, `/goal wait`, and `/goal unwait` are safe to run — they only touch control-plane state and don't interrupt the current turn. Setting a **new** goal mid-run (`/goal <new text>`) is rejected with a message telling you to `/stop` first, so the old continuation can't race the new one.
 
 ### Persistence
 
-Goal state lives in `SessionDB.state_meta` keyed by `goal:<session_id>`. That means `/resume` picks up right where you left off — set a goal, close your laptop, come back tomorrow, `/resume`, and the goal is still standing exactly as you left it (active, paused, or done).
+Goal state lives in the shared session store keyed by `goal:<session_id>`. That means `/resume` picks up right where you left off — set a goal, close your laptop, come back tomorrow, `/resume`, and the goal is still standing exactly as you left it (active, paused, or done).
 
 ### Prompt cache
 

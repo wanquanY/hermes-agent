@@ -1,12 +1,12 @@
 import json
 from unittest.mock import AsyncMock
 
-from gateway.config import Platform, PlatformConfig, load_gateway_config
+from hermes_gateway.config import Platform, PlatformConfig, load_gateway_config
 
 
 def _make_adapter(require_mention=None, mention_patterns=None, free_response_chats=None,
                   dm_policy=None, allow_from=None, group_policy=None, group_allow_from=None):
-    from gateway.platforms.whatsapp import WhatsAppAdapter
+    from channels.platforms.whatsapp import WhatsAppAdapter
 
     extra = {}
     if require_mention is not None:
@@ -125,8 +125,8 @@ def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
     assert config is not None
     assert config.platforms[Platform.WHATSAPP].extra["require_mention"] is True
     assert config.platforms[Platform.WHATSAPP].extra["mention_patterns"] == [r"^\s*chompy\b"]
-    assert __import__("os").environ["WHATSAPP_REQUIRE_MENTION"] == "true"
-    assert json.loads(__import__("os").environ["WHATSAPP_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
+    assert "WHATSAPP_REQUIRE_MENTION" not in __import__("os").environ
+    assert "WHATSAPP_MENTION_PATTERNS" not in __import__("os").environ
 
 
 def test_free_response_chats_bypass_mention_gating():
@@ -269,9 +269,9 @@ def test_config_bridges_whatsapp_dm_and_group_policy(monkeypatch, tmp_path):
     assert config.platforms[Platform.WHATSAPP].extra["dm_policy"] == "disabled"
     assert config.platforms[Platform.WHATSAPP].extra["group_policy"] == "allowlist"
     assert config.platforms[Platform.WHATSAPP].extra["group_allow_from"] == ["120363001234567890@g.us"]
-    assert __import__("os").environ["WHATSAPP_DM_POLICY"] == "disabled"
-    assert __import__("os").environ["WHATSAPP_GROUP_POLICY"] == "allowlist"
-    assert __import__("os").environ["WHATSAPP_GROUP_ALLOWED_USERS"] == "120363001234567890@g.us"
+    assert "WHATSAPP_DM_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_GROUP_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_GROUP_ALLOWED_USERS" not in __import__("os").environ
 
 
 def test_config_bridges_whatsapp_allow_from(monkeypatch, tmp_path):
@@ -294,8 +294,8 @@ def test_config_bridges_whatsapp_allow_from(monkeypatch, tmp_path):
     assert config is not None
     assert config.platforms[Platform.WHATSAPP].extra["dm_policy"] == "allowlist"
     assert config.platforms[Platform.WHATSAPP].extra["allow_from"] == ["6281234567890@s.whatsapp.net"]
-    assert __import__("os").environ["WHATSAPP_DM_POLICY"] == "allowlist"
-    assert __import__("os").environ["WHATSAPP_ALLOWED_USERS"] == "6281234567890@s.whatsapp.net"
+    assert "WHATSAPP_DM_POLICY" not in __import__("os").environ
+    assert "WHATSAPP_ALLOWED_USERS" not in __import__("os").environ
 
 
 # --- Broadcast / status / newsletter pseudo-chats are always dropped ---
@@ -306,7 +306,7 @@ def test_status_broadcast_chats_are_always_dropped():
     (a contact's WhatsApp Story update). These pseudo-chats aren't real
     conversations and the adapter must drop them regardless of dm_policy.
     """
-    from gateway.platforms.whatsapp import WhatsAppAdapter
+    from channels.platforms.whatsapp import WhatsAppAdapter
 
     # Even on the most permissive config — open DMs, no allowlist — Stories
     # and Channel posts must not reach the agent.
@@ -359,7 +359,7 @@ def test_real_dm_still_processed_after_broadcast_filter():
 
 
 def test_is_broadcast_chat_helper_recognizes_common_jids():
-    from gateway.platforms.whatsapp import WhatsAppAdapter
+    from channels.platforms.whatsapp import WhatsAppAdapter
 
     assert WhatsAppAdapter._is_broadcast_chat("status@broadcast") is True
     assert WhatsAppAdapter._is_broadcast_chat("STATUS@BROADCAST") is True

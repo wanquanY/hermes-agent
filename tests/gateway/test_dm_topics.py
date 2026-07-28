@@ -18,28 +18,35 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
-    if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
-        return
-
     telegram_mod = MagicMock()
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    telegram_mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    telegram_mod.constants.ChatType.GROUP = "group"
-    telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"
-    telegram_mod.constants.ChatType.CHANNEL = "channel"
-    telegram_mod.constants.ChatType.PRIVATE = "private"
 
-    for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
-        sys.modules.setdefault(name, telegram_mod)
+    # Register telegram.constants as a separate module mock so that
+    # ``from telegram.constants import ChatType`` resolves to our mock
+    # with string-valued members (not auto-generated MagicMocks).
+    constants_mod = MagicMock()
+    constants_mod.ParseMode.MARKDOWN_V2 = "MarkdownV2"
+    constants_mod.ChatType.GROUP = "group"
+    constants_mod.ChatType.SUPERGROUP = "supergroup"
+    constants_mod.ChatType.CHANNEL = "channel"
+    constants_mod.ChatType.PRIVATE = "private"
+
+    sys.modules["telegram"] = telegram_mod
+    sys.modules["telegram.ext"] = telegram_mod.ext
+    sys.modules["telegram.constants"] = constants_mod
+    sys.modules["telegram.request"] = telegram_mod.request
+
+    # Force reimport so the adapter picks up the mock ChatType.
+    sys.modules.pop("channels.platforms.telegram", None)
 
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
 
 
 def _make_adapter(dm_topics_config=None, group_topics_config=None):
@@ -449,13 +456,15 @@ def test_cache_dm_topic_from_message_no_overwrite():
 
 def _make_mock_message(chat_id=111, chat_type="private", text="hello", thread_id=None,
                        user_id=42, user_name="Test User", forum_topic_created=None,
-                       is_topic_message=None):
+                       is_topic_message=None, is_forum=None):
     """Create a mock Telegram Message for _build_message_event tests."""
     chat = SimpleNamespace(
         id=chat_id,
         type=chat_type,
         title=None,
     )
+    if is_forum is not None:
+        chat.is_forum = is_forum
     # Add full_name attribute for DM chats
     if not hasattr(chat, "full_name"):
         chat.full_name = user_name
@@ -484,7 +493,7 @@ def _make_mock_message(chat_id=111, chat_type="private", text="hello", thread_id
 
 def test_build_message_event_sets_auto_skill():
     """When topic has a skill binding, auto_skill should be set on the event."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter([
         {
@@ -506,7 +515,7 @@ def test_build_message_event_sets_auto_skill():
 
 def test_build_message_event_no_auto_skill_without_binding():
     """Topics without skill binding should have auto_skill=None."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter([
         {
@@ -527,7 +536,7 @@ def test_build_message_event_no_auto_skill_without_binding():
 
 def test_build_message_event_no_auto_skill_without_thread():
     """Regular DM messages (no thread_id) should have auto_skill=None."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_mock_message(chat_id=111, thread_id=None)
@@ -538,7 +547,7 @@ def test_build_message_event_no_auto_skill_without_thread():
 
 def test_build_message_event_filters_non_topic_dm_thread_id():
     """A DM reply-thread id should not be persisted unless Telegram marks it as a topic message."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_mock_message(chat_id=111, thread_id=777, is_topic_message=False)
@@ -551,7 +560,7 @@ def test_build_message_event_filters_non_topic_dm_thread_id():
 
 def test_build_message_event_preserves_true_dm_topic_thread_id():
     """True DM topic messages should keep their thread id for routing."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter([
         {
@@ -581,7 +590,7 @@ from telegram.constants import ChatType as _ChatType  # noqa: E402
 
 def test_group_topic_skill_binding():
     """Group topic with skill config should set auto_skill on the event."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -594,7 +603,12 @@ def test_group_topic_skill_binding():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1001234567890, chat_type=_ChatType.SUPERGROUP, thread_id=5, text="hello"
+        chat_id=-1001234567890,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=5,
+        text="hello",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -604,7 +618,7 @@ def test_group_topic_skill_binding():
 
 def test_group_topic_skill_binding_second_topic():
     """A different thread_id in the same group should resolve its own skill."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -617,7 +631,12 @@ def test_group_topic_skill_binding_second_topic():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1001234567890, chat_type=_ChatType.SUPERGROUP, thread_id=12, text="deal update"
+        chat_id=-1001234567890,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=12,
+        text="deal update",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -627,7 +646,7 @@ def test_group_topic_skill_binding_second_topic():
 
 def test_group_topic_no_skill_binding():
     """Group topic without a skill key should have auto_skill=None but set chat_topic."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -639,7 +658,12 @@ def test_group_topic_no_skill_binding():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1001234567890, chat_type=_ChatType.SUPERGROUP, thread_id=1, text="hey"
+        chat_id=-1001234567890,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=1,
+        text="hey",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -649,7 +673,7 @@ def test_group_topic_no_skill_binding():
 
 def test_group_topic_unmapped_thread_id():
     """Thread ID not in config should fall through — no skill, no topic name."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -661,7 +685,12 @@ def test_group_topic_unmapped_thread_id():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1001234567890, chat_type=_ChatType.SUPERGROUP, thread_id=999, text="random"
+        chat_id=-1001234567890,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=999,
+        text="random",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -671,7 +700,7 @@ def test_group_topic_unmapped_thread_id():
 
 def test_group_topic_unmapped_chat_id():
     """Chat ID not in group_topics config should fall through silently."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -683,7 +712,12 @@ def test_group_topic_unmapped_chat_id():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1009999999999, chat_type=_ChatType.SUPERGROUP, thread_id=5, text="wrong group"
+        chat_id=-1009999999999,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=5,
+        text="wrong group",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -693,7 +727,7 @@ def test_group_topic_unmapped_chat_id():
 
 def test_group_topic_no_config():
     """No group_topics config at all should be fine — no skill, no topic."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()  # no group_topics_config
 
@@ -708,7 +742,7 @@ def test_group_topic_no_config():
 
 def test_group_topic_chat_id_int_string_coercion():
     """chat_id as string in config should match integer chat.id via str() coercion."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter(group_topics_config=[
         {
@@ -720,7 +754,12 @@ def test_group_topic_chat_id_int_string_coercion():
     ])
 
     msg = _make_mock_message(
-        chat_id=-1001234567890, chat_type=_ChatType.SUPERGROUP, thread_id=7, text="test"
+        chat_id=-1001234567890,
+        chat_type=_ChatType.SUPERGROUP,
+        thread_id=7,
+        text="test",
+        is_topic_message=True,
+        is_forum=True,
     )
     event = adapter._build_message_event(msg, MessageType.TEXT)
 
@@ -733,7 +772,7 @@ def test_group_topic_chat_id_int_string_coercion():
 
 def test_build_message_event_dm_from_user_none_falls_back_to_chat_id():
     """When from_user is None in a DM, user_id should fall back to chat.id."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_mock_message(chat_id=12345, user_id=42, user_name="Alice")
@@ -749,7 +788,7 @@ def test_build_message_event_dm_from_user_none_falls_back_to_chat_id():
 
 def test_build_message_event_group_from_user_none_stays_none():
     """When from_user is None in a group, user_id should remain None."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_mock_message(
@@ -767,7 +806,7 @@ def test_build_message_event_group_from_user_none_stays_none():
 
 def test_build_message_event_dm_from_user_present_uses_user():
     """When from_user is present in a DM, it should be used (no fallback)."""
-    from gateway.platforms.base import MessageType
+    from channels.platforms.base import MessageType
 
     adapter = _make_adapter()
     msg = _make_mock_message(chat_id=12345, user_id=99999, user_name="Bob")

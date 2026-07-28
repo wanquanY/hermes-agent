@@ -17,14 +17,14 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gateway.config import (
+from hermes_gateway.config import (
     GatewayConfig,
     HomeChannel,
     Platform,
     PlatformConfig,
 )
-from gateway.platforms.base import MessageEvent, MessageType, SendResult
-from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
+from channels.platforms.base import MessageEvent, MessageType, SendResult
+from channels.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +316,7 @@ class TestGitHubCommentDelivery:
         mock_result.stderr = ""
 
         with patch(
-            "gateway.platforms.webhook.subprocess.run",
+            "channels.platforms.webhook.subprocess.run",
             return_value=mock_result,
         ) as mock_run:
             result = await adapter.send(

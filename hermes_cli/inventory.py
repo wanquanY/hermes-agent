@@ -52,6 +52,7 @@ class ConfigContext:
     current_base_url: str
     user_providers: dict
     custom_providers: list
+    excluded_providers: tuple[str, ...] = ()
 
     def with_overrides(
         self,
@@ -96,12 +97,23 @@ def load_picker_context() -> ConfigContext:
         current_provider = ""
         current_base_url = ""
     raw = cfg.get("providers")
+    model_catalog = cfg.get("model_catalog")
+    raw_excluded = (
+        model_catalog.get("excluded_providers", [])
+        if isinstance(model_catalog, dict)
+        else []
+    )
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
         current_base_url=current_base_url,
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
+        excluded_providers=tuple(
+            str(name).strip()
+            for name in raw_excluded
+            if isinstance(name, str) and name.strip()
+        ) if isinstance(raw_excluded, list) else (),
     )
 
 
@@ -115,6 +127,8 @@ def build_models_payload(
     picker_hints: bool = False,
     canonical_order: bool = False,
     max_models: int = 50,
+    probe_custom_providers: bool = True,
+    probe_current_custom_provider: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
     needs from a single substrate call.
@@ -138,10 +152,23 @@ def build_models_payload(
         user_providers=ctx.user_providers,
         custom_providers=ctx.custom_providers,
         max_models=max_models,
+        probe_custom_providers=probe_custom_providers,
+        probe_current_custom_provider=probe_current_custom_provider,
+        excluded_providers=list(ctx.excluded_providers),
     )
 
+    moa_row = _moa_provider_row(ctx.current_provider)
+    if moa_row is not None:
+        rows = [moa_row] + [
+            row for row in rows if str(row.get("slug", "")).lower() != "moa"
+        ]
+
     if include_unconfigured:
-        rows = list(rows) + _append_unconfigured_rows(rows, ctx)
+        rows = list(rows) + [
+            row
+            for row in _append_unconfigured_rows(rows, ctx)
+            if str(row.get("slug", "")).lower() != "moa"
+        ]
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:
@@ -159,13 +186,37 @@ def build_models_payload(
 
 def _append_unconfigured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
     """Build skeleton rows for canonical providers missing from ``rows``."""
-    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS
+    from hermes_cli.config import is_provider_enabled
+    from hermes_cli.models import (
+        CANONICAL_PROVIDERS,
+        _PROVIDER_ALIASES,
+        _PROVIDER_LABELS,
+    )
 
     seen = {r["slug"].lower() for r in rows}
     cur = (ctx.current_provider or "").lower()
+    excluded = {name.lower() for name in ctx.excluded_providers}
+    names_for_slug: dict[str, set[str]] = {
+        entry.slug: {entry.slug.lower()} for entry in CANONICAL_PROVIDERS
+    }
+    for alias, canonical in _PROVIDER_ALIASES.items():
+        names_for_slug.setdefault(canonical, {canonical.lower()}).add(alias.lower())
     extras: list[dict] = []
     for entry in CANONICAL_PROVIDERS:
         if entry.slug.lower() in seen:
+            continue
+        if names_for_slug.get(entry.slug, {entry.slug.lower()}) & excluded:
+            continue
+        provider_cfg = next(
+            (
+                value
+                for name, value in ctx.user_providers.items()
+                if str(name).strip().lower()
+                in names_for_slug.get(entry.slug, {entry.slug.lower()})
+            ),
+            None,
+        )
+        if provider_cfg is not None and not is_provider_enabled(provider_cfg):
             continue
         extras.append(
             {
@@ -238,3 +289,31 @@ def _reorder_canonical(rows: list[dict]) -> list[dict]:
     )
     extras = [r for r in rows if r["slug"] not in order]
     return canon + extras
+
+
+def _moa_provider_row(current_provider: str = "") -> dict | None:
+    """Build the virtual MoA provider row for every model picker."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.moa_config import normalize_moa_config
+
+        config = normalize_moa_config(load_config().get("moa") or {})
+        presets = list(config.get("presets", {}).keys())
+        if not presets:
+            return None
+        return {
+            "slug": "moa",
+            "name": "Mixture of Agents",
+            "is_current": (current_provider or "").lower() == "moa",
+            "is_user_defined": False,
+            "models": presets,
+            "total_models": len(presets),
+            "source": "virtual",
+            "authenticated": True,
+            "auth_type": "virtual",
+            "warning": (
+                "The aggregator acts after the configured reference models."
+            ),
+        }
+    except Exception:
+        return None

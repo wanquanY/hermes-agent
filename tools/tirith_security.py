@@ -101,6 +101,78 @@ _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_
 _install_lock = threading.Lock()
 _install_thread: threading.Thread | None = None
 
+# Consecutive operational-failure breaker. Gateway sessions may scan in
+# parallel, so transition and counter updates are synchronized.
+_CRASH_LIMIT = 3
+_crash_count = 0
+_circuit_open = False
+_breaker_lock = threading.Lock()
+
+
+def _record_tirith_failure() -> None:
+    global _crash_count, _circuit_open
+    opened_now = False
+    with _breaker_lock:
+        if _circuit_open:
+            return
+        _crash_count += 1
+        if _crash_count >= _CRASH_LIMIT:
+            _circuit_open = True
+            opened_now = True
+    if opened_now:
+        logger.warning(
+            "tirith circuit breaker opened after %d consecutive operational failures",
+            _CRASH_LIMIT,
+        )
+
+
+def _record_tirith_success() -> None:
+    global _crash_count
+    with _breaker_lock:
+        if not _circuit_open:
+            _crash_count = 0
+
+
+def _tirith_circuit_is_open() -> bool:
+    with _breaker_lock:
+        return _circuit_open
+
+
+def _reset_tirith_breaker() -> None:
+    global _crash_count, _circuit_open
+    with _breaker_lock:
+        _crash_count = 0
+        _circuit_open = False
+
+# Warning de-duplication. The spawn/path warnings live in the hot path —
+# without this dedupe set, a Windows install where ``tirith`` isn't on PATH
+# (e.g. background install thread still running, or install marked failed)
+# spams ``tirith spawn failed: [WinError 2]...`` once per terminal command,
+# easily filling errors.log with hundreds of identical lines.
+_warned_messages: set[str] = set()
+_warned_lock = threading.Lock()
+
+
+def _warn_once(key: str, message: str, *args) -> None:
+    """``logger.warning`` but at-most-once per ``key`` for the process
+    lifetime. Used to avoid drowning the log when a fail-open tirith
+    misconfiguration fires on every command."""
+    with _warned_lock:
+        if key in _warned_messages:
+            return
+        _warned_messages.add(key)
+    logger.warning(message, *args)
+
+
+def _reset_spawn_warning_state() -> None:
+    """Clear the warn-once dedupe set. Called when tirith is freshly
+    (re)installed so a subsequent failure surfaces again — e.g. user
+    deletes the binary mid-session.
+    """
+    with _warned_lock:
+        _warned_messages.clear()
+    _reset_tirith_breaker()
+
 # Disk-persistent failure marker — avoids retry across process restarts
 _MARKER_TTL = 86400  # 24 hours
 
@@ -168,6 +240,10 @@ def _mark_install_failed(reason: str = ""):
 
 def _clear_install_failed():
     """Remove the failure marker after successful install."""
+    # Reset the warn-once dedupe set so a subsequent failure (e.g. user
+    # deletes the binary) surfaces in the log again instead of being
+    # silently suppressed by a stale dedupe key from before the fix.
+    _reset_spawn_warning_state()
     try:
         os.unlink(_failure_marker_path())
     except OSError:
@@ -182,7 +258,12 @@ def _hermes_bin_dir() -> str:
 
 
 def _detect_target() -> str | None:
-    """Return the Rust target triple for the current platform, or None."""
+    """Return the Rust target triple for the current platform, or None.
+
+    Windows is intentionally unsupported — tirith does not ship a Windows
+    build. Callers should treat `None` as "this platform will never have
+    tirith" and silently fall back to pattern-matching guards.
+    """
     system = platform.system()
     machine = platform.machine().lower()
 
@@ -202,6 +283,16 @@ def _detect_target() -> str | None:
         return None
 
     return f"{arch}-{plat}"
+
+
+def is_platform_supported() -> bool:
+    """True when tirith ships a prebuilt binary for this OS+arch.
+
+    Used by callers (CLI banner, etc.) to distinguish "tirith failed to
+    install" from "tirith was never going to install here" — the latter
+    is silent because there is nothing the user can do about it.
+    """
+    return _detect_target() is not None
 
 
 def _download_file(url: str, dest: str, timeout: int = 10):
@@ -240,6 +331,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
              checksums_path],
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             timeout=15,
         )
         if result.returncode == 0:
@@ -416,6 +508,15 @@ def _resolve_tirith_path(configured_path: str) -> str:
     explicit = _is_explicit_path(configured_path)
     install_failed = _resolved_path is _INSTALL_FAILED
 
+    # Platform has no tirith build (Windows etc.). Cache the verdict and
+    # return the unexpanded configured path — the spawn loop will fail-open
+    # via the dedupe'd OSError handler, but only after the first call; on
+    # subsequent calls the fast-path above short-circuits before spawning.
+    if not explicit and not is_platform_supported():
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "unsupported_platform"
+        return expanded
+
     # Explicit path: check it and stop. Never auto-download a replacement.
     if explicit:
         if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
@@ -542,6 +643,14 @@ def ensure_installed(*, log_failures: bool = True):
             return path
         return None
 
+    # Platform has no tirith build (e.g. Windows) — don't probe PATH,
+    # don't start a download thread, don't write a disk failure marker.
+    # Pattern-matching guards still run; this path stays silent.
+    if not is_platform_supported():
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "unsupported_platform"
+        return None
+
     configured_path = cfg["tirith_path"]
     explicit = _is_explicit_path(configured_path)
     expanded = os.path.expanduser(configured_path)
@@ -627,12 +736,30 @@ def check_command_security(command: str) -> dict:
     if not cfg["tirith_enabled"]:
         return {"action": "allow", "findings": [], "summary": ""}
 
-    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
+    # Unsupported platform (Windows etc.) — tirith has no binary here and
+    # never will. Skip the resolver entirely so we don't even try to spawn.
+    # Pattern-matching guards still run via the rest of approval.py.
+    if not is_platform_supported():
+        return {"action": "allow", "findings": [], "summary": ""}
+
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
+    if _tirith_circuit_is_open():
+        action = "allow" if fail_open else "block"
+        suffix = "fail-open" if fail_open else "fail-closed"
+        return {
+            "action": action,
+            "findings": [],
+            "summary": f"tirith disabled by circuit breaker ({suffix})",
+        }
+
+    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
 
     if tirith_path is None:
-        logger.warning("tirith path resolved to None; scanning disabled")
+        _warn_once(
+            "tirith_path_none",
+            "tirith path resolved to None; scanning disabled",
+        )
         if fail_open:
             return {"action": "allow", "findings": [], "summary": "tirith path unavailable"}
         return {"action": "block", "findings": [], "summary": "tirith path unavailable (fail-closed)"}
@@ -644,15 +771,28 @@ def check_command_security(command: str) -> dict:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
-        # Covers FileNotFoundError, PermissionError, exec format error
-        logger.warning("tirith spawn failed: %s", exc)
+        # Covers FileNotFoundError, PermissionError, exec format error.
+        # Dedupe by ``(errno, exc class)`` so a transient failure mode
+        # surfaces once but doesn't drown the log on every command —
+        # commonly seen on Windows when the configured path "tirith"
+        # isn't on PATH yet (background install still running, or
+        # install marked failed for the day).
+        spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
+        _warn_once(spawn_key, "tirith spawn failed: %s", exc)
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
     except subprocess.TimeoutExpired:
-        logger.warning("tirith timed out after %ds", timeout)
+        _warn_once(
+            f"tirith_timeout:{timeout}",
+            "tirith timed out after %ds",
+            timeout,
+        )
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
@@ -661,13 +801,17 @@ def check_command_security(command: str) -> dict:
     exit_code = result.returncode
     if exit_code == 0:
         action = "allow"
+        _record_tirith_success()
     elif exit_code == 1:
         action = "block"
+        _record_tirith_success()
     elif exit_code == 2:
         action = "warn"
+        _record_tirith_success()
     else:
         # Unknown exit code — respect fail_open
         logger.warning("tirith returned unexpected exit code %d", exit_code)
+        _record_tirith_failure()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}
@@ -688,4 +832,33 @@ def check_command_security(command: str) -> dict:
         elif action == "warn":
             summary = "security warning detected (details unavailable)"
 
+    # Suppress warn verdicts that consist solely of a lookalike_tld finding for
+    # the .app TLD.  .app is a legitimate gTLD used by many production services
+    # and the "can be confused with file extensions" heuristic generates false
+    # positives for normal API calls.  Any other finding (including other
+    # lookalike_tld entries for non-.app TLDs) preserves the warn action.
+    if action == "warn" and findings:
+        non_suppressible = [f for f in findings if not _is_app_tld_finding(f)]
+        if not non_suppressible:
+            action = "allow"
+            findings = []
+            summary = ""
+
     return {"action": action, "findings": findings, "summary": summary}
+
+
+def _is_app_tld_finding(finding: dict) -> bool:
+    """Return True if this finding is a lookalike_tld warning for the .app TLD only.
+
+    Checks the rule_id and inspects common value/detail field names that
+    Tirith may use to carry the TLD string.
+    """
+    if not isinstance(finding, dict):
+        return False
+    if finding.get("rule_id") != "lookalike_tld":
+        return False
+    for field in ("value", "tld", "detail", "description", "message"):
+        val = finding.get(field)
+        if val is not None and ".app" in str(val).lower():
+            return True
+    return False

@@ -26,8 +26,9 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from hermes_constants import get_hermes_home
-from typing import Dict, List, Tuple
+from hermes_constants import ensure_directory_path, get_bundled_skills_dir, get_hermes_home
+from agent.skill_utils import is_excluded_skill_path
+from typing import Dict, List, Optional, Tuple
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -42,12 +43,10 @@ def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
     Checks HERMES_BUNDLED_SKILLS env var first (set by Nix wrapper),
-    then falls back to the relative path from this source file.
+    then a wheel-installed data dir, then falls back to the relative
+    path from this source file.
     """
-    env_override = os.getenv("HERMES_BUNDLED_SKILLS")
-    if env_override:
-        return Path(env_override)
-    return Path(__file__).parent.parent / "skills"
+    return get_bundled_skills_dir(Path(__file__).parent.parent / "skills")
 
 
 def _read_manifest() -> Dict[str, str]:
@@ -85,7 +84,7 @@ def _write_manifest(entries: Dict[str, str]):
     """
     import tempfile
 
-    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(MANIFEST_FILE.parent)
     data = "\n".join(f"{name}:{hash_val}" for name, hash_val in sorted(entries.items())) + "\n"
 
     try:
@@ -141,8 +140,7 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
         return skills
 
     for skill_md in bundled_dir.rglob("SKILL.md"):
-        path_str = str(skill_md)
-        if "/.git/" in path_str or "/.github/" in path_str or "/.hub/" in path_str:
+        if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
         skill_name = _read_skill_name(skill_md, skill_dir.name)
@@ -189,7 +187,7 @@ def sync_skills(quiet: bool = False) -> dict:
             "user_modified": [], "cleaned": [], "total_bundled": 0,
         }
 
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_directory_path(SKILLS_DIR)
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
@@ -227,7 +225,7 @@ def sync_skills(quiet: bool = False) -> dict:
                             f"to replace it with the bundled version."
                         )
                 else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    ensure_directory_path(dest.parent)
                     shutil.copytree(skill_src, dest)
                     copied.append(skill_name)
                     manifest[skill_name] = bundled_hash
@@ -301,7 +299,7 @@ def sync_skills(quiet: bool = False) -> dict:
         dest_desc = SKILLS_DIR / rel
         if not dest_desc.exists():
             try:
-                dest_desc.parent.mkdir(parents=True, exist_ok=True)
+                ensure_directory_path(dest_desc.parent)
                 shutil.copy2(desc_md, dest_desc)
             except (OSError, IOError) as e:
                 logger.debug("Could not copy %s: %s", desc_md, e)
@@ -316,6 +314,55 @@ def sync_skills(quiet: bool = False) -> dict:
         "cleaned": cleaned,
         "total_bundled": len(bundled_skills),
     }
+
+
+def _rmtree_writable(path: Path) -> None:
+    """Remove a directory tree, making read-only entries writable first.
+
+    Handles immutable package sources (Nix store, deb/rpm installs) that
+    preserve read-only permissions on copied files *and* directories
+    (``r-xr-xr-x``).  Removing a child requires write permission on its
+    parent directory, so the retry handler makes the failing path **and its
+    parent** writable before re-attempting.  See #34860, #34972.
+    """
+    # Defense in depth (#48200): refuse to rmtree anything outside
+    # ``HERMES_HOME/skills/`` to prevent the catastrophic wipe of
+    # ``~/.hermes/`` (``.env``, ``MEMORY.md``, ``kanban.db``, custom
+    # skills, scripts, …) that an earlier incident observed. Five call
+    # sites in this file invoke this helper; if any one of them ever
+    # computes a destination outside the skills root — through a bad
+    # path join, a missing ``HERMES_HOME`` default, a malicious
+    # bundled-manifest entry, or a mid-flight exception that leaves a
+    # stale path in scope — this guard turns the resulting
+    # ``shutil.rmtree(~/.hermes)`` into a loud, recoverable ``ValueError``
+    # instead of silently destroying the user's install.
+    target = Path(path).resolve()
+    skills_root = SKILLS_DIR.resolve()
+    # Every legitimate caller passes a skill directory or its ``.bak``
+    # sibling — always a strict child of the skills root. The skills root
+    # itself must never be removed: a ``dest`` that collapses to
+    # ``SKILLS_DIR`` (e.g. a relative path resolving to ``.``) would wipe
+    # every installed skill, and its ``.bak`` sibling lands one level up in
+    # ``HERMES_HOME``. Require a strict-child relationship so both escape
+    # into the skills root and out of it are refused.
+    if skills_root not in target.parents:
+        raise ValueError(
+            f"refusing to rmtree {target!r}: not strictly under {skills_root!r} "
+            f"(scope guard — see #48200)"
+        )
+    import stat
+
+    def _on_error(func, fpath, exc_info):
+        # Unlinking a child requires the parent dir to be writable, so chmod
+        # the parent as well as the failing path, then retry.
+        for target in (os.path.dirname(fpath), fpath):
+            try:
+                os.chmod(target, stat.S_IRWXU)
+            except OSError:
+                pass
+        func(fpath)
+
+    shutil.rmtree(path, onerror=_on_error)
 
 
 def reset_bundled_skill(name: str, restore: bool = False) -> dict:
@@ -416,6 +463,285 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     return {"ok": True, "action": action, "message": message, "synced": synced}
 
 
+def list_user_modified_bundled_skills() -> List[dict]:
+    """Return the bundled skills that ``hermes update`` keeps because the user
+    edited them locally.
+
+    A skill counts as user-modified when its on-disk copy no longer matches the
+    origin hash recorded in the manifest the last time it was synced — the exact
+    same test the sync loop uses to decide what to skip. This is the discovery
+    half of that behavior, so a user can find the names the ``~ N user-modified
+    (kept)`` notice only counts.
+
+    Returns a list (sorted by name) of dicts:
+        ``{"name": str, "dest": Path, "bundled_src": Path}``
+    where ``dest`` is the user's copy and ``bundled_src`` is the current stock
+    copy (so callers can diff or restore).
+    """
+    manifest = _read_manifest()
+    if not manifest:
+        return []
+    bundled_dir = _get_bundled_dir()
+    modified: List[dict] = []
+    for skill_name, skill_dir in _discover_bundled_skills(bundled_dir):
+        origin_hash = manifest.get(skill_name)
+        # No entry, or a v1 entry not yet baselined (empty hash): not a tracked
+        # modification — the next sync handles it.
+        if not origin_hash:
+            continue
+        dest = _compute_relative_dest(skill_dir, bundled_dir)
+        if not dest.exists():
+            continue
+        if _dir_hash(dest) != origin_hash:
+            modified.append(
+                {"name": skill_name, "dest": dest, "bundled_src": skill_dir}
+            )
+    modified.sort(key=lambda e: e["name"])
+    return modified
+
+
+def _read_text_for_diff(path: Path) -> Optional[str]:
+    """Return file text for diffing, or ``None`` if the file is binary/unreadable."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def diff_bundled_skill(name: str) -> dict:
+    """Diff a user's copy of a bundled skill against the current stock version.
+
+    Lets a user see exactly what diverged before deciding whether to keep their
+    edits or ``hermes skills reset`` back to upstream.
+
+    Returns a dict:
+        ``ok`` (bool), ``name`` (str), ``found`` (bool — bundled source exists),
+        ``user_present`` (bool), ``modified`` (bool), ``message`` (str),
+        ``diffs``: list of ``{"path": str, "status": str, "diff": str}`` where
+        status is one of ``modified`` / ``added`` (only in user copy) /
+        ``removed`` (only in bundled) / ``binary``.
+    """
+    import difflib
+
+    bundled_dir = _get_bundled_dir()
+    bundled_by_name = dict(_discover_bundled_skills(bundled_dir))
+    bundled_src = bundled_by_name.get(name)
+    if bundled_src is None:
+        return {
+            "ok": False,
+            "name": name,
+            "found": False,
+            "user_present": False,
+            "modified": False,
+            "diffs": [],
+            "message": (
+                f"'{name}' is not a tracked bundled skill (no stock version to "
+                f"diff against). Hub-installed skills use `hermes skills inspect`."
+            ),
+        }
+    dest = _compute_relative_dest(bundled_src, bundled_dir)
+    if not dest.exists():
+        return {
+            "ok": False,
+            "name": name,
+            "found": True,
+            "user_present": False,
+            "modified": False,
+            "diffs": [],
+            "message": f"No local copy of '{name}' found at {dest}.",
+        }
+
+    user_files = {
+        p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()
+    }
+    stock_files = {
+        p.relative_to(bundled_src).as_posix()
+        for p in bundled_src.rglob("*")
+        if p.is_file()
+    }
+
+    diffs: List[dict] = []
+    for rel in sorted(user_files | stock_files):
+        in_user = rel in user_files
+        in_stock = rel in stock_files
+        user_text = _read_text_for_diff(dest / rel) if in_user else None
+        stock_text = _read_text_for_diff(bundled_src / rel) if in_stock else None
+
+        if in_user and in_stock:
+            if user_text is None or stock_text is None:
+                # At least one side is binary — report only if bytes differ.
+                if (dest / rel).read_bytes() != (bundled_src / rel).read_bytes():
+                    diffs.append(
+                        {"path": rel, "status": "binary", "diff": "<binary file differs>"}
+                    )
+                continue
+            if user_text == stock_text:
+                continue
+            text = "".join(
+                difflib.unified_diff(
+                    stock_text.splitlines(keepends=True),
+                    user_text.splitlines(keepends=True),
+                    fromfile=f"stock/{rel}",
+                    tofile=f"yours/{rel}",
+                )
+            )
+            diffs.append({"path": rel, "status": "modified", "diff": text})
+        elif in_user:
+            diffs.append(
+                {"path": rel, "status": "added", "diff": f"+ only in your copy: {rel}"}
+            )
+        else:
+            diffs.append(
+                {"path": rel, "status": "removed", "diff": f"- only in stock: {rel}"}
+            )
+
+    modified = bool(diffs)
+    return {
+        "ok": True,
+        "name": name,
+        "found": True,
+        "user_present": True,
+        "modified": modified,
+        "diffs": diffs,
+        "message": (
+            f"'{name}' matches the stock version."
+            if not modified
+            else f"'{name}' differs from the stock version in {len(diffs)} file(s)."
+        ),
+    }
+
+
+def set_bundled_skills_opt_out(enabled: bool) -> dict:
+    """Toggle the .no-bundled-skills opt-out marker for the active profile.
+
+    When ``enabled`` is True, writes HERMES_HOME/.no-bundled-skills so the
+    installer, ``hermes update``, and any direct sync stop seeding bundled
+    skills. When False, removes the marker so seeding resumes on the next
+    sync. This is the on-disk-state half of ``hermes skills opt-out`` /
+    ``opt-in``; removal of already-present skills is a separate, explicit
+    step (see ``remove_pristine_bundled_skills``).
+
+    Returns:
+        dict with keys: ok (bool), changed (bool), marker (str path),
+                        message (str).
+    """
+    marker = HERMES_HOME / NO_BUNDLED_SKILLS_MARKER
+    existed = marker.exists()
+    try:
+        if enabled:
+            HERMES_HOME.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                "This profile opted out of bundled-skill seeding "
+                "(`hermes skills opt-out`).\n"
+                "Delete this file to re-enable sync on the next `hermes update`.\n",
+                encoding="utf-8",
+            )
+            changed = not existed
+            message = (
+                "Opted out of bundled skills. Future install / update / sync "
+                "runs will not seed bundled skills into this profile."
+                if changed
+                else "Already opted out — marker was already present."
+            )
+        else:
+            if existed:
+                marker.unlink()
+            changed = existed
+            message = (
+                "Opted back in. The next `hermes update` (or `hermes skills "
+                "opt-in --sync`) will re-seed bundled skills."
+                if changed
+                else "Not opted out — no marker to remove."
+            )
+    except OSError as e:
+        return {
+            "ok": False, "changed": False, "marker": str(marker),
+            "message": f"Could not update opt-out marker at {marker}: {e}",
+        }
+    return {"ok": True, "changed": changed, "marker": str(marker), "message": message}
+
+
+def is_bundled_skills_opt_out() -> bool:
+    """Return True if the active profile carries the opt-out marker."""
+    return (HERMES_HOME / NO_BUNDLED_SKILLS_MARKER).exists()
+
+
+def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
+    """Delete bundled skills that are present, manifest-tracked, AND unmodified.
+
+    Safety is the whole point of this function. A skill on disk is removed
+    ONLY when all of these hold:
+      - it is recorded in the sync manifest (so it is genuinely a bundled
+        skill, not a hub-installed or hand-written one), AND
+      - it still exists in the bundled source (so we can hash-compare), AND
+      - its on-disk copy is byte-identical to the manifest origin hash
+        (so the user has not edited it).
+
+    Anything user-modified, hub-installed, or locally authored is left
+    untouched and reported under ``skipped``. The manifest entry for each
+    removed skill is dropped so a later opt-in re-seed treats it as new.
+
+    Args:
+        dry_run: When True, compute what would be removed without deleting.
+
+    Returns:
+        dict with keys: ok (bool), removed (list[str]),
+                        skipped (list[dict]) where each dict is
+                        {name, reason}, dry_run (bool), message (str).
+    """
+    manifest = _read_manifest()
+    bundled_dir = _get_bundled_dir()
+    bundled_by_name = dict(_discover_bundled_skills(bundled_dir))
+
+    removed: List[str] = []
+    skipped: List[dict] = []
+
+    for name, origin_hash in sorted(manifest.items()):
+        src = bundled_by_name.get(name)
+        if src is None:
+            # Tracked but no longer bundled upstream — leave it; not ours to judge.
+            skipped.append({"name": name, "reason": "no bundled source (removed upstream)"})
+            continue
+        dest = _compute_relative_dest(src, bundled_dir)
+        if not dest.exists():
+            # Already gone from disk; just forget the stale manifest entry.
+            if not dry_run and name in manifest:
+                del manifest[name]
+            continue
+        on_disk = _dir_hash(dest)
+        if on_disk != origin_hash:
+            skipped.append({"name": name, "reason": "user-modified (kept)"})
+            continue
+        # Pristine bundled copy — safe to remove.
+        if dry_run:
+            removed.append(name)
+            continue
+        try:
+            _rmtree_writable(dest)
+        except (OSError, IOError) as e:
+            skipped.append({"name": name, "reason": f"delete failed: {e}"})
+            continue
+        if name in manifest:
+            del manifest[name]
+        removed.append(name)
+
+    if not dry_run and removed:
+        _write_manifest(manifest)
+
+    verb = "Would remove" if dry_run else "Removed"
+    message = f"{verb} {len(removed)} pristine bundled skill(s); kept {len(skipped)}."
+    return {
+        "ok": True, "removed": removed, "skipped": skipped,
+        "dry_run": dry_run, "message": message,
+    }
+
+
 if __name__ == "__main__":
     print("Syncing bundled skills into ~/.hermes/skills/ ...")
     result = sync_skills(quiet=False)
@@ -425,7 +751,12 @@ if __name__ == "__main__":
         f"{result['skipped']} unchanged",
     ]
     if result["user_modified"]:
-        parts.append(f"{len(result['user_modified'])} user-modified (kept)")
+        names = result["user_modified"]
+        MAX_SHOW = 5
+        shown = ", ".join(names[:MAX_SHOW])
+        if len(names) > MAX_SHOW:
+            shown += f", +{len(names) - MAX_SHOW} more"
+        parts.append(f"{len(names)} user-modified (kept): {shown}")
     if result["cleaned"]:
         parts.append(f"{len(result['cleaned'])} cleaned from manifest")
     print(f"\nDone: {', '.join(parts)}. {result['total_bundled']} total bundled.")

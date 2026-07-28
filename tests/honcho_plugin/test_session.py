@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugins.memory.honcho.session import (
     HonchoSession,
@@ -212,55 +212,67 @@ class TestPeerLookupHelpers:
         assert mgr.get_peer_card(session.key) == ["Name: Robert"]
         assistant_peer.get_card.assert_called_once_with(target=session.user_peer_id)
 
-    def test_search_context_uses_assistant_perspective_with_target(self):
+    def test_search_context_uses_user_peer_perspective(self):
         mgr, session = self._make_cached_manager()
-        assistant_peer = MagicMock()
-        assistant_peer.context.return_value = SimpleNamespace(
-            representation="Robert runs neuralancer",
-            peer_card=["Location: Melbourne"],
-        )
-        mgr._get_or_create_peer = MagicMock(return_value=assistant_peer)
+        client = MagicMock()
+        client.search.return_value = [
+            SimpleNamespace(
+                content="Robert runs neuralancer",
+                peer_id=session.user_peer_id,
+                session_id=session.honcho_session_id,
+            )
+        ]
 
-        result = mgr.search_context(session.key, "neuralancer")
+        with patch("plugins.memory.honcho.session.get_honcho_client", return_value=client):
+            result = mgr.search_context(session.key, "neuralancer")
 
         assert "Robert runs neuralancer" in result
-        assert "- Location: Melbourne" in result
-        assistant_peer.context.assert_called_once_with(
-            target=session.user_peer_id,
-            search_query="neuralancer",
+        client.search.assert_called_once_with(
+            "neuralancer",
+            filters={"peer_perspective": session.user_peer_id},
+            limit=10,
         )
 
-    def test_search_context_unified_mode_uses_user_self_context(self):
+    def test_search_context_unified_mode_still_uses_requested_peer_scope(self):
         mgr, session = self._make_cached_manager()
         mgr._ai_observe_others = False
-        user_peer = MagicMock()
-        user_peer.context.return_value = SimpleNamespace(
-            representation="Unified self context",
-            peer_card=["Name: Robert"],
-        )
-        mgr._get_or_create_peer = MagicMock(return_value=user_peer)
+        client = MagicMock()
+        client.search.return_value = [
+            SimpleNamespace(
+                content="Unified self context",
+                peer_id=session.user_peer_id,
+                session_id="",
+            )
+        ]
 
-        result = mgr.search_context(session.key, "self")
+        with patch("plugins.memory.honcho.session.get_honcho_client", return_value=client):
+            result = mgr.search_context(session.key, "self")
 
         assert "Unified self context" in result
-        user_peer.context.assert_called_once_with(search_query="self")
+        assert client.search.call_args.kwargs["filters"] == {
+            "peer_perspective": session.user_peer_id
+        }
 
     def test_search_context_accepts_explicit_ai_peer_id(self):
         mgr, session = self._make_cached_manager()
-        ai_peer = MagicMock()
-        ai_peer.context.return_value = SimpleNamespace(
-            representation="Assistant self context",
-            peer_card=["Role: Assistant"],
-        )
-        mgr._get_or_create_peer = MagicMock(return_value=ai_peer)
+        client = MagicMock()
+        client.search.return_value = [
+            SimpleNamespace(
+                content="Assistant self context",
+                peer_id=session.assistant_peer_id,
+                session_id=session.honcho_session_id,
+            )
+        ]
 
-        result = mgr.search_context(session.key, "assistant", peer=session.assistant_peer_id)
+        with patch("plugins.memory.honcho.session.get_honcho_client", return_value=client):
+            result = mgr.search_context(
+                session.key, "assistant", peer=session.assistant_peer_id
+            )
 
         assert "Assistant self context" in result
-        ai_peer.context.assert_called_once_with(
-            target=session.assistant_peer_id,
-            search_query="assistant",
-        )
+        assert client.search.call_args.kwargs["filters"] == {
+            "peer_perspective": session.assistant_peer_id
+        }
 
     def test_get_prefetch_context_fetches_user_and_ai_from_peer_api(self):
         mgr, session = self._make_cached_manager()
@@ -1570,7 +1582,7 @@ class TestDialecticLifecycleSmoke:
         self._await_thread(provider)
         assert mgr.dialectic_query.call_count == 2, "turn 4 cadence fire"
         _, kwargs = mgr.dialectic_query.call_args
-        assert kwargs.get("reasoning_level") in ("medium", "high"), \
+        assert kwargs.get("reasoning_level") in {"medium", "high"}, \
             f"long query must bump reasoning level above 'low'; got {kwargs.get('reasoning_level')}"
         assert provider._last_dialectic_turn == 4, "cadence tracker advances on success"
 

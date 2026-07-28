@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -58,6 +59,10 @@ class _ClarifyEntry:
     def signature(self) -> Dict[str, object]:
         return {
             "clarify_id": self.clarify_id,
+            # Unified interactive-request identity (I7): clarify_id IS the
+            # request_id for this path. Exposed under both names so the
+            # PendingRegistry / frontend can address by request_id alone.
+            "request_id": self.clarify_id,
             "session_key": self.session_key,
             "question": self.question,
             "choices": list(self.choices) if self.choices else None,
@@ -65,11 +70,27 @@ class _ClarifyEntry:
 
 
 _lock = threading.RLock()
-# clarify_id → _ClarifyEntry  (primary lookup for button callbacks)
-_entries: Dict[str, _ClarifyEntry] = {}
-# session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
-_session_index: Dict[str, List[str]] = {}
 
+# Per-profile state (see services/profile_context.py for the broader
+# sub-sidecar removal refactor). These proxies look like flat dicts
+# to every call site; internally they route to the active profile's
+# ProfileContext when the `current_profile` ContextVar is set,
+# otherwise fall back to the module-level dicts below.
+_entries_fallback: Dict[str, _ClarifyEntry] = {}
+_session_index_fallback: Dict[str, List[str]] = {}
+try:
+    from tui_gateway.services.profile_context import _PerProfileDict as _PerProfileDict  # noqa: F401
+    # clarify_id → _ClarifyEntry  (primary lookup for button callbacks)
+    _entries: Dict[str, _ClarifyEntry] = _PerProfileDict(  # type: ignore[assignment]
+        "clarify_entries", _entries_fallback,
+    )
+    # session_key → list[clarify_id]  (FIFO; for text-fallback intercept and session cleanup)
+    _session_index: Dict[str, List[str]] = _PerProfileDict(  # type: ignore[assignment]
+        "clarify_session_index", _session_index_fallback,
+    )
+except ImportError:
+    _entries = _entries_fallback
+    _session_index = _session_index_fallback
 
 # =========================================================================
 # Public API — agent-thread side
@@ -86,6 +107,10 @@ def register(
     The caller (gateway clarify_callback) will then send the prompt to the
     user and block on ``wait_for_response(clarify_id, timeout)``.
     """
+    # I7: every interactive request has an id from the moment it exists.
+    # Callers normally mint the clarify_id themselves; backstop-mint here so
+    # no registration path can produce an unaddressable request.
+    clarify_id = str(clarify_id or "").strip() or uuid.uuid4().hex
     entry = _ClarifyEntry(
         clarify_id=clarify_id,
         session_key=session_key,
@@ -160,6 +185,30 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     entry.response = str(response) if response is not None else ""
     entry.event.set()
     return True
+
+
+def has_pending_clarify(clarify_id: str) -> bool:
+    """Non-destructive check: is a clarify with this id pending in THIS process?
+
+    Used by the gateway runtime proxy to decide whether a ``clarify.respond`` must
+    be handled locally (the request was registered here — e.g. the in-process team
+    leader conversation run) instead of being proxied to a scoped runtime worker
+    that never saw it.
+    """
+    cid = str(clarify_id or "").strip()
+    if not cid:
+        return False
+    with _lock:
+        return cid in _entries
+
+
+def get_pending_by_request_id(clarify_id: str) -> Optional[_ClarifyEntry]:
+    """Return a pending clarify entry by request id without resolving it."""
+    cid = str(clarify_id or "").strip()
+    if not cid:
+        return None
+    with _lock:
+        return _entries.get(cid)
 
 
 def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
@@ -255,7 +304,14 @@ def get_clarify_timeout() -> int:
 # callback bridges sync→async (runs on the agent thread; schedules the
 # adapter ``send_clarify`` call on the event loop).
 
-_notify_cbs: Dict[str, Callable[[_ClarifyEntry], None]] = {}
+# Per-profile (see _entries above for the design — same proxy pattern).
+_notify_cbs_fallback: Dict[str, Callable[[_ClarifyEntry], None]] = {}
+try:
+    _notify_cbs: Dict[str, Callable[[_ClarifyEntry], None]] = _PerProfileDict(  # noqa: F811 — same import guard as _entries
+        "clarify_notify_cbs", _notify_cbs_fallback,
+    )  # type: ignore[assignment]
+except NameError:
+    _notify_cbs = _notify_cbs_fallback
 
 
 def register_notify(session_key: str, cb: Callable[[_ClarifyEntry], None]) -> None:

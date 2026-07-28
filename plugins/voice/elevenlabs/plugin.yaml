@@ -1,0 +1,7 @@
+name: elevenlabs-transcription
+version: 1.0.0
+description: ElevenLabs Scribe speech-to-text backend.
+author: Hermes Agent
+kind: backend
+requires_env:
+  - ELEVENLABS_API_KEY

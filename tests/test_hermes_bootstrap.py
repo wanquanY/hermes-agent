@@ -244,7 +244,7 @@ class TestEntryPointsImportBootstrap:
         "hermes_cli/main.py",   # hermes CLI (console_script)
         "run_agent.py",          # hermes-agent (console_script)
         "acp_adapter/entry.py",  # hermes-acp (console_script)
-        "gateway/run.py",        # gateway
+        "hermes_gateway/runner.py",        # gateway
         "batch_runner.py",       # batch mode
         "cli.py",                # legacy direct-launch CLI
     ]
@@ -284,6 +284,8 @@ class TestEntryPointsImportBootstrap:
 
         first_import_node = None
         for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 first_import_node = node
                 break

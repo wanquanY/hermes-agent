@@ -15,6 +15,7 @@ directories, matching ripgrep's default behavior.
 
 import os
 import subprocess
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -48,7 +49,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_skips_hub_cache_files(self, searchable_tree):
         """find should not return files from .hub/ directory."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.json'"
+            f"find '{searchable_tree}' -not -path '*/.*' -type f -name '*.json'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "catalog.json" not in result.stdout
@@ -57,7 +58,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_skips_git_internals(self, searchable_tree):
         """find should not return files from .git/ directory."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.idx'"
+            f"find '{searchable_tree}' -not -path '*/.*' -type f -name '*.idx'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "pack-abc.idx" not in result.stdout
@@ -66,7 +67,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_still_returns_visible_files(self, searchable_tree):
         """find should still return files from visible directories."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.md'"
+            f"find '{searchable_tree}' -not -path '*/.*' -type f -name '*.md'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "SKILL.md" in result.stdout
@@ -75,10 +76,20 @@ class TestFindExcludesHiddenDirs:
 class TestGrepExcludesHiddenDirs:
     """_search_with_grep should exclude hidden directories."""
 
+    # Mirror the exclude list from file_operations._search_with_grep.
+    # grep --exclude-dir uses glob matching, NOT regex — a bare '.*'
+    # matches every directory name and swallows all results.
+    _EXCLUDES = " ".join(
+        f"--exclude-dir={d}" for d in
+        (".git", ".svn", ".hg", ".venv", "venv", "node_modules",
+         "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+         ".hub", ".hermes")
+    )
+
     def test_grep_skips_hub_cache(self, searchable_tree):
         """grep --exclude-dir should skip .hub/ directory."""
         cmd = (
-            f"grep -rnH --exclude-dir='.*' 'ignore' {searchable_tree}"
+            f"grep -rnH {self._EXCLUDES} 'ignore' '{searchable_tree}'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         # Should NOT find the injection text in .hub/index-cache/catalog.json
@@ -88,10 +99,105 @@ class TestGrepExcludesHiddenDirs:
     def test_grep_still_finds_visible_content(self, searchable_tree):
         """grep should still find content in visible directories."""
         cmd = (
-            f"grep -rnH --exclude-dir='.*' 'real skill' {searchable_tree}"
+            f"grep -rnH {self._EXCLUDES} 'real skill' '{searchable_tree}'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "SKILL.md" in result.stdout
+
+
+class TestGrepFallbackIntegration:
+    """Integration test: call FileOperations._search_content directly,
+    forcing the grep fallback path (no ripgrep).
+
+    Regression for the --exclude-dir='.*' bug: a bare '.*' regex matched
+    every directory name, so grep excluded ALL directories and returned
+    zero results.  The shell-level tests above cannot catch this because
+    they construct their own grep command independently — this class
+    exercises the real code path in file_operations.py.
+    """
+
+    def _make_env(self):
+        """Real-execution env backed by subprocess.run."""
+        env = MagicMock()
+        env.cwd = "/"
+
+        def execute(command, cwd=None, **kwargs):
+            completed = subprocess.run(
+                command, shell=True, text=True, capture_output=True,
+                cwd=cwd,  # critical: run grep inside the test tree
+            )
+            return {"output": completed.stdout, "returncode": completed.returncode}
+
+        env.execute = execute
+        return env
+
+    def test_grep_fallback_finds_visible_content(self, searchable_tree, monkeypatch):
+        """_search_content with grep fallback must find visible files.
+
+        This is the test that would have caught the --exclude-dir='.*'
+        bug: with the bug, grep returns zero results for ANY pattern
+        because every directory is excluded.
+
+        Critical: the search path must be '.' (matching the real
+        search_files default) — the bug only manifests when the root
+        directory name is '.' because '.*' glob-matches '.'.
+        Searching with an absolute path does NOT reproduce the bug.
+        """
+        from tools.file_operations import ShellFileOperations
+
+        env = self._make_env()
+        env.cwd = str(searchable_tree)  # so grep runs inside the tree
+        ops = ShellFileOperations(env)
+        # Force grep fallback even if rg is installed.
+        monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == "grep")
+
+        result = ops._search_content(
+            pattern="real skill",
+            path=".",  # NOT str(searchable_tree) — must be '.'
+            file_glob=None,
+            limit=50,
+            offset=0,
+            output_mode="content",
+            context=0,
+        )
+
+        assert result.error is None, f"unexpected error: {result.error}"
+        assert result.total_count > 0, (
+            "grep fallback returned zero results — "
+            "--exclude-dir bug may have regressed"
+        )
+        paths = [m.path for m in result.matches]
+        assert any("SKILL.md" in p for p in paths), (
+            f"SKILL.md not found in results: {paths}"
+        )
+
+    def test_grep_fallback_excludes_hidden_dirs(self, searchable_tree, monkeypatch):
+        """_search_content with grep fallback must NOT search .hub/."""
+        from tools.file_operations import ShellFileOperations
+
+        env = self._make_env()
+        env.cwd = str(searchable_tree)
+        ops = ShellFileOperations(env)
+        monkeypatch.setattr(ops, "_has_command", lambda cmd: cmd == "grep")
+
+        result = ops._search_content(
+            pattern="ignore",
+            path=".",
+            file_glob=None,
+            limit=50,
+            offset=0,
+            output_mode="content",
+            context=0,
+        )
+
+        assert result.error is None
+        paths = [m.path for m in result.matches]
+        assert not any(".hub" in p for p in paths), (
+            f".hub/ file leaked into results: {paths}"
+        )
+        assert not any("catalog.json" in p for p in paths), (
+            f"catalog.json leaked into results: {paths}"
+        )
 
 
 class TestRipgrepAlreadyExcludesHidden:

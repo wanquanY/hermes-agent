@@ -2,9 +2,24 @@
 
 import importlib
 
+import pytest
+
 from model_tools import get_tool_definitions
 
 terminal_tool_module = importlib.import_module("tools.terminal_tool")
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    """Invalidate check_fn and tool-definitions caches before each test
+    so that monkeypatched env vars / config take effect."""
+    from tools.registry import invalidate_check_fn_cache
+    from model_tools import _clear_tool_defs_cache
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    yield
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
 
 
 class TestTerminalRequirements:
@@ -26,6 +41,27 @@ class TestTerminalRequirements:
         names = {tool["function"]["name"] for tool in tools}
         assert "terminal" in names
         assert {"read_file", "write_file", "patch", "search_files"}.issubset(names)
+
+    def test_desktop_terminal_workspace_tools_resolve_only_for_desktop(self, monkeypatch):
+        monkeypatch.setattr(
+            terminal_tool_module,
+            "_get_env_config",
+            lambda: {"env_type": "local"},
+        )
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        desktop_tools = get_tool_definitions(enabled_toolsets=["terminal"], quiet_mode=True)
+        desktop_names = {tool["function"]["name"] for tool in desktop_tools}
+        assert {"list_terminals", "read_terminal", "write_terminal"}.issubset(desktop_names)
+
+        from tools.registry import invalidate_check_fn_cache
+        from model_tools import _clear_tool_defs_cache
+
+        monkeypatch.delenv("HERMES_DESKTOP")
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+        non_desktop_tools = get_tool_definitions(enabled_toolsets=["terminal"], quiet_mode=True)
+        non_desktop_names = {tool["function"]["name"] for tool in non_desktop_tools}
+        assert {"list_terminals", "read_terminal", "write_terminal"}.isdisjoint(non_desktop_names)
 
     def test_terminal_and_execute_code_tools_resolve_for_managed_modal(self, monkeypatch, tmp_path):
         monkeypatch.setattr("tools.tool_backend_helpers.managed_nous_tools_enabled", lambda: True)

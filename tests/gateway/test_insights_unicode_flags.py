@@ -3,17 +3,15 @@
 Telegram on iOS auto-converts -- to em/en dashes. The /insights handler
 normalizes these before parsing --days and --source flags.
 """
-import re
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-
-# The regex from gateway/run.py insights handler
-_UNICODE_DASH_RE = re.compile(r'[\u2012\u2013\u2014\u2015](days|source)')
-
-
-def _normalize_insights_args(raw: str) -> str:
-    """Apply the same normalization as the /insights handler."""
-    return _UNICODE_DASH_RE.sub(r'--\1', raw)
+from hermes_gateway.insights_command import (
+    GatewayInsightsCommandMixin,
+    normalize_insights_args,
+)
 
 
 class TestInsightsUnicodeDashFlags:
@@ -37,18 +35,51 @@ class TestInsightsUnicodeDashFlags:
         ("\u2014days 30 \u2014source cli", "--days 30 --source cli"),
     ])
     def test_unicode_dash_normalized(self, input_str, expected):
-        result = _normalize_insights_args(input_str)
+        result = normalize_insights_args(input_str)
         assert result == expected
 
     def test_regular_hyphens_unaffected(self):
         """Normal --days/--source must pass through unchanged."""
-        assert _normalize_insights_args("--days 7 --source discord") == "--days 7 --source discord"
+        assert normalize_insights_args("--days 7 --source discord") == "--days 7 --source discord"
 
     def test_bare_number_still_works(self):
         """Shorthand /insights 7 (no flag) must not be mangled."""
-        assert _normalize_insights_args("7") == "7"
+        assert normalize_insights_args("7") == "7"
 
     def test_no_flags_unchanged(self):
         """Input with no flags passes through as-is."""
-        assert _normalize_insights_args("") == ""
-        assert _normalize_insights_args("30") == "30"
+        assert normalize_insights_args("") == ""
+        assert normalize_insights_args("30") == "30"
+
+
+@pytest.mark.asyncio
+async def test_gateway_insights_uses_analytics_component_and_closes_store():
+    analytics = object()
+    store = SimpleNamespace(analytics=analytics, close=MagicMock())
+    observed = {}
+
+    class Engine:
+        def __init__(self, component):
+            observed["component"] = component
+
+        def generate(self, *, days, source):
+            observed["query"] = (days, source)
+            return {"ok": True}
+
+        def format_gateway(self, report):
+            return "formatted" if report["ok"] else "invalid"
+
+    event = SimpleNamespace(get_command_args=lambda: "--days 7 --source cli")
+    handler = GatewayInsightsCommandMixin()
+    with (
+        patch(
+            "hermes_gateway.insights_command.open_cli_session_store",
+            return_value=store,
+        ),
+        patch("agent.insights.InsightsEngine", Engine),
+    ):
+        result = await handler._handle_insights_command(event)
+
+    assert result == "formatted"
+    assert observed == {"component": analytics, "query": (7, "cli")}
+    store.close.assert_called_once_with()

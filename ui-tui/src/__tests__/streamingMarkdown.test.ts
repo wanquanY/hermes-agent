@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { findStableBoundary } from '../components/streamingMarkdown.js'
+import { advanceScan, createScanState, findStableBoundary } from '../components/streamingMarkdown.js'
 // We test the pure boundary logic by rendering the component's ref
 // behaviour through repeated calls. Since React isn't being rendered here,
 // we reach into the module to test findStableBoundary via its exported
@@ -117,5 +117,52 @@ describe('streaming theme assumption', () => {
     // already happens above — this is a smoke test that the module graph
     // for streamingMarkdown wires up without cycles.
     expect(DEFAULT_THEME.color.accent).toBeTruthy()
+  })
+})
+
+describe('incremental stream scanner', () => {
+  const corpus = [
+    'First paragraph.\n\n',
+    '```ts\nconst value = 1\n\nstill code\n```\n\n',
+    '$$\nx + y\n$$\n\n',
+    'Final paragraph without a newline'
+  ].join('')
+
+  it('reconstructs the source exactly from settled blocks and tail', () => {
+    const state = createScanState()
+
+    advanceScan(corpus, state)
+
+    expect(state.blocks.join('') + corpus.slice(state.settledLen)).toBe(corpus)
+    expect(state.blocks.length).toBe(3)
+  })
+
+  it('is append-only and matches one-shot scanning across tiny deltas', () => {
+    const expected = createScanState()
+    const incremental = createScanState()
+
+    advanceScan(corpus, expected)
+
+    let priorBlocks: string[] = []
+
+    for (let end = 1; end <= corpus.length; end++) {
+      advanceScan(corpus.slice(0, end), incremental)
+      expect(incremental.blocks.slice(0, priorBlocks.length)).toEqual(priorBlocks)
+      priorBlocks = [...incremental.blocks]
+    }
+
+    expect(incremental).toEqual(expected)
+  })
+
+  it('keeps an incomplete fence-looking line in the mutable tail', () => {
+    const state = createScanState()
+
+    advanceScan('paragraph\n\n``', state)
+    expect(state.blocks).toEqual(['paragraph\n\n'])
+    expect(state.codeOpen).toBe(false)
+
+    advanceScan('paragraph\n\n```ts\ncode\n\nstill code', state)
+    expect(state.blocks).toEqual(['paragraph\n\n'])
+    expect(state.codeOpen).toBe(true)
   })
 })

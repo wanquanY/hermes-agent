@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # ``time.sleep`` globally because ``time`` is the module object; under xdist
 # that lets unrelated background threads inflate retry-test call counts.
 _sleep = time.sleep
+_monotonic = time.monotonic
 
 _SYNC_INTERVAL_SECONDS = 5.0
 _FORCE_SYNC_ENV = "HERMES_FORCE_FILE_SYNC"
@@ -144,7 +145,7 @@ class FileSyncManager:
         On failure, state rolls back so the next cycle retries everything.
         """
         if not force and not os.environ.get(_FORCE_SYNC_ENV):
-            now = time.monotonic()
+            now = _monotonic()
             if now - self._last_sync_time < self._sync_interval:
                 return
 
@@ -167,7 +168,7 @@ class FileSyncManager:
         to_delete = [p for p in self._synced_files if p not in current_remote_paths]
 
         if not to_upload and not to_delete:
-            self._last_sync_time = time.monotonic()
+            self._last_sync_time = _monotonic()
             return
 
         # Snapshot for rollback (only when there's work to do)
@@ -201,12 +202,11 @@ class FileSyncManager:
                 self._pushed_hashes.pop(p, None)
 
             self._synced_files = new_files
-            self._last_sync_time = time.monotonic()
+            self._last_sync_time = _monotonic()
 
         except Exception as exc:
             self._synced_files = prev_files
             self._pushed_hashes = prev_hashes
-            self._last_sync_time = time.monotonic()
             logger.warning("file_sync: sync failed, rolled back state: %s", exc)
 
     # ------------------------------------------------------------------
@@ -289,7 +289,10 @@ class FileSyncManager:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             self._sync_back_impl()
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
             lock_fd.close()
 
     def _sync_back_impl(self) -> None:

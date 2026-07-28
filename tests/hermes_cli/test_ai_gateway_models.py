@@ -48,7 +48,7 @@ def test_ai_gateway_pricing_translates_input_output_to_prompt_completion():
             }
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_pricing(force_refresh=True)
 
     entry = result["moonshotai/kimi-k2.5"]
@@ -60,7 +60,7 @@ def test_ai_gateway_pricing_translates_input_output_to_prompt_completion():
 
 def test_ai_gateway_pricing_returns_empty_on_fetch_failure():
     _reset_caches()
-    with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+    with patch.object(models_module, "_urlopen_model_catalog_request", side_effect=OSError("network down")):
         result = fetch_ai_gateway_pricing(force_refresh=True)
     assert result == {}
 
@@ -73,7 +73,7 @@ def test_ai_gateway_pricing_skips_entries_without_pricing_dict():
             {"id": "a/b", "pricing": {"input": "0", "output": "0"}},
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_pricing(force_refresh=True)
     assert "x/y" not in result
     assert result["a/b"] == {"prompt": "0", "completion": "0"}
@@ -97,7 +97,7 @@ def test_fetch_ai_gateway_models_filters_against_live_catalog():
             for mid in live_ids
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_models(force_refresh=True)
 
     assert [mid for mid, _ in result] == live_ids
@@ -114,7 +114,7 @@ def test_fetch_ai_gateway_models_tags_free_models():
             {"id": second_id, "pricing": {"input": "0", "output": "0"}},
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_models(force_refresh=True)
 
     by_id = dict(result)
@@ -132,7 +132,7 @@ def test_free_moonshot_model_auto_promoted_to_top_even_if_not_curated():
             {"id": unlisted_free_moonshot, "pricing": {"input": "0", "output": "0"}},
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_models(force_refresh=True)
 
     assert result[0] == (unlisted_free_moonshot, "recommended")
@@ -148,7 +148,7 @@ def test_paid_moonshot_does_not_get_auto_promoted():
             {"id": "moonshotai/some-paid-variant", "pricing": {"input": "0.001", "output": "0.002"}},
         ]
     }
-    with patch("urllib.request.urlopen", return_value=_mock_urlopen(payload)):
+    with patch.object(models_module, "_urlopen_model_catalog_request", return_value=_mock_urlopen(payload)):
         result = fetch_ai_gateway_models(force_refresh=True)
 
     assert result[0][0] == first_curated
@@ -156,6 +156,6 @@ def test_paid_moonshot_does_not_get_auto_promoted():
 
 def test_fetch_ai_gateway_models_falls_back_on_error():
     _reset_caches()
-    with patch("urllib.request.urlopen", side_effect=OSError("network")):
+    with patch.object(models_module, "_urlopen_model_catalog_request", side_effect=OSError("network")):
         result = fetch_ai_gateway_models(force_refresh=True)
     assert result == list(VERCEL_AI_GATEWAY_MODELS)

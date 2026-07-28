@@ -21,6 +21,24 @@ from agent.redact import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from channels.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.getenv(name, default)
+
+
+def _default_workspace_cwd() -> str:
+    cwd = os.getenv("DOVIE_WORKSPACE_ROOT", "").strip()
+    if cwd:
+        return cwd
+    if os.getenv("DOVIE_PROCESS_ROLE") == "hermes-worker":
+        raise RuntimeError("Dovie workspace root is not configured")
+    return os.getcwd()
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -77,6 +95,63 @@ _BLOCKED_DEVICE_PATHS = frozenset({
     "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
 })
 
+# ── Backfilled from upstream/main:tools/file_tools.py ───────────────────────
+# Worktree-cwd discipline helpers — referenced by absorbed P0/P1 commits
+# (file-tools harden patches) but their defining commits aren't on the
+# absorption list. Without them `read_file` / `write_file` raise NameError
+# the moment any path-anchoring code runs.
+_TERMINAL_CWD_SENTINELS = frozenset({"", ".", "./", "auto", "cwd"})
+
+
+def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
+    """Normalize a cwd candidate to an absolute, sentinel-free anchor."""
+    raw = str(raw or "").strip()
+    if raw.lower() in _TERMINAL_CWD_SENTINELS:
+        return None
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        return None
+    return expanded
+
+
+def _configured_terminal_cwd() -> str | None:
+    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+
+
+def _registered_task_cwd_override(task_id: str = "default") -> str | None:
+    """Return a registered cwd override for the raw task id, when available."""
+    try:
+        from tools.terminal_tool import resolve_task_overrides
+
+        overrides = resolve_task_overrides(task_id)
+    except Exception:
+        return None
+    return _sentinel_free_abs_cwd(overrides.get("cwd"))
+
+
+def _authoritative_workspace_root(task_id: str = "default") -> str | None:
+    """Best-effort absolute workspace root for divergence checks."""
+    live = _get_live_tracking_cwd(task_id)
+    if live:
+        return live
+    registered = _registered_task_cwd_override(task_id)
+    if registered:
+        return registered
+    return _configured_terminal_cwd()
+
+
+def _resolve_base_dir(task_id: str = "default") -> Path:
+    """Return the ABSOLUTE base directory for resolving relative paths."""
+    root = _authoritative_workspace_root(task_id)
+    if root:
+        base = Path(root).expanduser()
+    else:
+        base = Path(os.getcwd())
+    if not base.is_absolute():
+        base = Path(os.getcwd()) / base
+    return base.resolve()
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _resolve_path(filepath: str, task_id: str = "default") -> Path:
     """Resolve a path relative to TERMINAL_CWD (the worktree base directory)
@@ -92,6 +167,31 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
         container_key = _resolve_container_task_id(task_id)
     except Exception:
         container_key = task_id
+
+    try:
+        from tools.terminal_cwd_registry import (
+            resolve_terminal_session_key,
+            terminal_cwd_registry,
+        )
+        from tools.approval import get_current_session_key
+
+        explicit_session_key = str(get_current_session_key(default="") or "").strip()
+        session_key = explicit_session_key or resolve_terminal_session_key(task_id)
+        session_cwd = terminal_cwd_registry.get(
+            container_key,
+            session_key,
+        )
+        if session_cwd:
+            return session_cwd
+        # A gateway conversation has an independent logical cwd.  Until that
+        # conversation records one, fall back to its configured workspace —
+        # never to the cwd left behind by another conversation in the shared
+        # environment object. Standalone callers without session context keep
+        # the legacy live-env fallback below.
+        if explicit_session_key and explicit_session_key != container_key:
+            return None
+    except Exception:
+        pass
 
     with _file_ops_lock:
         cached = _file_ops_cache.get(container_key) or _file_ops_cache.get(task_id)
@@ -120,28 +220,74 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     """Resolve *filepath* against the task's live terminal cwd when possible."""
     p = Path(filepath).expanduser()
     if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or os.environ.get(
-            "TERMINAL_CWD", os.getcwd()
-        )
+        default_cwd = _default_workspace_cwd()
+        base = _get_live_tracking_cwd(task_id) or _session_env("TERMINAL_CWD", default_cwd) or default_cwd
         p = Path(base) / p
     return p.resolve()
 
 
-def _is_blocked_device(filepath: str) -> bool:
-    """Return True if the path would hang the process (infinite output or blocking input).
-
-    Uses the *literal* path — no symlink resolution — because the model
-    specifies paths directly and realpath follows symlinks all the way
-    through (e.g. /dev/stdin → /proc/self/fd/0 → /dev/pts/0), defeating
-    the check.
-    """
-    normalized = os.path.expanduser(filepath)
+def _is_blocked_device_path(path: str) -> bool:
+    """Return True for concrete device/fd paths that can hang reads."""
+    normalized = os.path.normpath(os.path.expanduser(path))
     if normalized in _BLOCKED_DEVICE_PATHS:
         return True
-    # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/fd/0", "/fd/1", "/fd/2")
     ):
+        return True
+    if normalized.startswith("/proc/") and normalized.endswith(
+        (
+            "/environ",
+            "/cmdline",
+            "/maps",
+            "/smaps",
+            "/smaps_rollup",
+            "/numa_maps",
+            "/mem",
+            "/auxv",
+            "/pagemap",
+        )
+    ):
+        return True
+    return False
+
+
+def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> bool:
+    """Return True if the path would hang the process (infinite output or blocking input).
+
+    Check the literal path first so aliases like /dev/stdin are caught before
+    they resolve to terminal-specific paths. Then check each symlink hop before
+    the final resolved path so aliases to devices cannot bypass the guard.
+    """
+    expanded = os.path.expanduser(filepath)
+    if base_dir is not None and not os.path.isabs(expanded):
+        expanded = os.path.join(os.fspath(base_dir), expanded)
+    normalized = os.path.normpath(expanded)
+    if _is_blocked_device_path(normalized):
+        return True
+
+    seen: set[str] = set()
+    current = normalized
+    for _ in range(20):
+        try:
+            target = os.readlink(current)
+        except OSError:
+            break
+        if not os.path.isabs(target):
+            target = os.path.join(os.path.dirname(current), target)
+        target = os.path.normpath(target)
+        if _is_blocked_device_path(target):
+            return True
+        if target in seen:
+            break
+        seen.add(target)
+        current = target
+
+    try:
+        resolved = os.path.normpath(os.path.realpath(normalized))
+    except (OSError, ValueError):
+        return False
+    if _is_blocked_device_path(resolved):
         return True
     return False
 
@@ -152,7 +298,37 @@ _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
     "/private/etc/", "/private/var/",
 )
+# macOS resolves the per-user temporary/cache tree from ``/var/folders`` to
+# ``/private/var/folders``.  It is user-writable application data, not a system
+# configuration tree.  Keep the broad ``/private/var`` denial for system-owned
+# state while allowing this one platform-defined user-data subtree.  Resolved
+# symlink targets are checked independently below, so a link from the allowed
+# tree into ``/private/etc`` or another denied subtree still fails closed.
+_SENSITIVE_PATH_PREFIX_EXCEPTIONS = ("/private/var/folders/",)
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+
+_hermes_config_resolved: str | None = None
+_hermes_config_resolved_loaded = False
+
+
+def _get_hermes_config_resolved() -> str | None:
+    """Return the resolved Hermes config path, cached for this process."""
+    global _hermes_config_resolved, _hermes_config_resolved_loaded
+    if _hermes_config_resolved_loaded:
+        return _hermes_config_resolved
+    _hermes_config_resolved_loaded = True
+    try:
+        from hermes_cli.config import get_config_path
+
+        _hermes_config_resolved = str(get_config_path().resolve())
+    except Exception:
+        try:
+            _hermes_config_resolved = str(
+                Path("~/.hermes/config.yaml").expanduser().resolve()
+            )
+        except Exception:
+            _hermes_config_resolved = None
+    return _hermes_config_resolved
 
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
@@ -166,11 +342,20 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+    for candidate in (resolved, normalized):
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIX_EXCEPTIONS):
+            continue
+        if any(candidate.startswith(prefix) for prefix in _SENSITIVE_PATH_PREFIXES):
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
+    hermes_config = _get_hermes_config_resolved()
+    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
+        return (
+            f"Refusing to write to Hermes config file: {filepath}\n"
+            "Agent cannot modify security-sensitive configuration. "
+            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
+        )
     return None
 
 
@@ -300,6 +485,49 @@ def _is_internal_file_status_text(content: str) -> bool:
             len(stripped) <= 2 * len(_READ_DEDUP_STATUS_MESSAGE):
         return True
     return False
+
+
+def _looks_like_read_file_line_numbered_content(content: str) -> bool:
+    """Return True for content dominated by read_file's ``LINE_NUM|CONTENT`` display.
+
+    ``read_file`` intentionally returns line-numbered text to the model. If
+    that display format is echoed into ``write_file``, config/source files are
+    silently corrupted with prefixes like `` 1|``.  We reject writes where the
+    non-empty lines are mostly consecutive read_file-style numbered lines, while
+    allowing sparse literal pipe content such as a single ``1|value`` line.
+    """
+    if not isinstance(content, str):
+        return False
+
+    lines = [line for line in content.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+
+    numbered: list[int] = []
+    for line in lines:
+        stripped = line.lstrip()
+        prefix, sep, _rest = stripped.partition("|")
+        if sep and prefix.isdigit():
+            numbered.append(int(prefix))
+
+    if len(numbered) < 2:
+        return False
+    if len(numbered) / len(lines) < 0.6:
+        return False
+
+    consecutive_pairs = sum(
+        1 for prev, current in zip(numbered, numbered[1:])
+        if current == prev + 1
+    )
+    return consecutive_pairs >= len(numbered) - 1
+
+
+def _is_internal_file_tool_content(content: str) -> bool:
+    """Return True when content is file-tool display text, not intended file bytes."""
+    return (
+        _is_internal_file_status_text(content)
+        or _looks_like_read_file_line_numbered_content(content)
+    )
 
 
 def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
@@ -452,7 +680,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
-        if _is_blocked_device(path):
+        device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(task_id)
+        if _is_blocked_device(path, base_dir=device_base):
             return json.dumps({
                 "error": (
                     f"Cannot read '{path}': this is a device file that would "
@@ -461,6 +690,67 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             })
 
         _resolved = _resolve_path_for_task(path, task_id)
+
+        # Structured documents are rendered to text before the binary guard so
+        # notebooks and Office containers participate in the same paginated,
+        # redacted read contract as ordinary source files.
+        from tools.read_extract import (
+            ExtractionError,
+            extract_document_text,
+            is_extractable_document,
+        )
+
+        if is_extractable_document(str(_resolved)):
+            try:
+                extracted_text = extract_document_text(str(_resolved))
+            except ExtractionError:
+                logger.debug("document extraction failed for %s", path, exc_info=True)
+            else:
+                file_ops = _get_file_ops(task_id)
+                lines = extracted_text.splitlines()
+                total_lines = len(lines)
+                end_line = offset + limit - 1
+                page_text = "\n".join(lines[offset - 1:end_line])
+                result_dict = {
+                    "content": file_ops._add_line_numbers(page_text, offset) if page_text else "",
+                    "total_lines": total_lines,
+                    "file_size": os.path.getsize(_resolved),
+                    "truncated": total_lines > end_line,
+                    "extracted_document": True,
+                }
+                if result_dict["truncated"]:
+                    result_dict["hint"] = (
+                        f"Use offset={end_line + 1} to continue reading "
+                        f"(showing {offset}-{min(end_line, total_lines)} of {total_lines} lines)"
+                    )
+                content_len = len(result_dict["content"])
+                max_chars = _get_max_read_chars()
+                if content_len > max_chars:
+                    trimmed, lines_kept, _ = _truncate_to_char_budget(
+                        result_dict["content"], max_chars
+                    )
+                    next_offset = offset + lines_kept
+                    shown_end = offset + lines_kept - 1
+                    result_dict["content"] = trimmed
+                    result_dict["truncated"] = True
+                    result_dict["truncated_by"] = "bytes"
+                    result_dict["next_offset"] = next_offset
+                    result_dict["hint"] = (
+                        f"Output truncated at the {max_chars:,}-char read budget "
+                        f"after {lines_kept} line(s) (showing lines {offset}-"
+                        f"{shown_end} of {total_lines}). Use offset={next_offset} "
+                        "to continue."
+                    )
+                    if len(trimmed.split("\n", 1)[0]) >= max_chars:
+                        result_dict["hint"] += (
+                            " Note: the first line alone exceeded the budget and "
+                            "was clamped mid-line; its remainder is not retrievable via offset."
+                        )
+                if result_dict["content"]:
+                    result_dict["content"] = redact_sensitive_text(
+                        result_dict["content"], file_read=True
+                    )
+                return json.dumps(result_dict, ensure_ascii=False)
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block binary files by extension (no I/O).
@@ -475,7 +765,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Hermes internal path guard ────────────────────────────────
         # Prevent prompt injection via catalog or hub metadata files.
-        block_error = get_read_block_error(path)
+        block_error = get_read_block_error(str(_resolved))
         if block_error:
             return json.dumps({"error": block_error})
 
@@ -795,10 +1085,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
-    if _is_internal_file_status_text(content):
+    if _is_internal_file_tool_content(content):
         return tool_error(
-            "Refusing to write internal read_file status text as file content. "
-            "Re-read the file or reconstruct the intended file contents before writing."
+            "Refusing to write internal read_file display text as file content. "
+            "Strip read_file line-number prefixes or reconstruct the intended "
+            "file contents before writing."
         )
     try:
         # Resolve once for the registry lock + stale check.  Failures here
@@ -847,6 +1138,27 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         return tool_error(str(e))
 
 
+def _extract_v4a_patch_paths(patch: str) -> tuple[list[str], str | None]:
+    """Extract every filesystem endpoint accepted by the V4A parser."""
+    import re as _re
+
+    paths: list[str] = []
+    for match in _re.finditer(
+        r'^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE
+    ):
+        paths.append(match.group(1).strip())
+    for match in _re.finditer(r'^\*\*\*\s*Move\s+File:\s*(.+)$', patch, _re.MULTILINE):
+        move = match.group(1).strip()
+        if " -> " not in move:
+            return [], "Invalid Move File header: expected 'source -> destination'"
+        source, destination = move.split(" -> ", 1)
+        paths.extend((source.strip(), destination.strip()))
+    for endpoint in paths:
+        if ".." in Path(endpoint).parts:
+            return [], f"Refusing patch path traversal: {endpoint}"
+    return paths, None
+
+
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default") -> str:
@@ -856,9 +1168,10 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     if path:
         _paths_to_check.append(path)
     if mode == "patch" and patch:
-        import re as _re
-        for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
-            _paths_to_check.append(_m.group(1).strip())
+        extracted, extraction_error = _extract_v4a_patch_paths(patch)
+        if extraction_error:
+            return tool_error(extraction_error)
+        _paths_to_check.extend(extracted)
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:

@@ -349,6 +349,7 @@ class TestConvertMessagesToConverse:
         image_blocks = [b for b in content if "image" in b]
         assert len(image_blocks) == 1
         assert image_blocks[0]["image"]["format"] == "png"
+        assert image_blocks[0]["image"]["source"]["bytes"] == b"\x89PNG\r\n\x1a\n"
 
     def test_multiple_system_messages_merged(self):
         from agent.bedrock_adapter import convert_messages_to_converse
@@ -916,6 +917,22 @@ class TestStreamConverseWithCallbacks:
         assert deltas == ["Hello", " world"]
         assert result.choices[0].message.content == "Hello world"
 
+    def test_every_wire_event_refreshes_liveness_callback(self):
+        from agent.bedrock_adapter import stream_converse_with_callbacks
+
+        events = {
+            "stream": [
+                {"messageStart": {"role": "assistant"}},
+                {"messageStop": {"stopReason": "end_turn"}},
+                {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 0}}},
+            ]
+        }
+        seen = []
+
+        stream_converse_with_callbacks(events, on_event=lambda: seen.append(True))
+
+        assert len(seen) == 3
+
     def test_text_deltas_suppressed_when_tool_use_present(self):
         """Text deltas should NOT fire when tool_use blocks are present."""
         from agent.bedrock_adapter import stream_converse_with_callbacks
@@ -960,9 +977,12 @@ class TestStreamConverseWithCallbacks:
             {"metadata": {"usage": {"inputTokens": 0, "outputTokens": 0}}},
         ]}
         result = stream_converse_with_callbacks(
-            events, on_tool_start=lambda name: tools_started.append(name),
+            events,
+            on_tool_start=lambda name, tool_call_id: tools_started.append(
+                (name, tool_call_id)
+            ),
         )
-        assert tools_started == ["read_file"]
+        assert tools_started == [("read_file", "c1")]
 
     def test_interrupt_stops_processing(self):
         from agent.bedrock_adapter import stream_converse_with_callbacks
@@ -1102,11 +1122,11 @@ class TestBedrockContextLength:
 
     def test_claude_opus_4_6(self):
         from agent.bedrock_adapter import get_bedrock_context_length
-        assert get_bedrock_context_length("anthropic.claude-opus-4-6-20250514-v1:0") == 200_000
+        assert get_bedrock_context_length("anthropic.claude-opus-4-6-20250514-v1:0") == 1_000_000
 
     def test_claude_sonnet_versioned(self):
         from agent.bedrock_adapter import get_bedrock_context_length
-        assert get_bedrock_context_length("anthropic.claude-sonnet-4-6-20250514-v1:0") == 200_000
+        assert get_bedrock_context_length("anthropic.claude-sonnet-4-6-20250514-v1:0") == 1_000_000
 
     def test_nova_pro(self):
         from agent.bedrock_adapter import get_bedrock_context_length
@@ -1123,12 +1143,62 @@ class TestBedrockContextLength:
     def test_inference_profile_resolves(self):
         from agent.bedrock_adapter import get_bedrock_context_length
         # Cross-region inference profiles contain the base model ID
-        assert get_bedrock_context_length("us.anthropic.claude-sonnet-4-6") == 200_000
+        assert get_bedrock_context_length("us.anthropic.claude-sonnet-4-6") == 1_000_000
 
     def test_longest_prefix_wins(self):
         from agent.bedrock_adapter import get_bedrock_context_length
         # "anthropic.claude-3-5-sonnet" should match before "anthropic.claude-3"
         assert get_bedrock_context_length("anthropic.claude-3-5-sonnet-20240620-v1:0") == 200_000
+
+    @pytest.mark.parametrize(
+        "model_id",
+        (
+            "anthropic.claude-fable-5-v1:0",
+            "anthropic.claude-sonnet-5-v1:0",
+            "anthropic.claude-opus-4-8-v1:0",
+            "anthropic.claude-opus-4-7-v1:0",
+        ),
+    )
+    def test_latest_claude_models_use_1m_static_floor(self, model_id):
+        from agent.bedrock_adapter import get_bedrock_context_length
+
+        assert get_bedrock_context_length(model_id) == 1_000_000
+
+
+class TestBedrockContextProbe:
+    @staticmethod
+    def _client_raising(message):
+        client = MagicMock()
+        client.converse.side_effect = Exception(message)
+        return client
+
+    def test_probe_parses_authoritative_window(self, monkeypatch):
+        from agent import bedrock_adapter
+
+        monkeypatch.setattr(bedrock_adapter, "_BEDROCK_PROBE_TIERS", (10,))
+        error = "prompt is too long: 1300032 tokens > 1000000 maximum"
+        with patch(
+            "agent.bedrock_adapter._get_bedrock_runtime_client",
+            return_value=self._client_raising(error),
+        ):
+            assert (
+                bedrock_adapter.probe_bedrock_context_length(
+                    "eu.anthropic.claude-opus-4-8", "eu-central-1"
+                )
+                == 1_000_000
+            )
+
+    def test_probe_failure_falls_back_to_static_table(self, monkeypatch):
+        from agent import bedrock_adapter
+
+        monkeypatch.setattr(bedrock_adapter, "_BEDROCK_PROBE_TIERS", (10,))
+        with patch(
+            "agent.bedrock_adapter._get_bedrock_runtime_client",
+            return_value=self._client_raising("AccessDeniedException: denied"),
+        ):
+            assert bedrock_adapter.get_bedrock_context_length(
+                "anthropic.claude-opus-4-6", region="eu-central-1"
+            ) == 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -1240,22 +1310,42 @@ class TestIsAnthropicBedrockModel:
 
 
 class TestEmptyTextBlockFix:
-    """Test that empty text blocks are replaced with space placeholders."""
+    """Empty text blocks use a Bedrock-valid non-whitespace placeholder."""
 
-    def test_none_content_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_none_content_gets_placeholder(self):
+        from agent.bedrock_adapter import (
+            _EMPTY_TEXT_PLACEHOLDER,
+            _convert_content_to_converse,
+        )
         blocks = _convert_content_to_converse(None)
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
 
-    def test_empty_string_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_empty_string_gets_placeholder(self):
+        from agent.bedrock_adapter import (
+            _EMPTY_TEXT_PLACEHOLDER,
+            _convert_content_to_converse,
+        )
         blocks = _convert_content_to_converse("")
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
 
-    def test_whitespace_only_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_whitespace_only_gets_placeholder(self):
+        from agent.bedrock_adapter import (
+            _EMPTY_TEXT_PLACEHOLDER,
+            _convert_content_to_converse,
+        )
         blocks = _convert_content_to_converse("   ")
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
+
+    def test_whitespace_list_item_gets_placeholder(self):
+        from agent.bedrock_adapter import (
+            _EMPTY_TEXT_PLACEHOLDER,
+            _convert_content_to_converse,
+        )
+        blocks = _convert_content_to_converse(["\t\n"])
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
 
     def test_real_text_preserved(self):
         from agent.bedrock_adapter import _convert_content_to_converse

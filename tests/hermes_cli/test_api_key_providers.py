@@ -314,6 +314,16 @@ class TestResolveProvider:
         assert resolve_provider("auto") == "openrouter"
 
     def test_auto_does_not_select_copilot_from_github_token(self, monkeypatch):
+        # AWS Bedrock auto-detection (via boto3's credential chain) runs at
+        # the tail of resolve_provider("auto") and will silently pick up
+        # ~/.aws/credentials on developer machines that aren't blanked by
+        # the hermetic conftest. Force-disable it so this test exercises
+        # the specific "GitHub token alone shouldn't auto-pick copilot"
+        # behavior, not the Bedrock fallback.
+        monkeypatch.setattr(
+            "agent.bedrock_adapter.has_aws_credentials",
+            lambda env=None: False,
+        )
         monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
         with pytest.raises(AuthError, match="No inference provider configured"):
             resolve_provider("auto")
@@ -613,6 +623,29 @@ class TestRuntimeProviderResolution:
         assert result["provider"] == "kimi-coding"
         assert result["api_mode"] == "chat_completions"
         assert result["api_key"] == "kimi-key"
+
+    def test_runtime_kimi_explicit_coding_key_uses_coding_endpoint(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("KIMI_API_KEY", raising=False)
+        monkeypatch.delenv("KIMI_CODING_API_KEY", raising=False)
+        monkeypatch.delenv("KIMI_BASE_URL", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._get_model_config",
+            lambda: {},
+        )
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(
+            requested="kimi-coding",
+            explicit_api_key="sk-kimi-managed-key",
+        )
+
+        assert result["provider"] == "kimi-coding"
+        assert result["api_key"] == "sk-kimi-managed-key"
+        assert result["base_url"] == KIMI_CODE_BASE_URL
+        assert result["api_mode"] == "anthropic_messages"
 
     def test_runtime_stepfun(self, monkeypatch):
         monkeypatch.setenv("STEPFUN_API_KEY", "stepfun-key")
@@ -1233,9 +1266,7 @@ class TestNovitaProvider:
             call_count["n"] += 1
             return _FakeResp()
 
-        monkeypatch.setattr(
-            models_mod.urllib.request, "urlopen", fake_urlopen
-        )
+        monkeypatch.setattr(models_mod, "_urlopen_model_catalog_request", fake_urlopen)
 
         # First call hits the network.
         first = models_mod._fetch_novita_pricing()

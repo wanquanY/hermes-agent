@@ -13,10 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, merge_pending_message_event
-from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL
-from gateway.session import SessionSource, build_session_key
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent, MessageType, merge_pending_message_event
+from hermes_gateway.runner import GatewayRunner, _AGENT_PENDING_SENTINEL
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 class _FakeAdapter:
@@ -58,7 +59,6 @@ def _make_runner():
     runner._restart_drain_timeout = 0.0
     runner._stop_task = None
     runner._exit_code = None
-    runner._update_runtime_status = MagicMock()
     runner._is_user_authorized = lambda _source: True
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
@@ -123,6 +123,25 @@ async def test_sentinel_cleaned_up_after_handler_returns():
     assert session_key not in runner._running_agents, (
         "Sentinel must be removed after handler completes"
     )
+    assert runner._active_work_registry.snapshot() == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_drain_rejects_new_turn_before_sentinel_allocation():
+    runner = _make_runner()
+    runner._active_work_registry = ActiveWorkRegistry()
+    runner._active_work_registry.begin_drain()
+    event = _make_event()
+    session_key = build_session_key(event.source)
+    inner = AsyncMock(return_value="unexpected")
+
+    with patch.object(GatewayRunner, "_handle_message_with_agent", inner):
+        result = await runner._handle_message(event)
+
+    assert isinstance(result, str)
+    assert session_key not in runner._running_agents
+    assert runner._active_work_registry.snapshot() == ()
+    inner.assert_not_awaited()
 
 
 # ------------------------------------------------------------------
@@ -162,17 +181,20 @@ async def test_second_message_during_sentinel_queued_not_duplicate():
     session_key = build_session_key(event1.source)
 
     barrier = asyncio.Event()
+    entered_agent_setup = asyncio.Event()
 
     async def slow_inner(self_inner, ev, src, qk, generation):
         # Simulate slow setup — wait until test tells us to proceed
+        entered_agent_setup.set()
         await barrier.wait()
         return "ok"
 
     with patch.object(GatewayRunner, "_handle_message_with_agent", slow_inner):
         # Start first message (will block at barrier)
         task1 = asyncio.create_task(runner._handle_message(event1))
-        # Yield so task1 enters slow_inner and sentinel is set
-        await asyncio.sleep(0)
+        # The async ingress/storage boundary may need more than one loop turn.
+        # Wait on the behavior under test instead of scheduler timing.
+        await asyncio.wait_for(entered_agent_setup.wait(), timeout=1)
 
         # Verify sentinel is set
         assert runner._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL
@@ -259,6 +281,43 @@ def test_merge_pending_message_event_promotes_document_followups_over_text():
     assert merged.media_types == ["application/pdf"]
 
 
+def test_media_merge_invalidates_cached_pending_transcription():
+    pending = {}
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="12345",
+        chat_type="dm",
+        user_id="u1",
+    )
+    session_key = build_session_key(source)
+    first_voice = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/voice-one.ogg"],
+        media_types=["audio/ogg"],
+    )
+    first_voice._gateway_pending_stt_text = "stale transcript"
+    first_voice._gateway_pending_stt_transcripts = ["stale transcript"]
+    first_voice._gateway_pending_stt_echo_sent = True
+    second_voice = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/voice-two.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+    pending[session_key] = first_voice
+    merge_pending_message_event(pending, session_key, second_voice, merge_text=True)
+
+    merged = pending[session_key]
+    assert merged.media_urls == ["/tmp/voice-one.ogg", "/tmp/voice-two.ogg"]
+    assert not hasattr(merged, "_gateway_pending_stt_text")
+    assert not hasattr(merged, "_gateway_pending_stt_transcripts")
+    assert not hasattr(merged, "_gateway_pending_stt_echo_sent")
+
+
 @pytest.mark.asyncio
 async def test_recent_telegram_text_followup_is_queued_without_interrupt():
     runner = _make_runner()
@@ -336,7 +395,7 @@ async def test_command_messages_do_not_leave_sentinel():
     [
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
-        ("/update", "_handle_update_command", "Update text"),
+        ("/update", "update_service", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
     ],
 )
@@ -353,7 +412,14 @@ async def test_active_session_bypass_commands_dispatch_without_interrupt(
     fake_agent = MagicMock()
     fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
     runner._running_agents[session_key] = fake_agent
-    setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
+    if handler_attr == "update_service":
+        from hermes_gateway.update_lifecycle import update_lifecycle_for
+
+        update_lifecycle_for(runner).handle_update_command = AsyncMock(
+            return_value=handler_result
+        )
+    else:
+        setattr(runner, handler_attr, AsyncMock(return_value=handler_result))
 
     result = await runner._handle_message(event)
 
@@ -374,14 +440,16 @@ async def test_stop_during_sentinel_force_cleans_session():
     session_key = build_session_key(event1.source)
 
     barrier = asyncio.Event()
+    entered_agent_setup = asyncio.Event()
 
     async def slow_inner(self_inner, ev, src, qk, generation):
+        entered_agent_setup.set()
         await barrier.wait()
         return "ok"
 
     with patch.object(GatewayRunner, "_handle_message_with_agent", slow_inner):
         task1 = asyncio.create_task(runner._handle_message(event1))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(entered_agent_setup.wait(), timeout=1)
 
         # Sentinel should be set
         assert runner._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL
@@ -500,8 +568,8 @@ async def test_shutdown_skips_sentinel():
     runner._exit_reason = None
     runner._shutdown_all_gateway_honcho = lambda: None
 
-    with patch("gateway.status.remove_pid_file"), \
-         patch("gateway.status.write_runtime_status"):
+    with patch("channels.runtime_status.remove_pid_file"), \
+         patch("channels.runtime_status.write_runtime_status"):
         await runner.stop()
 
     # Real agent should have been interrupted

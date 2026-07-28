@@ -87,15 +87,15 @@ logger = logging.getLogger(__name__)
 # already loaded.
 # ---------------------------------------------------------------------------
 
-from gateway.platforms.base import (
+from channels.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
     SendResult,
     cache_image_from_bytes,
 )
-from gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from channels.session_identity import SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ class RequestCache:
 
     def mark_delivered(self, request_id: str) -> None:
         entry = self._entries.get(request_id)
-        if entry is None or entry.state not in (State.READY, State.ERROR):
+        if entry is None or entry.state not in {State.READY, State.ERROR}:
             return
         entry.state = State.DELIVERED
         entry.updated_at = time.time()
@@ -447,7 +447,7 @@ class _LineClient:
     async def reply(self, reply_token: str, messages: List[Dict[str, Any]]) -> None:
         import aiohttp
         timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(
                 LINE_REPLY_URL,
                 headers=self._headers,
@@ -460,7 +460,7 @@ class _LineClient:
     async def push(self, chat_id: str, messages: List[Dict[str, Any]]) -> None:
         import aiohttp
         timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(
                 LINE_PUSH_URL,
                 headers=self._headers,
@@ -479,7 +479,7 @@ class _LineClient:
         clamped = max(5, min(60, (seconds // 5) * 5 or 5))
         try:
             timeout = aiohttp.ClientTimeout(total=5.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 await session.post(
                     LINE_LOADING_URL,
                     headers=self._headers,
@@ -493,7 +493,7 @@ class _LineClient:
         import aiohttp
         url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
         timeout = aiohttp.ClientTimeout(total=30.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(url, headers={"Authorization": f"Bearer {self._token}"}) as resp:
                 if resp.status >= 400:
                     raise RuntimeError(f"LINE content {resp.status}")
@@ -504,7 +504,7 @@ class _LineClient:
         import aiohttp
         timeout = aiohttp.ClientTimeout(total=10.0)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 async with session.get(LINE_BOT_INFO_URL, headers=self._headers) as resp:
                     if resp.status >= 400:
                         return None
@@ -614,7 +614,7 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
     if v is None:
         return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +737,7 @@ class LineAdapter(BasePlatformAdapter):
 
         # Prevent two profiles from running on the same channel access token.
         try:
-            from gateway.status import acquire_scoped_lock
+            from channels.runtime_status import acquire_scoped_lock
             # Use a hash of the token so we don't write the secret to disk.
             tok_hash = hashlib.sha256(self.channel_access_token.encode()).hexdigest()[:16]
             if not acquire_scoped_lock("line", tok_hash):
@@ -835,7 +835,7 @@ class LineAdapter(BasePlatformAdapter):
 
         if self._lock_key:
             try:
-                from gateway.status import release_scoped_lock
+                from channels.runtime_status import release_scoped_lock
                 release_scoped_lock("line", self._lock_key)
             except Exception:
                 pass
@@ -910,7 +910,7 @@ class LineAdapter(BasePlatformAdapter):
             await self._handle_message_event(event)
         elif event_type == "postback":
             await self._handle_postback_event(event)
-        elif event_type in ("follow", "unfollow", "join", "leave"):
+        elif event_type in {"follow", "unfollow", "join", "leave"}:
             logger.info("LINE: lifecycle event %s from %s", event_type, source)
         else:
             logger.debug("LINE: ignoring event type %r", event_type)
@@ -939,7 +939,7 @@ class LineAdapter(BasePlatformAdapter):
 
         if msg_type == "text":
             text = msg.get("text", "") or ""
-        elif msg_type in ("image", "audio", "video", "file"):
+        elif msg_type in {"image", "audio", "video", "file"}:
             local_path = await self._download_media(message_id, msg_type)
             if local_path:
                 media_urls.append(local_path)

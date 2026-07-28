@@ -1,4 +1,4 @@
-"""Tests for ``gateway.run._build_replay_entry``.
+"""Tests for gateway replay entry construction.
 
 The gateway rebuilds ``agent_history`` from the persisted transcript on every
 turn (unlike the CLI, which keeps the live in-memory message list).  When a
@@ -18,24 +18,40 @@ from __future__ import annotations
 
 import pytest
 
-from gateway.run import _ASSISTANT_REPLAY_FIELDS, _build_replay_entry
+from hermes_gateway.replay import ASSISTANT_REPLAY_FIELDS, build_replay_entry
 
 
 class TestBuildReplayEntry:
     def test_user_message_has_only_role_and_content(self):
-        entry = _build_replay_entry(
+        entry = build_replay_entry(
             "user",
             "hello",
             {"role": "user", "content": "hello", "reasoning": "leak", "extra": "drop"},
         )
         assert entry == {"role": "user", "content": "hello"}
 
+    def test_user_preserves_provider_wire_sidecar(self):
+        entry = build_replay_entry(
+            "user",
+            "clean",
+            {
+                "role": "user",
+                "content": "clean",
+                "api_content": "clean\n\n<memory-context>wire</memory-context>",
+            },
+        )
+        assert entry == {
+            "role": "user",
+            "content": "clean",
+            "api_content": "clean\n\n<memory-context>wire</memory-context>",
+        }
+
     def test_tool_message_has_only_role_and_content(self):
         # Tool messages aren't routed through this helper in production
         # (they take the rich-passthrough branch), but the helper itself
         # must not leak reasoning fields onto non-assistant roles even if
         # someone calls it incorrectly.
-        entry = _build_replay_entry(
+        entry = build_replay_entry(
             "tool",
             "result",
             {"role": "tool", "content": "result", "reasoning": "leak"},
@@ -43,12 +59,24 @@ class TestBuildReplayEntry:
         assert entry == {"role": "tool", "content": "result"}
 
     def test_assistant_minimal_has_only_role_and_content(self):
-        entry = _build_replay_entry(
+        entry = build_replay_entry(
             "assistant",
             "ok",
             {"role": "assistant", "content": "ok"},
         )
         assert entry == {"role": "assistant", "content": "ok"}
+
+    def test_assistant_preserves_provider_wire_sidecar(self):
+        entry = build_replay_entry(
+            "assistant",
+            "clean answer",
+            {
+                "role": "assistant",
+                "content": "clean answer",
+                "api_content": " exact provider answer ",
+            },
+        )
+        assert entry["api_content"] == " exact provider answer "
 
     def test_assistant_preserves_reasoning(self):
         msg = {
@@ -56,7 +84,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "reasoning": "I think therefore I am.",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["reasoning"] == "I think therefore I am."
 
     def test_assistant_preserves_reasoning_content(self):
@@ -70,7 +98,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "reasoning_content": "structured CoT",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["reasoning_content"] == "structured CoT"
 
     def test_assistant_preserves_reasoning_details(self):
@@ -91,7 +119,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "reasoning_details": details,
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["reasoning_details"] == details
 
     def test_assistant_preserves_codex_reasoning_items(self):
@@ -101,7 +129,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "codex_reasoning_items": items,
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["codex_reasoning_items"] == items
 
     def test_assistant_preserves_codex_message_items(self):
@@ -125,7 +153,7 @@ class TestBuildReplayEntry:
             "content": "Done",
             "codex_message_items": items,
         }
-        entry = _build_replay_entry("assistant", "Done", msg)
+        entry = build_replay_entry("assistant", "Done", msg)
         assert entry["codex_message_items"] == items
 
     def test_assistant_preserves_finish_reason(self):
@@ -139,7 +167,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "finish_reason": "stop",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["finish_reason"] == "stop"
 
     def test_assistant_drops_falsy_reasoning(self):
@@ -154,7 +182,7 @@ class TestBuildReplayEntry:
             "codex_message_items": [],
             "finish_reason": "",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry == {"role": "assistant", "content": "answer"}
 
     def test_assistant_preserves_empty_reasoning_content(self):
@@ -171,7 +199,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "reasoning_content": "",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert "reasoning_content" in entry
         assert entry["reasoning_content"] == ""
 
@@ -182,7 +210,7 @@ class TestBuildReplayEntry:
             "content": "answer",
             "reasoning_content": None,
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert "reasoning_content" not in entry
 
     def test_assistant_preserves_all_six_fields_together(self):
@@ -206,7 +234,7 @@ class TestBuildReplayEntry:
             "codex_message_items": msg_items,
             "finish_reason": "stop",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert entry["reasoning"] == "thinking"
         assert entry["reasoning_content"] == "structured"
         assert entry["reasoning_details"] == details
@@ -217,7 +245,7 @@ class TestBuildReplayEntry:
     def test_assistant_does_not_invent_keys(self):
         """The helper only copies over fields that are explicitly present."""
         msg = {"role": "assistant", "content": "answer", "reasoning": "r"}
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         # reasoning_details/etc. weren't in msg, so they shouldn't be in entry
         for absent in (
             "reasoning_content",
@@ -230,7 +258,7 @@ class TestBuildReplayEntry:
 
     def test_replay_fields_constant_is_stable(self):
         """Pin the whitelist explicitly so accidental renames are caught."""
-        assert _ASSISTANT_REPLAY_FIELDS == (
+        assert ASSISTANT_REPLAY_FIELDS == (
             "reasoning",
             "reasoning_content",
             "reasoning_details",
@@ -248,7 +276,7 @@ class TestBuildReplayEntry:
             "internal_marker": "should not flow",
             "tool_call_id": "should not be set on simple-text branch",
         }
-        entry = _build_replay_entry("assistant", "answer", msg)
+        entry = build_replay_entry("assistant", "answer", msg)
         assert "timestamp" not in entry
         assert "internal_marker" not in entry
         assert "tool_call_id" not in entry

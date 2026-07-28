@@ -27,7 +27,9 @@ _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::(
 # because the API requires a conversation ID. To DM a user you must first call
 # conversations.open to obtain a D... ID. Without this gate, Slack IDs fall
 # through to channel-name resolution, which only matches by name and fails.
-_SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
+_SLACK_TARGET_RE = re.compile(r"^\s*([CGDU][A-Z0-9]{8,})\s*$")
+# Session-derived Slack thread targets use "<conversation_id>:<thread_ts>".
+_SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
@@ -137,7 +139,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/hermes/cache/img_xxx.jpg') in the message — the platform will deliver it as a native media attachment."
+                "description": "The message text to send. To send an image or file, include MEDIA:<local_path> for a file under a Hermes media cache or HERMES_MEDIA_ALLOW_DIRS — the platform will deliver it as a native media attachment."
             }
         },
         "required": []
@@ -158,7 +160,7 @@ def send_message_tool(args, **kw):
 def _handle_list():
     """Return formatted list of available messaging targets."""
     try:
-        from gateway.channel_directory import format_directory_for_display
+        from hermes_gateway.channel_directory import format_directory_for_display
         return json.dumps({"targets": format_directory_for_display()})
     except Exception as e:
         return json.dumps(_error(f"Failed to load channel directory: {e}"))
@@ -185,7 +187,7 @@ def _handle_send(args):
     # Resolve human-friendly channel names to numeric IDs
     if target_ref and not is_explicit:
         try:
-            from gateway.channel_directory import resolve_channel_name
+            from hermes_gateway.channel_directory import resolve_channel_name
             resolved = resolve_channel_name(platform_name, target_ref)
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
@@ -205,7 +207,7 @@ def _handle_send(args):
         return tool_error("Interrupted")
 
     try:
-        from gateway.config import load_gateway_config, Platform
+        from hermes_gateway.config import load_gateway_config, Platform
         config = load_gateway_config()
     except Exception as e:
         return json.dumps(_error(f"Failed to load gateway config: {e}"))
@@ -225,7 +227,7 @@ def _handle_send(args):
             wx_token = os.getenv("WEIXIN_TOKEN", "").strip()
             wx_account = os.getenv("WEIXIN_ACCOUNT_ID", "").strip()
             if wx_token and wx_account:
-                from gateway.config import PlatformConfig
+                from hermes_gateway.config import PlatformConfig
                 pconfig = PlatformConfig(
                     enabled=True,
                     token=wx_token,
@@ -240,7 +242,7 @@ def _handle_send(args):
         else:
             return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
 
-    from gateway.platforms.base import BasePlatformAdapter
+    from channels.platforms.base import BasePlatformAdapter
 
     # Capture [[as_document]] directive before extract_media strips it.
     # Image-extension files in this batch will route through send_document
@@ -249,6 +251,7 @@ def _handle_send(args):
     force_document_attachments = "[[as_document]]" in message
 
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
     used_home_channel = False
@@ -257,7 +260,7 @@ def _handle_send(args):
         if not home and platform_name == "weixin":
             wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
             if wx_home:
-                from gateway.config import HomeChannel
+                from hermes_gateway.config import HomeChannel
                 home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
         if home:
             chat_id = home.chat_id
@@ -272,6 +275,28 @@ def _handle_send(args):
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
         return json.dumps(duplicate_skip)
+
+    # Slack: resolve user IDs (U...) to DM channel IDs via conversations.open
+    if platform_name == "slack" and chat_id and chat_id.startswith("U"):
+        try:
+            import aiohttp
+            async def _open_slack_dm(token, user_id):
+                url = "https://slack.com/api/conversations.open"
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    async with session.post(url, headers=headers, json={"users": [user_id]}) as resp:
+                        data = await resp.json()
+                        if data.get("ok"):
+                            return data["channel"]["id"]
+                        return None
+            from model_tools import _run_async
+            dm_channel = _run_async(_open_slack_dm(pconfig.token, chat_id))
+            if dm_channel:
+                chat_id = dm_channel
+            else:
+                return json.dumps({"error": f"Could not open DM with Slack user {chat_id}. Check bot permissions (im:write)."})
+        except Exception as e:
+            return json.dumps({"error": f"Failed to open Slack DM: {e}"})
 
     try:
         from model_tools import _run_async
@@ -292,8 +317,8 @@ def _handle_send(args):
         # Mirror the sent message into the target's gateway session
         if isinstance(result, dict) and result.get("success") and mirror_text:
             try:
-                from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
+                from hermes_gateway.mirror import mirror_to_session
+                from channels.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
                 if mirror_to_session(
@@ -321,6 +346,13 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+        from channels.platforms.telegram_ids import (
+            parse_telegram_username_target,
+        )
+
+        username = parse_telegram_username_target(target_ref)
+        if username:
+            return username, None, True
     if platform_name == "feishu":
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -330,9 +362,24 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if match:
             return match.group(1), match.group(2), True
     if platform_name == "slack":
+        match = _SLACK_THREAD_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), match.group(2), True
         match = _SLACK_TARGET_RE.fullmatch(target_ref)
         if match:
-            return match.group(1), None, True
+            chat_id = match.group(1)
+            # Slack user IDs (U...) and workspace IDs (W...) are NOT valid
+            # explicit send targets — chat.postMessage rejects them. A DM
+            # must be opened first via conversations.open to get a D...
+            # conversation ID. Caller still gets the chat_id so the U→D
+            # resolution path in send_message() can run.
+            is_explicit = chat_id[0] not in {"U", "W"}
+            return chat_id, None, is_explicit
+    if platform_name == "matrix":
+        trimmed = target_ref.strip()
+        split_idx = trimmed.rfind(":$")
+        if split_idx > 0:
+            return trimmed[:split_idx], trimmed[split_idx + 1 :], True
     if platform_name == "weixin":
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -382,7 +429,7 @@ def _describe_media_for_mirror(media_files):
 
 def _get_cron_auto_delivery_target():
     """Return the cron scheduler's auto-delivery target for the current run, if any."""
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
     platform = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", "").strip().lower()
     chat_id = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "").strip()
     if not platform or not chat_id:
@@ -449,8 +496,9 @@ async def _send_via_adapter(
     """
     runner = None
     try:
-        from gateway.run import _gateway_runner_ref
-        runner = _gateway_runner_ref()
+        from hermes_gateway.runner_ref import gateway_runner_ref
+
+        runner = gateway_runner_ref()
     except Exception:
         runner = None
 
@@ -474,7 +522,7 @@ async def _send_via_adapter(
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     entry = None
     try:
-        from gateway.platform_registry import platform_registry
+        from channels.platform_registry import platform_registry
         entry = platform_registry.get(platform_name)
     except Exception:
         entry = None
@@ -522,21 +570,21 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     using the same smart-splitting algorithm as the gateway adapters
     (preserves code-block boundaries, adds part indicators).
     """
-    from gateway.config import Platform
-    from gateway.platforms.base import BasePlatformAdapter, utf16_len
-    from gateway.platforms.discord import DiscordAdapter
-    from gateway.platforms.slack import SlackAdapter
+    from hermes_gateway.config import Platform
+    from channels.platforms.base import BasePlatformAdapter, utf16_len
+    from channels.platforms.discord import DiscordAdapter
+    from channels.platforms.slack import SlackAdapter
 
     # Telegram adapter import is optional (requires python-telegram-bot)
     try:
-        from gateway.platforms.telegram import TelegramAdapter
+        from channels.platforms.telegram import TelegramAdapter
         _telegram_available = True
     except ImportError:
         _telegram_available = False
 
     # Feishu adapter import is optional (requires lark-oapi)
     try:
-        from gateway.platforms.feishu import FeishuAdapter
+        from channels.platforms.feishu import FeishuAdapter
         _feishu_available = True
     except ImportError:
         _feishu_available = False
@@ -562,7 +610,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # Check plugin registry for max_message_length
     if platform not in _MAX_LENGTHS:
         try:
-            from gateway.platform_registry import platform_registry
+            from channels.platform_registry import platform_registry
             entry = platform_registry.get(platform.value)
             if entry and entry.max_message_length > 0:
                 _MAX_LENGTHS[platform] = entry.max_message_length
@@ -754,6 +802,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     return last_result
 
 
+def _is_telegram_thread_not_found(error: Exception) -> bool:
+    """Check if a Telegram error is a thread-not-found failure.
+
+    Matches the gateway adapter's ``_is_thread_not_found_error`` for
+    the standalone ``_send_telegram`` path (issue #27012).
+    """
+    return "thread not found" in str(error).lower()
+
+
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
@@ -776,7 +833,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         else:
             # Reuse the gateway adapter's format_message for markdown→MarkdownV2
             try:
-                from gateway.platforms.telegram import TelegramAdapter
+                from channels.platforms.telegram import TelegramAdapter
                 _adapter = TelegramAdapter.__new__(TelegramAdapter)
                 formatted = _adapter.format_message(message)
             except Exception:
@@ -784,8 +841,35 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 formatted = message
             send_parse_mode = ParseMode.MARKDOWN_V2
 
-        bot = Bot(token=token)
-        int_chat_id = int(chat_id)
+        # Honour a configured proxy (telegram.proxy_url in config.yaml, exported
+        # as TELEGRAM_PROXY env var by load_gateway_config). Without this, the
+        # standalone send path bypasses the proxy and times out in regions
+        # where api.telegram.org is blocked. The in-gateway adapter does the
+        # same thing in gateway/platforms/telegram.py.
+        try:
+            from channels.platforms.base import resolve_proxy_url
+            _tg_proxy = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=["api.telegram.org"])
+        except Exception:
+            _tg_proxy = None
+        if _tg_proxy:
+            try:
+                from telegram.request import HTTPXRequest
+                logger.info("send_message: standalone Telegram send routed through proxy %s", _tg_proxy)
+                bot = Bot(
+                    token=token,
+                    request=HTTPXRequest(proxy=_tg_proxy),
+                    get_updates_request=HTTPXRequest(proxy=_tg_proxy),
+                )
+            except Exception as _proxy_err:
+                logger.warning("send_message: failed to attach Telegram proxy (%s), falling back to direct connection", _proxy_err)
+                bot = Bot(token=token)
+        else:
+            bot = Bot(token=token)
+        from channels.platforms.telegram_ids import (
+            normalize_telegram_chat_id,
+        )
+
+        int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = {}
         if thread_id is not None:
@@ -798,7 +882,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             # send to a forum group's General topic always errors out
             # (see issue #22267).
             try:
-                from gateway.platforms.telegram import TelegramAdapter
+                from channels.platforms.telegram import TelegramAdapter
                 effective_thread_id = TelegramAdapter._message_thread_id_for_send(
                     str(thread_id)
                 )
@@ -810,8 +894,12 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 )
             if effective_thread_id is not None:
                 thread_kwargs["message_thread_id"] = effective_thread_id
+        # disable_web_page_preview is only valid for send_message, not
+        # send_photo/send_video/etc.  Keep it separate so media sends
+        # don't inherit an invalid parameter (issue #27012).
+        text_kwargs = dict(thread_kwargs)
         if disable_link_previews:
-            thread_kwargs["disable_web_page_preview"] = True
+            text_kwargs["disable_web_page_preview"] = True
 
         last_msg = None
         warnings = []
@@ -821,11 +909,24 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 last_msg = await _send_telegram_message_with_retry(
                     bot,
                     chat_id=int_chat_id, text=formatted,
-                    parse_mode=send_parse_mode, **thread_kwargs
+                    parse_mode=send_parse_mode, **text_kwargs
                 )
             except Exception as md_error:
-                # Parse failed, fall back to plain text
-                if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower() or "html" in str(md_error).lower():
+                # Thread not found — retry without message_thread_id so the
+                # message still delivers (matching the gateway adapter's
+                # fallback behaviour, issue #27012).
+                if _is_telegram_thread_not_found(md_error) and thread_kwargs:
+                    logger.warning(
+                        "Thread %s not found in _send_telegram, retrying without message_thread_id",
+                        thread_kwargs.get("message_thread_id"),
+                    )
+                    text_kwargs.pop("message_thread_id", None)
+                    last_msg = await _send_telegram_message_with_retry(
+                        bot,
+                        chat_id=int_chat_id, text=formatted,
+                        parse_mode=send_parse_mode, **text_kwargs
+                    )
+                elif "parse" in str(md_error).lower() or "markdown" in str(md_error).lower() or "html" in str(md_error).lower():
                     logger.warning(
                         "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
                         send_parse_mode,
@@ -833,7 +934,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     )
                     if not _has_html:
                         try:
-                            from gateway.platforms.telegram import _strip_mdv2
+                            from channels.platforms.telegram import _strip_mdv2
                             plain = _strip_mdv2(formatted)
                         except Exception:
                             plain = message
@@ -842,7 +943,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     last_msg = await _send_telegram_message_with_retry(
                         bot,
                         chat_id=int_chat_id, text=plain,
-                        parse_mode=None, **thread_kwargs
+                        parse_mode=None, **text_kwargs
                     )
                 else:
                     raise
@@ -856,27 +957,84 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 
             ext = os.path.splitext(media_path)[1].lower()
             try:
+                duration = None
+                if (ext in _VOICE_EXTS and is_voice) or ext in _TELEGRAM_SEND_AUDIO_EXTS:
+                    from channels.platforms.telegram import (
+                        _probe_voice_duration_seconds,
+                    )
+
+                    duration = await asyncio.to_thread(
+                        _probe_voice_duration_seconds,
+                        media_path,
+                    )
                 with open(media_path, "rb") as f:
-                    if ext in _IMAGE_EXTS and not force_document:
-                        last_msg = await bot.send_photo(
-                            chat_id=int_chat_id, photo=f, **thread_kwargs
-                        )
-                    elif ext in _VIDEO_EXTS:
-                        last_msg = await bot.send_video(
-                            chat_id=int_chat_id, video=f, **thread_kwargs
-                        )
-                    elif ext in _VOICE_EXTS and is_voice:
-                        last_msg = await bot.send_voice(
-                            chat_id=int_chat_id, voice=f, **thread_kwargs
-                        )
-                    elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
-                        last_msg = await bot.send_audio(
-                            chat_id=int_chat_id, audio=f, **thread_kwargs
-                        )
-                    else:
-                        last_msg = await bot.send_document(
-                            chat_id=int_chat_id, document=f, **thread_kwargs
-                        )
+                    media_kwargs = dict(thread_kwargs)
+                    try:
+                        if ext in _IMAGE_EXTS and not force_document:
+                            last_msg = await bot.send_photo(
+                                chat_id=int_chat_id, photo=f, **media_kwargs
+                            )
+                        elif ext in _VIDEO_EXTS:
+                            last_msg = await bot.send_video(
+                                chat_id=int_chat_id, video=f, **media_kwargs
+                            )
+                        elif ext in _VOICE_EXTS and is_voice:
+                            last_msg = await bot.send_voice(
+                                chat_id=int_chat_id,
+                                voice=f,
+                                duration=duration,
+                                **media_kwargs,
+                            )
+                        elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
+                            last_msg = await bot.send_audio(
+                                chat_id=int_chat_id,
+                                audio=f,
+                                duration=duration,
+                                **media_kwargs,
+                            )
+                        else:
+                            last_msg = await bot.send_document(
+                                chat_id=int_chat_id, document=f, **media_kwargs
+                            )
+                    except Exception as media_err:
+                        if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
+                            # Thread not found for media — retry without
+                            # message_thread_id (issue #27012).
+                            logger.warning(
+                                "Thread %s not found for media send, retrying without message_thread_id",
+                                media_kwargs["message_thread_id"],
+                            )
+                            # Re-seek the file since the first attempt consumed it
+                            f.seek(0)
+                            media_kwargs.pop("message_thread_id", None)
+                            if ext in _IMAGE_EXTS and not force_document:
+                                last_msg = await bot.send_photo(
+                                    chat_id=int_chat_id, photo=f, **media_kwargs
+                                )
+                            elif ext in _VIDEO_EXTS:
+                                last_msg = await bot.send_video(
+                                    chat_id=int_chat_id, video=f, **media_kwargs
+                                )
+                            elif ext in _VOICE_EXTS and is_voice:
+                                last_msg = await bot.send_voice(
+                                    chat_id=int_chat_id,
+                                    voice=f,
+                                    duration=duration,
+                                    **media_kwargs,
+                                )
+                            elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
+                                last_msg = await bot.send_audio(
+                                    chat_id=int_chat_id,
+                                    audio=f,
+                                    duration=duration,
+                                    **media_kwargs,
+                                )
+                            else:
+                                last_msg = await bot.send_document(
+                                    chat_id=int_chat_id, document=f, **media_kwargs
+                                )
+                        else:
+                            raise
             except Exception as e:
                 warning = _sanitize_error_text(f"Failed to send media {media_path}: {e}")
                 logger.error(warning)
@@ -951,7 +1109,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         auth_headers = {"Authorization": f"Bot {token}"}
@@ -970,7 +1128,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
             # cache → GET /channels/{id} probe (with result memoized).
             _channel_type = None
             try:
-                from gateway.channel_directory import lookup_channel_type
+                from hermes_gateway.channel_directory import lookup_channel_type
                 _channel_type = lookup_channel_type("discord", chat_id)
             except Exception:
                 pass
@@ -1131,7 +1289,7 @@ async def _send_slack(token, chat_id, message):
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url()
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         url = "https://slack.com/api/chat.postMessage"
@@ -1189,7 +1347,7 @@ async def _send_signal(extra, chat_id, message, media_files=None):
     except ImportError:
         return {"error": "httpx not installed"}
 
-    from gateway.platforms.signal_rate_limit import (
+    from channels.platforms.signal_rate_limit import (
         SIGNAL_BATCH_PACING_NOTICE_THRESHOLD,
         SIGNAL_MAX_ATTACHMENTS_PER_MSG,
         SIGNAL_RATE_LIMIT_MAX_ATTEMPTS,
@@ -1421,7 +1579,7 @@ async def _send_sms(auth_token, chat_id, message):
     message = message.strip()
 
     try:
-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        from channels.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url()
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
         creds = f"{account_sid}:{auth_token}"
@@ -1517,7 +1675,7 @@ async def _send_matrix(token, extra, chat_id, message):
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via the Matrix adapter so native Matrix media uploads are preserved."""
     try:
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
     except ImportError:
         return {"error": "Matrix dependencies not installed. Run: pip install 'mautrix[encryption]'"}
 
@@ -1631,14 +1789,14 @@ async def _send_dingtalk(extra, chat_id, message):
 async def _send_wecom(extra, chat_id, message):
     """Send via WeCom using the adapter's WebSocket send pipeline."""
     try:
-        from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
+        from channels.platforms.wecom import WeComAdapter, check_wecom_requirements
         if not check_wecom_requirements():
             return {"error": "WeCom requirements not met. Need aiohttp + WECOM_BOT_ID/SECRET."}
     except ImportError:
         return {"error": "WeCom adapter not available."}
 
     try:
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         pconfig = PlatformConfig(extra=extra)
         adapter = WeComAdapter(pconfig)
         connected = await adapter.connect()
@@ -1658,7 +1816,7 @@ async def _send_wecom(extra, chat_id, message):
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
     """Send via Weixin iLink using the native adapter helper."""
     try:
-        from gateway.platforms.weixin import check_weixin_requirements, send_weixin_direct
+        from channels.platforms.weixin import check_weixin_requirements, send_weixin_direct
         if not check_weixin_requirements():
             return {"error": "Weixin requirements not met. Need aiohttp + cryptography."}
     except ImportError:
@@ -1679,14 +1837,14 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
 async def _send_bluebubbles(extra, chat_id, message):
     """Send via BlueBubbles iMessage server using the adapter's REST API."""
     try:
-        from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
+        from channels.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
         if not check_bluebubbles_requirements():
             return {"error": "BlueBubbles requirements not met (need aiohttp + httpx)."}
     except ImportError:
         return {"error": "BlueBubbles adapter not available."}
 
     try:
-        from gateway.config import PlatformConfig
+        from hermes_gateway.config import PlatformConfig
         pconfig = PlatformConfig(extra=extra)
         adapter = BlueBubblesAdapter(pconfig)
         connected = await adapter.connect()
@@ -1706,10 +1864,10 @@ async def _send_bluebubbles(extra, chat_id, message):
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""
     try:
-        from gateway.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
+        from channels.platforms.feishu import FeishuAdapter, FEISHU_AVAILABLE
         if not FEISHU_AVAILABLE:
             return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
-        from gateway.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
+        from channels.platforms.feishu import FEISHU_DOMAIN, LARK_DOMAIN
     except ImportError:
         return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
 
@@ -1775,12 +1933,12 @@ def _check_send_message():
     """
     if os.environ.get("HERMES_KANBAN_TASK"):
         return True
-    from gateway.session_context import get_session_env
+    from channels.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
     if platform and platform != "local":
         return True
     try:
-        from gateway.status import is_gateway_running
+        from channels.runtime_status import is_gateway_running
         return is_gateway_running()
     except Exception:
         return False
@@ -1870,7 +2028,7 @@ async def _send_yuanbao(chat_id, message, media_files=None):
       - DM:    "direct:<account_id>" or just "<account_id>"
     """
     try:
-        from gateway.platforms.yuanbao import get_active_adapter, send_yuanbao_direct
+        from channels.platforms.yuanbao import get_active_adapter, send_yuanbao_direct
     except ImportError:
         return _error("Yuanbao adapter module not available.")
 

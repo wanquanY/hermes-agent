@@ -1,12 +1,13 @@
 """Tests for gateway session management."""
-
 import json
+import sqlite3
+import threading
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.session import (
+from hermes_gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
+from channels.platforms.base import MessageEvent
+from hermes_gateway.session import (
     SessionSource,
     SessionStore,
     build_session_context,
@@ -14,11 +15,25 @@ from gateway.session import (
     build_session_key,
     canonical_whatsapp_identifier,
 )
+from hermes_agent.repositories.session_repo import SessionSpec
 
 # Legacy name preserved for these tests; product renamed the function to
 # canonical_whatsapp_identifier.  Keep the tests referencing the old name
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
+
+
+def _session_store_with_storage(tmp_path):
+    from hermes_agent.repositories.session_repo import SessionRepoImpl
+    from hermes_agent.composition.session_repository_db import connect_session_repository_db
+
+    conn = connect_session_repository_db(tmp_path / "state.db")
+    return SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        session_repo=SessionRepoImpl(conn),
+        storage_conn=conn,
+    )
 
 
 class TestSessionSourceRoundtrip:
@@ -68,6 +83,32 @@ class TestSessionSourceRoundtrip:
         assert restored.platform == Platform.LOCAL
         assert restored.chat_id == "cli"
         assert restored.chat_type == "dm"  # default value preserved
+
+    def test_scope_alias_and_profile_roundtrip(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="channel-1",
+            scope_id="guild-1",
+            profile="coder",
+        )
+
+        payload = source.to_dict()
+        restored = SessionSource.from_dict(payload)
+
+        assert payload["scope_id"] == payload["guild_id"] == "guild-1"
+        assert restored.scope_id == restored.guild_id == "guild-1"
+        assert restored.profile == "coder"
+
+    def test_legacy_guild_id_populates_canonical_scope(self):
+        restored = SessionSource.from_dict(
+            {
+                "platform": "discord",
+                "chat_id": "channel-1",
+                "guild_id": "guild-1",
+            }
+        )
+
+        assert restored.scope_id == restored.guild_id == "guild-1"
 
     def test_chat_id_coerced_to_string(self):
         """from_dict should handle numeric chat_id (common from Telegram)."""
@@ -441,7 +482,7 @@ class TestSenderPrefixWithBackfill:
 
     @pytest.fixture()
     def runner(self):
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         r = GatewayRunner.__new__(GatewayRunner)
         r.config = GatewayConfig(group_sessions_per_user=False)
@@ -502,19 +543,15 @@ class TestSenderPrefixWithBackfill:
 
 
 class TestSessionStoreRewriteTranscript:
-    """Regression: /retry and /undo must persist truncated history to disk."""
+    """Regression: /retry and /undo must persist truncated history to DB."""
 
     @pytest.fixture()
     def store(self, tmp_path):
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
-        s._db = None  # no SQLite for these tests
-        s._loaded = True
-        return s
+        return _session_store_with_storage(tmp_path)
 
-    def test_rewrite_replaces_jsonl(self, store, tmp_path):
+    def test_rewrite_replaces_transcript(self, store, tmp_path):
         session_id = "test_session_1"
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         # Write initial transcript
         for msg in [
             {"role": "user", "content": "hello"},
@@ -537,6 +574,7 @@ class TestSessionStoreRewriteTranscript:
 
     def test_rewrite_with_empty_list(self, store):
         session_id = "test_session_2"
+        store._session_repo.create(SessionSpec(session_id=session_id, source="test"))
         store.append_to_transcript(session_id, {"role": "user", "content": "hi"})
 
         store.rewrite_transcript(session_id, [])
@@ -545,161 +583,43 @@ class TestSessionStoreRewriteTranscript:
         assert reloaded == []
 
 
-class TestLoadTranscriptCorruptLines:
-    """Regression: corrupt JSONL lines (e.g. from mid-write crash) must be
-    skipped instead of crashing the entire transcript load.  GH-1193."""
+class TestLoadTranscriptDBOnly:
+    """After spec 002, load_transcript reads only from state.db."""
 
-    @pytest.fixture()
-    def store(self, tmp_path):
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
-        s._db = None
-        s._loaded = True
-        return s
-
-    def test_corrupt_line_skipped(self, store, tmp_path):
-        session_id = "corrupt_test"
-        transcript_path = store.get_transcript_path(session_id)
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(transcript_path, "w") as f:
-            f.write('{"role": "user", "content": "hello"}\n')
-            f.write('{"role": "assistant", "content": "hi th')  # truncated
-            f.write("\n")
-            f.write('{"role": "user", "content": "goodbye"}\n')
-
-        messages = store.load_transcript(session_id)
-        assert len(messages) == 2
-        assert messages[0]["content"] == "hello"
-        assert messages[1]["content"] == "goodbye"
-
-    def test_all_lines_corrupt_returns_empty(self, store, tmp_path):
-        session_id = "all_corrupt"
-        transcript_path = store.get_transcript_path(session_id)
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(transcript_path, "w") as f:
-            f.write("not json at all\n")
-            f.write("{truncated\n")
-
-        messages = store.load_transcript(session_id)
-        assert messages == []
-
-    def test_valid_transcript_unaffected(self, store, tmp_path):
-        session_id = "valid_test"
-        store.append_to_transcript(session_id, {"role": "user", "content": "a"})
-        store.append_to_transcript(session_id, {"role": "assistant", "content": "b"})
-
-        messages = store.load_transcript(session_id)
-        assert len(messages) == 2
-        assert messages[0]["content"] == "a"
-        assert messages[1]["content"] == "b"
-
-
-class TestLoadTranscriptPreferLongerSource:
-    """Regression: load_transcript must return whichever source (SQLite or JSONL)
-    has more messages to prevent silent truncation.  GH-3212."""
-
-    @pytest.fixture()
-    def store_with_db(self, tmp_path):
-        """SessionStore with both SQLite and JSONL active."""
-        from hermes_state import SessionDB
-
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
-        s._db = SessionDB(db_path=tmp_path / "state.db")
-        s._loaded = True
-        return s
-
-    def test_jsonl_longer_than_sqlite_returns_jsonl(self, store_with_db):
-        """Legacy session: JSONL has full history, SQLite has only recent turn."""
-        sid = "legacy_session"
-        store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 10 messages (legacy history — written before SQLite existed)
-        for i in range(10):
-            role = "user" if i % 2 == 0 else "assistant"
-            store_with_db.append_to_transcript(
-                sid, {"role": role, "content": f"msg-{i}"}, skip_db=True,
-            )
-        # SQLite has only 2 messages (recent turn after migration)
-        store_with_db._db.append_message(session_id=sid, role="user", content="new-q")
-        store_with_db._db.append_message(session_id=sid, role="assistant", content="new-a")
-
-        result = store_with_db.load_transcript(sid)
-        assert len(result) == 10
-        assert result[0]["content"] == "msg-0"
-
-    def test_sqlite_longer_than_jsonl_returns_sqlite(self, store_with_db):
-        """Fully migrated session: SQLite has more (JSONL stopped growing)."""
-        sid = "migrated_session"
-        store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 2 old messages
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "old-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "old-a"}, skip_db=True,
-        )
-        # SQLite has 4 messages (superset after migration)
-        for i in range(4):
-            role = "user" if i % 2 == 0 else "assistant"
-            store_with_db._db.append_message(session_id=sid, role=role, content=f"db-{i}")
-
-        result = store_with_db.load_transcript(sid)
-        assert len(result) == 4
-        assert result[0]["content"] == "db-0"
-
-    def test_sqlite_empty_falls_back_to_jsonl(self, store_with_db):
-        """No SQLite rows — falls back to JSONL (original behavior preserved)."""
-        sid = "no_db_rows"
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "hello"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "hi"}, skip_db=True,
-        )
-
-        result = store_with_db.load_transcript(sid)
-        assert len(result) == 2
-        assert result[0]["content"] == "hello"
-
-    def test_both_empty_returns_empty(self, store_with_db):
-        """Neither source has data — returns empty list."""
-        result = store_with_db.load_transcript("nonexistent")
+    def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
+        store = _session_store_with_storage(tmp_path)
+        result = store.load_transcript("nonexistent")
         assert result == []
 
-    def test_equal_length_prefers_sqlite(self, store_with_db):
-        """When both have same count, SQLite wins (has richer fields like reasoning)."""
-        sid = "equal_session"
-        store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # Write 2 messages to JSONL only
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "jsonl-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "jsonl-a"}, skip_db=True,
-        )
-        # Write 2 different messages to SQLite only
-        store_with_db._db.append_message(session_id=sid, role="user", content="db-q")
-        store_with_db._db.append_message(session_id=sid, role="assistant", content="db-a")
+    def test_db_only_returns_messages(self, tmp_path, monkeypatch):
+        store = _session_store_with_storage(tmp_path)
+        sid = "db_only_session"
+        store._session_repo.create(SessionSpec(session_id=sid, source="gateway", model="m"))
+        store.append_to_transcript(sid, {"role": "user", "content": "db-q"})
+        store.append_to_transcript(sid, {"role": "assistant", "content": "db-a"})
 
-        result = store_with_db.load_transcript(sid)
+        result = store.load_transcript(sid)
         assert len(result) == 2
-        # Should be the SQLite version (equal count → prefers SQLite)
         assert result[0]["content"] == "db-q"
+        assert result[1]["content"] == "db-a"
 
 
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
-        from hermes_state import SessionDB
+        from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionSpec
+        from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
-        db = SessionDB(db_path=tmp_path / "state.db")
-        store._db = db
+        conn = connect_session_repository_db(tmp_path / "state.db")
+        repo = SessionRepoImpl(conn)
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(
+                sessions_dir=tmp_path / "sessions",
+                config=config,
+                session_repo=repo,
+            )
         store._loaded = True
 
         source = SessionSource(
@@ -713,19 +633,27 @@ class TestSessionStoreSwitchSession:
         current_session_id = current_entry.session_id
 
         target_session_id = "old_session_abc"
-        db.create_session(target_session_id, source="feishu", user_id="user-1")
-        db.end_session(target_session_id, end_reason="user_exit")
-        assert db.get_session(target_session_id)["ended_at"] is not None
+        repo.create(SessionSpec(session_id=target_session_id, source="feishu"))
+        repo.close(target_session_id, reason="user_exit")
+        assert repo.get(target_session_id).ended_at is not None
 
         switched = store.switch_session(current_entry.session_key, target_session_id)
 
         assert switched is not None
         assert switched.session_id == target_session_id
-        assert db.get_session(current_session_id)["end_reason"] == "session_switch"
-        resumed = db.get_session(target_session_id)
-        assert resumed["ended_at"] is None
-        assert resumed["end_reason"] is None
-        db.close()
+        current = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (current_session_id,),
+        ).fetchone()
+        assert current["end_reason"] == "session_switch"
+        resumed = repo.get(target_session_id)
+        assert resumed.ended_at is None
+        resumed_row = conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = ?",
+            (target_session_id,),
+        ).fetchone()
+        assert resumed_row["end_reason"] is None
+        conn.close()
 
 
 class TestWhatsAppSessionKeyConsistency:
@@ -735,7 +663,7 @@ class TestWhatsAppSessionKeyConsistency:
     @pytest.fixture()
     def store(self, tmp_path):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
         s._db = None
         s._loaded = True
@@ -900,6 +828,44 @@ class TestWhatsAppSessionKeyConsistency:
         assert build_session_key(first) == "agent:main:telegram:dm:99"
         assert build_session_key(second) == "agent:main:telegram:dm:100"
         assert build_session_key(first) != build_session_key(second)
+
+    def test_named_profile_namespaces_session_key(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+            profile="coder",
+        )
+
+        assert (
+            build_session_key(source)
+            == "agent:coder:discord:group:guild-123:alice"
+        )
+        assert (
+            build_session_key(source, profile="reviewer")
+            == "agent:reviewer:discord:group:guild-123:alice"
+        )
+
+    def test_default_profile_preserves_legacy_namespace(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="99",
+            chat_type="dm",
+            profile="default",
+        )
+
+        assert build_session_key(source) == "agent:main:telegram:dm:99"
+
+    def test_dm_without_chat_id_falls_back_to_participant(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="",
+            chat_type="dm",
+            user_id="alice",
+        )
+
+        assert build_session_key(source) == "agent:main:discord:dm:alice"
 
     def test_discord_group_includes_chat_id(self):
         """Group/channel keys include chat_type and chat_id."""
@@ -1097,7 +1063,7 @@ class TestSessionStoreEntriesAttribute:
 
     def test_entries_attribute_exists(self):
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=Path("/tmp"), config=config)
         store._loaded = True
         assert hasattr(store, "_entries")
@@ -1108,43 +1074,44 @@ class TestHasAnySessions:
     """Tests for has_any_sessions() fix (issue #351)."""
 
     @pytest.fixture
-    def store_with_mock_db(self, tmp_path):
-        """SessionStore with a mocked database."""
+    def store_with_mock_repo(self, tmp_path):
+        """SessionStore with a mocked session repository."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
+        repo = MagicMock()
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            s = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         s._loaded = True
         s._entries = {}
-        s._db = MagicMock()
+        s._session_repo = repo
         return s
 
-    def test_uses_database_count_when_available(self, store_with_mock_db):
-        """has_any_sessions should use database session_count, not len(_entries)."""
-        store = store_with_mock_db
+    def test_uses_repository_count_when_available(self, store_with_mock_repo):
+        """has_any_sessions should use repository rows, not len(_entries)."""
+        store = store_with_mock_repo
         # Simulate single-platform user with only 1 entry in memory
         store._entries = {"telegram:12345": MagicMock()}
-        # But database has 3 sessions (current + 2 previous resets)
-        store._db.session_count.return_value = 3
+        # But repository has historical rows (current + previous resets)
+        store._session_repo.list.return_value = [MagicMock(), MagicMock()]
 
         assert store.has_any_sessions() is True
-        store._db.session_count.assert_called_once()
+        store._session_repo.list.assert_called_once()
 
-    def test_first_session_ever_returns_false(self, store_with_mock_db):
-        """First session ever should return False (only current session in DB)."""
-        store = store_with_mock_db
+    def test_first_session_ever_returns_false(self, store_with_mock_repo):
+        """First session ever should return False (only current session in repo)."""
+        store = store_with_mock_repo
         store._entries = {"telegram:12345": MagicMock()}
-        # Database has exactly 1 session (the current one just created)
-        store._db.session_count.return_value = 1
+        store._session_repo.list.return_value = [MagicMock()]
 
         assert store.has_any_sessions() is False
 
-    def test_fallback_without_database(self, tmp_path):
-        """Should fall back to len(_entries) when DB is not available."""
+    def test_fallback_without_repository(self, tmp_path):
+        """Should fall back to len(_entries) when repository is not available."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
+        repo = MagicMock()
+        repo.list.side_effect = RuntimeError("unavailable")
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config, session_repo=repo)
         store._loaded = True
-        store._db = None
         store._entries = {"key1": MagicMock(), "key2": MagicMock()}
 
         # > 1 entries means has sessions
@@ -1159,7 +1126,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_default(self):
         """New sessions should have last_prompt_tokens=0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1171,7 +1138,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_roundtrip(self):
         """last_prompt_tokens should survive serialization/deserialization."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="test",
@@ -1187,7 +1154,7 @@ class TestLastPromptTokens:
 
     def test_session_entry_from_old_data(self):
         """Old session data without last_prompt_tokens should default to 0."""
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         data = {
             "session_key": "test",
             "session_id": "s1",
@@ -1204,13 +1171,13 @@ class TestLastPromptTokens:
     def test_update_session_sets_last_prompt_tokens(self, tmp_path):
         """update_session should store the actual prompt token count."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1226,13 +1193,13 @@ class TestLastPromptTokens:
     def test_update_session_none_does_not_change(self, tmp_path):
         """update_session with default (None) should not change last_prompt_tokens."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1249,13 +1216,13 @@ class TestLastPromptTokens:
     def test_update_session_zero_resets(self, tmp_path):
         """update_session with last_prompt_tokens=0 should reset the field."""
         config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
+        with patch("hermes_gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path, config=config)
         store._loaded = True
         store._db = None
         store._save = MagicMock()
 
-        from gateway.session import SessionEntry
+        from hermes_gateway.session import SessionEntry
         from datetime import datetime
         entry = SessionEntry(
             session_key="k1",
@@ -1273,85 +1240,154 @@ class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 
     def test_reasoning_survives_rewrite(self, tmp_path):
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "reasoning-test"
-        db.create_session(session_id=session_id, source="cli")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
 
         # Insert a message WITH all three reasoning fields
-        db.append_message(
-            session_id=session_id,
-            role="assistant",
-            content="The answer is 42.",
-            reasoning="I need to think step by step.",
-            reasoning_content="provider scratchpad",
-            reasoning_details=[{"type": "summary", "text": "step by step"}],
-            codex_reasoning_items=[{"id": "r1", "type": "reasoning"}],
-        )
+        store.append_to_transcript(session_id, {
+            "role": "assistant",
+            "content": "The answer is 42.",
+            "reasoning": "I need to think step by step.",
+            "reasoning_content": "provider scratchpad",
+            "reasoning_details": [{"type": "summary", "text": "step by step"}],
+            "codex_reasoning_items": [{"id": "r1", "type": "reasoning"}],
+        })
 
         # Verify all three were stored
-        before = db.get_messages_as_conversation(session_id)
+        before = store.load_transcript(session_id)
         assert before[0].get("reasoning") == "I need to think step by step."
         assert before[0].get("reasoning_content") == "provider scratchpad"
         assert before[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert before[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-        # Now simulate /retry: build the SessionStore and call rewrite_transcript
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
         # rewrite_transcript receives the messages that load_transcript returned
         store.rewrite_transcript(session_id, before)
 
         # Load again — all three reasoning fields must survive
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_content") == "provider scratchpad"
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
-    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
-        from hermes_state import SessionDB
+    def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path):
+        from hermes_agent.repositories.message_repo import MessageRepository
 
-        db = SessionDB(db_path=tmp_path / "test.db")
+        store = _session_store_with_storage(tmp_path)
         session_id = "atomic-rewrite-test"
-        db.create_session(session_id=session_id, source="cli")
-        db.append_message(session_id=session_id, role="user", content="before user")
-        db.append_message(session_id=session_id, role="assistant", content="before assistant")
+        store._session_repo.create(SessionSpec(session_id=session_id, source="cli"))
+        store.append_to_transcript(session_id, {"role": "user", "content": "before user"})
+        store.append_to_transcript(session_id, {"role": "assistant", "content": "before assistant"})
 
-        config = GatewayConfig()
-        with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = db
-        store._loaded = True
-
-        # Force the second insert inside replace_messages to fail, simulating
+        # Force the second insert inside replace_conversation to fail, simulating
         # any storage-layer error that might abort a multi-row rewrite.
-        real_encode = SessionDB._encode_content
         calls = {"n": 0}
+        original_insert = MessageRepository._insert_message
 
-        def flaky_encode(cls, content):
+        def flaky_insert(self, session_id, message, timestamp):
             calls["n"] += 1
             if calls["n"] == 2:
                 raise RuntimeError("simulated storage failure")
-            return real_encode.__func__(cls, content)
+            return original_insert(self, session_id, message, timestamp)
 
-        monkeypatch.setattr(SessionDB, "_encode_content", classmethod(flaky_encode))
+        with patch.object(MessageRepository, "_insert_message", flaky_insert):
+            replacement = [
+                {"role": "user", "content": "after user"},
+                {"role": "assistant", "content": "after assistant"},
+            ]
 
-        replacement = [
-            {"role": "user", "content": "after user"},
-            {"role": "assistant", "content": "after assistant"},
-        ]
-
-        store.rewrite_transcript(session_id, replacement)
+            store.rewrite_transcript(session_id, replacement)
 
         # The rewrite must roll back atomically — original messages preserved.
-        after = db.get_messages_as_conversation(session_id)
+        after = store.load_transcript(session_id)
         assert [msg["content"] for msg in after] == [
             "before user",
             "before assistant",
         ]
+
+
+def test_session_store_close_releases_owned_connection(tmp_path) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    conn = store._storage_conn
+    assert conn is not None
+
+    store.close()
+    store.close()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.execute("SELECT 1")
+
+
+def test_session_store_close_preserves_injected_connection(tmp_path) -> None:
+    from hermes_agent.composition.session_repository_db import (
+        connect_session_repository_db,
+    )
+
+    conn = connect_session_repository_db(tmp_path / "injected.db")
+    store = SessionStore(
+        sessions_dir=tmp_path,
+        config=GatewayConfig(),
+        storage_conn=conn,
+    )
+
+    store.close()
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+    conn.close()
+
+
+def test_session_index_write_does_not_hold_metadata_lock(tmp_path, monkeypatch) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="lock-test",
+        chat_type="dm",
+        user_id="user-1",
+    )
+    entry = store.get_or_create_session(source)
+    started = threading.Event()
+    release = threading.Event()
+    original_write = store._write_index_snapshot
+
+    def slow_write(revision, data) -> None:
+        started.set()
+        release.wait(timeout=2)
+        original_write(revision, data)
+
+    monkeypatch.setattr(store, "_write_index_snapshot", slow_write)
+    worker = threading.Thread(
+        target=store.update_session,
+        args=(entry.session_key,),
+    )
+    worker.start()
+    assert started.wait(timeout=1)
+    assert store._lock.acquire(timeout=0.2)
+    store._lock.release()
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    store.close()
+
+
+def test_older_session_index_snapshot_cannot_overwrite_newer_state(tmp_path) -> None:
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="revision-test",
+        chat_type="dm",
+        user_id="user-1",
+    )
+    entry = store.get_or_create_session(source)
+
+    with store._lock:
+        entry.display_name = "older"
+        older = store._snapshot_index_locked()
+        entry.display_name = "newer"
+        newer = store._snapshot_index_locked()
+
+    store._write_index_snapshot(*newer)
+    store._write_index_snapshot(*older)
+
+    persisted = json.loads((tmp_path / "sessions.json").read_text(encoding="utf-8"))
+    assert persisted[entry.session_key]["display_name"] == "newer"
+    store.close()

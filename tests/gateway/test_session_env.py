@@ -3,11 +3,12 @@ import os
 
 import pytest
 
-from gateway.config import Platform
-from gateway.run import GatewayRunner
-from gateway.session import SessionContext, SessionSource
-from gateway.session_context import (
+from hermes_gateway.config import Platform
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionContext, SessionSource
+from channels.session_context import (
     get_session_env,
+    get_session_context_env,
     set_session_vars,
     clear_session_vars,
     _VAR_MAP,
@@ -124,6 +125,40 @@ def test_get_session_env_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_PLATFORM") == ""
 
 
+def test_dovie_browser_session_id_is_session_scoped(monkeypatch):
+    """Dovie browser automation must bind to the active gateway session."""
+    monkeypatch.setenv("DOVIE_BROWSER_SESSION_ID", "browser:electron:global")
+
+    assert get_session_env("DOVIE_BROWSER_SESSION_ID") == "browser:electron:global"
+
+    tokens = set_session_vars(
+        session_key="session-a",
+        dovie_browser_session_id="browser:hermes:session-a",
+    )
+    try:
+        assert get_session_env("DOVIE_BROWSER_SESSION_ID") == "browser:hermes:session-a"
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_env("DOVIE_BROWSER_SESSION_ID") == ""
+
+
+def test_get_session_context_env_never_falls_back_to_os_environ(monkeypatch):
+    """Ownership-sensitive routing must not read another session's env fallback."""
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+
+    assert get_session_env("HERMES_SESSION_PLATFORM") == "discord"
+    assert get_session_context_env("HERMES_SESSION_PLATFORM") == ""
+
+    tokens = set_session_vars(platform="telegram")
+    try:
+        assert get_session_context_env("HERMES_SESSION_PLATFORM") == "telegram"
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_context_env("HERMES_SESSION_PLATFORM") == ""
+
+
 def test_get_session_env_default_when_nothing_set(monkeypatch):
     """get_session_env returns default when neither contextvar nor env is set."""
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
@@ -188,6 +223,17 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     # After clear — should return "" (explicitly cleared), not os.environ (#10304)
     clear_session_vars(tokens)
     assert get_session_env("HERMES_SESSION_KEY") == ""
+
+
+def test_session_id_set_via_contextvars(monkeypatch):
+    """set_session_vars should set HERMES_SESSION_ID via contextvars."""
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-env-session")
+
+    tokens = set_session_vars(session_id="ctx-session-456")
+    assert get_session_env("HERMES_SESSION_ID") == "ctx-session-456"
+
+    clear_session_vars(tokens)
+    assert get_session_env("HERMES_SESSION_ID") == ""
 
 
 def test_set_session_env_includes_session_key():

@@ -49,6 +49,7 @@ class TestRunAsyncLoopLifecycle:
 
     def test_loop_not_closed_after_run_async(self):
         """The loop used by _run_async must still be open after the call."""
+        import model_tools
         from model_tools import _run_async
 
         loop = _run_async(_get_current_loop())
@@ -209,6 +210,7 @@ class TestRunAsyncWithRunningLoop:
         caller returns).
         """
         import concurrent.futures
+        import model_tools
         from model_tools import _run_async
 
         events = {
@@ -254,11 +256,12 @@ class TestRunAsyncWithRunningLoop:
             "ThreadPoolExecutor",
             FakeExecutor,
         )
+        monkeypatch.setattr(model_tools, "_ASYNC_TOOL_TIMEOUT_SECONDS", 0.0)
 
         with pytest.raises(concurrent.futures.TimeoutError):
             _run_async(_never_finishes())
 
-        assert events["result_timeout"] == 300
+        assert events["result_timeout"] == model_tools._ASYNC_TOOL_INTERRUPT_POLL_SECONDS
         # The worker wrapper creates its own event loop so _run_async can
         # cancel the task on timeout — this must NOT be bare asyncio.run.
         assert events["submitted_fn"] != "run", (
@@ -284,6 +287,7 @@ class TestRunAsyncWithRunningLoop:
         future is a no-op, so the worker thread kept running the coroutine
         to completion (leaking one thread per tool-timeout).
         """
+        import model_tools
         from model_tools import _run_async
 
         # Shrink the 300s internal timeout by patching future.result.
@@ -297,13 +301,7 @@ class TestRunAsyncWithRunningLoop:
             def __init__(self, *a, **kw):
                 super().__init__(*a, **kw)
 
-        # Patch future.result to time out after 1s instead of 300s.
-        real_result = _cf.Future.result
-
-        def fast_result(self, timeout=None):
-            return real_result(self, timeout=1.0 if timeout == 300 else timeout)
-
-        monkeypatch.setattr(_cf.Future, "result", fast_result)
+        monkeypatch.setattr(model_tools, "_ASYNC_TOOL_TIMEOUT_SECONDS", 0.2)
 
         cancel_observed = threading.Event()
 

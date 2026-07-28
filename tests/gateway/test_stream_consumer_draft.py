@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.stream_consumer import (
+from hermes_gateway.stream_consumer import (
     GatewayStreamConsumer,
     StreamConsumerConfig,
 )
@@ -34,7 +34,7 @@ def _make_draft_capable_adapter(
     (Telegram bot, Discord client, etc.) while still satisfying the
     consumer's isinstance(BasePlatformAdapter) gate.
     """
-    from gateway.platforms.base import BasePlatformAdapter, SendResult
+    from channels.platforms.base import BasePlatformAdapter, SendResult
 
     DraftCapableAdapter = type(
         "DraftCapableAdapter",
@@ -79,6 +79,11 @@ def _make_draft_capable_adapter(
 
 class TestDraftTransportSelection:
     """Verify _resolve_draft_streaming picks the right transport."""
+
+    def test_default_transport_stays_on_edit(self):
+        adapter = _make_draft_capable_adapter()
+        consumer = GatewayStreamConsumer(adapter, "12345", StreamConsumerConfig(chat_type="dm"))
+        assert consumer._resolve_draft_streaming() is False
 
     def test_auto_dm_with_draft_capable_adapter_picks_draft(self):
         adapter = _make_draft_capable_adapter()

@@ -63,7 +63,7 @@ class TestHermesTimeNow:
         assert result.tzinfo is not None
         # Offset is -5h or -4h depending on DST
         offset_hours = result.utcoffset().total_seconds() / 3600
-        assert offset_hours in (-5, -4)
+        assert offset_hours in {-5, -4}
 
     def test_invalid_timezone_falls_back(self, caplog):
         """Invalid timezone logs warning and falls back to server-local."""
@@ -128,6 +128,18 @@ class TestGetTimezone:
         os.environ["HERMES_TIMEZONE"] = "Not/A/Timezone"
         tz = hermes_time.get_timezone()
         assert tz is None
+
+
+def test_timezone_resolution_uses_shared_raw_config_cache(monkeypatch):
+    monkeypatch.delenv("HERMES_TIMEZONE", raising=False)
+
+    with patch(
+        "hermes_cli.config.read_raw_config",
+        return_value={"timezone": "Asia/Tokyo"},
+    ) as read_raw_config:
+        assert hermes_time._resolve_timezone_name() == "Asia/Tokyo"
+
+    read_raw_config.assert_called_once_with()
 
 
 

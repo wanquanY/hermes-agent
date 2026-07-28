@@ -13,8 +13,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
-from gateway.run import GatewayRunner, _parse_session_key
+from hermes_gateway.config import GatewayConfig, Platform
+from hermes_gateway.runner import GatewayRunner
+import hermes_gateway.gateway_runtime_config as gateway_runtime_config
+from hermes_gateway.process_watcher import process_watcher_for
+from hermes_gateway.session_key import parse_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +35,9 @@ class _FakeRegistry:
             return self._sessions.pop(0)
         return None
 
+    def is_completion_consumed(self, session_id):
+        return False
+
 
 def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
     """Create a GatewayRunner with a fake config for the given mode."""
@@ -40,9 +46,7 @@ def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
         encoding="utf-8",
     )
 
-    import gateway.run as gateway_run
-
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
 
     runner = GatewayRunner(GatewayConfig())
     adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
@@ -69,46 +73,41 @@ def _watcher_dict(session_id="proc_test", thread_id=""):
 class TestLoadBackgroundNotificationsMode:
 
     def test_defaults_to_all(self, monkeypatch, tmp_path):
-        import gateway.run as gw
-        monkeypatch.setattr(gw, "_hermes_home", tmp_path)
+        monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "all"
 
     def test_reads_config_yaml(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
             "display:\n  background_process_notifications: error\n"
         )
-        import gateway.run as gw
-        monkeypatch.setattr(gw, "_hermes_home", tmp_path)
+        monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "error"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "error"
 
     def test_env_var_overrides_config(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
             "display:\n  background_process_notifications: error\n"
         )
-        import gateway.run as gw
-        monkeypatch.setattr(gw, "_hermes_home", tmp_path)
+        monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.setenv("HERMES_BACKGROUND_NOTIFICATIONS", "off")
-        assert GatewayRunner._load_background_notifications_mode() == "off"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "off"
 
     def test_false_value_maps_to_off(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
             "display:\n  background_process_notifications: false\n"
         )
-        import gateway.run as gw
-        monkeypatch.setattr(gw, "_hermes_home", tmp_path)
+        monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "off"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "off"
 
     def test_invalid_value_defaults_to_all(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
             "display:\n  background_process_notifications: banana\n"
         )
-        import gateway.run as gw
-        monkeypatch.setattr(gw, "_hermes_home", tmp_path)
+        monkeypatch.setattr(gateway_runtime_config, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert gateway_runtime_config.GatewayRuntimeConfigService.load_background_notifications_mode() == "all"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +190,7 @@ async def test_run_process_watcher_respects_notification_mode(
     runner = _build_runner(monkeypatch, tmp_path, mode)
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict())
 
     assert adapter.send.await_count == expected_calls, (
         f"mode={mode}: expected {expected_calls} sends, got {adapter.send.await_count}"
@@ -216,7 +215,7 @@ async def test_thread_id_passed_to_send(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict(thread_id="42"))
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict(thread_id="42"))
 
     assert adapter.send.await_count == 1
     _, kwargs = adapter.send.call_args
@@ -238,7 +237,7 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
 
-    await runner._run_process_watcher(_watcher_dict())
+    await process_watcher_for(runner).run_process_watcher(_watcher_dict())
 
     assert adapter.send.await_count == 1
     _, kwargs = adapter.send.call_args
@@ -247,7 +246,7 @@ async def test_no_thread_id_sends_no_metadata(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_inject_watch_notification_routes_from_session_store_origin(monkeypatch, tmp_path):
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
@@ -267,17 +266,126 @@ async def test_inject_watch_notification_routes_from_session_store_origin(monkey
         "session_key": "agent:main:telegram:group:-100:42",
     }
 
-    await runner._inject_watch_notification("[SYSTEM: Background process matched]", evt)
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: Background process matched]", evt)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: Background process matched]",
+        metadata={"thread_id": "42"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
+    """notify_on_complete injection carries the triggering message_id so the
+    synthetic event can be reply-anchored back into a Telegram DM topic.
+
+    Without an anchor, Telegram private-chat topic sends fall back to the main
+    chat (see _thread_kwargs_for_send / telegram_dm_topic_reply_fallback)."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="SMOKE_OK\n", exited=True, exit_code=0, command="sleep 1",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = {
+        "session_id": "proc_anchor",
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "platform": "telegram",
+        "chat_id": "123",
+        "thread_id": "24296",
+        "message_id": "555",
+        "notify_on_complete": True,
+    }
+    await process_watcher_for(runner).run_process_watcher(watcher)
 
     adapter.handle_message.assert_awaited_once()
     synth_event = adapter.handle_message.await_args.args[0]
     assert synth_event.internal is True
-    assert synth_event.source.platform == Platform.TELEGRAM
-    assert synth_event.source.chat_id == "-100"
-    assert synth_event.source.chat_type == "group"
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "123"
-    assert synth_event.source.user_name == "Emiliyan"
+    assert synth_event.message_id == "555"
+    assert synth_event.source.thread_id == "24296"
+
+
+@pytest.mark.asyncio
+async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_path):
+    """A watcher dict without message_id (CLI spawn, pre-upgrade checkpoint)
+    still injects — message_id is simply None."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = {
+        "session_id": "proc_anchorless",
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "platform": "telegram",
+        "chat_id": "123",
+        "thread_id": "24296",
+        "notify_on_complete": True,
+    }
+    await process_watcher_for(runner).run_process_watcher(watcher)
+
+    adapter.handle_message.assert_awaited_once()
+    synth_event = adapter.handle_message.await_args.args[0]
+    assert synth_event.message_id is None
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
+    from hermes_gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:dm:123:24296"] = SimpleNamespace(
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            thread_id="24296",
+            user_id="1",
+            user_name="Fabio",
+        )
+    )
+
+    evt = {
+        "session_id": "proc_watch",
+        "session_key": "agent:main:telegram:dm:123:24296",
+        "message_id": "777",
+    }
+
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: Background process matched]", evt)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once_with(
+        "123",
+        "[SYSTEM: Background process matched]",
+        metadata={
+            "thread_id": "24296",
+            "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "24296",
+            "telegram_reply_to_message_id": "777",
+        },
+    )
 
 
 def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypatch, tmp_path):
@@ -293,7 +401,7 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
         "user_name": "Emiliyan",
     }
 
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
 
     assert source is not None
     assert source.platform == Platform.TELEGRAM
@@ -307,7 +415,7 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
 def test_build_process_event_source_uses_cached_live_source_before_session_key_parse(
     monkeypatch, tmp_path
 ):
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     runner._cache_session_source(
@@ -322,7 +430,7 @@ def test_build_process_event_source_uses_cached_live_source_before_session_key_p
         ),
     )
 
-    source = runner._build_process_event_source(
+    source = process_watcher_for(runner).build_process_event_source(
         {
             "session_id": "proc_watch",
             "session_key": "agent:main:telegram:group:-100:42",
@@ -341,7 +449,7 @@ def test_build_process_event_source_uses_cached_live_source_before_session_key_p
 @pytest.mark.asyncio
 async def test_inject_watch_notification_ignores_foreground_event_source(monkeypatch, tmp_path):
     """Negative test: watch notification must NOT route to the foreground thread."""
-    from gateway.session import SessionSource
+    from hermes_gateway.session import SessionSource
 
     runner = _build_runner(monkeypatch, tmp_path, "all")
     adapter = runner.adapters[Platform.TELEGRAM]
@@ -364,20 +472,22 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
         "session_key": "agent:main:telegram:group:-100:42",
     }
 
-    await runner._inject_watch_notification("[SYSTEM: watch match]", evt)
+    await process_watcher_for(runner).inject_watch_notification("[SYSTEM: watch match]", evt)
 
-    adapter.handle_message.assert_awaited_once()
-    synth_event = adapter.handle_message.await_args.args[0]
-    # Must route to thread 42 (process origin), NOT some other thread
-    assert synth_event.source.thread_id == "42"
-    assert synth_event.source.user_id == "proc_owner"
+    adapter.handle_message.assert_not_awaited()
+    # Must route to thread 42 (process origin), NOT some other thread.
+    adapter.send.assert_awaited_once_with(
+        "-100",
+        "[SYSTEM: watch match]",
+        metadata={"thread_id": "42"},
+    )
 
 
 def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_path):
     """Missing session_key and no platform metadata → None (drop notification)."""
     runner = _build_runner(monkeypatch, tmp_path, "all")
 
-    source = runner._build_process_event_source({"session_id": "proc_orphan"})
+    source = process_watcher_for(runner).build_process_event_source({"session_id": "proc_orphan"})
     assert source is None
 
 
@@ -391,7 +501,7 @@ def test_build_process_event_source_returns_none_for_invalid_platform(monkeypatc
         "chat_type": "dm",
         "chat_id": "123",
     }
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
     assert source is None
 
 
@@ -403,8 +513,103 @@ def test_build_process_event_source_returns_none_for_short_session_key(monkeypat
         "session_id": "proc_short",
         "session_key": "agent:main:telegram",  # Too few parts
     }
-    source = runner._build_process_event_source(evt)
+    source = process_watcher_for(runner).build_process_event_source(evt)
     assert source is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_completion_claims_inject_once(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_injection(_text, _event):
+        started.set()
+        await release.wait()
+        return True
+
+    service._inject_completion_notification = AsyncMock(
+        side_effect=blocked_injection
+    )
+    event = {
+        "type": "completion",
+        "session_id": "proc-one",
+        "started_at": 123.0,
+    }
+
+    first = asyncio.create_task(
+        service.deliver_completion_notification("done", event)
+    )
+    await started.wait()
+    duplicate = await service.deliver_completion_notification("done", dict(event))
+    release.set()
+
+    assert await first is True
+    assert duplicate is None
+    assert service._inject_completion_notification.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_claim_is_released_for_retry(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._inject_completion_notification = AsyncMock(
+        side_effect=[False, True]
+    )
+    event = {
+        "type": "completion",
+        "session_id": "proc-retry",
+        "started_at": 123.0,
+    }
+
+    assert await service.deliver_completion_notification("done", event) is False
+    assert await service.deliver_completion_notification("done", event) is True
+    assert service._inject_completion_notification.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_process_incarnations_have_distinct_delivery_identity(
+    monkeypatch, tmp_path
+):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._inject_completion_notification = AsyncMock(return_value=True)
+
+    for started_at in (10.0, 20.0):
+        assert await service.deliver_completion_notification(
+            "done",
+            {
+                "type": "completion",
+                "session_id": "proc-reused",
+                "started_at": started_at,
+            },
+        ) is True
+
+    assert service._inject_completion_notification.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_delivery_retention_is_bounded(monkeypatch, tmp_path):
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    service = process_watcher_for(runner)
+    service._completion_delivery_retention = 2
+    service._inject_completion_notification = AsyncMock(return_value=True)
+
+    for index in range(3):
+        await service.deliver_completion_notification(
+            "done",
+            {
+                "type": "completion",
+                "session_id": f"proc-{index}",
+                "started_at": float(index),
+            },
+        )
+
+    assert len(service._completion_deliveries_delivered) == 2
+    assert ("completion", "proc-0", 0.0) not in (
+        service._completion_deliveries_delivered
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -412,39 +617,39 @@ def test_build_process_event_source_returns_none_for_short_session_key(monkeypat
 # ---------------------------------------------------------------------------
 
 def test_parse_session_key_valid():
-    result = _parse_session_key("agent:main:telegram:group:-100")
+    result = parse_session_key("agent:main:telegram:group:-100")
     assert result == {"platform": "telegram", "chat_type": "group", "chat_id": "-100"}
 
 
 def test_parse_session_key_with_extra_parts():
     """6th part in a group key may be a user_id, not a thread_id — omit it."""
-    result = _parse_session_key("agent:main:discord:group:chan123:thread456")
+    result = parse_session_key("agent:main:discord:group:chan123:thread456")
     assert result == {"platform": "discord", "chat_type": "group", "chat_id": "chan123"}
 
 
 def test_parse_session_key_with_user_id_part():
     """Group keys with per-user isolation have user_id as 6th part — don't return as thread_id."""
-    result = _parse_session_key("agent:main:telegram:group:chat1:user99")
+    result = parse_session_key("agent:main:telegram:group:chat1:user99")
     assert result == {"platform": "telegram", "chat_type": "group", "chat_id": "chat1"}
 
 
 def test_parse_session_key_dm_with_thread():
     """DM keys use parts[5] as thread_id unambiguously."""
-    result = _parse_session_key("agent:main:telegram:dm:chat1:topic42")
+    result = parse_session_key("agent:main:telegram:dm:chat1:topic42")
     assert result == {"platform": "telegram", "chat_type": "dm", "chat_id": "chat1", "thread_id": "topic42"}
 
 
 def test_parse_session_key_thread_chat_type():
     """Thread-typed keys use parts[5] as thread_id unambiguously."""
-    result = _parse_session_key("agent:main:discord:thread:chan1:thread99")
+    result = parse_session_key("agent:main:discord:thread:chan1:thread99")
     assert result == {"platform": "discord", "chat_type": "thread", "chat_id": "chan1", "thread_id": "thread99"}
 
 
 def test_parse_session_key_too_short():
-    assert _parse_session_key("agent:main:telegram") is None
-    assert _parse_session_key("") is None
+    assert parse_session_key("agent:main:telegram") is None
+    assert parse_session_key("") is None
 
 
 def test_parse_session_key_wrong_prefix():
-    assert _parse_session_key("cron:main:telegram:dm:123") is None
-    assert _parse_session_key("agent:cron:telegram:dm:123") is None
+    assert parse_session_key("cron:main:telegram:dm:123") is None
+    assert parse_session_key("agent:cron:telegram:dm:123") is None

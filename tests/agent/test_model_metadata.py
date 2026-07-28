@@ -22,9 +22,11 @@ from unittest.mock import patch, MagicMock
 from agent.model_metadata import (
     CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    MINIMUM_CONTEXT_LENGTH,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
+    estimate_request_tokens_rough,
     get_model_context_length,
     get_next_probe_tier,
     get_cached_context_length,
@@ -122,6 +124,56 @@ class TestEstimateMessagesTokensRough:
         assert result < 5000
 
 
+class TestEstimateRequestTokensRough:
+    def test_caches_tools_estimate(self):
+        import agent.model_metadata as model_metadata
+
+        model_metadata._TOOLS_TOKENS_CACHE.clear()
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        with patch(
+            "agent.model_metadata.json.dumps",
+            wraps=__import__("json").dumps,
+        ) as dumps:
+            estimate_request_tokens_rough(messages, tools=tools)
+            estimate_request_tokens_rough(messages, tools=tools)
+            assert dumps.call_count == 1
+
+    def test_tools_cache_is_bounded(self):
+        import agent.model_metadata as model_metadata
+
+        model_metadata._TOOLS_TOKENS_CACHE.clear()
+        cap = model_metadata._TOOLS_TOKENS_CACHE_MAX
+        held = []
+        for index in range(cap + 50):
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"tool_{index}",
+                        "description": "d",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+            held.append(tools)
+            model_metadata._estimate_tools_tokens_rough(tools)
+            assert len(model_metadata._TOOLS_TOKENS_CACHE) <= cap
+        assert len(model_metadata._TOOLS_TOKENS_CACHE) == cap
+
+
 # =========================================================================
 # Default context lengths
 # =========================================================================
@@ -134,7 +186,10 @@ class TestDefaultContextLengths:
             # Claude 4.6+ models (4.6 and 4.7) have 1M context at standard
             # API pricing (no long-context premium).  Older Claude 4.x and
             # 3.x models cap at 200k.
-            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7")):
+            if any(tag in key for tag in (
+                "4.6", "4-6", "4.7", "4-7", "4.8", "4-8", "fable",
+                "sonnet-5",
+            )):
                 assert value == 1000000, f"{key} should be 1000000"
             else:
                 assert value == 200000, f"{key} should be 200000"
@@ -712,6 +767,111 @@ class TestNousPortalContextResolution:
 # =========================================================================
 
 class TestGetModelContextLength:
+    @pytest.mark.parametrize(
+        ("model", "provider", "base_url", "expected"),
+        [
+            (
+                "gpt-5.4",
+                "openai-codex",
+                "https://chatgpt.com/backend-api/codex",
+                272_000,
+            ),
+            (
+                "gpt-4.1",
+                "copilot",
+                "https://api.githubcopilot.com",
+                128_000,
+            ),
+            (
+                "openai/gpt-5.4",
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                1_050_000,
+            ),
+        ],
+    )
+    def test_runtime_resolution_never_performs_metadata_network_io(
+        self,
+        model,
+        provider,
+        base_url,
+        expected,
+    ):
+        """Agent construction is cache/static only, even with credentials."""
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch(
+                "agent.models_dev.lookup_models_dev_context",
+                return_value=None,
+            ) as models_dev,
+            patch("agent.model_metadata.requests.get") as requests_get,
+            patch("agent.model_metadata.fetch_model_metadata") as openrouter_fetch,
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch(
+                "hermes_cli.models.get_copilot_model_context"
+            ) as copilot_catalog,
+        ):
+            result = get_model_context_length(
+                model,
+                provider=provider,
+                base_url=base_url,
+                api_key="credential-must-not-trigger-discovery",
+                allow_network_discovery=False,
+            )
+
+        assert result == expected
+        requests_get.assert_not_called()
+        openrouter_fetch.assert_not_called()
+        ollama_probe.assert_not_called()
+        copilot_catalog.assert_not_called()
+        if provider == "openai-codex":
+            models_dev.assert_not_called()
+        else:
+            models_dev.assert_called_once_with(
+                provider,
+                model,
+                allow_network=False,
+            )
+
+    def test_runtime_custom_endpoint_uses_safe_floor_without_probing(self):
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch("agent.model_metadata._resolve_endpoint_context_length") as endpoint,
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch("agent.model_metadata._query_local_context_length") as local_probe,
+        ):
+            result = get_model_context_length(
+                "vendor/unknown-large-model",
+                provider="custom",
+                base_url="https://models.example.com/v1",
+                api_key="secret",
+                allow_network_discovery=False,
+            )
+
+        assert result == MINIMUM_CONTEXT_LENGTH
+        endpoint.assert_not_called()
+        ollama_probe.assert_not_called()
+        local_probe.assert_not_called()
+
+    def test_non_ollama_provider_never_receives_native_ollama_probe(self):
+        with (
+            patch("agent.model_metadata.get_cached_context_length", return_value=None),
+            patch("agent.model_metadata._query_ollama_api_show") as ollama_probe,
+            patch(
+                "agent.models_dev.lookup_models_dev_context",
+                return_value=128_000,
+            ),
+        ):
+            result = get_model_context_length(
+                "gpt-4.1",
+                provider="openai",
+                base_url="https://api.openai.com/v1",
+                api_key="secret",
+            )
+
+        assert result == 128_000
+        ollama_probe.assert_not_called()
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_known_model_from_api(self, mock_fetch):
         mock_fetch.return_value = {
@@ -745,6 +905,16 @@ class TestGetModelContextLength:
         """qwen3-coder has a 256K context window, not the generic 128K Qwen default."""
         mock_fetch.return_value = {}
         assert get_model_context_length("qwen3-coder") == 262144
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_qwen3_6_plus_context_length(self, mock_fetch):
+        """qwen3.6-plus has a 1M context window, not the generic 128K Qwen default."""
+        mock_fetch.return_value = {}
+        assert get_model_context_length("qwen3.6-plus") == 1048576
+        # Provider-prefixed variants must resolve to the same explicit entry
+        # via the longest-substring fallback (no portal/OR cache available).
+        assert get_model_context_length("qwen/qwen3.6-plus") == 1048576
+        assert get_model_context_length("dashscope/qwen3.6-plus") == 1048576
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_qwen_generic_context_length(self, mock_fetch):

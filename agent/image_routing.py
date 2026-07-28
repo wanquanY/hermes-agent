@@ -7,29 +7,23 @@ Two modes:
             OpenAI chat.completions) already translate these into their
             vendor-specific multimodal formats.
 
-  text    — run ``vision_analyze`` on each image up-front and prepend the
-            description to the user's text. The model never sees the pixels;
-            it only sees a lossy text summary. This is the pre-existing
-            behaviour and still the right choice for non-vision models.
+  text    — expose exact image handles plus a mandatory ``vision_analyze``
+            instruction in the user turn. The visible tool lifecycle performs
+            the auxiliary vision call, so the UI can show progress and the
+            image is analysed only once.
 
 The decision is made once per message turn by :func:`decide_image_input_mode`.
 It reads ``agent.image_input_mode`` from config.yaml (``auto`` | ``native``
 | ``text``, default ``auto``) and the active model's capability metadata.
 
-In ``auto`` mode:
-  - If the user has explicitly configured ``auxiliary.vision.provider``
-    (i.e. not ``auto`` and not empty), we assume they want the text pipeline
-    regardless of the main model — they've opted in to a specific vision
-    backend for a reason (cost, quality, local-only, etc.).
-  - Otherwise, if the active model reports ``supports_vision=True`` in its
-    models.dev metadata, we attach natively.
-  - Otherwise (non-vision model, no explicit override), we fall back to text.
+In ``auto`` mode, the active model's capability is authoritative:
+  - If the active model supports vision, attach images natively.
+  - Otherwise, fall back to the auxiliary ``vision_analyze`` text pipeline.
 
-This keeps ``vision_analyze`` surfaced as a tool in every session — skills
-and agent flows that chain it (browser screenshots, deeper inspection of
-URL-referenced images, style-gating loops) keep working. The routing only
-affects *how user-attached images on the current turn* are presented to the
-main model.
+Configuring ``auxiliary.vision`` selects the fallback backend; it does not
+force vision-capable main models through that fallback. Users who deliberately
+want the auxiliary pipeline for every model can still set
+``agent.image_input_mode: text`` explicitly.
 """
 
 from __future__ import annotations
@@ -37,6 +31,8 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +40,164 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_MODES = frozenset({"auto", "native", "text"})
+
+
+# Image extensions used by extract_image_refs(). Kept tight on purpose: we only
+# auto-attach files the model can actually see. Documents and archives are
+# routed through the document/file attachment path instead.
+_IMAGE_EXTS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".heic",
+)
+_IMAGE_EXT_PATTERN = "|".join(e.lstrip(".") for e in _IMAGE_EXTS)
+
+_LOCAL_IMAGE_PATH_RE = re.compile(
+    r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:"
+    + _IMAGE_EXT_PATTERN
+    + r")\b",
+    re.IGNORECASE,
+)
+_IMAGE_URL_RE = re.compile(
+    r"https?://[^\s<>\"']+?\.(?:"
+    + _IMAGE_EXT_PATTERN
+    + r")(?:\?[^\s<>\"']*)?",
+    re.IGNORECASE,
+)
+
+
+def extract_image_refs(text: str) -> Tuple[List[str], List[str]]:
+    """Scan text for local image paths and remote image URLs.
+
+    Returns (local_paths, urls). Local paths must exist on disk; URLs are
+    syntax-filtered only and left for the provider or vision tool to fetch.
+    References inside fenced code blocks and inline backticks are ignored.
+    """
+    if not isinstance(text, str) or not text:
+        return [], []
+
+    code_spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"```[^\n]*\n.*?```", text, re.DOTALL):
+        code_spans.append((match.start(), match.end()))
+    for match in re.finditer(r"`[^`\n]+`", text):
+        code_spans.append((match.start(), match.end()))
+
+    def in_code(pos: int) -> bool:
+        return any(start <= pos < end for start, end in code_spans)
+
+    local_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for match in _LOCAL_IMAGE_PATH_RE.finditer(text):
+        if in_code(match.start()):
+            continue
+        raw = match.group(0)
+        expanded = os.path.expanduser(raw)
+        try:
+            if not os.path.isfile(expanded):
+                continue
+        except OSError:
+            continue
+        if expanded in seen_paths:
+            continue
+        seen_paths.add(expanded)
+        local_paths.append(expanded)
+
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+    for match in _IMAGE_URL_RE.finditer(text):
+        if in_code(match.start()):
+            continue
+        url = match.group(0).rstrip(".,;:!?)]>")
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        urls.append(url)
+
+    return local_paths, urls
+
+
+# Strict YAML/JSON boolean coercion for capability overrides.
+#
+# ``bool("false")`` is True in Python because non-empty strings are truthy, so
+# a user writing ``supports_vision: "false"`` (quoted — a common YAML mistake)
+# would silently enable native vision routing on a model that can't actually
+# handle it. Accept only the values YAML 1.1 / 1.2 treat as booleans, plus
+# real ``bool`` and integer 0/1. Anything else returns None so the caller
+# falls through to models.dev rather than honouring garbage.
+_TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
+_FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
+
+
+def _coerce_capability_bool(raw: Any) -> Optional[bool]:
+    """Return True/False for recognised boolean values, None otherwise."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        if raw in (0, 1):
+            return bool(raw)
+        return None
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in _TRUE_TOKENS:
+            return True
+        if s in _FALSE_TOKENS:
+            return False
+    return None
+
+
+def _supports_vision_override(
+    cfg: Optional[Dict[str, Any]],
+    provider: str,
+    model: str,
+) -> Optional[bool]:
+    """Resolve user-declared vision capability from config.yaml.
+
+    Resolution order, first hit wins:
+      1. ``model.supports_vision`` (top-level shortcut for the active model)
+      2. ``providers.<provider>.models.<model>.supports_vision``
+         (named custom providers — ``provider`` may be the runtime-resolved
+         value ``"custom"`` and/or the user-declared name under
+         ``model.provider``; both are tried)
+
+    Returns None when no override is set, so the caller falls through to
+    models.dev. Returns False explicitly only when the user wrote a
+    recognised boolean false token.
+    """
+    if not isinstance(cfg, dict):
+        return None
+
+    # 1. Top-level shortcut
+    model_cfg_raw = cfg.get("model")
+    model_cfg: Dict[str, Any] = model_cfg_raw if isinstance(model_cfg_raw, dict) else {}
+    top = _coerce_capability_bool(model_cfg.get("supports_vision"))
+    if top is not None:
+        return top
+
+    # 2. Per-provider, per-model. Named custom providers (e.g. "my-vllm")
+    # get rewritten to provider="custom" at runtime
+    # (hermes_cli/runtime_provider.py:_resolve_named_custom_runtime), so the
+    # config still holds the user-declared name under model.provider. Try
+    # both as candidate provider keys.
+    config_provider = str(model_cfg.get("provider") or "").strip()
+    providers_raw = cfg.get("providers")
+    providers_cfg: Dict[str, Any] = providers_raw if isinstance(providers_raw, dict) else {}
+    for p in dict.fromkeys(filter(None, (provider, config_provider))):
+        entry_raw = providers_cfg.get(p)
+        entry: Dict[str, Any] = entry_raw if isinstance(entry_raw, dict) else {}
+        models_raw = entry.get("models")
+        models_cfg: Dict[str, Any] = models_raw if isinstance(models_raw, dict) else {}
+        per_model_raw = models_cfg.get(model)
+        per_model: Dict[str, Any] = per_model_raw if isinstance(per_model_raw, dict) else {}
+        coerced = _coerce_capability_bool(per_model.get("supports_vision"))
+        if coerced is not None:
+            return coerced
+    return None
 
 
 def _coerce_mode(raw: Any) -> str:
@@ -56,11 +210,22 @@ def _coerce_mode(raw: Any) -> str:
     return "auto"
 
 
-def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when the user configured a specific auxiliary vision backend.
+def configured_image_input_mode(cfg: Optional[Dict[str, Any]]) -> str:
+    """Return the explicitly configured image-input mode or ``"auto"``."""
+    if not isinstance(cfg, dict):
+        return "auto"
+    agent_cfg = cfg.get("agent") or {}
+    if not isinstance(agent_cfg, dict):
+        return "auto"
+    return _coerce_mode(agent_cfg.get("image_input_mode"))
 
-    An explicit override means the user *wants* the text pipeline (they're
-    paying for a dedicated vision model), so we don't silently bypass it.
+
+def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
+    """Return whether a concrete auxiliary vision backend is configured.
+
+    This is capability detection only. Inbound attachment routing deliberately
+    does not interpret it as a request to bypass a vision-capable main model;
+    ``agent.image_input_mode: text`` is the explicit switch for that behavior.
     """
     if not isinstance(cfg, dict):
         return False
@@ -81,8 +246,20 @@ def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
-def _lookup_supports_vision(provider: str, model: str) -> Optional[bool]:
-    """Return True/False if we can resolve caps, None if unknown."""
+def _lookup_supports_vision(
+    provider: str,
+    model: str,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """Return True/False if we can resolve caps, None if unknown.
+
+    Consults the user's ``supports_vision`` override in config.yaml first
+    (so custom/local models declared as vision-capable don't fall through to
+    text routing in ``auto`` mode), then falls back to models.dev.
+    """
+    override = _supports_vision_override(cfg, provider, model)
+    if override is not None:
+        return override
     if not provider or not model:
         return None
     try:
@@ -100,6 +277,8 @@ def decide_image_input_mode(
     provider: str,
     model: str,
     cfg: Optional[Dict[str, Any]],
+    *,
+    supports_vision_override: Optional[bool] = None,
 ) -> str:
     """Return ``"native"`` or ``"text"`` for the given turn.
 
@@ -107,23 +286,26 @@ def decide_image_input_mode(
       provider: active inference provider ID (e.g. ``"anthropic"``, ``"openrouter"``).
       model:    active model slug as it would be sent to the provider.
       cfg:      loaded config.yaml dict, or None. When None, behaves as auto.
+      supports_vision_override: optional per-turn capability from the runtime
+        model descriptor. Used by Dovie and other gateway clients when the
+        active model capability is known outside static models.dev metadata.
     """
-    mode_cfg = "auto"
-    if isinstance(cfg, dict):
-        agent_cfg = cfg.get("agent") or {}
-        if isinstance(agent_cfg, dict):
-            mode_cfg = _coerce_mode(agent_cfg.get("image_input_mode"))
+    mode_cfg = configured_image_input_mode(cfg)
 
     if mode_cfg == "native":
         return "native"
     if mode_cfg == "text":
         return "text"
 
-    # auto
-    if _explicit_aux_vision_override(cfg):
+    # auto: model capability owns attachment routing. ``auxiliary.vision``
+    # only chooses the fallback backend when the main model cannot consume
+    # the image itself.
+    if supports_vision_override is True:
+        return "native"
+    if supports_vision_override is False:
         return "text"
 
-    supports = _lookup_supports_vision(provider, model)
+    supports = _lookup_supports_vision(provider, model, cfg)
     if supports is True:
         return "native"
     return "text"
@@ -230,34 +412,32 @@ def _file_to_data_url(path: Path) -> Optional[str]:
 def build_native_content_parts(
     user_text: str,
     image_paths: List[str],
+    image_urls: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Build an OpenAI-style ``content`` list for a user turn.
 
     Shape:
       [{"type": "text", "text": "...\\n\\n[Image attached at: /local/path]"},
        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+       {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
        ...]
 
-    The local path of each successfully attached image is appended to the
-    text part as ``[Image attached at: <path>]``. The model still sees the
-    pixels via the ``image_url`` part (full native vision); the path note
-    just gives it a string handle so MCP/skill tools that take an image
-    path or URL argument can be invoked on the same image without an
-    extra round-trip. This parallels the text-mode hint produced by
-    ``Runner._enrich_message_with_vision`` (``vision_analyze using image_url:
-    <path>``) so behaviour is consistent across both image input modes.
+    Local paths are embedded as base64 data URLs. Remote URLs are passed
+    through; the provider fetches them server-side. The text part receives a
+    stable handle for each image so tools can refer to the same source.
 
     Images are attached at their native size. If a provider rejects the
     request because an image is too large (e.g. Anthropic's 5 MB per-image
     ceiling), the agent's retry loop transparently shrinks and retries
     once — see ``run_agent._try_shrink_image_parts_in_messages``.
 
-    Returns (content_parts, skipped_paths). Skipped paths are files that
-    couldn't be read from disk and are NOT advertised in the path hints.
+    Returns (content_parts, skipped_paths). Skipped paths are local files that
+    could not be read; URLs are not validated here.
     """
     skipped: List[str] = []
     image_parts: List[Dict[str, Any]] = []
     attached_paths: List[str] = []
+    attached_urls: List[str] = []
 
     for raw_path in image_paths:
         p = Path(raw_path)
@@ -274,16 +454,26 @@ def build_native_content_parts(
         })
         attached_paths.append(str(raw_path))
 
+    for url in image_urls or []:
+        url = (url or "").strip()
+        if not url:
+            continue
+        image_parts.append({
+            "type": "image_url",
+            "image_url": {"url": url},
+        })
+        attached_urls.append(url)
+
     text = (user_text or "").strip()
 
     # If at least one image attached, build a single text part that combines
-    # the user's caption (or a neutral default) with one path hint per image.
-    if attached_paths:
+    # the user's caption (or a neutral default) with one hint per image.
+    if attached_paths or attached_urls:
         base_text = text or "What do you see in this image?"
-        path_hints = "\n".join(
-            f"[Image attached at: {p}]" for p in attached_paths
-        )
-        combined_text = f"{base_text}\n\n{path_hints}"
+        hint_lines: List[str] = []
+        hint_lines.extend(f"[Image attached at: {p}]" for p in attached_paths)
+        hint_lines.extend(f"[Image attached: {u}]" for u in attached_urls)
+        combined_text = f"{base_text}\n\n" + "\n".join(hint_lines)
         parts: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}]
         parts.extend(image_parts)
         return parts, skipped
@@ -298,4 +488,6 @@ def build_native_content_parts(
 __all__ = [
     "decide_image_input_mode",
     "build_native_content_parts",
+    "configured_image_input_mode",
+    "extract_image_refs",
 ]

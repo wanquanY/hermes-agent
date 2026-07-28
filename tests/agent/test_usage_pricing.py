@@ -39,6 +39,22 @@ def test_normalize_usage_openai_subtracts_cached_prompt_tokens():
     assert normalized.output_tokens == 700
 
 
+def test_normalize_usage_chat_completions_reads_reasoning_tokens():
+    usage = SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=40,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=25),
+    )
+
+    normalized = normalize_usage(
+        usage,
+        provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert normalized.reasoning_tokens == 25
+
+
 def test_normalize_usage_openai_reads_top_level_anthropic_cache_fields():
     """Some OpenAI-compatible proxies (OpenRouter, Vercel AI Gateway, Cline) expose
     Anthropic-style cache token counts at the top level of the usage object when
@@ -145,6 +161,30 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
     assert float(result.amount_usd) == 0.0
 
 
+def test_subscription_provider_usage_never_probes_models_endpoint(monkeypatch):
+    def _unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("subscription pricing must not query /models")
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _unexpected_probe,
+    )
+
+    for provider, base_url in (
+        ("copilot", "https://api.githubcopilot.com"),
+        ("copilot-acp", "acp://copilot"),
+        ("xai-oauth", "https://api.x.ai/v1"),
+    ):
+        result = estimate_usage_cost(
+            "gpt-5.4",
+            CanonicalUsage(input_tokens=1_000, output_tokens=500),
+            provider=provider,
+            base_url=base_url,
+        )
+        assert result.status == "included"
+        assert float(result.amount_usd) == 0.0
+
+
 def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",
@@ -192,6 +232,56 @@ def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
     assert float(entry.output_cost_per_million) == 2.0
 
 
+def test_runtime_pricing_is_cache_only(monkeypatch):
+    calls = []
+
+    def _fake_fetch(base_url, api_key=None, *, allow_network=True):
+        calls.append((base_url, allow_network))
+        return {}
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _fake_fetch,
+    )
+
+    entry = get_pricing_entry(
+        "vendor/private-model",
+        provider="custom",
+        base_url="https://models.example.com/v1",
+        api_key="secret",
+        allow_network_discovery=False,
+    )
+
+    assert entry is None
+    assert calls == [("https://models.example.com/v1", False)]
+
+
+def test_nous_portal_pricing_preserves_vendor_prefixed_model_ids(monkeypatch):
+    seen = {}
+
+    def _fake_fetch_endpoint_model_metadata(base_url, api_key=None):
+        seen["base_url"] = base_url
+        return {
+            "openai/gpt-5.5-pro": {
+                "pricing": {
+                    "prompt": "0.000025",
+                    "completion": "0.000125",
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        _fake_fetch_endpoint_model_metadata,
+    )
+
+    entry = get_pricing_entry("openai/gpt-5.5-pro", provider="nous")
+
+    assert seen["base_url"] == "https://inference-api.nousresearch.com/v1"
+    assert float(entry.input_cost_per_million) == 25.0
+    assert float(entry.output_cost_per_million) == 125.0
+
+
 def test_deepseek_v4_pro_pricing_entry_exists():
     """Regression test: deepseek-v4-pro must have a pricing entry.
 
@@ -224,3 +314,35 @@ def test_deepseek_v4_pro_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
     assert float(result.amount_usd) == 3.48
+
+
+def test_sonnet_5_uses_current_intro_pricing():
+    from agent.usage_pricing import get_pricing_entry
+
+    entry = get_pricing_entry("claude-sonnet-5", provider="anthropic")
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 2.0
+    assert float(entry.output_cost_per_million) == 10.0
+    assert entry.pricing_version == "anthropic-pricing-2026-06-intro"
+
+
+def test_current_bedrock_claude_profiles_resolve_with_cache_pricing():
+    from agent.usage_pricing import get_pricing_entry
+
+    for bare in (
+        "anthropic.claude-opus-4-8",
+        "anthropic.claude-opus-4-7",
+        "anthropic.claude-opus-4-6",
+        "anthropic.claude-sonnet-5",
+    ):
+        reference = get_pricing_entry(bare, provider="bedrock")
+        assert reference is not None, bare
+        assert reference.cache_read_cost_per_million is not None, bare
+        assert reference.cache_write_cost_per_million is not None, bare
+        for prefix in ("global.", "us.", "eu.", "apac.", "au."):
+            scoped = get_pricing_entry(
+                f"{prefix}{bare}-20260701-v1:0",
+                provider="bedrock",
+            )
+            assert scoped == reference, f"{prefix}{bare}"

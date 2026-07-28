@@ -445,7 +445,7 @@ class TestResolveActiveHost:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_HONCHO_HOST", None)
             with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
-                assert resolve_active_host() == "hermes.coder"
+                assert resolve_active_host() == "hermes_coder"
 
     def test_default_profile_returns_hermes(self):
         with patch.dict(os.environ, {}, clear=False):
@@ -691,15 +691,15 @@ class TestResolveSessionNameGatewayKey:
         )
         assert result == "agent-main-telegram-dm-8439114563"
 
-    def test_session_title_still_wins_over_gateway_key(self):
-        """Explicit /title remap takes priority over gateway_session_key."""
+    def test_gateway_key_remains_authoritative_after_title_change(self):
+        """A display title must not remap a gateway conversation's memory."""
         config = HonchoClientConfig(session_strategy="per-session")
         result = config.resolve_session_name(
             session_title="my-custom-title",
             session_id="20260412_171002_69bb38",
             gateway_session_key="agent:main:telegram:dm:8439114563",
         )
-        assert result == "my-custom-title"
+        assert result == "agent-main-telegram-dm-8439114563"
 
     def test_per_session_fallback_without_gateway_key(self):
         """Without gateway_session_key, per-session returns session_id (CLI path)."""
@@ -799,10 +799,11 @@ class TestResolveSessionNameLengthLimit:
 class TestResetHonchoClient:
     def test_reset_clears_singleton(self):
         import plugins.memory.honcho.client as mod
-        mod._honcho_client = MagicMock()
-        assert mod._honcho_client is not None
+
+        sentinel = MagicMock()
+        assert mod._honcho_client_slot.get(lambda: sentinel) is sentinel
         reset_honcho_client()
-        assert mod._honcho_client is None
+        assert mod._honcho_client_slot.peek() is None
 
 
 class TestDialecticDepthParsing:

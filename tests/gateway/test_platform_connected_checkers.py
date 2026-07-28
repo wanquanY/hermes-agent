@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gateway.config import Platform, _PLATFORM_CONNECTED_CHECKERS, _BUILTIN_PLATFORM_VALUES
+from hermes_gateway.config import Platform, _PLATFORM_CONNECTED_CHECKERS, _BUILTIN_PLATFORM_VALUES
 
 
 def test_all_builtins_have_checker_or_generic_token_path():
@@ -76,12 +76,12 @@ def test_checker_returns_true_when_configured(platform, checker, monkeypatch):
     elif platform == Platform.SMS:
         monkeypatch.setenv("TWILIO_ACCOUNT_SID", "ACtest")
         mock_config.extra = {}
-    elif platform in (
+    elif platform in {
         Platform.API_SERVER,
         Platform.WEBHOOK,
         Platform.MSGRAPH_WEBHOOK,
         Platform.WHATSAPP,
-    ):
+    }:
         mock_config.extra = {}
     elif platform == Platform.FEISHU:
         mock_config.extra = {"app_id": "app"}

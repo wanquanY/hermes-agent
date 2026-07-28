@@ -7,7 +7,7 @@ sidebar_position: 3
 Hermes uses two kinds of model slots:
 
 - **Main model** — what the agent thinks with. Every user message, every tool-call loop, every streamed response goes through this model.
-- **Auxiliary models** — smaller side-jobs the agent offloads. Context compression, vision (image analysis), web-page summarization, session search, approval scoring, MCP tool routing, session-title generation, and skill search. Each has its own slot and can be overridden independently.
+- **Auxiliary models** — smaller side-jobs the agent offloads. Context compression, vision (image analysis), web-page summarization, approval scoring, MCP tool routing, session-title generation, and skill search. Each has its own slot and can be overridden independently.
 
 This page covers configuring both from the dashboard. If you prefer config files or the CLI, jump to [Alternative methods](#alternative-methods) at the bottom.
 
@@ -52,7 +52,6 @@ Every auxiliary task defaults to `auto` — meaning Hermes uses your main model 
 | **Title Gen** | Almost always. A $0.10/M flash model writes session titles as well as Opus. Default config sets this to `google/gemini-3-flash-preview` on OpenRouter. |
 | **Vision** | When your main model is a coding model without vision (e.g. Kimi, DeepSeek). Point it at `google/gemini-2.5-flash` or `gpt-4o-mini`. |
 | **Compression** | When you're burning reasoning tokens on Opus/M2.7 just to summarize context. A fast chat model does the job at 1/50th the cost. |
-| **Session Search** | When recall queries fan out — default max_concurrency is 3. A cheap model keeps the bill predictable. |
 | **Approval** | For `approval_mode: smart` — a fast/cheap model (haiku, flash, gpt-5-mini) decides whether to auto-approve low-risk commands. Expensive models here are waste. |
 | **Web Extract** | When you use `web_extract` heavily. Same logic as compression — summarization doesn't need reasoning. |
 | **Skills Hub** | `hermes skills search` uses this. Usually fine at `auto`. |
@@ -155,11 +154,18 @@ On OpenRouter (or any aggregator), bare model names resolve *within* the aggrega
 Inside any `hermes chat` session:
 
 ```
-/model gpt-5.4 --provider openrouter             # session-only
-/model gpt-5.4 --provider openrouter --global    # also persists to config.yaml
+/model gpt-5.4 --provider openrouter --session   # this session only
+/model gpt-5.4 --provider openrouter --global    # persists to config.yaml
+/model claude-opus-4.6 --once                    # next turn only, then restores
 ```
 
 `--global` does the same thing the dashboard's **Change** button does, plus it switches the running session in-place.
+
+`--once` leases a model for exactly the next agent turn and restores the previous model afterward on success, error, or interrupt. It does not modify the session's durable model choice or `config.yaml`, so a restart cannot promote the temporary model into a persistent setting. This is useful for escalating one hard question to a stronger model or using a cheaper model for a throwaway query.
+
+:::note Prompt-cache cost
+A one-turn switch breaks the provider's prompt-cache prefix when switching out and again when restoring. In a long cached conversation, the following turn may repay the full input cost. `--once` is most economical for short sessions or cheap-to-expensive escalation; a brief side question inside a long expensive session can cost more than it saves.
+:::
 
 ### Custom aliases
 

@@ -7,17 +7,20 @@ deadline timeouts. These tests pin all of that without spawning real codex.
 
 from __future__ import annotations
 
-import threading
+import itertools
+
 import time
+from unittest.mock import patch
 from typing import Any, Optional
 
 import pytest
 
+import agent.transports.codex_app_server_session as session_mod
 from agent.transports.codex_app_server_session import (
     CodexAppServerSession,
-    TurnResult,
     _ServerRequestRouting,
     _approval_choice_to_codex_decision,
+    _coerce_turn_input_text,
 )
 
 
@@ -126,6 +129,15 @@ class TestApprovalChoiceMapping:
         assert _approval_choice_to_codex_decision(choice) == expected
 
 
+class TestTurnInputCoercion:
+    def test_list_content_keeps_text_and_marks_images(self):
+        text = _coerce_turn_input_text([
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ])
+        assert text == "caption\n\n[image attached]"
+
+
 # ---- lifecycle ----
 
 class TestLifecycle:
@@ -159,6 +171,25 @@ class TestLifecycle:
         s.close()
         assert client._closed is True
 
+    def test_native_compaction_state_tracks_started_completed_and_close(self):
+        session = make_session(FakeClient())
+        started = {
+            "method": "item/started",
+            "params": {"item": {"id": "compact-1", "type": "contextCompaction"}},
+        }
+        completed = {
+            "method": "item/completed",
+            "params": {"item": {"id": "compact-1", "type": "contextCompaction"}},
+        }
+
+        session._track_compaction_state(started)  # noqa: SLF001
+        assert session.is_compacting is True
+        session._track_compaction_state(completed)  # noqa: SLF001
+        assert session.is_compacting is False
+        session._track_compaction_state(started)  # noqa: SLF001
+        session.close()
+        assert session.is_compacting is False
+
 
 # ---- turn loop ----
 
@@ -185,6 +216,189 @@ class TestRunTurn:
                    for m in r.projected_messages)
         # turn_id propagated for downstream session-DB linkage
         assert r.turn_id == "turn-fake-001"
+
+    def test_manual_compaction_waits_for_typed_boundary_and_usage(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/started", threadId="thread-fake-001", turn={"id": "compact-1"}
+        )
+        client.queue_notification(
+            "item/completed",
+            threadId="thread-fake-001",
+            turnId="compact-1",
+            item={"id": "item-compact", "type": "contextCompaction"},
+        )
+        client.queue_notification(
+            "thread/tokenUsage/updated",
+            threadId="thread-fake-001",
+            tokenUsage={
+                "last": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 20,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 2,
+                    "totalTokens": 127,
+                }
+            },
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-1", "status": "completed"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert ("thread/compact/start", {"threadId": "thread-fake-001"}) in client.requests
+        assert result.compacted is True
+        assert result.interrupted is False
+        assert result.turn_id == "compact-1"
+        assert result.token_usage_last["totalTokens"] == 127
+
+    def test_manual_compaction_rejects_interrupted_terminal(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "compact-2", "status": "interrupted"},
+        )
+
+        result = make_session(client).compact_thread(turn_timeout=1.0)
+
+        assert result.interrupted is True
+        assert result.error == "compact turn interrupted"
+
+    def test_token_usage_notification_is_captured(self):
+        client = FakeClient()
+        client.queue_notification(
+            "thread/tokenUsage/updated",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            tokenUsage={
+                "last": {
+                    "totalTokens": 130,
+                    "inputTokens": 80,
+                    "cachedInputTokens": 20,
+                    "outputTokens": 25,
+                    "reasoningOutputTokens": 5,
+                },
+                "total": {
+                    "totalTokens": 500,
+                    "inputTokens": 300,
+                    "cachedInputTokens": 75,
+                    "outputTokens": 100,
+                    "reasoningOutputTokens": 25,
+                },
+                "modelContextWindow": 200000,
+            },
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        r = make_session(client).run_turn("hi", turn_timeout=2.0)
+        assert r.token_usage_last["totalTokens"] == 130
+        assert r.token_usage_total["totalTokens"] == 500
+        assert r.model_context_window == 200000
+
+    def test_thread_compacted_notification_is_captured(self):
+        client = FakeClient()
+        client.queue_notification(
+            "thread/compacted",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
+        )
+
+        result = make_session(client).run_turn("hi", turn_timeout=2.0)
+
+        assert result.compacted is True
+        assert result.thread_id == "thread-fake-001"
+        assert result.turn_id == "turn-fake-001"
+
+    def test_context_compaction_item_is_captured(self):
+        client = FakeClient()
+        client.queue_notification(
+            "item/completed",
+            threadId="thread-fake-001",
+            turnId="turn-fake-001",
+            item={"id": "compact-1", "type": "contextCompaction"},
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
+        )
+
+        result = make_session(client).run_turn("hi", turn_timeout=2.0)
+
+        assert result.compacted is True
+
+    def test_rich_content_turn_is_collapsed_to_text_payload(self):
+        client = FakeClient()
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client)
+        r = s.run_turn(
+            [
+                {
+                    "type": "text",
+                    "text": "look at this\n\n[Image attached at: /tmp/a.png]",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
+            ],
+            turn_timeout=2.0,
+        )
+        assert r.error is None
+        method, params = next(req for req in client.requests if req[0] == "turn/start")
+        assert method == "turn/start"
+        text = params["input"][0]["text"]
+        assert isinstance(text, str)
+        assert "[Image attached at: /tmp/a.png]" in text
+        assert "[image attached]" in text
+
+    def test_turn_start_includes_explicit_platform_model_override(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client)
+        r = s.run_turn("hi", model_override="glm-5.2", turn_timeout=2.0)
+
+        assert r.error is None
+        method, params = next(req for req in client.requests if req[0] == "turn/start")
+        assert method == "turn/start"
+        assert params["model"] == "glm-5.2"
+        assert r.requested_model == "glm-5.2"
+
+    def test_turn_start_omits_model_without_override(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client)
+        r = s.run_turn("hi", turn_timeout=2.0)
+
+        assert r.error is None
+        _method, params = next(req for req in client.requests if req[0] == "turn/start")
+        assert "model" not in params
 
     def test_tool_iteration_counter_ticks(self):
         client = FakeClient()
@@ -234,8 +448,9 @@ class TestRunTurn:
     def test_turn_start_failure_attaches_redacted_stderr_tail(self):
         """When codex stderr has content (non-OAuth), the tail gets attached
         to the user-facing error so config/provider problems are debuggable
-        instead of just 'Internal error'. Secrets in stderr are redacted
-        via agent.redact(force=True)."""
+        instead of just 'Internal error'. Credential-shaped values in stderr
+        are redacted via agent.redact(force=True); web-URL query params pass
+        through (see fix(redact): pass web URLs through unchanged)."""
         client = FakeClient()
         client.set_stderr_tail([
             "ERROR: provider auth failed",
@@ -258,9 +473,8 @@ class TestRunTurn:
         # Stderr tail attached
         assert "codex stderr" in r.error
         assert "provider auth failed" in r.error
-        # Secrets redacted
+        # Credential-shaped values still redacted (sk- prefix + Bearer header)
         assert "sk-live-deadbeefdeadbeef" not in r.error
-        assert "querysecret12345" not in r.error
         # Non-OAuth → should NOT retire (subprocess JSON-RPC is still healthy).
         assert r.should_retire is False
 
@@ -344,6 +558,47 @@ class TestRunTurn:
         assert r.interrupted is True
         assert r.error and "timed out" in r.error
 
+    def test_no_event_watchdog_after_turn_started_closes_client(self):
+        client = FakeClient()
+        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        s = make_session(client)
+        r = s.run_turn(
+            "stream wedges",
+            turn_timeout=2.0,
+            notification_poll_timeout=0.005,
+            no_event_timeout=0.02,
+        )
+        assert r.interrupted is True
+        assert r.should_retire is True
+        assert r.error and "codex_app_server_no_event_timeout" in r.error
+        assert "Hint:" in r.error
+        assert client._closed is True
+        assert s._client is None
+        assert any(
+            method == "turn/interrupt" and params.get("turnId") == "turn-fake-001"
+            for (method, params) in client.requests
+        )
+
+    def test_deadline_uses_monotonic_clock(self):
+        client = FakeClient()
+        s = make_session(client)
+        monotonic_values = itertools.chain(
+            [1000.0, 999.0, 999.0, 1001.0],
+            itertools.count(1002.0),
+        )
+        with patch.object(
+            session_mod.time,
+            "monotonic",
+            side_effect=lambda: next(monotonic_values),
+        ):
+            r = s.run_turn(
+                "never finishes",
+                turn_timeout=0.1,
+                notification_poll_timeout=0.0,
+            )
+        assert r.interrupted is True
+        assert r.error and "timed out" in r.error
+
     def test_failed_turn_records_error_from_turn_completed(self):
         client = FakeClient()
         client.queue_notification(
@@ -382,6 +637,38 @@ class TestServerRequestRouting:
         assert captured["command"] == "ls /tmp"
         # The session must have responded to the server request with "accept"
         assert ("req-1", {"decision": "accept"}) in client.responses
+
+    def test_on_event_fires_during_approval_drain(self):
+        client = FakeClient()
+        client.queue_notification(
+            "item/started",
+            item={
+                "type": "commandExecution",
+                "id": "exec-1",
+                "command": "echo drained",
+                "cwd": "/tmp",
+            },
+        )
+        client.queue_server_request(
+            "item/commandExecution/requestApproval",
+            request_id="req-d",
+            command="echo drained",
+            cwd="/tmp",
+        )
+        client.queue_notification(
+            "turn/completed",
+            threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        events: list[dict] = []
+
+        def cb(command, description, *, allow_permanent=True):
+            return "once"
+
+        s = make_session(client, approval_callback=cb, on_event=events.append)
+        s.run_turn("hi", turn_timeout=1.0)
+
+        assert any(event.get("method") == "item/started" for event in events)
 
     def test_exec_approval_no_callback_denies(self):
         client = FakeClient()
@@ -665,6 +952,38 @@ class TestSessionRetirement:
         assert r.error and "silent" in r.error
         # Confirm we issued turn/interrupt to free codex compute
         assert any(method == "turn/interrupt" for (method, _) in client.requests)
+
+    def test_post_tool_watchdog_uses_monotonic_clock(self):
+        client = FakeClient()
+        client.queue_notification(
+            "item/completed",
+            item={
+                "type": "commandExecution", "id": "ex1",
+                "command": "echo hi", "cwd": "/tmp",
+                "status": "completed", "aggregatedOutput": "hi",
+                "exitCode": 0, "commandActions": [],
+            },
+            threadId="t", turnId="tu1",
+        )
+        s = make_session(client)
+        monotonic_values = itertools.chain(
+            [1000.0, 999.0, 999.0, 999.0, 1000.2],
+            itertools.count(1001.2),
+        )
+        with patch.object(
+            session_mod.time,
+            "monotonic",
+            side_effect=lambda: next(monotonic_values),
+        ):
+            r = s.run_turn(
+                "tool then silence",
+                turn_timeout=5.0,
+                notification_poll_timeout=0.0,
+                post_tool_quiet_timeout=0.15,
+            )
+        assert r.interrupted is True
+        assert r.should_retire is True
+        assert r.error and "silent" in r.error
 
     def test_post_tool_watchdog_resets_on_further_activity(self):
         """A tool completion followed by an agent message should NOT trip

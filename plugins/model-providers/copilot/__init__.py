@@ -19,6 +19,30 @@ from providers.base import ProviderProfile
 class CopilotProfile(ProviderProfile):
     """GitHub Copilot / GitHub Models — editor headers + reasoning."""
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            from hermes_cli.models import github_model_reasoning_efforts
+
+            efforts = github_model_reasoning_efforts(model)
+        except Exception:
+            efforts = []
+        if not efforts:
+            return {}
+        return {
+            "reasoning_enabled": True,
+            "reasoning_efforts": ["none", *efforts],
+            "default_reasoning_effort": (
+                "medium" if "medium" in efforts else efforts[0]
+            ),
+            "reasoning_format": "reasoning_items",
+        }
+
     def build_api_kwargs_extras(
         self,
         *,
@@ -35,8 +59,8 @@ class CopilotProfile(ProviderProfile):
                 supported_efforts = github_model_reasoning_efforts(model)
                 if supported_efforts and reasoning_config:
                     effort = reasoning_config.get("effort", "medium")
-                    # Normalize non-standard effort levels to the nearest supported
-                    if effort == "xhigh":
+                    # Normalize stronger generic levels to the nearest supported.
+                    if effort in {"xhigh", "max", "ultra"}:
                         effort = "high"
                     if effort in supported_efforts:
                         extra_body["reasoning"] = {"effort": effort}

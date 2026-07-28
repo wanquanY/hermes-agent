@@ -76,12 +76,12 @@ class TestMcpRegistrationE2E:
 
         def mock_register(config_map):
             registered_configs.update(config_map)
-            return ["mcp_test_fs_read", "mcp_test_fs_write", "mcp_test_api_search"]
+            return ["mcp__test_fs__read", "mcp__test_fs__write", "mcp__test_api__search"]
 
         fake_tools = [
-            {"function": {"name": "mcp_test_fs_read"}},
-            {"function": {"name": "mcp_test_fs_write"}},
-            {"function": {"name": "mcp_test_api_search"}},
+            {"function": {"name": "mcp__test_fs__read"}},
+            {"function": {"name": "mcp__test_fs__write"}},
+            {"function": {"name": "mcp__test_api__search"}},
             {"function": {"name": "terminal"}},
         ]
 
@@ -108,7 +108,7 @@ class TestMcpRegistrationE2E:
         # Verify agent tool surface was refreshed
         assert state.agent.tools == fake_tools
         assert state.agent.valid_tool_names == {
-            "mcp_test_fs_read", "mcp_test_fs_write", "mcp_test_api_search", "terminal"
+            "mcp__test_fs__read", "mcp__test_fs__write", "mcp__test_api__search", "terminal"
         }
 
     @pytest.mark.asyncio
@@ -183,7 +183,7 @@ class TestMcpRegistrationE2E:
         assert "hello" in complete_event.content[0].content.text
         assert complete_event.raw_output is None
 
-    def test_patch_mode_tool_start_emits_diff_blocks_for_v4a_patch(self):
+    def test_patch_mode_tool_start_defers_diff_to_edit_approval_prompt(self):
         update = build_tool_start(
             "tc-1",
             "patch",
@@ -193,14 +193,9 @@ class TestMcpRegistrationE2E:
             },
         )
 
-        assert len(update.content) == 2
-        assert update.content[0].type == "diff"
-        assert update.content[0].path == "src/app.py"
-        assert update.content[0].old_text == "old line"
-        assert update.content[0].new_text == "new line"
-        assert update.content[1].type == "diff"
-        assert update.content[1].path == "src/new.py"
-        assert update.content[1].new_text == "hello"
+        assert len(update.content) == 1
+        assert update.content[0].type == "content"
+        assert "Approval prompt shows the diff" in update.content[0].content.text
 
     @pytest.mark.asyncio
     async def test_prompt_tool_results_paired_by_call_id(self, acp_agent, mock_manager):
@@ -270,9 +265,9 @@ class TestMcpSanitizationE2E:
         registered_configs = {}
         def mock_register(config_map):
             registered_configs.update(config_map)
-            return ["mcp_ai_exa_exa_search"]
+            return ["mcp__ai_exa_exa__search"]
 
-        fake_tools = [{"function": {"name": "mcp_ai_exa_exa_search"}}]
+        fake_tools = [{"function": {"name": "mcp__ai_exa_exa__search"}}]
 
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=fake_tools):
@@ -283,7 +278,7 @@ class TestMcpSanitizationE2E:
         # Raw server name preserved as config key
         assert "ai.exa/exa" in registered_configs
         # Agent tools refreshed with sanitized name
-        assert "mcp_ai_exa_exa_search" in state.agent.valid_tool_names
+        assert "mcp__ai_exa_exa__search" in state.agent.valid_tool_names
 
 
 class TestSessionLifecycleMcpE2E:

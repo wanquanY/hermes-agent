@@ -61,6 +61,23 @@ class TestProjectionInvariants:
             assert r.is_tool_iteration is False
             assert r.final_text is None
 
+    def test_reasoning_delta_is_classified_without_materializing_message(self) -> None:
+        result = CodexEventProjector().project(
+            {"method": "item/reasoning/delta", "params": {"delta": "thinking"}}
+        )
+
+        assert result.reasoning_delta == "thinking"
+        assert result.content_delta == ""
+        assert result.messages == []
+
+    def test_agent_message_delta_is_classified_as_content(self) -> None:
+        result = CodexEventProjector().project(
+            {"method": "item/agentMessage/delta", "params": {"delta": "answer"}}
+        )
+
+        assert result.content_delta == "answer"
+        assert result.reasoning_delta == ""
+
     def test_turn_started_and_completed_are_silent(self) -> None:
         p = CodexEventProjector()
         for method in ("turn/started", "turn/completed", "thread/started"):
@@ -210,8 +227,24 @@ class TestMcpToolCallProjection:
         msgs = CodexEventProjector().project(
             {"method": "item/completed", "params": {"item": item}}
         ).messages
-        assert msgs[0]["tool_calls"][0]["function"]["name"] == "mcp.obsidian.search_notes"
+        assert msgs[0]["tool_calls"][0]["function"]["name"] == "mcp__obsidian__search_notes"
         assert "found" in msgs[1]["content"]
+
+    def test_internal_hermes_mcp_tool_uses_bare_native_name(self) -> None:
+        item = {
+            "type": "mcpToolCall",
+            "id": "m-native",
+            "server": "hermes-tools",
+            "tool": "web_search",
+            "arguments": {"query": "Hermes"},
+            "result": {"content": [{"text": "found"}]},
+        }
+
+        [assistant, _tool] = CodexEventProjector().project(
+            {"method": "item/completed", "params": {"item": item}}
+        ).messages
+
+        assert assistant["tool_calls"][0]["function"]["name"] == "web_search"
 
     def test_mcp_error_surfaced(self) -> None:
         item = {

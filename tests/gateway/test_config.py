@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from gateway.config import (
+from hermes_gateway.config import (
     GatewayConfig,
     HomeChannel,
     Platform,
@@ -164,6 +164,10 @@ class TestSessionResetPolicy:
 
 
 class TestStreamingConfig:
+    def test_defaults_to_edit_transport(self):
+        restored = StreamingConfig.from_dict({"enabled": "true"})
+        assert restored.transport == "edit"
+
     def test_from_dict_coerces_quoted_false_enabled(self):
         restored = StreamingConfig.from_dict({"enabled": "false"})
         assert restored.enabled is False
@@ -303,7 +307,7 @@ class TestLoadGatewayConfig:
         assert config.thread_sessions_per_user is False
 
     def test_bridges_discord_thread_require_mention_from_config_yaml(self, tmp_path, monkeypatch):
-        """discord.thread_require_mention in config.yaml should reach the runtime env var."""
+        """Discord mention policy should remain in profile-local config."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -316,9 +320,12 @@ class TestLoadGatewayConfig:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("DISCORD_THREAD_REQUIRE_MENTION", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
+        assert (
+            config.platforms[Platform.DISCORD].extra["thread_require_mention"]
+            is True
+        )
 
     def test_thread_require_mention_yaml_does_not_overwrite_env(self, tmp_path, monkeypatch):
         """Explicit env var should win over config.yaml (env > yaml precedence)."""
@@ -424,10 +431,11 @@ class TestLoadGatewayConfig:
         monkeypatch.delenv("DISCORD_HISTORY_BACKFILL", raising=False)
         monkeypatch.delenv("DISCORD_HISTORY_BACKFILL_LIMIT", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.getenv("DISCORD_HISTORY_BACKFILL") == "true"
-        assert os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT") == "17"
+        extra = config.platforms[Platform.DISCORD].extra
+        assert extra["history_backfill"] is True
+        assert extra["history_backfill_limit"] == 17
 
     def test_bridges_telegram_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -469,7 +477,7 @@ class TestLoadGatewayConfig:
             "C01ABC": "Code review mode",
         }
 
-    def test_bridges_feishu_allow_bots_from_config_yaml_to_env(self, tmp_path, monkeypatch):
+    def test_bridges_feishu_allow_bots_from_config_yaml_to_profile(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -481,9 +489,9 @@ class TestLoadGatewayConfig:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("FEISHU_ALLOW_BOTS", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("FEISHU_ALLOW_BOTS") == "mentions"
+        assert config.platforms[Platform.FEISHU].extra["allow_bots"] == "mentions"
 
     def test_feishu_allow_bots_env_takes_precedence_over_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -547,6 +555,26 @@ class TestLoadGatewayConfig:
 
         assert config.platforms[Platform.TELEGRAM].extra["disable_link_previews"] is True
 
+    def test_bridges_telegram_extra_base_url_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "telegram:\n"
+            "  extra:\n"
+            "    base_url: https://custom-proxy.example.com/bot\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert (
+            config.platforms[Platform.TELEGRAM].extra["base_url"]
+            == "https://custom-proxy.example.com/bot"
+        )
+
     def test_bridges_notice_delivery_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -576,10 +604,12 @@ class TestLoadGatewayConfig:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_PROXY", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os
-        assert os.environ.get("TELEGRAM_PROXY") == "socks5://127.0.0.1:1080"
+        assert (
+            config.platforms[Platform.TELEGRAM].extra["proxy_url"]
+            == "socks5://127.0.0.1:1080"
+        )
 
     def test_telegram_proxy_env_takes_precedence_over_config(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"

@@ -1,7 +1,9 @@
 """Tests for tools/skills_hub.py — source adapters, lock file, taps, dedup logic."""
 
 import json
+import time
 from pathlib import Path
+from typing import List, Optional
 from unittest.mock import patch, MagicMock
 
 import httpx
@@ -15,16 +17,20 @@ from tools.skills_hub import (
     UrlSource,
     WellKnownSkillSource,
     OptionalSkillSource,
-    SkillMeta,
+    SkillSource,
     SkillBundle,
+    SkillMeta,
     HubLockFile,
     TapsManager,
     bundle_content_hash,
     check_for_skill_updates,
     create_source_router,
+    delete_skill_package,
+    parallel_search_sources,
     unified_search,
     append_audit_log,
     _skill_meta_to_dict,
+    ensure_hub_dirs,
     quarantine_bundle,
 )
 
@@ -32,6 +38,26 @@ from tools.skills_hub import (
 # ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick
 # ---------------------------------------------------------------------------
+
+
+def test_ensure_hub_dirs_repairs_non_directory_skills_path(tmp_path, monkeypatch):
+    import tools.skills_hub as hub
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.write_text("legacy corrupt file\n")
+    monkeypatch.setattr(hub, "SKILLS_DIR", skills_dir)
+    monkeypatch.setattr(hub, "HUB_DIR", skills_dir / ".hub")
+    monkeypatch.setattr(hub, "LOCK_FILE", skills_dir / ".hub" / "lock.json")
+    monkeypatch.setattr(hub, "QUARANTINE_DIR", skills_dir / ".hub" / "quarantine")
+    monkeypatch.setattr(hub, "AUDIT_LOG", skills_dir / ".hub" / "audit.log")
+    monkeypatch.setattr(hub, "TAPS_FILE", skills_dir / ".hub" / "taps.json")
+    monkeypatch.setattr(hub, "INDEX_CACHE_DIR", skills_dir / ".hub" / "index-cache")
+
+    ensure_hub_dirs()
+
+    assert skills_dir.is_dir()
+    assert (skills_dir / ".hub" / "lock.json").is_file()
+    assert any(path.name.startswith("skills.invalid-") for path in tmp_path.iterdir())
 
 
 class TestParseFrontmatterQuick:
@@ -101,7 +127,7 @@ class TestTrustLevelFor:
         src = self._source()
         result = src.trust_level_for("owner/repo")
         # No path part — still resolves repo correctly
-        assert result in ("trusted", "community")
+        assert result in {"trusted", "community"}
 
 
 # ---------------------------------------------------------------------------
@@ -1279,10 +1305,11 @@ class TestUnifiedSearchDedup:
         return src
 
     def test_dedup_keeps_first_seen(self):
+        # Same identifier from two sources — only the first (community) is kept when equal trust.
         s1 = SkillMeta(name="skill", description="from A", source="a",
-                        identifier="a/skill", trust_level="community")
+                        identifier="shared/skill", trust_level="community")
         s2 = SkillMeta(name="skill", description="from B", source="b",
-                        identifier="b/skill", trust_level="community")
+                        identifier="shared/skill", trust_level="community")
         src_a = self._make_source("a", [s1])
         src_b = self._make_source("b", [s2])
         results = unified_search("skill", [src_a, src_b])
@@ -1290,10 +1317,11 @@ class TestUnifiedSearchDedup:
         assert results[0].description == "from A"
 
     def test_dedup_prefers_trusted_over_community(self):
+        # Same identifier — trusted wins over community.
         community = SkillMeta(name="skill", description="community", source="a",
-                               identifier="a/skill", trust_level="community")
+                               identifier="shared/skill", trust_level="community")
         trusted = SkillMeta(name="skill", description="trusted", source="b",
-                             identifier="b/skill", trust_level="trusted")
+                             identifier="shared/skill", trust_level="trusted")
         src_a = self._make_source("a", [community])
         src_b = self._make_source("b", [trusted])
         results = unified_search("skill", [src_a, src_b])
@@ -1303,9 +1331,9 @@ class TestUnifiedSearchDedup:
     def test_dedup_prefers_builtin_over_trusted(self):
         """Regression: builtin must not be overwritten by trusted."""
         builtin = SkillMeta(name="skill", description="builtin", source="a",
-                             identifier="a/skill", trust_level="builtin")
+                             identifier="shared/skill", trust_level="builtin")
         trusted = SkillMeta(name="skill", description="trusted", source="b",
-                             identifier="b/skill", trust_level="trusted")
+                             identifier="shared/skill", trust_level="trusted")
         src_a = self._make_source("a", [builtin])
         src_b = self._make_source("b", [trusted])
         results = unified_search("skill", [src_a, src_b])
@@ -1314,13 +1342,30 @@ class TestUnifiedSearchDedup:
 
     def test_dedup_trusted_not_overwritten_by_community(self):
         trusted = SkillMeta(name="skill", description="trusted", source="a",
-                             identifier="a/skill", trust_level="trusted")
+                             identifier="shared/skill", trust_level="trusted")
         community = SkillMeta(name="skill", description="community", source="b",
-                               identifier="b/skill", trust_level="community")
+                               identifier="shared/skill", trust_level="community")
         src_a = self._make_source("a", [trusted])
         src_b = self._make_source("b", [community])
         results = unified_search("skill", [src_a, src_b])
         assert results[0].trust_level == "trusted"
+
+    def test_browse_sh_same_name_different_site_not_deduped(self):
+        # Browse.sh skills from different hostnames share task names (e.g. "search-listings")
+        # but have unique identifiers. They must NOT be collapsed into one result.
+        airbnb = SkillMeta(
+            name="search-listings", description="Airbnb search", source="browse-sh",
+            identifier="browse-sh/airbnb.com/search-listings-ddgioa", trust_level="community",
+        )
+        booking = SkillMeta(
+            name="search-listings", description="Booking.com search", source="browse-sh",
+            identifier="browse-sh/booking.com/search-listings-xyzab", trust_level="community",
+        )
+        src = self._make_source("browse-sh", [airbnb, booking])
+        results = unified_search("search-listings", [src])
+        assert len(results) == 2, (
+            "browse-sh skills with the same name but different sites must not be deduplicated"
+        )
 
     def test_source_filter(self):
         s1 = SkillMeta(name="s1", description="d", source="a",
@@ -1471,6 +1516,52 @@ class TestQuarantineBundleBinaryAssets:
 
         assert (q_path / "SKILL.md").read_text(encoding="utf-8").startswith("---")
         assert (q_path / "assets" / "neutts-cli" / "samples" / "jo.wav").read_bytes() == b"RIFF\x00\x01fakewav"
+
+
+class TestDeleteSkillPackage:
+    def test_deletes_local_skill_package(self, tmp_path):
+        import tools.skills_hub as hub
+
+        skills_dir = tmp_path / "skills"
+        hub_dir = skills_dir / ".hub"
+        skill_dir = skills_dir / "creative" / "local-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: local-skill\ndescription: Local\n---\n\nBody\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "HUB_DIR", hub_dir), \
+             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
+             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
+             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
+             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
+             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"), \
+             patch("tools.skills_sync._read_manifest", return_value=set()):
+            ok, message = delete_skill_package("local-skill")
+
+        assert ok is True
+        assert "Deleted local skill package" in message
+        assert not skill_dir.exists()
+
+    def test_refuses_builtin_skill_package(self, tmp_path):
+        import tools.skills_hub as hub
+
+        skills_dir = tmp_path / "skills"
+        hub_dir = skills_dir / ".hub"
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "HUB_DIR", hub_dir), \
+             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
+             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
+             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
+             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
+             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"), \
+             patch("tools.skills_sync._read_manifest", return_value={"builtin-skill"}):
+            ok, message = delete_skill_package("builtin-skill")
+
+        assert ok is False
+        assert "builtin skill" in message
 
     def test_quarantine_bundle_rejects_traversal_file_paths(self, tmp_path):
         import tools.skills_hub as hub
@@ -1674,3 +1765,347 @@ class TestDownloadDirectoryRecursive:
 
         assert "SKILL.md" in files
         assert "scripts/run.py" not in files  # lost due to rate limit
+
+
+# ---------------------------------------------------------------------------
+# Install-path safety (lock-file → uninstall rmtree boundary)
+# ---------------------------------------------------------------------------
+
+
+class TestInstallPathSafety:
+    """Guard the lock-file → ``uninstall_skill`` rmtree path.
+
+    The destructive boundary is ``shutil.rmtree(SKILLS_DIR / install_path)``.
+    Lock-file ``install_path`` values that are absolute, contain ``..``,
+    point at the skills root itself, or are redirected via a symlink/junction
+    inside ``skills/`` must be rejected before they reach rmtree.
+    """
+
+    @pytest.fixture
+    def isolated_skills_dir(self, tmp_path, monkeypatch):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        monkeypatch.setattr("tools.skills_hub.SKILLS_DIR", skills_dir)
+        return skills_dir
+
+    @pytest.fixture
+    def patch_lock_file(self, monkeypatch):
+        """Redirect HubLockFile's default path to a test-controlled file.
+
+        HubLockFile.__init__ captures LOCK_FILE as a default arg at class
+        definition time, so monkeypatching the module-level LOCK_FILE doesn't
+        affect later HubLockFile() calls. Patch __defaults__ instead.
+        """
+        def _apply(lock_path):
+            monkeypatch.setattr(HubLockFile.__init__, "__defaults__", (lock_path,))
+        return _apply
+
+    @pytest.mark.parametrize(
+        "bad_install_path",
+        [
+            "",
+            ".",
+            "..",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "skills/../../tmp",
+            "C:/Windows/System32",
+        ],
+    )
+    def test_record_install_rejects_unsafe_paths(self, tmp_path, bad_install_path):
+        """record_install must reject malformed install_path values at write time."""
+        lock = HubLockFile(path=tmp_path / "lock.json")
+        with pytest.raises(ValueError, match="Unsafe"):
+            lock.record_install(
+                name="evil",
+                source="github",
+                identifier="x",
+                trust_level="trusted",
+                scan_verdict="pass",
+                skill_hash="h1",
+                install_path=bad_install_path,
+                files=["SKILL.md"],
+            )
+
+    def test_record_install_rejects_mismatched_last_component(self, tmp_path):
+        """The final component of install_path MUST equal the skill name."""
+        lock = HubLockFile(path=tmp_path / "lock.json")
+        with pytest.raises(ValueError, match="Unsafe install path"):
+            lock.record_install(
+                name="legit-skill",
+                source="github",
+                identifier="x",
+                trust_level="trusted",
+                scan_verdict="pass",
+                skill_hash="h1",
+                install_path="legit-skill/evil-suffix",
+                files=["SKILL.md"],
+            )
+
+    def test_record_install_accepts_bare_name(self, tmp_path):
+        lock = HubLockFile(path=tmp_path / "lock.json")
+        lock.record_install(
+            name="good", source="github", identifier="x",
+            trust_level="trusted", scan_verdict="pass",
+            skill_hash="h", install_path="good", files=["SKILL.md"],
+        )
+        assert lock.get_installed("good")["install_path"] == "good"
+
+    def test_record_install_accepts_category_and_name(self, tmp_path):
+        lock = HubLockFile(path=tmp_path / "lock.json")
+        lock.record_install(
+            name="good", source="github", identifier="x",
+            trust_level="trusted", scan_verdict="pass",
+            skill_hash="h", install_path="devops/good", files=["SKILL.md"],
+        )
+        assert lock.get_installed("good")["install_path"] == "devops/good"
+
+    def test_uninstall_rejects_poisoned_absolute_path(self, tmp_path, isolated_skills_dir, patch_lock_file):
+        """Hand-edited lock.json with absolute install_path must not delete anything."""
+        from tools.skills_hub import uninstall_skill
+
+        lock_path = tmp_path / "lock.json"
+        target = tmp_path / "victim"
+        target.mkdir()
+        (target / "file.txt").write_text("important")
+
+        # Bypass record_install's validator to simulate a poisoned lock file.
+        lock_path.write_text(json.dumps({
+            "installed": {
+                "evil": {
+                    "source": "github",
+                    "identifier": "x",
+                    "trust_level": "trusted",
+                    "scan_verdict": "pass",
+                    "content_hash": "h",
+                    "install_path": str(target),
+                    "files": [],
+                    "metadata": {},
+                    "installed_at": "now",
+                    "updated_at": "now",
+                }
+            }
+        }))
+
+        patch_lock_file(lock_path)
+        ok, msg = uninstall_skill("evil")
+        assert ok is False
+        assert "Unsafe" in msg or "Refusing" in msg
+        assert target.exists()
+        assert (target / "file.txt").read_text() == "important"
+
+    def test_uninstall_rejects_traversal(self, tmp_path, isolated_skills_dir, patch_lock_file):
+        from tools.skills_hub import uninstall_skill
+
+        lock_path = tmp_path / "lock.json"
+        sibling = tmp_path / "sibling"
+        sibling.mkdir()
+        (sibling / "data").write_text("nope")
+
+        lock_path.write_text(json.dumps({
+            "installed": {
+                "evil": {
+                    "source": "github", "identifier": "x",
+                    "trust_level": "trusted", "scan_verdict": "pass",
+                    "content_hash": "h",
+                    "install_path": "../sibling",
+                    "files": [], "metadata": {},
+                    "installed_at": "now", "updated_at": "now",
+                }
+            }
+        }))
+
+        patch_lock_file(lock_path)
+        ok, msg = uninstall_skill("evil")
+        assert ok is False
+        assert sibling.exists()
+        assert (sibling / "data").read_text() == "nope"
+
+    def test_uninstall_rejects_empty_install_path(self, tmp_path, isolated_skills_dir, patch_lock_file):
+        """Empty install_path resolves to SKILLS_DIR itself — must be refused."""
+        from tools.skills_hub import uninstall_skill
+
+        # Put a sibling skill alongside to prove rmtree doesn't fire.
+        (isolated_skills_dir / "bystander").mkdir()
+        (isolated_skills_dir / "bystander" / "SKILL.md").write_text("safe")
+
+        lock_path = tmp_path / "lock.json"
+        lock_path.write_text(json.dumps({
+            "installed": {
+                "evil": {
+                    "source": "github", "identifier": "x",
+                    "trust_level": "trusted", "scan_verdict": "pass",
+                    "content_hash": "h",
+                    "install_path": "",
+                    "files": [], "metadata": {},
+                    "installed_at": "now", "updated_at": "now",
+                }
+            }
+        }))
+
+        patch_lock_file(lock_path)
+        ok, msg = uninstall_skill("evil")
+        assert ok is False
+        assert (isolated_skills_dir / "bystander" / "SKILL.md").read_text() == "safe"
+
+    def test_uninstall_rejects_symlink_redirect_inside_skills(
+        self, tmp_path, isolated_skills_dir, patch_lock_file
+    ):
+        """A symlinked skill dir that points outside skills/ must not be followed."""
+        from tools.skills_hub import uninstall_skill
+
+        # Outside-tree victim
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        (victim / "important").write_text("don't delete me")
+
+        # Symlink in skills/ pointing to the victim
+        link = isolated_skills_dir / "evil"
+        try:
+            link.symlink_to(victim, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unsupported on this platform")
+
+        lock_path = tmp_path / "lock.json"
+        lock_path.write_text(json.dumps({
+            "installed": {
+                "evil": {
+                    "source": "github", "identifier": "x",
+                    "trust_level": "trusted", "scan_verdict": "pass",
+                    "content_hash": "h",
+                    "install_path": "evil",
+                    "files": [], "metadata": {},
+                    "installed_at": "now", "updated_at": "now",
+                }
+            }
+        }))
+
+        patch_lock_file(lock_path)
+        ok, msg = uninstall_skill("evil")
+        assert ok is False
+        assert victim.exists()
+        assert (victim / "important").read_text() == "don't delete me"
+
+    def test_install_from_quarantine_rejects_symlinks(self, tmp_path):
+        """Skill install must not follow symlinks that leak file contents
+        from outside the quarantine directory."""
+        import tools.skills_hub as hub
+        from tools.skills_guard import ScanResult
+
+        skills_dir = tmp_path / "skills"
+        quarantine_root = skills_dir / ".hub" / "quarantine"
+        quarantine_root.mkdir(parents=True)
+
+        q_dir = quarantine_root / "pending"
+        q_dir.mkdir()
+        (q_dir / "SKILL.md").write_text("---\nname: bad-skill\n---\n")
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("data exfiltration payload\n")
+
+        leak = q_dir / "leak.txt"
+        try:
+            leak.symlink_to(secret)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unsupported on this platform")
+
+        bundle = hub.SkillBundle(
+            name="bad-skill",
+            files={"SKILL.md": "---\nname: bad-skill\n---\n"},
+            source="community",
+            identifier="x",
+            trust_level="community",
+        )
+        scan_result = ScanResult(
+            skill_name="bad-skill",
+            source="community",
+            trust_level="community",
+            verdict="safe",
+        )
+
+        with patch.object(hub, "SKILLS_DIR", skills_dir), \
+             patch.object(hub, "QUARANTINE_DIR", quarantine_root):
+            with pytest.raises(ValueError, match="symlink"):
+                hub.install_from_quarantine(
+                    q_dir, "bad-skill", "", bundle, scan_result,
+                )
+
+        assert not (skills_dir / "bad-skill" / "leak.txt").exists()
+        assert secret.read_text() == "data exfiltration payload\n"
+
+
+# ---------------------------------------------------------------------------
+# parallel_search_sources — overall_timeout must be honoured even when a
+# source blocks for far longer than the budget (regression: the executor used
+# `with ... as pool`, whose __exit__ calls shutdown(wait=True) and blocked the
+# caller on the slow worker, making overall_timeout a no-op).
+# ---------------------------------------------------------------------------
+
+
+class _FakeSource(SkillSource):
+    def __init__(self, sid: str, sleep: float = 0.0, results=None):
+        self._sid = sid
+        self._sleep = sleep
+        self._results = results or []
+
+    def source_id(self) -> str:
+        return self._sid
+
+    def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
+        if self._sleep:
+            time.sleep(self._sleep)
+        return list(self._results)
+
+    def fetch(self, identifier: str) -> Optional[SkillBundle]:
+        return None
+
+    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+        return None
+
+
+class TestParallelSearchSourcesTimeout:
+    def _meta(self, sid: str) -> SkillMeta:
+        return SkillMeta(
+            name=f"{sid}-skill",
+            description="x",
+            source=sid,
+            identifier=f"{sid}/x",
+            trust_level="community",
+        )
+
+    def test_slow_source_does_not_block_caller(self):
+        """A source sleeping well past overall_timeout must not stall the
+        return. Before the fix the executor's `with` block waited on the slow
+        worker (~5s); now the call returns promptly and reports the source as
+        timed out."""
+        fast = _FakeSource("fast", sleep=0.0, results=[self._meta("fast")])
+        slow = _FakeSource("slow", sleep=5.0, results=[self._meta("slow")])
+
+        start = time.monotonic()
+        all_results, source_counts, timed_out_ids = parallel_search_sources(
+            [fast, slow], query="q", overall_timeout=0.3,
+        )
+        elapsed = time.monotonic() - start
+
+        # Must return long before the slow source's 5s sleep finishes.
+        assert elapsed < 2.0, f"call blocked for {elapsed:.2f}s (timeout not honoured)"
+        assert "slow" in timed_out_ids
+        # Fast source still delivered its result and is not flagged timed out.
+        assert source_counts.get("fast") == 1
+        assert "fast" not in timed_out_ids
+        assert any(r.source == "fast" for r in all_results)
+
+    def test_all_fast_sources_complete_without_timeout(self):
+        """Happy path: when every source finishes within budget, none are
+        flagged and all results are collected."""
+        a = _FakeSource("a", results=[self._meta("a")])
+        b = _FakeSource("b", results=[self._meta("b")])
+
+        all_results, source_counts, timed_out_ids = parallel_search_sources(
+            [a, b], query="q", overall_timeout=5.0,
+        )
+
+        assert timed_out_ids == []
+        assert source_counts.get("a") == 1
+        assert source_counts.get("b") == 1
+        assert len(all_results) == 2

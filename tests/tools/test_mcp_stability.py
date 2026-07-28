@@ -131,11 +131,11 @@ class TestStdioPidTracking:
         monkeypatch.setattr(signal, "SIGKILL", fake_sigkill, raising=False)
 
         # Post-#21561 the alive check routes through
-        # ``gateway.status._pid_exists`` (so it's safe on Windows — see
+        # ``channels.runtime_status._pid_exists`` (so it's safe on Windows — see
         # bpo-14484). Return True so the SIGKILL escalation fires.
         with patch("tools.mcp_tool.os.kill") as mock_kill, \
-             patch("gateway.status._pid_exists", return_value=True), \
-             patch("time.sleep") as mock_sleep:
+             patch("channels.runtime_status._pid_exists", return_value=True), \
+             patch("tools.mcp_tool.time.sleep") as mock_sleep:
             _kill_orphaned_mcp_children()
 
         # SIGTERM then SIGKILL; the alive check no longer touches os.kill.
@@ -163,7 +163,7 @@ class TestStdioPidTracking:
         monkeypatch.delattr(signal, "SIGKILL", raising=False)
 
         with patch("tools.mcp_tool.os.kill") as mock_kill, \
-             patch("time.sleep") as mock_sleep:
+             patch("tools.mcp_tool.time.sleep") as mock_sleep:
             _kill_orphaned_mcp_children()
 
         # SIGTERM phase, alive check raises (process gone), no escalation
@@ -261,9 +261,10 @@ class TestMCPInitialConnectionRetry:
 
         asyncio.get_event_loop().run_until_complete(_run())
 
-    def test_initial_connect_gives_up_after_max_retries(self):
-        """Server gives up after _MAX_INITIAL_CONNECT_RETRIES failures."""
+    def test_initial_connect_parks_after_max_retries(self):
+        """Exhausted startup retries retain one low-cost parked owner."""
         from tools.mcp_tool import MCPServerTask, _MAX_INITIAL_CONNECT_RETRIES
+        from tools.mcp_lifecycle import MCPServerState
 
         call_count = 0
 
@@ -280,12 +281,14 @@ class TestMCPInitialConnectionRetry:
                 task = asyncio.ensure_future(server.run({"command": "fake"}))
                 await server._ready.wait()
 
-                # Should have an error after exhausting retries
+                assert server.state == MCPServerState.PARKED
                 assert server._error is not None
-                assert "DNS resolution failed" in str(server._error)
+                assert "DNS resolution failed" in (server.last_error or "")
                 # 1 initial + N retries = _MAX_INITIAL_CONNECT_RETRIES + 1 total attempts
                 assert call_count == _MAX_INITIAL_CONNECT_RETRIES + 1
 
+                server._shutdown_event.set()
+                server._reconnect_event.set()
                 await task
 
         asyncio.get_event_loop().run_until_complete(_run())
@@ -315,8 +318,10 @@ class TestMCPInitialConnectionRetry:
                 server._shutdown_event.set()
                 await server._ready.wait()
 
-                # Should have the error set and be done
-                assert server._error is not None
+                from tools.mcp_lifecycle import MCPServerState
+
+                assert server._error is None
                 await task
+                assert server.state == MCPServerState.STOPPED
 
         asyncio.get_event_loop().run_until_complete(_run())

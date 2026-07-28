@@ -7,12 +7,14 @@ import { $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $uiSessionId, $uiTheme } from '../app/uiStore.js'
 
 import { FloatBox } from './appChrome.js'
+import { BillingOverlay } from './billingOverlay.js'
 import { MaskedPrompt } from './maskedPrompt.js'
 import { ModelPicker } from './modelPicker.js'
 import { OverlayHint } from './overlayControls.js'
 import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt } from './prompts.js'
 import { SessionPicker } from './sessionPicker.js'
 import { SkillsHub } from './skillsHub.js'
+import { SubscriptionOverlay } from './subscriptionOverlay.js'
 
 const COMPLETION_WINDOW = 16
 
@@ -30,6 +32,38 @@ export function PromptZone({
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
         <ApprovalPrompt onChoice={onApprovalChoice} req={overlay.approval} t={theme} />
+      </Box>
+    )
+  }
+
+  if (overlay.billing) {
+    const current = overlay.billing
+
+    const onPatch = (next: Partial<typeof current>) =>
+      patchOverlayState(prev => (prev.billing ? { ...prev, billing: { ...prev.billing, ...next } } : prev))
+
+    const onClose = () => patchOverlayState({ billing: null })
+
+    return (
+      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+        <BillingOverlay onClose={onClose} onPatch={onPatch} overlay={current} t={theme} />
+      </Box>
+    )
+  }
+
+  if (overlay.subscription) {
+    const current = overlay.subscription
+
+    const onPatch = (next: Partial<typeof current>) =>
+      patchOverlayState(prev =>
+        prev.subscription ? { ...prev, subscription: { ...prev.subscription, ...next } } : prev
+      )
+
+    const onClose = () => patchOverlayState({ subscription: null })
+
+    return (
+      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+        <SubscriptionOverlay onClose={onClose} onPatch={onPatch} overlay={current} t={theme} />
       </Box>
     )
   }

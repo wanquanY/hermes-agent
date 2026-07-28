@@ -523,7 +523,7 @@ class TestPreloadResumedSession:
     def test_returns_false_when_session_not_found(self):
         cli = _make_cli(resume="nonexistent_session")
         mock_db = MagicMock()
-        mock_db.get_session.return_value = None
+        mock_db.sessions.get.return_value = None
         cli._session_db = mock_db
 
         buf = StringIO()
@@ -537,8 +537,9 @@ class TestPreloadResumedSession:
     def test_returns_false_when_session_has_no_messages(self):
         cli = _make_cli(resume="empty_session")
         mock_db = MagicMock()
-        mock_db.get_session.return_value = {"id": "empty_session", "title": None}
-        mock_db.get_messages_as_conversation.return_value = []
+        mock_db.sessions.get.return_value = {"id": "empty_session", "title": None}
+        mock_db.sessions.resolve_resume_id.return_value = "empty_session"
+        mock_db.messages.all_as_conversation.return_value = []
         cli._session_db = mock_db
 
         buf = StringIO()
@@ -553,8 +554,9 @@ class TestPreloadResumedSession:
         cli = _make_cli(resume="good_session")
         messages = _simple_history()
         mock_db = MagicMock()
-        mock_db.get_session.return_value = {"id": "good_session", "title": "Test Session"}
-        mock_db.get_messages_as_conversation.return_value = messages
+        mock_db.sessions.get.return_value = {"id": "good_session", "title": "Test Session"}
+        mock_db.sessions.resolve_resume_id.return_value = "good_session"
+        mock_db.messages.all_as_conversation.return_value = messages
         cli._session_db = mock_db
 
         buf = StringIO()
@@ -573,21 +575,16 @@ class TestPreloadResumedSession:
         cli = _make_cli(resume="reopen_session")
         messages = [{"role": "user", "content": "hi"}]
         mock_db = MagicMock()
-        mock_db.get_session.return_value = {"id": "reopen_session", "title": None}
-        mock_db.get_messages_as_conversation.return_value = messages
-        mock_conn = MagicMock()
-        mock_db._conn = mock_conn
+        mock_db.sessions.get.return_value = {"id": "reopen_session", "title": None}
+        mock_db.sessions.resolve_resume_id.return_value = "reopen_session"
+        mock_db.messages.all_as_conversation.return_value = messages
         cli._session_db = mock_db
 
         buf = StringIO()
         cli.console.file = buf
         cli._preload_resumed_session()
 
-        # Should have executed UPDATE to clear ended_at
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
-        assert "ended_at = NULL" in call_args[0][0]
-        mock_conn.commit.assert_called_once()
+        mock_db.sessions.reopen.assert_called_once_with("reopen_session")
 
     def test_singular_user_message_grammar(self):
         """1 user message should say 'message' not 'messages'."""
@@ -597,9 +594,9 @@ class TestPreloadResumedSession:
             {"role": "assistant", "content": "hi"},
         ]
         mock_db = MagicMock()
-        mock_db.get_session.return_value = {"id": "one_msg_session", "title": None}
-        mock_db.get_messages_as_conversation.return_value = messages
-        mock_db._conn = MagicMock()
+        mock_db.sessions.get.return_value = {"id": "one_msg_session", "title": None}
+        mock_db.sessions.resolve_resume_id.return_value = "one_msg_session"
+        mock_db.messages.all_as_conversation.return_value = messages
         cli._session_db = mock_db
 
         buf = StringIO()
@@ -631,8 +628,8 @@ class TestInitAgentSkipsPreloaded:
         with patch.object(cli, "_ensure_runtime_credentials", return_value=False):
             cli._init_agent()
 
-        # get_messages_as_conversation should NOT have been called
-        mock_db.get_messages_as_conversation.assert_not_called()
+        # Persistent history should not be loaded again.
+        mock_db.messages.all_as_conversation.assert_not_called()
 
 
 # ── Config default tests ─────────────────────────────────────────────

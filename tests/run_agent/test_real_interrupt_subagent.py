@@ -119,6 +119,7 @@ class TestRealSubagentInterrupt(unittest.TestCase):
                                 skip_context_files=True,
                                 skip_memory=True,
                                 platform="cli",
+                                model_context_window=65536,
                             )
                             child._delegate_depth = 1
                             parent._active_children.append(child)

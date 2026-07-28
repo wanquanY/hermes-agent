@@ -1,5 +1,7 @@
 """Tests for agent.models_dev — models.dev registry integration."""
 import json
+import os
+import time
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -158,6 +160,28 @@ class TestLookupModelsDevContext:
 
 
 class TestFetchModelsDev:
+    @patch("agent.models_dev.requests.get")
+    def test_cache_only_mode_uses_stale_disk_without_network(
+        self,
+        mock_get,
+        tmp_path,
+        monkeypatch,
+    ):
+        import agent.models_dev as md
+
+        cache_path = tmp_path / "models_dev_cache.json"
+        cache_path.write_text(json.dumps(SAMPLE_REGISTRY), encoding="utf-8")
+        old = time.time() - md._MODELS_DEV_CACHE_TTL - 60
+        os.utime(cache_path, (old, old))
+        monkeypatch.setattr(md, "_get_cache_path", lambda: cache_path)
+        md._models_dev_cache = {}
+        md._models_dev_cache_time = 0
+
+        result = fetch_models_dev(allow_network=False)
+
+        assert result == SAMPLE_REGISTRY
+        mock_get.assert_not_called()
+
     @patch("agent.models_dev.requests.get")
     def test_fetch_success(self, mock_get):
         mock_resp = MagicMock()

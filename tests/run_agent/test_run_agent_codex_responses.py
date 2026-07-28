@@ -22,6 +22,8 @@ def _no_codex_backoff(monkeypatch):
 
 
 def _patch_agent_bootstrap(monkeypatch):
+    import agent.agent_init as agent_init
+
     monkeypatch.setattr(
         run_agent,
         "get_tool_definitions",
@@ -37,6 +39,7 @@ def _patch_agent_bootstrap(monkeypatch):
         ],
     )
     monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(agent_init, "query_ollama_num_ctx", lambda *args, **kwargs: None)
 
 
 def _build_agent(monkeypatch):
@@ -54,7 +57,6 @@ def _build_agent(monkeypatch):
     agent._cleanup_task_resources = lambda task_id: None
     agent._persist_session = lambda messages, history=None: None
     agent._save_trajectory = lambda messages, user_message, completed: None
-    agent._save_session_log = lambda messages: None
     return agent
 
 
@@ -75,8 +77,45 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     agent._cleanup_task_resources = lambda task_id: None
     agent._persist_session = lambda messages, history=None: None
     agent._save_trajectory = lambda messages, user_message, completed: None
-    agent._save_session_log = lambda messages: None
     return agent
+
+
+def test_codex_responses_hides_vision_fallback_tool_for_native_vision_model(
+    monkeypatch,
+):
+    agent = _build_agent(monkeypatch)
+    agent.tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run shell commands.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "vision_analyze",
+                "description": "Analyze an image with an auxiliary model.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    agent.model_descriptor = {
+        "id": "kimi-k3",
+        "vision_enabled": True,
+    }
+    agent._image_input_mode = "auto"
+
+    kwargs = agent._build_api_kwargs(
+        [{"role": "user", "content": "Describe the attached image."}]
+    )
+
+    assert {tool["name"] for tool in kwargs["tools"]} == {"terminal"}
+    assert {
+        tool["function"]["name"] for tool in agent.tools
+    } == {"terminal", "vision_analyze"}
 
 
 def _codex_message_response(text: str):
@@ -157,9 +196,11 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, events=(), final_response=None, final_error=None):
+        self._events = list(events)
         self._final_response = final_response
         self._final_error = final_error
+        self.response = SimpleNamespace(status_code=200)
 
     def __enter__(self):
         return self
@@ -168,7 +209,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -186,6 +227,27 @@ class _FakeCreateStream:
 
     def close(self):
         self.closed = True
+
+
+class _IteratorTypeErrorStream:
+    """Mimic the SDK raising while parsing response.completed.output=None."""
+
+    def __init__(self, events_before_error):
+        self._events_before_error = list(events_before_error)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        for event in self._events_before_error:
+            yield event
+        raise TypeError("'NoneType' object is not iterable")
+
+    def get_final_response(self):  # pragma: no cover - iterator fails first
+        raise AssertionError("get_final_response should not be reached")
 
 
 def _codex_request_kwargs():
@@ -308,7 +370,10 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert kwargs["parallel_tool_calls"] is True
     assert isinstance(kwargs["prompt_cache_key"], str)
     assert len(kwargs["prompt_cache_key"]) > 0
-    assert "timeout" not in kwargs
+    # ``timeout`` is now wired from ``_resolved_api_call_timeout`` (default 1800s)
+    # so per-provider ``request_timeout_seconds`` actually reaches the SDK.
+    assert isinstance(kwargs.get("timeout"), float)
+    assert kwargs["timeout"] > 0
     assert "max_tokens" not in kwargs
     assert "extra_body" not in kwargs
 
@@ -335,7 +400,6 @@ def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
     agent._cleanup_task_resources = lambda task_id: None
     agent._persist_session = lambda messages, history=None: None
     agent._save_trajectory = lambda messages, user_message, completed: None
-    agent._save_session_log = lambda messages: None
 
     kwargs = agent._build_api_kwargs(
         [
@@ -365,7 +429,6 @@ def test_build_api_kwargs_codex_preserves_supported_efforts(monkeypatch):
         agent._cleanup_task_resources = lambda task_id: None
         agent._persist_session = lambda messages, history=None: None
         agent._save_trajectory = lambda messages, user_message, completed: None
-        agent._save_session_log = lambda messages: None
 
         kwargs = agent._build_api_kwargs(
             [
@@ -420,6 +483,137 @@ def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
     response = agent._run_codex_stream(_codex_request_kwargs())
     assert calls["stream"] == 2
     assert response.output[0].content[0].text == "stream ok"
+
+
+def test_run_codex_stream_does_not_retry_after_visible_tool_generation(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    generated: list[tuple[str, str]] = []
+    aborted: list[tuple[str, str, str, str, str]] = []
+    agent.tool_gen_callback = lambda name, tool_call_id: generated.append(
+        (name, tool_call_id)
+    )
+    agent.tool_gen_abort_callback = lambda *args: aborted.append(args)
+    calls = {"stream": 0}
+
+    def _fake_stream(**_kwargs):
+        calls["stream"] += 1
+        return _FakeResponsesStream(
+            events=[
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(
+                        type="function_call",
+                        call_id="call-write-1",
+                        name="write_file",
+                    ),
+                )
+            ],
+            final_error=ConnectionError("upstream connection closed"),
+        )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=lambda **_kwargs: _codex_message_response(
+                "unexpected fallback"
+            ),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls["stream"] == 1
+    assert generated == [("write_file", "call-write-1")]
+    assert aborted == [
+        (
+            "write_file",
+            "call-write-1",
+            "failed",
+            "upstream connection closed",
+            "provider_stream_aborted",
+        )
+    ]
+    assert response._hermes_stream_error is True
+    assert response.output[0].content[0].text == ""
+    assert response._dropped_tool_names == ["write_file"]
+
+
+def test_run_codex_stream_fault_injection_emits_retry_and_recovery_telemetry(monkeypatch):
+    from agent.provider_telemetry import ProviderCallTelemetry
+
+    agent = _build_agent(monkeypatch)
+    agent.session_id = "execution-provider-fault"
+    agent._hermes_active_run_id = "run-provider-fault"
+    agent._hermes_active_turn_id = "turn-provider-fault"
+    agent._hermes_active_runtime_scope_key = "profile:provider-fault"
+    agent._current_api_request_id = "turn-provider-fault:api:1"
+    agent._active_run_context = lambda: SimpleNamespace(
+        conversation_session_id="conversation-provider-fault",
+        execution_scope_key="profile:provider-fault",
+        activity_id="activity-provider-fault",
+        participant_id="participant-provider-fault",
+    )
+    events = []
+    monkeypatch.setattr(
+        "tui_gateway.services.run_control.publish_recorded_event",
+        lambda params, **_kwargs: events.append(params) or [],
+    )
+    telemetry = ProviderCallTelemetry.start(
+        agent,
+        logical_attempt=1,
+        max_logical_attempts=3,
+        stream_mode="streaming",
+    )
+    agent._provider_call_telemetry = telemetry
+    calls = {"stream": 0}
+
+    def _fake_stream(**_kwargs):
+        calls["stream"] += 1
+        if calls["stream"] == 1:
+            raise ConnectionError(
+                "secret prompt https://provider.invalid Authorization=Bearer-secret"
+            )
+        return _FakeResponsesStream(
+            events=[
+                SimpleNamespace(type="response.output_text.delta", delta="recovered"),
+                SimpleNamespace(type="response.completed"),
+            ],
+            final_response=_codex_message_response("recovered"),
+        )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=lambda **_kwargs: _codex_message_response("unexpected fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    telemetry.completed()
+
+    assert response.output[0].content[0].text == "recovered"
+    assert calls["stream"] == 2
+    telemetry_events = [
+        event
+        for event in events
+        if event.get("type") == "runtime.provider.telemetry"
+    ]
+    assert [event["payload"]["stage"] for event in telemetry_events] == [
+        "provider.call.started",
+        "provider.attempt.started",
+        "provider.attempt.failed",
+        "provider.attempt.retry_scheduled",
+        "provider.attempt.started",
+        "provider.response.headers",
+        "provider.response.first_event",
+        "provider.response.first_delta",
+        "provider.call.completed",
+    ]
+    assert telemetry_events[5]["payload"]["metrics"]["network_attempt"] == 2
+    assert telemetry_events[6]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
+    assert telemetry_events[7]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
+    assert "provider.invalid" not in repr(events)
+    assert "Bearer-secret" not in repr(events)
 
 
 def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(monkeypatch):
@@ -485,6 +679,40 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert response.output[0].content[0].text == "streamed create ok"
 
 
+def test_run_codex_stream_falls_back_when_stream_iteration_parses_null_output(monkeypatch):
+    """Regression for #11179: the SDK can raise while iterating response.completed.
+
+    The failure happens before get_final_response(), so post-loop backfill alone is
+    not enough. Preserve already streamed output_item.done events.
+    """
+    agent = _build_agent(monkeypatch)
+    output_item = SimpleNamespace(
+        type="message",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="stream item survived")],
+    )
+    calls = {"stream": 0}
+
+    def _fake_stream(**kwargs):
+        calls["stream"] += 1
+        return _IteratorTypeErrorStream([
+            SimpleNamespace(type="response.output_item.done", item=output_item),
+        ])
+
+    def _unexpected_create(**kwargs):  # pragma: no cover - recovery should avoid fallback call
+        raise AssertionError("create fallback should not be needed when output items were collected")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(stream=_fake_stream, create=_unexpected_create),
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls["stream"] == 1
+    assert response.output == [output_item]
+    assert response.status == "completed"
+
+
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
@@ -495,6 +723,56 @@ def test_run_conversation_codex_plain_text(monkeypatch):
     assert result["final_response"] == "OK"
     assert result["messages"][-1]["role"] == "assistant"
     assert result["messages"][-1]["content"] == "OK"
+
+
+def test_run_conversation_crosses_both_llm_middleware_boundaries(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    setattr(agent, "_disable_streaming", True)
+    captured = {}
+    contexts = []
+
+    def request_middleware(request, **context):
+        contexts.append(("request", context))
+        replacement = dict(request)
+        replacement["instructions"] = (
+            str(request.get("instructions") or "") + "\nrequest-middleware"
+        )
+        return SimpleNamespace(
+            payload=replacement,
+            original_payload=request,
+            changed=True,
+            trace=[{"source": "test"}],
+        )
+
+    def execution_middleware(request, next_call, **context):
+        contexts.append(("execution", context))
+        assert "request-middleware" in request["instructions"]
+        replacement = dict(request)
+        replacement["instructions"] += "\nexecution-middleware"
+        return next_call(replacement)
+
+    def capture(api_kwargs):
+        captured.update(api_kwargs)
+        return _codex_message_response("OK")
+
+    monkeypatch.setattr(
+        "hermes_cli.middleware.apply_llm_request_middleware",
+        request_middleware,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.middleware.run_llm_execution_middleware",
+        execution_middleware,
+    )
+    monkeypatch.setattr(agent, "_interruptible_api_call", capture)
+
+    result = agent.run_conversation("Say OK")
+
+    assert result["completed"] is True
+    assert "request-middleware" in captured["instructions"]
+    assert "execution-middleware" in captured["instructions"]
+    assert [name for name, _context in contexts] == ["request", "execution"]
+    assert all(context["turn_id"] for _name, context in contexts)
+    assert all(context["api_request_id"] for _name, context in contexts)
 
 
 def test_run_conversation_codex_empty_output_with_output_text(monkeypatch):
@@ -578,6 +856,196 @@ def test_run_conversation_codex_refreshes_after_401_and_retries(monkeypatch):
     assert result["final_response"] == "Recovered after refresh"
 
 
+def _build_xai_oauth_agent(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="grok-4.3",
+        provider="xai-oauth",
+        api_mode="codex_responses",
+        base_url="https://api.x.ai/v1",
+        api_key="xai-oauth-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    return agent
+
+
+def test_build_api_kwargs_xai_oauth_sends_cache_key_via_extra_body(monkeypatch):
+    """xai-oauth + codex_responses must route prompt caching via the
+    ``prompt_cache_key`` body field on /v1/responses (xAI's documented
+    Responses-API cache key — see docs.x.ai prompt-caching/maximizing-
+    cache-hits).
+
+    We pass it through ``extra_body`` rather than as a top-level kwarg so
+    the body field is serialized into JSON regardless of whether the
+    installed openai SDK build still accepts ``prompt_cache_key`` on
+    ``Responses.stream()``. Older or trimmed SDK builds drop it from the
+    signature and would otherwise raise ``TypeError`` before the request
+    reaches api.x.ai. The ``x-grok-conv-id`` header is retained as a
+    belt-and-braces fallback for clients/proxies that route on headers."""
+    agent = _build_xai_oauth_agent(monkeypatch)
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Ping"},
+        ]
+    )
+
+    assert kwargs.get("model") == "grok-4.3"
+    # Top-level kwarg must NOT be set — that's the openai SDK
+    # incompatibility this whole indirection exists to dodge.
+    assert "prompt_cache_key" not in kwargs
+    extra_body = kwargs.get("extra_body") or {}
+    assert extra_body.get("prompt_cache_key"), (
+        "xAI prompt-cache routing must travel via extra_body.prompt_cache_key "
+        "for /v1/responses — body field is the documented surface."
+    )
+    headers = kwargs.get("extra_headers") or {}
+    assert "x-grok-conv-id" in headers, (
+        "x-grok-conv-id header kept as belt-and-braces fallback for clients "
+        "that route on headers."
+    )
+
+
+def test_run_conversation_xai_oauth_refreshes_after_401_and_retries(monkeypatch):
+    """xai-oauth speaks the Responses API just like codex.  When the access
+    token is rejected mid-call (401), the same proactive refresh-and-retry
+    handler that fires for openai-codex must also fire for xai-oauth — the
+    bug it caught: the gating condition checked only ``provider == "openai-codex"``,
+    so xai-oauth 401s leaked straight to non-retryable abort path with no
+    chance to swap in a freshly refreshed access token."""
+    agent = _build_xai_oauth_agent(monkeypatch)
+    calls = {"api": 0, "refresh": 0}
+
+    class _UnauthorizedError(RuntimeError):
+        def __init__(self):
+            super().__init__("Error code: 401 - unauthorized")
+            self.status_code = 401
+
+    def _fake_api_call(api_kwargs):
+        calls["api"] += 1
+        if calls["api"] == 1:
+            raise _UnauthorizedError()
+        return _codex_message_response("Recovered after xAI refresh")
+
+    def _fake_refresh(*, force=True):
+        calls["refresh"] += 1
+        assert force is True
+        return True
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+    monkeypatch.setattr(agent, "_try_refresh_codex_client_credentials", _fake_refresh)
+
+    result = agent.run_conversation("Say OK")
+
+    assert calls["api"] == 2
+    assert calls["refresh"] == 1
+    assert result["completed"] is True
+    assert result["final_response"] == "Recovered after xAI refresh"
+
+
+def test_try_refresh_codex_client_credentials_handles_xai_oauth(monkeypatch):
+    """``_try_refresh_codex_client_credentials`` must rebuild the OpenAI
+    client with freshly resolved xAI OAuth credentials when the active
+    provider is xai-oauth.  The function name is shared between codex and
+    xai-oauth (both speak codex_responses) — covering both cases prevents
+    silent regressions where the function gets gated to a single provider."""
+    agent = _build_xai_oauth_agent(monkeypatch)
+    closed = {"value": False}
+    rebuilt = {"kwargs": None}
+
+    class _ExistingClient:
+        def close(self):
+            closed["value"] = True
+
+    class _RebuiltClient:
+        pass
+
+    def _fake_openai(**kwargs):
+        rebuilt["kwargs"] = kwargs
+        return _RebuiltClient()
+
+    def _fake_resolve(force_refresh=False, refresh_if_expiring=True, **_):
+        # The pre-refresh guard reads the singleton with refresh_if_expiring=False
+        # to verify that the agent's active key still matches; the actual
+        # refresh later passes force_refresh=True.  Both calls must succeed.
+        return {
+            "api_key": "fresh-xai-token" if force_refresh else agent.api_key,
+            "base_url": "https://api.x.ai/v1",
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+        _fake_resolve,
+    )
+    monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
+
+    agent.client = _ExistingClient()
+    ok = agent._try_refresh_codex_client_credentials(force=True)
+
+    assert ok is True
+    assert closed["value"] is True
+    assert rebuilt["kwargs"]["api_key"] == "fresh-xai-token"
+    assert rebuilt["kwargs"]["base_url"] == "https://api.x.ai/v1"
+    assert isinstance(agent.client, _RebuiltClient)
+    assert agent.api_key == "fresh-xai-token"
+
+
+def test_try_refresh_codex_client_credentials_skips_xai_oauth_when_singleton_differs(monkeypatch):
+    """An xai-oauth agent constructed with a non-singleton credential
+    (e.g. a manual pool entry whose tokens belong to a different account
+    than the loopback_pkce singleton, or an explicit ``api_key=`` arg)
+    MUST NOT silently adopt the singleton's tokens on a 401 reactive
+    refresh.  Otherwise a 401 mid-conversation would re-route the rest
+    of the conversation onto a different account, with no user feedback.
+
+    The credential pool's reactive recovery is the right channel for
+    pool-managed credentials; this fallback path is for the singleton-
+    only case and must short-circuit when the active key differs."""
+    agent = _build_xai_oauth_agent(monkeypatch)
+    # Agent is using "xai-oauth-token" (per the builder); singleton holds
+    # a *different* account's token.  No force_refresh should fire.
+    refresh_calls = {"count": 0}
+
+    def _fake_resolve(force_refresh=False, refresh_if_expiring=True, **_):
+        if force_refresh:
+            refresh_calls["count"] += 1
+            return {
+                "api_key": "singleton-account-token",
+                "base_url": "https://api.x.ai/v1",
+            }
+        # The pre-refresh guard read — return the singleton's view of the
+        # singleton's token, which is NOT what the agent is currently using.
+        return {
+            "api_key": "singleton-account-token",
+            "base_url": "https://api.x.ai/v1",
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+        _fake_resolve,
+    )
+
+    pre_refresh_key = agent.api_key
+    ok = agent._try_refresh_codex_client_credentials(force=True)
+
+    assert ok is False, (
+        "must not refresh when the active credential isn't the singleton; "
+        "otherwise the conversation silently swaps accounts mid-flight."
+    )
+    assert refresh_calls["count"] == 0, (
+        "force_refresh must not run — that would mutate the singleton's "
+        "tokens on disk and consume its single-use refresh_token for an "
+        "agent that wasn't even using the singleton."
+    )
+    assert agent.api_key == pre_refresh_key
+
+
 def test_run_conversation_copilot_refreshes_after_401_and_retries(monkeypatch):
     agent = _build_copilot_agent(monkeypatch)
     calls = {"api": 0, "refresh": 0}
@@ -624,12 +1092,18 @@ def test_try_refresh_codex_client_credentials_rebuilds_client(monkeypatch):
         rebuilt["kwargs"] = kwargs
         return _RebuiltClient()
 
+    def _fake_resolve(force_refresh=False, refresh_if_expiring=True, **_):
+        # Pre-refresh guard reads the singleton (refresh_if_expiring=False).
+        # It must report the agent's current api_key so the equality check
+        # passes; only then does the actual force_refresh run.
+        return {
+            "api_key": "new-codex-token" if force_refresh else agent.api_key,
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        }
+
     monkeypatch.setattr(
         "hermes_cli.auth.resolve_codex_runtime_credentials",
-        lambda force_refresh=True: {
-            "api_key": "new-codex-token",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-        },
+        _fake_resolve,
     )
     monkeypatch.setattr(run_agent, "OpenAI", _fake_openai)
 
@@ -861,6 +1335,29 @@ def test_preflight_codex_api_kwargs_allows_service_tier(monkeypatch):
     assert result["service_tier"] == "priority"
 
 
+def test_preflight_codex_api_kwargs_preserves_positive_timeout(monkeypatch):
+    """Positive numeric timeouts survive preflight so the SDK honors them."""
+    agent = _build_agent(monkeypatch)
+    kwargs = _codex_request_kwargs()
+    kwargs["timeout"] = 600.0
+
+    from agent.codex_responses_adapter import _preflight_codex_api_kwargs
+    result = _preflight_codex_api_kwargs(kwargs)
+    assert result["timeout"] == 600.0
+
+
+def test_preflight_codex_api_kwargs_drops_invalid_timeout(monkeypatch):
+    """Zero, negative, inf, and booleans are all dropped — not passed to SDK."""
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _preflight_codex_api_kwargs
+
+    for bad in (0, -1, float("inf"), True, False, "300", None):
+        kwargs = _codex_request_kwargs()
+        kwargs["timeout"] = bad
+        result = _preflight_codex_api_kwargs(kwargs)
+        assert "timeout" not in result, f"timeout={bad!r} should be dropped"
+
+
 def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
     agent = _build_agent(monkeypatch)
     responses = [_codex_tool_call_response(), _codex_message_response("done")]
@@ -896,6 +1393,26 @@ def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
     assert function_call["call_id"] == "call_1"
     assert "id" not in function_call
     assert function_output["call_id"] == "call_1"
+
+
+def test_run_conversation_persists_stream_only_responses_reasoning(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    def _fake_api_call(api_kwargs):
+        agent._fire_reasoning_delta("reasoning emitted only by the stream")
+        return _codex_message_response("done")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+
+    result = agent.run_conversation("answer with reasoning")
+
+    assistant = next(
+        message
+        for message in result["messages"]
+        if message.get("role") == "assistant" and message.get("content") == "done"
+    )
+    assert assistant["reasoning"] == "reasoning emitted only by the stream"
+    assert assistant["reasoning_content"] == "reasoning emitted only by the stream"
 
 
 def test_run_conversation_codex_continues_after_incomplete_interim_message(monkeypatch):
@@ -940,7 +1457,8 @@ def test_normalize_codex_response_marks_commentary_only_message_as_incomplete(mo
     )
 
     assert finish_reason == "incomplete"
-    assert "inspect the repository" in (assistant_message.content or "")
+    assert assistant_message.content == ""
+    assert "inspect the repository" in (assistant_message.reasoning or "")
 
 
 def test_normalize_codex_response_preserves_message_status_for_replay(monkeypatch):
@@ -1140,6 +1658,48 @@ def test_interim_commentary_preserves_assistant_content(monkeypatch):
     assert "I'll inspect the repo structure first." in observed["text"]
 
 
+def test_repeated_interim_commentary_is_internal_but_remains_in_provider_history(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+
+    def capture(text, **metadata):
+        observed.append({"text": text, **metadata})
+
+    agent.interim_assistant_callback = capture
+    first = {
+        "role": "assistant",
+        "content": "让我搜索微信的 FTS 全文索引数据库：",
+        "tool_calls": [{"id": "terminal_1"}],
+    }
+    repeated = {
+        "role": "assistant",
+        "content": "让我搜索微信的 FTS 全文索引数据库：",
+        "tool_calls": [{"id": "terminal_2"}],
+    }
+
+    agent._emit_interim_assistant_message(first)
+    agent._emit_interim_assistant_message(repeated)
+
+    assert "metadata" not in first
+    assert repeated["tool_calls"] == [{"id": "terminal_2"}]
+    assert repeated["metadata"] == {
+        "transcript_visibility": "internal",
+        "synthetic_kind": "repeated_interim_commentary",
+    }
+    assert observed == [
+        {
+            "text": "让我搜索微信的 FTS 全文索引数据库：",
+            "already_streamed": False,
+        },
+        {
+            "text": "让我搜索微信的 FTS 全文索引数据库：",
+            "already_streamed": False,
+            "transcript_visibility": "internal",
+            "synthetic_kind": "repeated_interim_commentary",
+        },
+    ]
+
+
 def test_stream_delta_strips_leaked_memory_context(monkeypatch):
     agent = _build_agent(monkeypatch)
     observed = []
@@ -1233,6 +1793,33 @@ def test_stream_delta_preserves_mid_stream_leading_newlines(monkeypatch):
     assert combined == "Here is a list:\n- first\n- second"
 
 
+def test_stream_delta_injects_tool_break_by_default(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.stream_delta_callback = observed.append
+    agent._current_streamed_assistant_text = "I will inspect this first."
+    agent._stream_needs_break = True
+
+    agent._fire_stream_delta("Here is the answer.")
+
+    assert observed == ["\n\nHere is the answer."]
+    assert agent._stream_needs_break is False
+
+
+def test_stream_delta_can_disable_tool_break_injection_for_structured_streams(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.stream_delta_callback = observed.append
+    agent._current_streamed_assistant_text = "I will inspect this first."
+    agent._stream_needs_break = True
+    agent._stream_inject_tool_breaks = False
+
+    agent._fire_stream_delta("## Final answer")
+
+    assert observed == ["## Final answer"]
+    assert agent._stream_needs_break is False
+
+
 def test_stream_delta_preserves_code_fence_newlines(monkeypatch):
     """Code blocks span multiple deltas.  A "\\n```python\\n" boundary
     is the canonical case where stripping leading newlines corrupts output."""
@@ -1278,7 +1865,7 @@ def test_run_conversation_codex_continues_after_commentary_phase_message(monkeyp
     assert any(
         msg.get("role") == "assistant"
         and msg.get("finish_reason") == "incomplete"
-        and "inspect the repo structure" in (msg.get("content") or "")
+        and "inspect the repo structure" in (msg.get("reasoning") or "")
         for msg in result["messages"]
     )
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1" for msg in result["messages"])
@@ -1768,3 +2355,169 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
     # IDs must be stripped — with store=False the API 404s on id lookups.
     for it in reasoning_items:
         assert "id" not in it
+
+
+def test_run_conversation_codex_disables_reasoning_replay_after_invalid_encrypted_content(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    agent.provider = "custom"
+    agent.base_url = "https://api.example.com/v1"
+
+    request_payloads = []
+
+    class _InvalidEncryptedContentError(Exception):
+        def __init__(self):
+            super().__init__(
+                "Error code: 400 - The encrypted content for item rs_001 could not be verified. "
+                "Reason: Encrypted content could not be decrypted or parsed."
+            )
+            self.status_code = 400
+            self.body = {
+                "error": {
+                    "message": (
+                        '{"error":{"message":"The encrypted content for item rs_001 could not be verified. '
+                        'Reason: Encrypted content could not be decrypted or parsed.",'
+                        '"type":"invalid_request_error","param":"","code":"invalid_encrypted_content"}}'
+                    ),
+                    "type": "400",
+                }
+            }
+
+    responses = [_InvalidEncryptedContentError(), _codex_message_response("Recovered without replay.")]
+
+    def _fake_api_call(api_kwargs):
+        request_payloads.append(api_kwargs)
+        current = responses.pop(0)
+        if isinstance(current, Exception):
+            raise current
+        return current
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "incomplete",
+            "codex_reasoning_items": [
+                {"type": "reasoning", "id": "rs_001", "encrypted_content": "enc_bad", "summary": []},
+            ],
+        }
+    ]
+
+    result = agent.run_conversation("continue", conversation_history=history)
+
+    assert result["completed"] is True
+    assert result["final_response"] == "Recovered without replay."
+    assert len(request_payloads) == 2
+    assert any(item.get("type") == "reasoning" for item in request_payloads[0]["input"])
+    assert not any(item.get("type") == "reasoning" for item in request_payloads[1]["input"])
+    assert request_payloads[0].get("include") == ["reasoning.encrypted_content"]
+    assert request_payloads[1].get("include") == []
+    assert result["messages"][0].get("codex_reasoning_items") is None
+    assert agent._codex_reasoning_replay_enabled is False
+
+
+def test_run_conversation_codex_invalid_encrypted_content_without_replay_state_does_not_disable_replay(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    agent.provider = "custom"
+    agent.base_url = "https://api.example.com/v1"
+    monkeypatch.setattr(run_agent, "jittered_backoff", lambda *args, **kwargs: 0)
+
+    request_payloads = []
+
+    class _InvalidEncryptedContentError(Exception):
+        def __init__(self):
+            super().__init__("Error code: 400 - bad request")
+            self.status_code = 400
+            self.body = {
+                "error": {
+                    "code": "INVALID_ENCRYPTED_CONTENT",
+                    "message": "Bad request",
+                }
+            }
+
+    responses = [_InvalidEncryptedContentError(), _codex_message_response("Recovered after generic retry.")]
+
+    def _fake_api_call(api_kwargs):
+        request_payloads.append(api_kwargs)
+        current = responses.pop(0)
+        if isinstance(current, Exception):
+            raise current
+        return current
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_api_call)
+
+    result = agent.run_conversation(
+        "continue",
+        conversation_history=[{"role": "assistant", "content": "No replay state here."}],
+    )
+
+    assert result["completed"] is True
+    assert result["final_response"] == "Recovered after generic retry."
+    assert len(request_payloads) == 2
+    assert all(payload.get("include") == ["reasoning.encrypted_content"] for payload in request_payloads)
+    assert all(not any(item.get("type") == "reasoning" for item in payload["input"]) for payload in request_payloads)
+    assert agent._codex_reasoning_replay_enabled is True
+    assert result["messages"][0].get("codex_reasoning_items") is None
+
+
+def test_run_conversation_compresses_mid_turn_before_next_request(monkeypatch):
+    """Large tool results are compacted before the next provider call."""
+    agent = _build_agent(monkeypatch)
+    agent.context_compressor.context_length = 20_000
+    agent.context_compressor.threshold_tokens = 20_000
+
+    responses = [
+        _codex_tool_call_response(),
+        _codex_message_response("Summary after compaction."),
+    ]
+    requests = []
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: requests.append(api_kwargs) or responses.pop(0),
+    )
+
+    def _fake_execute_tool_calls(
+        assistant_message,
+        messages,
+        effective_task_id,
+        api_call_count=0,
+    ):
+        del effective_task_id, api_call_count
+        for call in assistant_message.tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": "x" * 80_000,
+                }
+            )
+
+    compress_calls = []
+
+    def _fake_compress_context(
+        messages,
+        system_message,
+        *,
+        approx_tokens=None,
+        task_id="default",
+        focus_topic=None,
+    ):
+        del messages, system_message, task_id, focus_topic
+        compress_calls.append(approx_tokens)
+        agent._last_compaction_in_place = True
+        return [
+            {"role": "user", "content": "[summary of prior tool-heavy work]"}
+        ], "You are Hermes."
+
+    monkeypatch.setattr(agent, "_execute_tool_calls", _fake_execute_tool_calls)
+    monkeypatch.setattr(agent, "_compress_context", _fake_compress_context)
+
+    result = agent.run_conversation("do a tool-heavy task")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "Summary after compaction."
+    assert len(compress_calls) == 1
+    assert compress_calls[0] >= 15_000
+    assert len(requests) == 2

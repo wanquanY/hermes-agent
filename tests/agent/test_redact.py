@@ -5,7 +5,12 @@ import os
 
 import pytest
 
-from agent.redact import redact_sensitive_text, RedactingFormatter
+from agent.redact import (
+    RedactingFormatter,
+    is_env_dump_command,
+    redact_sensitive_text,
+    redact_terminal_output,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +62,43 @@ class TestKnownPrefixes:
     def test_short_token_fully_masked(self):
         result = redact_sensitive_text("key=sk-short1234567")
         assert "***" in result
+
+    def test_fireworks_key_is_redacted_when_bare(self):
+        token = "fw_" + "a" * 40
+        result = redact_sensitive_text(f"request failed for {token}")
+        assert token not in result
+        assert result.startswith("request failed for fw_")
+
+
+class TestUrlBareToken:
+    def test_long_bare_userinfo_token_is_redacted(self):
+        token = "opaque-token-1234567890"
+        result = redact_sensitive_text(f"https://{token}@github.com/org/repo.git")
+        assert token not in result
+        assert "@github.com" in result
+
+    def test_short_username_is_not_treated_as_token(self):
+        value = "ssh://git@example.com/org/repo.git"
+        assert redact_sensitive_text(value) == value
+
+    def test_path_email_is_not_treated_as_userinfo(self):
+        value = "https://example.com/search/user@example.com"
+        assert redact_sensitive_text(value) == value
+
+
+class TestTerminalOutputPolicy:
+    def test_detects_env_dump_in_shell_sequence(self):
+        assert is_env_dump_command("echo ready && printenv | sort")
+        assert not is_env_dump_command("python dump_env.py")
+
+    def test_env_dump_masks_opaque_assignment(self):
+        secret = "opaque-value-without-vendor-prefix"
+        result = redact_terminal_output(f"CUSTOM_AUTH_TOKEN={secret}", "printenv")
+        assert secret not in result
+
+    def test_source_dump_keeps_fixture_assignment(self):
+        source = "MAX_TOKENS=100\nCUSTOM_AUTH_TOKEN=test-fixture"
+        assert redact_terminal_output(source, "sed -n 1,20p config.py") == source
 
 
 class TestEnvAssignments:
@@ -143,6 +185,48 @@ class TestAuthHeaders:
         text = "authorization: bearer mytoken123456789012345678"
         result = redact_sensitive_text(text)
         assert "mytoken12345" not in result
+
+    def test_basic_auth_credentials_masked(self):
+        # base64 of "user:longpassword1234" — leaks user:pass if not redacted.
+        text = "Authorization: Basic dXNlcjpsb25ncGFzc3dvcmQxMjM0"
+        result = redact_sensitive_text(text)
+        assert "Authorization: Basic" in result
+        assert "dXNlcjpsb25ncGFzc3dvcmQxMjM0" not in result
+
+    def test_token_scheme_masked(self):
+        text = "Authorization: token opaque-credential-1234567890"
+        result = redact_sensitive_text(text)
+        assert "Authorization: token" in result
+        assert "opaque-credential" not in result
+
+    def test_proxy_authorization_masked(self):
+        text = "Proxy-Authorization: Basic dXNlcjpzdXBlcnNlY3JldDEyMzQ="
+        result = redact_sensitive_text(text)
+        assert "dXNlcjpzdXBlcnNlY3JldDEyMzQ=" not in result
+
+    def test_authorization_prose_unchanged(self):
+        # "authorization" without a colon-delimited value is plain prose.
+        text = "the authorization model is fully open"
+        assert redact_sensitive_text(text) == text
+
+
+class TestApiKeyHeaders:
+    def test_x_api_key_header_masked(self):
+        text = "x-api-key: opaque-provider-key-1234567890"
+        result = redact_sensitive_text(text)
+        assert "x-api-key:" in result
+        assert "opaque-provider-key" not in result
+
+    def test_x_api_key_in_curl_command_masked(self):
+        text = 'curl -H "x-api-key: sk-local-VERYsecret-999888" https://api.example.com'
+        result = redact_sensitive_text(text)
+        assert "VERYsecret" not in result
+        assert "https://api.example.com" in result
+
+    def test_api_key_header_masked(self):
+        text = "api-key: anotherOpaqueSecret1234567"
+        result = redact_sensitive_text(text)
+        assert "anotherOpaqueSecret" not in result
 
 
 class TestTelegramTokens:
@@ -343,23 +427,19 @@ class TestJWTTokens:
 
 
 class TestDiscordMentions:
-    """Discord snowflake IDs in <@ID> or <@!ID> format."""
+    """Discord mentions are public routing syntax, not credentials."""
 
-    def test_normal_mention(self):
-        result = redact_sensitive_text("Hello <@222589316709220353>")
-        assert "222589316709220353" not in result
-        assert "<@***>" in result
+    def test_normal_mention_passes_through(self):
+        text = "Hello <@222589316709220353>"
+        assert redact_sensitive_text(text) == text
 
-    def test_nickname_mention(self):
-        result = redact_sensitive_text("Ping <@!1331549159177846844>")
-        assert "1331549159177846844" not in result
-        assert "<@!***>" in result
+    def test_nickname_mention_passes_through(self):
+        text = "Ping <@!1331549159177846844>"
+        assert redact_sensitive_text(text) == text
 
-    def test_multiple_mentions(self):
+    def test_multiple_mentions_pass_through(self):
         text = "<@111111111111111111> and <@222222222222222222>"
-        result = redact_sensitive_text(text)
-        assert "111111111111111111" not in result
-        assert "222222222222222222" not in result
+        assert redact_sensitive_text(text) == text
 
     def test_short_id_not_matched(self):
         """IDs shorter than 17 digits are not Discord snowflakes."""
@@ -373,61 +453,35 @@ class TestDiscordMentions:
 
     def test_preserves_surrounding_text(self):
         text = "User <@222589316709220353> said hello"
-        result = redact_sensitive_text(text)
-        assert result.startswith("User ")
-        assert result.endswith(" said hello")
+        assert redact_sensitive_text(text) == text
 
 
-class TestUrlQueryParamRedaction:
-    """URL query-string redaction (ported from nearai/ironclaw#2529).
+class TestWebUrlsNotRedacted:
+    """Actionable web URLs survive ordinary tool and navigation flows."""
 
-    Catches opaque tokens that don't match vendor prefix regexes by
-    matching on parameter NAME rather than value shape.
-    """
-
-    def test_oauth_callback_code(self):
+    def test_oauth_callback_code_passes_through(self):
         text = "GET https://api.example.com/oauth/cb?code=abc123xyz789&state=csrf_ok"
-        result = redact_sensitive_text(text)
-        assert "abc123xyz789" not in result
-        assert "code=***" in result
-        assert "state=csrf_ok" in result  # state is not sensitive
+        assert redact_sensitive_text(text) == text
 
-    def test_access_token_query(self):
+    def test_access_token_query_passes_through(self):
         text = "Fetching https://example.com/api?access_token=opaque_value_here_1234&format=json"
-        result = redact_sensitive_text(text)
-        assert "opaque_value_here_1234" not in result
-        assert "access_token=***" in result
-        assert "format=json" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_refresh_token_query(self):
+    def test_refresh_token_query_passes_through(self):
         text = "https://auth.example.com/token?refresh_token=somerefresh&grant_type=refresh"
-        result = redact_sensitive_text(text)
-        assert "somerefresh" not in result
-        assert "grant_type=refresh" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_api_key_query(self):
+    def test_api_key_query_passes_through(self):
         text = "https://api.example.com/v1/data?api_key=kABCDEF12345&limit=10"
-        result = redact_sensitive_text(text)
-        assert "kABCDEF12345" not in result
-        assert "limit=10" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_presigned_signature(self):
+    def test_presigned_signature_passes_through(self):
         text = "https://s3.amazonaws.com/bucket/k?signature=LONG_PRESIGNED_SIG&id=public"
-        result = redact_sensitive_text(text)
-        assert "LONG_PRESIGNED_SIG" not in result
-        assert "id=public" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_case_insensitive_param_names(self):
-        """Lowercase/mixed-case sensitive param names are redacted."""
-        # NOTE: All-caps names like TOKEN= are swallowed by _ENV_ASSIGN_RE
-        # (which matches KEY=value patterns greedily) before URL regex runs.
-        # This test uses lowercase names to isolate URL-query redaction.
+    def test_case_insensitive_param_names_pass_through(self):
         text = "https://example.com?api_key=abcdef&secret=ghijkl"
-        result = redact_sensitive_text(text)
-        assert "abcdef" not in result
-        assert "ghijkl" not in result
-        assert "api_key=***" in result
-        assert "secret=***" in result
+        assert redact_sensitive_text(text) == text
 
     def test_substring_match_does_not_trigger(self):
         """`token_count` and `session_id` must NOT match `token` / `session`."""
@@ -442,34 +496,27 @@ class TestUrlQueryParamRedaction:
 
     def test_url_with_fragment(self):
         text = "https://example.com/page?token=xyz#section"
-        result = redact_sensitive_text(text)
-        assert "token=xyz" not in result
-        assert "#section" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_websocket_url_query(self):
+    def test_websocket_url_query_passes_through(self):
         text = "wss://api.example.com/ws?token=opaqueWsToken123"
-        result = redact_sensitive_text(text)
-        assert "opaqueWsToken123" not in result
+        assert redact_sensitive_text(text) == text
 
 
-class TestUrlUserinfoRedaction:
-    """URL userinfo (`scheme://user:pass@host`) for non-DB schemes."""
+class TestUrlUserinfoPolicy:
+    """Ordinary web userinfo passes through; DB credentials never do."""
 
-    def test_https_userinfo(self):
+    def test_https_userinfo_passes_through(self):
         text = "URL: https://user:supersecretpw@host.example.com/path"
-        result = redact_sensitive_text(text)
-        assert "supersecretpw" not in result
-        assert "https://user:***@host.example.com" in result
+        assert redact_sensitive_text(text) == text
 
-    def test_http_userinfo(self):
+    def test_http_userinfo_passes_through(self):
         text = "http://admin:plaintextpass@internal.example.com/api"
-        result = redact_sensitive_text(text)
-        assert "plaintextpass" not in result
+        assert redact_sensitive_text(text) == text
 
-    def test_ftp_userinfo(self):
+    def test_ftp_userinfo_passes_through(self):
         text = "ftp://user:ftppass@ftp.example.com/file.txt"
-        result = redact_sensitive_text(text)
-        assert "ftppass" not in result
+        assert redact_sensitive_text(text) == text
 
     def test_url_without_userinfo_unchanged(self):
         text = "https://example.com/path"
@@ -480,6 +527,48 @@ class TestUrlUserinfoRedaction:
         text = "postgres://admin:dbpass@db.internal:5432/app"
         result = redact_sensitive_text(text)
         assert "dbpass" not in result
+
+
+class TestStrictUrlCredentialRedaction:
+    @pytest.mark.parametrize(
+        ("text", "secret", "expected"),
+        [
+            (
+                "https://x.test/#access_token=FRAG_SECRET&view=public",
+                "FRAG_SECRET",
+                "https://x.test/#access_token=***&view=public",
+            ),
+            (
+                "/resume?token=REL_SECRET&view=public",
+                "REL_SECRET",
+                "/resume?token=***&view=public",
+            ),
+            (
+                "https://x.test/cb?client%5Fsecret=ENC_SECRET&view=public",
+                "ENC_SECRET",
+                "https://x.test/cb?client%5Fsecret=***&view=public",
+            ),
+            (
+                "//user:NET_SECRET@x.test/path",
+                "NET_SECRET",
+                "//user:***@x.test/path",
+            ),
+        ],
+    )
+    def test_masks_url_credentials_only_when_opted_in(
+        self,
+        text,
+        secret,
+        expected,
+    ):
+        assert redact_sensitive_text(text) == text
+        result = redact_sensitive_text(text, redact_url_credentials=True)
+        assert secret not in result
+        assert result == expected
+
+    def test_similarly_named_public_params_remain_unchanged(self):
+        text = "/metrics?token_count=17&session_id=public"
+        assert redact_sensitive_text(text, redact_url_credentials=True) == text
 
 
 class TestFormBodyRedaction:
@@ -511,3 +600,29 @@ class TestFormBodyRedaction:
         text = "first=1\nsecond=2"
         # Should pass through (still subject to other redactors)
         assert "first=1" in redact_sensitive_text(text)
+
+
+class TestXaiToken:
+    KEY = "xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstu"
+
+    def test_bare_token_masked(self):
+        result = redact_sensitive_text(f"using key {self.KEY}", force=True)
+        assert self.KEY not in result
+        assert "xai-AB" in result
+
+    def test_env_assignment_masked(self):
+        result = redact_sensitive_text(f"XAI_API_KEY={self.KEY}", force=True)
+        assert self.KEY not in result
+
+    def test_too_short_not_masked(self):
+        short = "xai-tooshort"
+        result = redact_sensitive_text(f"text {short} here", force=True)
+        assert short in result
+
+    def test_company_name_not_masked(self):
+        result = redact_sensitive_text("xai is a company", force=True)
+        assert result == "xai is a company"
+
+    def test_prefix_visible_in_masked_output(self):
+        result = redact_sensitive_text(self.KEY, force=True)
+        assert result.startswith("xai-AB")

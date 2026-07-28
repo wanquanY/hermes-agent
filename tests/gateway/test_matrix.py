@@ -8,8 +8,8 @@ import types
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageType
+from hermes_gateway.config import Platform, PlatformConfig
+from channels.platforms.base import MessageType
 
 
 def _make_fake_mautrix():
@@ -249,7 +249,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -265,7 +265,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_USER_ID", "@bot:example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -280,7 +280,7 @@ class TestMatrixConfigLoading:
         monkeypatch.delenv("MATRIX_PASSWORD", raising=False)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -291,7 +291,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -303,7 +303,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -316,7 +316,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOME_ROOM", "!room123:example.org")
         monkeypatch.setenv("MATRIX_HOME_ROOM_NAME", "Bot Room")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -330,7 +330,7 @@ class TestMatrixConfigLoading:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_USER_ID", "@hermes:example.org")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -344,7 +344,7 @@ class TestMatrixConfigLoading:
 
 def _make_adapter():
     """Create a MatrixAdapter with mocked config."""
-    from gateway.platforms.matrix import MatrixAdapter
+    from channels.platforms.matrix import MatrixAdapter
     config = PlatformConfig(
         enabled=True,
         token="syt_test_token",
@@ -370,7 +370,7 @@ class TestMatrixTypingIndicator:
     @pytest.mark.asyncio
     async def test_stop_typing_clears_matrix_typing_state(self):
         """stop_typing() should send typing=false instead of waiting for timeout expiry."""
-        from gateway.platforms.matrix import RoomID
+        from channels.platforms.matrix import RoomID
 
         await self.adapter.stop_typing("!room:example.org")
 
@@ -695,7 +695,7 @@ class TestMatrixDisplayName:
 
 class TestMatrixModuleImport:
     def test_module_importable_without_mautrix(self):
-        """gateway.platforms.matrix must be importable even when mautrix is
+        """channels.platforms.matrix must be importable even when mautrix is
         not installed — otherwise the gateway crashes for ALL platforms.
 
         This test uses a subprocess to avoid polluting the current process's
@@ -717,7 +717,7 @@ class TestMatrixModuleImport:
                 "for k in list(sys.modules):\n"
                 "    if k.startswith('mautrix'): del sys.modules[k]\n"
                 "from unittest.mock import patch\n"
-                "from gateway.platforms.matrix import check_matrix_requirements\n"
+                "from channels.platforms.matrix import check_matrix_requirements\n"
                 "with patch('tools.lazy_deps.ensure', side_effect=ImportError('blocked')):\n"
                 "    assert not check_matrix_requirements()\n"
                 "print('OK')\n"
@@ -734,7 +734,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from channels.platforms.matrix import check_matrix_requirements
         try:
             import mautrix  # noqa: F401
             assert check_matrix_requirements() is True
@@ -746,13 +746,13 @@ class TestMatrixRequirements:
         monkeypatch.delenv("MATRIX_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("MATRIX_PASSWORD", raising=False)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from channels.platforms.matrix import check_matrix_requirements
         assert check_matrix_requirements() is False
 
     def test_check_requirements_without_homeserver(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from channels.platforms.matrix import check_matrix_requirements
         assert check_matrix_requirements() is False
 
     def test_check_requirements_encryption_true_no_e2ee_deps(self, monkeypatch):
@@ -761,7 +761,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False), \
              patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
             assert matrix_mod.check_matrix_requirements() is False
@@ -772,7 +772,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
             # Still needs mautrix itself to be importable
             try:
@@ -788,7 +788,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             try:
                 import mautrix  # noqa: F401
@@ -806,7 +806,7 @@ class TestMatrixAccessTokenAuth:
     @pytest.mark.asyncio
     async def test_connect_with_access_token_and_encryption(self):
         """connect() should call whoami, set user_id/device_id, set up crypto."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -860,7 +860,7 @@ class TestMatrixAccessTokenAuth:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -901,7 +901,7 @@ class TestDeviceKeyReVerification:
         mock_olm.account.identity_keys = {"ed25519": "local_new_key"}
         mock_olm.share_keys = AsyncMock()
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         result = await adapter._verify_device_keys_on_server(mock_client, mock_olm)
 
         assert result is False
@@ -913,7 +913,7 @@ class TestMatrixE2EEHardFail:
 
     @pytest.mark.asyncio
     async def test_connect_fails_when_encryption_true_but_no_e2ee_deps(self):
-        from gateway.platforms.matrix import MatrixAdapter, _check_e2ee_deps
+        from channels.platforms.matrix import MatrixAdapter, _check_e2ee_deps
 
         config = PlatformConfig(
             enabled=True,
@@ -940,7 +940,7 @@ class TestMatrixE2EEHardFail:
 
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
@@ -951,7 +951,7 @@ class TestMatrixE2EEHardFail:
     @pytest.mark.asyncio
     async def test_connect_fails_when_crypto_setup_raises(self):
         """Even if _check_e2ee_deps passes, if OlmMachine raises, hard-fail."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -979,7 +979,7 @@ class TestMatrixE2EEHardFail:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(side_effect=Exception("olm init failed"))
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 result = await adapter.connect()
@@ -991,7 +991,7 @@ class TestMatrixDeviceId:
     """MATRIX_DEVICE_ID should be used for stable device identity."""
 
     def test_device_id_from_config_extra(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1007,7 +1007,7 @@ class TestMatrixDeviceId:
     def test_device_id_from_env(self, monkeypatch):
         monkeypatch.setenv("MATRIX_DEVICE_ID", "FROM_ENV")
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1022,7 +1022,7 @@ class TestMatrixDeviceId:
     def test_device_id_config_takes_precedence_over_env(self, monkeypatch):
         monkeypatch.setenv("MATRIX_DEVICE_ID", "FROM_ENV")
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1038,7 +1038,7 @@ class TestMatrixDeviceId:
     @pytest.mark.asyncio
     async def test_connect_uses_configured_device_id_over_whoami(self):
         """When MATRIX_DEVICE_ID is set, it should be used instead of whoami device_id."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1085,7 +1085,7 @@ class TestMatrixDeviceId:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -1104,7 +1104,7 @@ class TestMatrixPasswordLoginDeviceId:
 
     @pytest.mark.asyncio
     async def test_password_login_uses_device_id(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1135,7 +1135,7 @@ class TestMatrixPasswordLoginDeviceId:
 
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.dict("sys.modules", fake_mautrix_mods):
             with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
                 with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
@@ -1155,7 +1155,7 @@ class TestMatrixDeviceIdConfig:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_DEVICE_ID", "HERMES_BOT")
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -1167,7 +1167,7 @@ class TestMatrixDeviceIdConfig:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_DEVICE_ID", raising=False)
 
-        from gateway.config import GatewayConfig, _apply_env_overrides
+        from hermes_gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
@@ -1329,7 +1329,7 @@ class TestMatrixEncryptedSendFallback:
 class TestJoinedRoomsReference:
     def test_joined_rooms_reference_preserved_after_reassignment(self):
         """_CryptoStateStore must see updates after initial sync populates rooms."""
-        from gateway.platforms.matrix import _CryptoStateStore
+        from channels.platforms.matrix import _CryptoStateStore
 
         joined = set()
         store = _CryptoStateStore(MagicMock(), joined)
@@ -1350,7 +1350,7 @@ class TestJoinedRoomsReference:
 class TestMatrixEncryptedEventHandler:
     @pytest.mark.asyncio
     async def test_connect_registers_encrypted_event_handler_when_encryption_on(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1396,7 +1396,7 @@ class TestMatrixEncryptedEventHandler:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -1416,7 +1416,7 @@ class TestMatrixEncryptedEventHandler:
     @pytest.mark.asyncio
     async def test_connect_fails_on_stale_otk_conflict(self):
         """connect() must refuse E2EE when OTK upload hits 'already exists'."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1465,7 +1465,7 @@ class TestMatrixEncryptedEventHandler:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        from channels.platforms import matrix as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 result = await adapter.connect()
@@ -1538,7 +1538,7 @@ class TestMatrixMarkdownHtmlSecurity:
     """Tests for HTML injection prevention in _markdown_to_html_fallback."""
 
     def setup_method(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         self.convert = MatrixAdapter._markdown_to_html_fallback
 
     def test_script_injection_in_header(self):
@@ -1599,7 +1599,7 @@ class TestMatrixMarkdownHtmlFormatting:
     """Tests for new formatting capabilities in _markdown_to_html_fallback."""
 
     def setup_method(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         self.convert = MatrixAdapter._markdown_to_html_fallback
 
     def test_fenced_code_block(self):
@@ -1666,23 +1666,23 @@ class TestMatrixMarkdownHtmlFormatting:
 
 class TestMatrixLinkSanitization:
     def test_safe_https_url(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("https://example.com") == "https://example.com"
 
     def test_javascript_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("javascript:alert(1)") == ""
 
     def test_data_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("data:text/html,bad") == ""
 
     def test_vbscript_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("vbscript:bad") == ""
 
     def test_quotes_escaped(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from channels.platforms.matrix import MatrixAdapter
         result = MatrixAdapter._sanitize_link_url('http://x"y')
         assert '"' not in result
         assert "&quot;" in result
@@ -1721,7 +1721,7 @@ class TestMatrixReactions:
     @pytest.mark.asyncio
     async def test_on_processing_start_sends_eyes(self):
         """on_processing_start should send eyes reaction."""
-        from gateway.platforms.base import MessageEvent, MessageType
+        from channels.platforms.base import MessageEvent, MessageType
 
         self.adapter._reactions_enabled = True
         self.adapter._send_reaction = AsyncMock(return_value="$reaction_event_123")
@@ -1741,7 +1741,7 @@ class TestMatrixReactions:
 
     @pytest.mark.asyncio
     async def test_on_processing_complete_sends_check(self):
-        from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+        from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
         self.adapter._reaction_redaction_delay_seconds = 0.01
@@ -1770,7 +1770,7 @@ class TestMatrixReactions:
 
     @pytest.mark.asyncio
     async def test_on_processing_complete_sends_cross_on_failure(self):
-        from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+        from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
         self.adapter._reaction_redaction_delay_seconds = 0.01
@@ -1799,7 +1799,7 @@ class TestMatrixReactions:
 
     @pytest.mark.asyncio
     async def test_on_processing_complete_cancelled_sends_no_terminal_reaction(self):
-        from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+        from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
         self.adapter._send_reaction = AsyncMock(return_value=True)
@@ -1819,7 +1819,7 @@ class TestMatrixReactions:
     @pytest.mark.asyncio
     async def test_on_processing_complete_no_pending_reaction(self):
         """on_processing_complete should skip redaction if no eyes reaction was tracked."""
-        from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+        from channels.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
         self.adapter._reactions_enabled = True
         self.adapter._pending_reactions = {}
@@ -1868,7 +1868,7 @@ class TestMatrixReactions:
 
     @pytest.mark.asyncio
     async def test_reactions_disabled(self):
-        from gateway.platforms.base import MessageEvent, MessageType
+        from channels.platforms.base import MessageEvent, MessageType
 
         self.adapter._reactions_enabled = False
         self.adapter._send_reaction = AsyncMock()
@@ -2257,6 +2257,210 @@ class TestMatrixOnRoomMessageFilter:
         ev = self._mk_event(sender="@alice:example.org", body="hello bot")
         await self.adapter._on_room_message(ev)
         self.adapter._handle_text_message.assert_awaited_once()
+
+
+class TestMatrixClockSkewWarning:
+    """Clock-skew detector for #12614.
+
+    Reporter's host clock was set ~2 hours ahead of real time.  The grace
+    filter `event_ts < startup_ts - 5` then drops every live event because
+    server timestamps look "older than startup".  When this happens well
+    after startup (>30s), the adapter logs a one-shot WARNING pointing the
+    user at NTP instead of failing silently.
+    """
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._user_id = "@bot:example.org"
+        self.adapter._handle_text_message = AsyncMock()
+        self.adapter._handle_media_message = AsyncMock()
+
+    @staticmethod
+    def _mk_event(sender, ts_ms, event_id=None):
+        ev = MagicMock()
+        ev.room_id = "!room:example.org"
+        ev.sender = sender
+        ev.event_id = event_id or f"$evt-{sender}-{ts_ms}"
+        ev.timestamp = ts_ms
+        ev.server_timestamp = ts_ms
+        ev.content = {"msgtype": "m.text", "body": "hi"}
+        return ev
+
+    @pytest.mark.asyncio
+    async def test_late_drops_emit_one_shot_clock_skew_warning(self, caplog):
+        import logging
+        import time as _t
+
+        # Simulate the reporter's environment: host clock is ~2 hours ahead
+        # of server time.  Startup happened "in the future" relative to the
+        # real-world events we're now receiving.
+        now = _t.time()
+        self.adapter._startup_ts = now - 60  # bot started 60s ago (wall clock)
+        # Server events are dated 2h before startup_ts (skewed clock).
+        skewed_event_ts_ms = int((self.adapter._startup_ts - 7200) * 1000)
+
+        with caplog.at_level(logging.WARNING, logger="channels.platforms.matrix"):
+            for i in range(5):
+                ev = self._mk_event(
+                    sender=f"@alice{i}:example.org", ts_ms=skewed_event_ts_ms
+                )
+                await self.adapter._on_room_message(ev)
+
+        # Handler should never be invoked — all events failed the grace check.
+        self.adapter._handle_text_message.assert_not_called()
+        # Exactly one WARNING from THIS logger should be emitted.  Filter by
+        # logger name so unrelated stdlib/library warnings can't satisfy the
+        # assertion.
+        skew_warnings = [
+            r for r in caplog.records
+            if r.name == "channels.platforms.matrix"
+            and r.levelname == "WARNING"
+            and "set-ntp" in r.getMessage()
+        ]
+        assert len(skew_warnings) == 1, (
+            f"expected exactly 1 clock-skew warning, got {len(skew_warnings)}"
+        )
+        msg = skew_warnings[0].getMessage()
+        assert "7200" in msg, f"skew value missing from message: {msg!r}"
+        # Pin the counter so a regression in the gating logic (e.g. warning
+        # at threshold 1 or 5, or not stopping after warn) is caught.
+        assert self.adapter._late_grace_drops == 3
+        assert self.adapter._clock_skew_warned is True
+
+    @pytest.mark.asyncio
+    async def test_initial_sync_drops_do_not_warn(self, caplog):
+        """During the first 30s after startup, old events are normal backfill."""
+        import logging
+        import time as _t
+
+        now = _t.time()
+        # Startup was 1s ago — we're still in the initial-sync window.
+        self.adapter._startup_ts = now - 1
+        old_ts_ms = int((self.adapter._startup_ts - 3600) * 1000)
+
+        with caplog.at_level(logging.WARNING, logger="channels.platforms.matrix"):
+            for i in range(5):
+                ev = self._mk_event(
+                    sender=f"@alice{i}:example.org", ts_ms=old_ts_ms
+                )
+                await self.adapter._on_room_message(ev)
+
+        # Backfill drops are silent — no clock-skew warning fired.
+        assert self.adapter._clock_skew_warned is False
+        skew_warnings = [
+            r for r in caplog.records
+            if r.name == "channels.platforms.matrix"
+            and "set-ntp" in r.getMessage()
+        ]
+        assert skew_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_fewer_than_three_late_drops_do_not_warn(self, caplog):
+        """A single delayed backfill event after 30s shouldn't trigger NTP advice."""
+        import logging
+        import time as _t
+
+        now = _t.time()
+        self.adapter._startup_ts = now - 120  # extra slack vs the 30s gate
+        old_ts_ms = int((self.adapter._startup_ts - 3600) * 1000)
+
+        with caplog.at_level(logging.WARNING, logger="channels.platforms.matrix"):
+            for i in range(2):  # only 2 late drops — under the threshold
+                ev = self._mk_event(
+                    sender=f"@alice{i}:example.org", ts_ms=old_ts_ms
+                )
+                await self.adapter._on_room_message(ev)
+
+        assert self.adapter._late_grace_drops == 2
+        assert self.adapter._clock_skew_warned is False
+
+    @pytest.mark.asyncio
+    async def test_varied_backfill_skews_do_not_warn(self, caplog):
+        """Backfill from a freshly-invited room delivers events of varied age.
+
+        A genuine clock-skew bug produces drops with a *constant* offset
+        (every event is ~X seconds older than wall clock).  Joining an old
+        room post-startup delivers events spanning hours-to-days; those
+        skews vary wildly and must NOT trigger the NTP warning.
+        """
+        import logging
+        import time as _t
+
+        now = _t.time()
+        self.adapter._startup_ts = now - 120
+        # Each event has a different age, ranging from 1h to 30d ago.
+        ages_in_hours = [1, 24, 168, 720, 4]  # 1h, 1d, 1w, 30d, 4h
+        with caplog.at_level(logging.WARNING, logger="channels.platforms.matrix"):
+            for i, hrs in enumerate(ages_in_hours):
+                ts_ms = int((self.adapter._startup_ts - hrs * 3600) * 1000)
+                ev = self._mk_event(
+                    sender=f"@alice{i}:example.org", ts_ms=ts_ms
+                )
+                await self.adapter._on_room_message(ev)
+
+        # The varied-skew guard should keep the counter from reaching 3.
+        assert self.adapter._late_grace_drops < 3
+        assert self.adapter._clock_skew_warned is False
+        skew_warnings = [
+            r for r in caplog.records
+            if r.name == "channels.platforms.matrix"
+            and "set-ntp" in r.getMessage()
+        ]
+        assert skew_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_state_reset_allows_warning_to_fire_again(self, caplog):
+        """After the reset block at top of connect() runs, the warning is rearmed.
+
+        Reconnect lifecycle: the user fixes NTP, restarts the bot, and the
+        new connect() call resets _late_grace_drops / _clock_skew_warned at
+        the top.  This test exercises the rearm path by:
+          1. Tripping the warning once (state: warned=True).
+          2. Running the same reset block connect() runs.
+          3. Tripping the warning a second time — the second warning should
+             fire because the state was cleared.
+        """
+        import logging
+        import time as _t
+
+        now = _t.time()
+        self.adapter._startup_ts = now - 60
+        skewed_ms = int((self.adapter._startup_ts - 7200) * 1000)
+
+        with caplog.at_level(logging.WARNING, logger="channels.platforms.matrix"):
+            for i in range(3):
+                ev = self._mk_event(
+                    sender=f"@alice{i}:example.org", ts_ms=skewed_ms,
+                    event_id=f"$first-{i}",
+                )
+                await self.adapter._on_room_message(ev)
+            assert self.adapter._clock_skew_warned is True
+
+            # Mirror the reset block in connect() (matrix.py around line 855).
+            self.adapter._startup_ts = _t.time() - 60
+            self.adapter._late_grace_drops = 0
+            self.adapter._late_grace_skew = 0.0
+            self.adapter._clock_skew_warned = False
+
+            # Same skewed-clock scenario should warn AGAIN after reset.
+            skewed_ms2 = int((self.adapter._startup_ts - 7200) * 1000)
+            for i in range(3):
+                ev = self._mk_event(
+                    sender=f"@bob{i}:example.org", ts_ms=skewed_ms2,
+                    event_id=f"$second-{i}",
+                )
+                await self.adapter._on_room_message(ev)
+
+        skew_warnings = [
+            r for r in caplog.records
+            if r.name == "channels.platforms.matrix"
+            and "set-ntp" in r.getMessage()
+        ]
+        assert len(skew_warnings) == 2, (
+            f"expected 2 warnings (one per connect cycle), got {len(skew_warnings)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # DM auto-thread
 # ---------------------------------------------------------------------------
@@ -2326,7 +2530,10 @@ class TestMatrixProxyConfig:
             for k, v in proxy_env.items():
                 monkeypatch.setenv(k, v)
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import MatrixAdapter
+            from channels.platforms import matrix as matrix_mod
+            if proxy_env is None:
+                monkeypatch.setattr(matrix_mod, "resolve_proxy_url", lambda **_: None)
+            from channels.platforms.matrix import MatrixAdapter
             cfg = PlatformConfig(enabled=True, token="syt_test",
                                  extra={"homeserver": "https://matrix.example.org",
                                         "user_id": "@bot:example.org"})
@@ -2359,7 +2566,7 @@ class TestCreateMatrixSession:
     @pytest.mark.asyncio
     async def test_no_proxy_returns_trust_env_session(self):
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import _create_matrix_session
+            from channels.platforms.matrix import _create_matrix_session
             session = _create_matrix_session(None)
             try:
                 assert session.trust_env is True
@@ -2369,7 +2576,7 @@ class TestCreateMatrixSession:
     @pytest.mark.asyncio
     async def test_http_proxy_sets_default_proxy(self):
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import _create_matrix_session
+            from channels.platforms.matrix import _create_matrix_session
             session = _create_matrix_session("http://proxy:8080")
             try:
                 assert str(session._default_proxy) == "http://proxy:8080"
@@ -2387,7 +2594,7 @@ class TestCreateMatrixSession:
                     )
                 ),
             }):
-                from gateway.platforms.matrix import _create_matrix_session
+                from channels.platforms.matrix import _create_matrix_session
                 session = _create_matrix_session("socks5://proxy:1080")
                 try:
                     assert session.connector is fake_connector

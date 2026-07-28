@@ -9,8 +9,7 @@ which has provider-specific conditionals for max_tokens defaults,
 reasoning configuration, temperature handling, and extra_body assembly.
 """
 
-import copy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
@@ -19,7 +18,25 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 
-def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+def _reasoning_config_for_model(
+    model: str, reasoning_config: dict | None
+) -> dict | None:
+    """Return a copy of reasoning config normalized to the model wire contract."""
+    if not isinstance(reasoning_config, dict):
+        return reasoning_config
+    if (
+        "gpt-5.6" in (model or "").lower()
+        and str(reasoning_config.get("effort") or "").strip().lower() == "ultra"
+    ):
+        normalized = dict(reasoning_config)
+        normalized["effort"] = "max"
+        return normalized
+    return reasoning_config
+
+
+def _build_gemini_thinking_config(
+    model: str, reasoning_config: dict | None
+) -> dict | None:
     """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
     if reasoning_config is None or not isinstance(reasoning_config, dict):
         return None
@@ -53,24 +70,30 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
     if normalized_model.startswith("gemini-2.5-"):
         return thinking_config
 
-    if effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+    if effort not in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
         effort = "medium"
 
-    # Gemini 3 Flash documents low/medium/high thinking levels; Gemini 3 Pro
-    # is stricter (low/high). Clamp Hermes' wider effort set to what each
-    # family accepts so we never forward an undocumented level verbatim.
+    # Gemini 3.5 Flash supports minimal/low/medium/high, and Gemini 3.1 Pro
+    # supports low/medium/high. Older Gemini 3 previews exposed narrower
+    # scales, so keep their historical clamps instead of forwarding a level
+    # that their endpoint may reject.
     if normalized_model.startswith(("gemini-3", "gemini-3.1")):
         if "flash" in normalized_model:
-            if effort in {"minimal", "low"}:
+            if normalized_model.startswith("gemini-3.5-") and effort == "minimal":
+                thinking_config["thinkingLevel"] = "minimal"
+            elif effort in {"minimal", "low"}:
                 thinking_config["thinkingLevel"] = "low"
-            elif effort in {"high", "xhigh"}:
+            elif effort in {"high", "xhigh", "max", "ultra"}:
                 thinking_config["thinkingLevel"] = "high"
             else:
                 thinking_config["thinkingLevel"] = "medium"
         elif "pro" in normalized_model:
-            thinking_config["thinkingLevel"] = (
-                "high" if effort in {"high", "xhigh"} else "low"
-            )
+            if effort in {"high", "xhigh", "max", "ultra"}:
+                thinking_config["thinkingLevel"] = "high"
+            elif normalized_model.startswith("gemini-3.1-") and effort == "medium":
+                thinking_config["thinkingLevel"] = "medium"
+            else:
+                thinking_config["thinkingLevel"] = "low"
 
     return thinking_config
 
@@ -99,6 +122,12 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _model_consumes_thought_signature(model: Any) -> bool:
+    """Return whether the target model requires Gemini thought signatures."""
+    normalized = str(model or "").lower()
+    return "gemini" in normalized or "gemma" in normalized
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -112,24 +141,72 @@ class ChatCompletionsTransport(ProviderTransport):
     def convert_messages(
         self, messages: list[dict[str, Any]], **kwargs
     ) -> list[dict[str, Any]]:
-        """Messages are already in OpenAI format — sanitize Codex leaks only.
+        """Messages are already in OpenAI format — strip internal fields
+        that strict chat-completions providers reject with HTTP 400/422
+        (or, in the case of some OpenAI-compatible gateways, 5xx):
 
-        Strips Codex Responses API fields (``codex_reasoning_items`` /
-        ``codex_message_items`` on the message, ``call_id``/``response_item_id``
-        on tool_calls) that strict chat-completions providers reject with 400/422.
+        - Codex Responses API fields: ``codex_reasoning_items`` /
+          ``codex_message_items`` on the message, ``call_id`` /
+          ``response_item_id`` on ``tool_calls`` entries.
+        - ``extra_content`` on tool calls — Gemini thought signatures are
+          required for Gemini/Gemma replay but rejected by strict non-Gemini
+          providers, so they are retained only for a compatible target model.
+        - ``tool_name`` on tool-result messages — written by
+          ``make_tool_result_message()`` for the SQLite FTS index, but not
+          part of the Chat Completions schema. Strict providers (Fireworks,
+          Moonshot/Kimi) reject any payload containing it with
+          ``Extra inputs are not permitted, field: 'messages[N].tool_name'``.
+          Permissive providers (OpenRouter, MiniMax) silently ignore the
+          field, which masked the bug for months.
+        - Conversation storage/projection fields (``message_id``,
+          ``conversation_message_id``, ``participant_id``, ``metadata``).
+          Canonical speaker identity belongs to Hermes metadata. Foreign
+          participant ownership is already encoded in the transient projected
+          content; the projector intentionally emits no provider ``name`` that
+          could make a Leader/member utterance look like the human user.
+        - Hermes-internal scaffolding markers — any top-level message key
+          starting with ``_`` (e.g. ``_empty_recovery_synthetic``,
+          ``_empty_terminal_sentinel``, ``_thinking_prefill``). These are
+          bookkeeping flags the agent loop attaches to messages so the
+          persistence layer can later strip its own scaffolding; they must
+          never reach the wire. Permissive providers (real OpenAI,
+          Anthropic) silently drop unknown message keys, but strict
+          gateways (e.g. opencode-go, codex.nekos.me) reject with
+          ``Extra inputs are not permitted, field: 'messages[N]._empty_recovery_synthetic'``,
+          which then poisons every subsequent request in the session.
         """
+        internal_message_keys = {
+            "message_id",
+            "conversation_message_id",
+            "participant_id",
+            "metadata",
+        }
+        strip_extra_content = not _model_consumes_thought_signature(kwargs.get("model"))
         needs_sanitize = False
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            if "codex_reasoning_items" in msg or "codex_message_items" in msg:
+            if (
+                "codex_reasoning_items" in msg
+                or "codex_message_items" in msg
+                or "tool_name" in msg
+                or "effect_disposition" in msg
+                or "timestamp" in msg  # #47868 — strict providers reject this
+                or "api_content" in msg
+                or any(key in msg for key in internal_message_keys)
+            ):
+                needs_sanitize = True
+                break
+            if any(isinstance(k, str) and k.startswith("_") for k in msg):
                 needs_sanitize = True
                 break
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
                     if isinstance(tc, dict) and (
-                        "call_id" in tc or "response_item_id" in tc
+                        "call_id" in tc
+                        or "response_item_id" in tc
+                        or (strip_extra_content and "extra_content" in tc)
                     ):
                         needs_sanitize = True
                         break
@@ -139,18 +216,72 @@ class ChatCompletionsTransport(ProviderTransport):
         if not needs_sanitize:
             return messages
 
-        sanitized = copy.deepcopy(messages)
-        for msg in sanitized:
+        # Copy only the list, messages, and tool calls that actually change.
+        # This keeps the hot request path cheap while preserving caller-owned
+        # transcript objects verbatim.
+        sanitized = list(messages)
+        for msg_idx, msg in enumerate(messages):
             if not isinstance(msg, dict):
                 continue
-            msg.pop("codex_reasoning_items", None)
-            msg.pop("codex_message_items", None)
+
+            copied_msg: dict[str, Any] | None = None
+
+            def mutable_msg() -> dict[str, Any]:
+                nonlocal copied_msg
+                if copied_msg is None:
+                    copied_msg = dict(msg)
+                    sanitized[msg_idx] = copied_msg
+                return copied_msg
+
+            removable_message_keys = {
+                "codex_reasoning_items",
+                "codex_message_items",
+                "tool_name",
+                "effect_disposition",
+                "timestamp",
+                "api_content",
+                *internal_message_keys,
+            }
+            present_message_keys = removable_message_keys.intersection(msg)
+            if present_message_keys:
+                out_msg = mutable_msg()
+                for key in present_message_keys:
+                    out_msg.pop(key, None)
+
+            # Drop all Hermes-internal scaffolding markers (``_``-prefixed).
+            # OpenAI's message schema has no ``_``-prefixed fields, so this
+            # is safe and future-proofs against new markers being added.
+            internal_keys = [
+                key for key in msg if isinstance(key, str) and key.startswith("_")
+            ]
+            if internal_keys:
+                out_msg = mutable_msg()
+                for key in internal_keys:
+                    out_msg.pop(key, None)
+
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        tc.pop("call_id", None)
-                        tc.pop("response_item_id", None)
+                copied_tool_calls: list[Any] | None = None
+                for tc_idx, tc in enumerate(tool_calls):
+                    if not isinstance(tc, dict):
+                        continue
+                    should_copy = (
+                        "call_id" in tc
+                        or "response_item_id" in tc
+                        or (strip_extra_content and "extra_content" in tc)
+                    )
+                    if not should_copy:
+                        continue
+                    if copied_tool_calls is None:
+                        copied_tool_calls = list(tool_calls)
+                    copied_tc = dict(tc)
+                    copied_tc.pop("call_id", None)
+                    copied_tc.pop("response_item_id", None)
+                    if strip_extra_content:
+                        copied_tc.pop("extra_content", None)
+                    copied_tool_calls[tc_idx] = copied_tc
+                if copied_tool_calls is not None:
+                    mutable_msg()["tool_calls"] = copied_tool_calls
         return sanitized
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -209,7 +340,7 @@ class ChatCompletionsTransport(ProviderTransport):
             extra_body_additions: dict | None
         """
         # Codex sanitization: drop reasoning_items / call_id / response_item_id
-        sanitized = self.convert_messages(messages)
+        sanitized = self.convert_messages(messages, model=model)
 
         # ── Provider profile: single-path when present ──────────────────
         _profile = params.get("provider_profile")
@@ -259,7 +390,9 @@ class ChatCompletionsTransport(ProviderTransport):
         is_nvidia_nim = params.get("is_nvidia_nim", False)
         is_kimi = params.get("is_kimi", False)
         is_tokenhub = params.get("is_tokenhub", False)
-        reasoning_config = params.get("reasoning_config")
+        reasoning_config = _reasoning_config_for_model(
+            model, params.get("reasoning_config")
+        )
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
@@ -350,18 +483,25 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Reasoning. LM Studio is handled above via top-level reasoning_effort,
         # so skip emitting extra_body.reasoning for it.
-        if params.get("supports_reasoning", False) and not params.get("is_lmstudio", False):
+        if params.get("supports_reasoning", False) and not params.get(
+            "is_lmstudio", False
+        ):
             if is_github_models:
                 gh_reasoning = params.get("github_reasoning_extra")
                 if gh_reasoning is not None:
                     extra_body["reasoning"] = gh_reasoning
             else:
-                extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
+                effort = "medium"
+                if isinstance(reasoning_config, dict):
+                    effort = reasoning_config.get("effort", "medium") or "medium"
+                extra_body["reasoning"] = {"enabled": True, "effort": effort}
 
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
             if _is_gemini_openai_compat_base_url(base_url):
-                thinking_config = _snake_case_gemini_thinking_config(raw_thinking_config)
+                thinking_config = _snake_case_gemini_thinking_config(
+                    raw_thinking_config
+                )
                 if thinking_config:
                     openai_compat_extra = extra_body.get("extra_body", {})
                     google_extra = openai_compat_extra.get("google", {})
@@ -444,18 +584,21 @@ class ChatCompletionsTransport(ProviderTransport):
         ephemeral = params.get("ephemeral_max_output_tokens")
         user_max = params.get("max_tokens")
         anthropic_max = params.get("anthropic_max_output")
+        profile_max = profile.get_max_tokens(model)
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
         elif user_max is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(user_max))
-        elif profile.default_max_tokens and max_tokens_fn:
-            api_kwargs.update(max_tokens_fn(profile.default_max_tokens))
+        elif profile_max and max_tokens_fn:
+            api_kwargs.update(max_tokens_fn(profile_max))
         elif anthropic_max is not None:
             api_kwargs["max_tokens"] = anthropic_max
 
         # Provider-specific api_kwargs extras (reasoning_effort, metadata, etc.)
-        reasoning_config = params.get("reasoning_config")
+        reasoning_config = _reasoning_config_for_model(
+            model, params.get("reasoning_config")
+        )
         extra_body_from_profile, top_level_from_profile = (
             profile.build_api_kwargs_extras(
                 reasoning_config=reasoning_config,
@@ -464,6 +607,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 model=model,
                 ollama_num_ctx=params.get("ollama_num_ctx"),
                 session_id=params.get("session_id"),
+                requested_provider=params.get("requested_provider"),
             )
         )
         api_kwargs.update(top_level_from_profile)
@@ -502,7 +646,23 @@ class ChatCompletionsTransport(ProviderTransport):
                     api_kwargs[k] = v
 
         if extra_body:
-            api_kwargs["extra_body"] = extra_body
+            # Native Gemini speaks Google's REST schema and rejects OpenAI
+            # extension keys such as tags/reasoning/provider. Only its native
+            # thinking configuration may cross this boundary.
+            try:
+                from agent.gemini_native_adapter import is_native_gemini_base_url
+
+                native_gemini = is_native_gemini_base_url(params.get("base_url"))
+            except Exception:
+                native_gemini = False
+            if native_gemini:
+                extra_body = {
+                    key: value
+                    for key, value in extra_body.items()
+                    if key in {"thinking_config", "thinkingConfig"}
+                }
+            if extra_body:
+                api_kwargs["extra_body"] = extra_body
 
         return api_kwargs
 
@@ -517,7 +677,10 @@ class ChatCompletionsTransport(ProviderTransport):
         """
         choice = response.choices[0]
         msg = choice.message
-        finish_reason = choice.finish_reason or "stop"
+        raw_finish_reason = choice.finish_reason
+        if isinstance(raw_finish_reason, int):
+            raw_finish_reason = str(raw_finish_reason)
+        finish_reason = raw_finish_reason or "stop"
 
         tool_calls = None
         if msg.tool_calls:
@@ -530,7 +693,10 @@ class ChatCompletionsTransport(ProviderTransport):
                 tc_provider_data: dict[str, Any] = {}
                 extra = getattr(tc, "extra_content", None)
                 if extra is None and hasattr(tc, "model_extra"):
-                    extra = (tc.model_extra or {}).get("extra_content")
+                    model_extra = (
+                        tc.model_extra if isinstance(tc.model_extra, dict) else {}
+                    )
+                    extra = model_extra.get("extra_content")
                 if extra is not None:
                     if hasattr(extra, "model_dump"):
                         try:
@@ -574,8 +740,25 @@ class ChatCompletionsTransport(ProviderTransport):
         if rd:
             provider_data["reasoning_details"] = rd
 
+        # Structured refusals may carry no ordinary content. Surface the
+        # explanation as a terminal content-filter response rather than
+        # retrying the same deterministic refusal as an empty response.
+        content = msg.content
+        refusal = getattr(msg, "refusal", None)
+        if refusal is None and hasattr(msg, "model_extra"):
+            message_extra = getattr(msg, "model_extra", None) or {}
+            if isinstance(message_extra, dict):
+                refusal = message_extra.get("refusal")
+        if isinstance(refusal, str) and refusal.strip():
+            provider_data["refusal"] = refusal
+            has_text = isinstance(content, str) and bool(content.strip())
+            if not has_text and not tool_calls:
+                content = refusal
+                if finish_reason in (None, "stop"):
+                    finish_reason = "content_filter"
+
         return NormalizedResponse(
-            content=msg.content,
+            content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning=reasoning,

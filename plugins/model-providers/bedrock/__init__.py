@@ -11,6 +11,7 @@ class BedrockProfile(ProviderProfile):
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
         """Bedrock model listing requires AWS SDK, not a REST call."""
@@ -24,6 +25,7 @@ bedrock = BedrockProfile(
     env_vars=(),  # AWS SDK credentials — not env vars
     base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
     auth_type="aws_sdk",
+    supports_health_check=False,
 )
 
 register_provider(bedrock)

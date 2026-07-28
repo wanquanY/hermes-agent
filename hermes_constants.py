@@ -5,10 +5,41 @@ without risk of circular imports.
 """
 
 import os
+import sysconfig
+import time
+import uuid
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 
 _profile_fallback_warned: bool = False
+_UNSET = object()
+_HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
+    "_HERMES_HOME_OVERRIDE", default=_UNSET
+)
+
+
+def set_hermes_home_override(path: str | Path | None) -> Token:
+    """Set a context-local Hermes home override and return its reset token.
+
+    This is for in-process, per-task scoping.  It deliberately does not mutate
+    ``os.environ`` because that is shared by every thread in the process.
+    """
+    value: str | object = _UNSET if path is None else str(path)
+    return _HERMES_HOME_OVERRIDE.set(value)
+
+
+def reset_hermes_home_override(token: Token) -> None:
+    """Restore the previous context-local Hermes home override."""
+    _HERMES_HOME_OVERRIDE.reset(token)
+
+
+def get_hermes_home_override() -> str | None:
+    """Return the active context-local Hermes home override, if any."""
+    override = _HERMES_HOME_OVERRIDE.get()
+    if override is _UNSET or not override:
+        return None
+    return str(override)
 
 
 def get_hermes_home() -> Path:
@@ -27,6 +58,10 @@ def get_hermes_home() -> Path:
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
+    override = get_hermes_home_override()
+    if override:
+        return Path(override)
+
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
@@ -107,6 +142,23 @@ def get_default_hermes_root() -> Path:
     return env_path
 
 
+def _get_packaged_data_dir(name: str) -> Path | None:
+    """Return an installed data-files directory if one exists.
+
+    Used to discover bundled skills/optional-skills when Hermes is installed
+    from a wheel that emitted them via setuptools data_files.
+    """
+    candidates = []
+    for scheme in ("data", "purelib", "platlib"):
+        raw = sysconfig.get_path(scheme)
+        if raw:
+            candidates.append(Path(raw) / name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def get_optional_skills_dir(default: Path | None = None) -> Path:
     """Return the optional-skills directory, honoring package-manager wrappers.
 
@@ -116,9 +168,50 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     override = os.getenv("HERMES_OPTIONAL_SKILLS", "").strip()
     if override:
         return Path(override)
+    packaged = _get_packaged_data_dir("optional-skills")
+    if packaged is not None:
+        return packaged
     if default is not None:
         return default
     return get_hermes_home() / "optional-skills"
+
+
+def get_optional_mcps_dir(default: Path | None = None) -> Path:
+    """Return the shipped MCP catalog directory.
+
+    Resolution mirrors :func:`get_optional_skills_dir` so source checkouts,
+    wheels, Nix/package-manager wrappers, and explicit deployments all see the
+    same catalog instead of silently falling back to an empty directory.
+    """
+    override = os.getenv("HERMES_OPTIONAL_MCPS", "").strip()
+    if override:
+        return Path(override)
+    packaged = _get_packaged_data_dir("optional-mcps")
+    if packaged is not None:
+        return packaged
+    if default is not None:
+        return default
+    return get_hermes_home() / "optional-mcps"
+
+
+def get_bundled_skills_dir(default: Path | None = None) -> Path:
+    """Return the bundled skills directory for source and packaged installs.
+
+    Resolution order:
+        1. ``HERMES_BUNDLED_SKILLS`` env var (Nix wrapper / explicit override)
+        2. Wheel-installed ``<sysconfig data>/skills`` (pip install path)
+        3. Caller-supplied ``default`` (typically the source-checkout path)
+        4. ``<HERMES_HOME>/skills`` last-resort
+    """
+    override = os.getenv("HERMES_BUNDLED_SKILLS", "").strip()
+    if override:
+        return Path(override)
+    packaged = _get_packaged_data_dir("skills")
+    if packaged is not None:
+        return packaged
+    if default is not None:
+        return default
+    return get_hermes_home() / "skills"
 
 
 def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
@@ -162,6 +255,26 @@ def display_hermes_home() -> str:
         return str(home)
 
 
+def secure_parent_dir(path: Path) -> None:
+    """Chmod ``0o700`` on the parent directory of *path*, but only if safe.
+
+    Refuses to chmod ``/`` or any top-level directory (resolved parent with
+    fewer than 3 parts, i.e. ``/`` or any direct child like ``/usr``) to
+    prevent catastrophic host bricking when ``HERMES_HOME`` or other path
+    env vars resolve to an unexpected location.
+
+    See https://github.com/NousResearch/hermes-agent/issues/25821.
+    """
+    parent = path.parent.resolve()
+    # Refuse root and its direct children (/usr, /home, /var, /tmp, …).
+    if parent == Path("/") or len(parent.parts) < 3:
+        return
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+
+
 def get_subprocess_home() -> str | None:
     """Return a per-profile HOME directory for subprocesses, or None.
 
@@ -179,7 +292,7 @@ def get_subprocess_home() -> str | None:
     Activation is directory-based: if the ``home/`` subdirectory doesn't
     exist, returns ``None`` and behavior is unchanged.
     """
-    hermes_home = os.getenv("HERMES_HOME")
+    hermes_home = get_hermes_home_override() or os.getenv("HERMES_HOME")
     if not hermes_home:
         return None
     profile_home = os.path.join(hermes_home, "home")
@@ -188,25 +301,145 @@ def get_subprocess_home() -> str | None:
     return None
 
 
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 
 
-def parse_reasoning_effort(effort: str) -> dict | None:
+def parse_reasoning_effort(effort) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
+    Valid levels: "none", "enabled", "minimal", "low", "medium", "high",
+    "xhigh", "max", "ultra".
     Returns None when the input is empty or unrecognized (caller uses default).
     Returns {"enabled": False} for "none".
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
     """
-    if not effort or not effort.strip():
+    if effort is False:
+        return {"enabled": False}
+    if effort is None or effort is True:
+        return None
+    effort = str(effort)
+    if not effort.strip():
         return None
     effort = effort.strip().lower()
     if effort == "none":
         return {"enabled": False}
+    if effort == "enabled":
+        return {"enabled": True}
     if effort in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": effort}
     return None
+
+
+def _canonical_model_variants(model: str) -> list[str]:
+    """Generate a bounded set of spelling variants for model overrides."""
+    import re
+
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            variants.append(value)
+
+    def add_derivatives(value: str) -> None:
+        all_dashed = value.replace(".", "-")
+        all_dotted = value.replace("-", ".")
+        for candidate in (
+            value,
+            all_dashed,
+            all_dotted,
+            re.sub(r"(\d)-(\d)", r"\1.\2", value),
+            re.sub(r"(\d)\.(\d)", r"\1-\2", value),
+            re.sub(r"(\d)-(\d)", r"\1.\2", all_dashed),
+            re.sub(r"(\d)\.(\d)", r"\1-\2", all_dotted),
+        ):
+            add(candidate)
+
+    add_derivatives(model)
+    parts = model.split("/")
+    if len(parts) >= 2:
+        add_derivatives(parts[-1])
+    if len(parts) >= 3:
+        add_derivatives("/".join(parts[1:]))
+
+    providers = (
+        "anthropic",
+        "openai",
+        "google",
+        "openrouter",
+        "groq",
+        "mistral",
+        "xai",
+        "cohere",
+        "perplexity",
+        "together",
+        "fireworks",
+        "deepseek",
+    )
+    for variant in tuple(value for value in variants if "/" not in value):
+        for provider in providers:
+            add(f"{provider}/{variant}")
+    aggregators = ("openrouter", "opencode", "fireworks", "groq", "together")
+    for variant in tuple(value for value in variants if value.count("/") == 1):
+        for aggregator in aggregators:
+            add(f"{aggregator}/{variant}")
+    return variants
+
+
+def resolve_per_model_reasoning_effort(
+    model: str,
+    overrides: dict | None,
+) -> dict | None:
+    """Resolve a spelling-tolerant per-model reasoning override."""
+    if not model or not isinstance(overrides, dict) or not overrides:
+        return None
+    for variant in _canonical_model_variants(model):
+        if variant in overrides:
+            parsed = parse_reasoning_effort(overrides[variant])
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
+    """Resolve per-model override first, then the raw global setting."""
+    config = cfg if isinstance(cfg, dict) else {}
+    agent_config = config.get("agent")
+    if not isinstance(agent_config, dict):
+        agent_config = {}
+    if not model:
+        model_config = config.get("model")
+        if isinstance(model_config, str):
+            model = model_config.strip()
+        elif isinstance(model_config, dict):
+            model = str(
+                model_config.get("default") or model_config.get("model") or ""
+            ).strip()
+    per_model = resolve_per_model_reasoning_effort(
+        model,
+        agent_config.get("reasoning_overrides"),
+    )
+    if per_model is not None:
+        return per_model
+    effort = agent_config.get("reasoning_effort", "")
+    result = parse_reasoning_effort(effort)
+    if effort and str(effort).strip() and result is None:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Unknown reasoning_effort '%s', using provider default",
+            effort,
+        )
+    return result
 
 
 def is_termux() -> bool:
@@ -288,6 +521,34 @@ def get_skills_dir() -> Path:
     return get_hermes_home() / "skills"
 
 
+def ensure_directory_path(path: str | Path) -> Path:
+    """Ensure *path* and every parent component are directories.
+
+    ``Path.mkdir(parents=True, exist_ok=True)`` still raises ``FileExistsError``
+    when any path component already exists as a non-directory. Hermes profile
+    homes are long-lived user data, so recover by moving the invalid filesystem
+    node aside instead of deleting it.
+    """
+    target = Path(path)
+    current = Path(target.anchor) if target.is_absolute() else Path()
+    parts = target.parts[1:] if target.is_absolute() else target.parts
+    for part in parts:
+        current = current / part
+        try:
+            current.mkdir()
+            continue
+        except FileExistsError:
+            pass
+        if current.is_dir():
+            continue
+        backup = current.with_name(
+            f"{current.name}.invalid-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        )
+        current.rename(backup)
+        current.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 
 def get_env_path() -> Path:
     """Return the path to the ``.env`` file under HERMES_HOME."""
@@ -337,6 +598,15 @@ def apply_ipv4_preference(force: bool = False) -> None:
 
     _ipv4_getaddrinfo._hermes_ipv4_patched = True  # type: ignore[attr-defined]
     socket.getaddrinfo = _ipv4_getaddrinfo  # type: ignore[assignment]
+
+
+# ─── Streaming Response Constants ────────────────────────────────────────────
+
+# Response ID for partial stream stubs used during error recovery
+PARTIAL_STREAM_STUB_ID = "partial-stream-stub"
+
+FINISH_REASON_LENGTH = "length"
+FINISH_REASON_STREAM_ERROR = "stream_error"
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"

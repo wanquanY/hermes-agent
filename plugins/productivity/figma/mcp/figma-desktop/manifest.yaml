@@ -1,0 +1,44 @@
+# Curated local Figma MCP integration. The remote Figma MCP currently accepts
+# only allow-listed clients; Hermes therefore ships the documented desktop
+# endpoint instead of advertising remote OAuth that Figma may reject.
+manifest_version: 1
+
+name: figma-desktop
+description: Read Figma design context from the local Figma Desktop MCP server.
+source: https://developers.figma.com/docs/figma-mcp-server/desktop-server-installation/
+
+transport:
+  type: http
+  url: http://127.0.0.1:3845/mcp
+
+auth:
+  type: none
+
+# Start read-first. Mutating Code Connect operations remain available through
+# `hermes mcp configure figma-desktop`, but are not silently granted during a
+# non-interactive install or a failed discovery probe.
+tools:
+  default_enabled:
+    - get_design_context
+    - get_metadata
+    - get_screenshot
+    - get_variable_defs
+    - get_code_connect_map
+    - get_code_connect_suggestions
+    - get_figjam
+
+post_install: |
+  Figma Desktop must be running on the SAME machine as Hermes:
+
+    1. Open or update the Figma Desktop app and open a Design or FigJam file.
+    2. Switch to Dev Mode and enable the MCP server in the right sidebar.
+    3. Confirm Figma reports http://127.0.0.1:3845/mcp.
+    4. Restart the Hermes session, then paste a Figma file or selection link.
+
+  This entry enables a conservative read-first tool subset. To enable canvas
+  or Code Connect mutations after reviewing the discovered surface, run:
+    hermes mcp configure figma-desktop
+
+  The remote endpoint https://mcp.figma.com/mcp is intentionally not installed
+  by this entry: Figma currently restricts it to clients in its MCP Catalog and
+  Hermes is not yet listed. You can add it manually once Figma grants access.

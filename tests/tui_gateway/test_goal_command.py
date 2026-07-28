@@ -25,12 +25,12 @@ def hermes_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    # Bust the goal-module DB cache so it re-resolves HERMES_HOME.
+    # Bust the goal-module store cache so it re-resolves HERMES_HOME.
     from hermes_cli import goals
 
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
     yield home
-    goals._DB_CACHE.clear()
+    goals._STORE_CACHE.clear()
 
 
 @pytest.fixture()
@@ -43,12 +43,12 @@ def server(hermes_home):
         },
     ):
         mod = importlib.import_module("tui_gateway.server")
+        if "goal.set" not in mod._methods or "command.dispatch" not in mod._methods:
+            mod._register_extracted_method_modules()
         yield mod
         mod._sessions.clear()
         mod._pending.clear()
         mod._answers.clear()
-        mod._methods.clear()
-        importlib.reload(mod)
 
 
 @pytest.fixture()
@@ -107,13 +107,45 @@ def test_goal_set_returns_send_with_notice(server, session):
     assert "Goal set" in result["notice"]
     assert "20-turn budget" in result["notice"]
 
-    # Persisted in SessionDB
+    # Persisted in shared session state.
     from hermes_cli.goals import GoalManager
 
     mgr = GoalManager(session_key)
     assert mgr.state is not None
     assert mgr.state.goal == "build a rocket"
     assert mgr.state.status == "active"
+
+
+def test_goal_set_parses_completion_contract(server, session):
+    sid, session_key, _ = session
+    r = _call(
+        server,
+        "command.dispatch",
+        name="goal",
+        arg="Ship it\nverify: pytest passes\nconstraints: preserve the API",
+        session_id=sid,
+    )
+    assert "Completion contract" in r["result"]["notice"]
+
+    from hermes_cli.goals import GoalManager
+
+    state = GoalManager(session_key).state
+    assert state.goal == "Ship it"
+    assert state.contract.verification == "pytest passes"
+    assert state.contract.constraints == "preserve the API"
+
+
+def test_goal_show_returns_contract(server, session):
+    sid, _, _ = session
+    _call(
+        server,
+        "command.dispatch",
+        name="goal",
+        arg="Ship it\nverify: pytest passes",
+        session_id=sid,
+    )
+    r = _call(server, "command.dispatch", name="goal", arg="show", session_id=sid)
+    assert "Verification: pytest passes" in r["result"]["output"]
 
 
 def test_goal_pause_after_set(server, session):
@@ -174,6 +206,62 @@ def test_goal_requires_session(server):
     r = _call(server, "command.dispatch", name="goal", arg="nope", session_id="unknown")
     assert "error" in r
     assert r["error"]["code"] == 4001
+
+
+# ── first-class goal RPC used by desktop clients ──────────────────────
+
+
+def test_goal_set_rpc_resolves_stable_conversation_identity(server, session):
+    _sid, session_key, _ = session
+    r = _call(
+        server,
+        "goal.set",
+        conversation_session_id=session_key,
+        goal="Refactor auth\nverify: pytest tests/auth passes",
+    )
+    assert r["result"]["active"] is True
+    assert r["result"]["status"] == "active"
+    assert r["result"]["goal"] == "Refactor auth"
+    assert r["result"]["kickoff_message"] == "Refactor auth"
+    assert r["result"]["contract"]["verification"] == "pytest tests/auth passes"
+
+    status = _call(server, "goal.get", conversation_session_id=session_key)
+    assert status["result"]["active"] is True
+    assert status["result"]["goal"] == "Refactor auth"
+
+
+def test_goal_set_rpc_rejects_running_session(server, session):
+    _sid, session_key, value = session
+    value["running"] = True
+    r = _call(server, "goal.set", session_id=session_key, goal="race the active run")
+    assert r["error"]["code"] == 4009
+
+
+def test_goal_control_rpcs_share_one_persisted_state(server, session):
+    _sid, session_key, _ = session
+    _call(server, "goal.set", session_id=session_key, goal="Ship it")
+    assert _call(server, "goal.pause", session_id=session_key)["result"]["status"] == "paused"
+    assert _call(server, "goal.resume", session_id=session_key)["result"]["status"] == "active"
+    cleared = _call(server, "goal.clear", session_id=session_key)
+    assert cleared["result"]["active"] is False
+    assert cleared["result"]["status"] == "none"
+
+
+def test_goal_resume_rpc_honors_string_false_reset_budget(server, session):
+    _sid, session_key, _ = session
+    _call(server, "goal.set", session_id=session_key, goal="Ship it")
+    from hermes_cli.goals import GoalManager
+
+    manager = GoalManager(session_id=session_key)
+    manager.state.turns_used = 4
+    manager.pause()
+    resumed = _call(
+        server,
+        "goal.resume",
+        session_id=session_key,
+        reset_budget="false",
+    )
+    assert resumed["result"]["turns_used"] == 4
 
 
 # ── slash.exec /goal routing ──────────────────────────────────────────

@@ -71,6 +71,12 @@ USE_VENV=true
 RUN_SETUP=true
 SKIP_BROWSER=false
 BRANCH="main"
+ENSURE_DEPS=""
+POSTINSTALL_MODE=false
+MANIFEST_MODE=false
+STAGE_NAME=""
+JSON_OUTPUT=false
+NON_INTERACTIVE=false
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -109,6 +115,31 @@ while [[ $# -gt 0 ]]; do
             HERMES_HOME="$2"
             shift 2
             ;;
+        --ensure)
+            ENSURE_DEPS="$2"
+            shift 2
+            ;;
+        --postinstall)
+            POSTINSTALL_MODE=true
+            shift
+            ;;
+        --manifest|-Manifest)
+            MANIFEST_MODE=true
+            shift
+            ;;
+        --stage|-Stage)
+            STAGE_NAME="$2"
+            shift 2
+            ;;
+        --json|-Json)
+            JSON_OUTPUT=true
+            shift
+            ;;
+        --non-interactive|-NonInteractive)
+            NON_INTERACTIVE=true
+            IS_INTERACTIVE=false
+            shift
+            ;;
         -h|--help)
             echo "Hermes Agent Installer"
             echo ""
@@ -133,6 +164,16 @@ while [[ $# -gt 0 ]]; do
             echo "  (default /root/.hermes).  This keeps Docker bind-mounted volumes"
             echo "  small and ensures the command is on PATH for all shells."
             echo "  Existing installs at \$HERMES_HOME/hermes-agent are preserved in-place."
+            echo "  --ensure DEPS  Install only specified deps (comma-separated)"
+            echo "                   Supported: node, browser, ripgrep, ffmpeg"
+            echo "                   Does NOT clone repo or create venv"
+            echo "  --postinstall  Run post-install setup only (for pip users)"
+            echo "                   Installs optional deps + runs hermes setup"
+            echo "                   Does NOT clone repo or create venv"
+            echo "  --manifest     Print the bootstrap stage manifest as JSON"
+            echo "  --stage NAME   Run one bootstrap stage"
+            echo "  --json         Emit a JSON result for --stage"
+            echo "  --non-interactive  Skip stages that require user input"
             exit 0
             ;;
         *)
@@ -171,6 +212,37 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}✗${NC} $1"
+}
+
+json_escape() {
+    printf '%s' "$1" | tr '\n' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+emit_manifest() {
+    printf '%s\n' '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hermes Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hermes command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'
+}
+
+stage_needs_user_input() {
+    case "$1" in
+        setup|gateway) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+emit_stage_json() {
+    local stage="$1"
+    local ok="$2"
+    local skipped="${3:-false}"
+    local reason="${4:-}"
+    local escaped_reason
+    escaped_reason="$(json_escape "$reason")"
+    if [ -n "$escaped_reason" ]; then
+        printf '{"ok":%s,"stage":"%s","skipped":%s,"reason":"%s"}\n' \
+            "$ok" "$stage" "$skipped" "$escaped_reason"
+    else
+        printf '{"ok":%s,"stage":"%s","skipped":%s}\n' \
+            "$ok" "$stage" "$skipped"
+    fi
 }
 
 prompt_yes_no() {
@@ -321,7 +393,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
+            log_info "  iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)"
             exit 1
             ;;
         *)
@@ -920,14 +992,38 @@ clone_repo() {
 
                 if [ "$restore_now" = "yes" ]; then
                     log_info "Restoring local changes..."
-                    if git stash apply "$autostash_ref"; then
+                    local restore_output=""
+                    local restore_ok="yes"
+                    if restore_output="$(git stash apply "$autostash_ref" 2>&1)"; then
+                        restore_ok="yes"
+                    else
+                        restore_ok="no"
+                    fi
+                    local conflicted_files=""
+                    conflicted_files="$(git diff --name-only --diff-filter=U || true)"
+                    if [ "$restore_ok" = "yes" ] && [ -z "$conflicted_files" ]; then
                         git stash drop "$autostash_ref" >/dev/null
                         log_warn "Local changes were restored on top of the updated codebase."
                         log_warn "Review git diff / git status if Hermes behaves unexpectedly."
                     else
-                        log_error "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
-                        log_info "Resolve manually with: git stash apply $autostash_ref"
-                        exit 1
+                        log_error "Update pulled new code, but restoring local changes hit conflicts."
+                        if [ -n "$restore_output" ]; then
+                            printf '%s\n' "$restore_output"
+                        fi
+                        if [ -n "$conflicted_files" ]; then
+                            printf '\nConflicted files:\n'
+                            while IFS= read -r conflicted_file; do
+                                [ -n "$conflicted_file" ] && printf '  - %s\n' "$conflicted_file"
+                            done <<EOF
+$conflicted_files
+EOF
+                        fi
+                        printf '\n'
+                        log_info "Your stashed changes are preserved -- nothing is lost."
+                        log_info "  Stash ref: $autostash_ref"
+                        git reset --hard HEAD >/dev/null 2>&1 || true
+                        log_info "Working tree reset to clean state."
+                        log_info "Restore your changes later with: git stash apply $autostash_ref"
                     fi
                 else
                     log_info "Skipped restoring local changes."
@@ -1050,11 +1146,6 @@ install_deps() {
         log_success "Main package installed"
         log_info "Termux note: matrix e2ee and local faster-whisper extras are excluded from .[termux-all] due to upstream Android wheel/toolchain blockers."
         log_info "Termux note: browser/WhatsApp tooling is not installed by default; see the Termux guide for optional follow-up steps."
-
-        if [ -d "tinker-atropos" ] && [ -f "tinker-atropos/pyproject.toml" ]; then
-            log_info "tinker-atropos submodule found — skipping install (optional, for RL training)"
-            log_info "  To install later: $PIP_PYTHON -m pip install -e \"./tinker-atropos\""
-        fi
 
         log_success "All dependencies installed"
         return 0
@@ -1242,13 +1333,6 @@ PY
     fi
 
     log_success "Main package installed"
-
-    # tinker-atropos (RL training) is optional — skip by default.
-    # To enable RL tools: git submodule update --init tinker-atropos && uv pip install -e "./tinker-atropos"
-    if [ -d "tinker-atropos" ] && [ -f "tinker-atropos/pyproject.toml" ]; then
-        log_info "tinker-atropos submodule found — skipping install (optional, for RL training)"
-        log_info "  To install: $UV_CMD pip install -e \"./tinker-atropos\""
-    fi
 
     log_success "All dependencies installed"
 }
@@ -1508,6 +1592,17 @@ find_system_browser() {
         fi
     done
 
+    if [ "$(uname)" = "Darwin" ]; then
+        for app in \
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+            "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+            if [ -x "$app" ]; then
+                echo "$app"
+                return 0
+            fi
+        done
+    fi
+
     return 1
 }
 
@@ -1530,8 +1625,13 @@ configure_browser_env_from_system_browser() {
         browser_path="$(find_system_browser 2>/dev/null || true)"
     fi
 
-    if [ -z "$browser_path" ] || [ ! -f "$env_file" ]; then
+    if [ -z "$browser_path" ]; then
         return 0
+    fi
+
+    mkdir -p "$HERMES_HOME"
+    if [ ! -f "$env_file" ]; then
+        touch "$env_file"
     fi
 
     if grep -q '^AGENT_BROWSER_EXECUTABLE_PATH=' "$env_file" 2>/dev/null; then
@@ -1884,6 +1984,249 @@ print_success() {
     fi
 }
 
+ensure_browser() {
+    if ! command -v node >/dev/null 2>&1; then
+        local node_bin="$HERMES_HOME/node/bin/node"
+        if [ -x "$node_bin" ]; then
+            export PATH="$HERMES_HOME/node/bin:$PATH"
+        else
+            log_error "Node.js not found. Run with --ensure node first."
+            return 1
+        fi
+    fi
+
+    local npm_bin
+    npm_bin="$(command -v npm 2>/dev/null || echo "$HERMES_HOME/node/bin/npm")"
+    if [ ! -x "$npm_bin" ]; then
+        log_error "npm not found"
+        return 1
+    fi
+
+    log_info "Installing agent-browser..."
+    local log_file
+    log_file="$(mktemp)"
+    if ! "$npm_bin" install -g --prefix "$HERMES_HOME/node" --silent --ignore-scripts \
+        "agent-browser@^0.26.0" \
+        "@askjo/camofox-browser@^1.5.2" \
+        >"$log_file" 2>&1; then
+        log_error "npm install failed:"
+        cat "$log_file" >&2
+        rm -f "$log_file"
+        return 1
+    fi
+    rm -f "$log_file"
+    export PATH="$HERMES_HOME/node/bin:$PATH"
+
+    local sys_browser
+    sys_browser="$(find_system_browser 2>/dev/null || true)"
+    if [ -n "$sys_browser" ]; then
+        configure_browser_env_from_system_browser "$sys_browser"
+        log_info "System browser detected -- skipping Chromium download"
+        return 0
+    fi
+
+    log_info "Installing Chromium via agent-browser install..."
+    local ab_bin="$HERMES_HOME/node/bin/agent-browser"
+    if [ -x "$ab_bin" ]; then
+        "$ab_bin" install 2>/dev/null || {
+            log_warn "Chromium install failed. Browser tools may not work without a system browser."
+
+            # OS-specific hints (detect_os sets $DISTRO)
+            case "${DISTRO:-unknown}" in
+                ubuntu|debian)
+                    log_info "Try: sudo apt-get install -y chromium-browser"
+                    ;;
+                arch)
+                    log_info "Try: sudo pacman -S chromium"
+                    ;;
+                fedora|rhel|centos)
+                    log_info "Try: sudo dnf install -y chromium"
+                    ;;
+            esac
+        }
+    else
+        log_warn "agent-browser not found at $ab_bin"
+    fi
+
+    return 0
+}
+
+ensure_mode() {
+    detect_os
+
+    IFS=',' read -ra DEPS <<< "$ENSURE_DEPS"
+    for dep in "${DEPS[@]}"; do
+        dep="$(echo "$dep" | tr -d '[:space:]')"
+        case "$dep" in
+            node)
+                check_node
+                ;;
+            browser)
+                check_node
+                if [ "$HAS_NODE" = true ]; then
+                    ensure_browser
+                fi
+                ;;
+            ripgrep)
+                if ! command -v rg &>/dev/null; then
+                    HAS_RIPGREP=false
+                    HAS_FFMPEG=true
+                    install_system_packages
+                fi
+                ;;
+            ffmpeg)
+                if ! command -v ffmpeg &>/dev/null; then
+                    HAS_FFMPEG=false
+                    HAS_RIPGREP=true
+                    install_system_packages
+                fi
+                ;;
+            *)
+                log_warn "Unknown dependency: $dep"
+                ;;
+        esac
+    done
+}
+
+postinstall_mode() {
+    print_banner
+    detect_os
+
+    log_info "Post-install mode: setting up Hermes for pip install"
+
+    check_node
+    check_network_prerequisites
+    install_system_packages
+
+    if [ "$HAS_NODE" = true ] && [ "$SKIP_BROWSER" = false ]; then
+        ensure_browser
+    fi
+
+    HERMES_CMD="$(command -v hermes 2>/dev/null || echo "")"
+    if [ -n "$HERMES_CMD" ]; then
+        log_info "Running hermes setup..."
+        "$HERMES_CMD" setup
+    else
+        log_warn "hermes command not found on PATH"
+        log_info "Try: python -m hermes_cli.main setup"
+    fi
+}
+
+require_install_dir() {
+    if [ -z "$INSTALL_DIR" ] || [ ! -d "$INSTALL_DIR" ]; then
+        log_error "Install directory not found: ${INSTALL_DIR:-<unset>}"
+        log_info "The 'repository' stage must run before this one."
+        return 1
+    fi
+    cd "$INSTALL_DIR"
+}
+
+run_stage_body() {
+    local stage="$1"
+    case "$stage" in
+        prerequisites)
+            print_banner
+            detect_os
+            resolve_install_layout
+            install_uv
+            check_python
+            check_git
+            check_node
+            check_network_prerequisites
+            install_system_packages
+            ;;
+        repository)
+            detect_os
+            resolve_install_layout
+            check_git
+            clone_repo
+            ;;
+        venv)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            install_uv
+            check_python
+            setup_venv
+            ;;
+        python-deps)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            install_uv
+            check_python
+            install_deps
+            ;;
+        node-deps)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            check_node
+            install_node_deps
+            ;;
+        path)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            setup_path
+            ;;
+        config)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            copy_config_templates
+            ;;
+        setup)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            run_setup_wizard
+            ;;
+        gateway)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            maybe_start_gateway
+            ;;
+        complete)
+            detect_os
+            resolve_install_layout
+            print_success
+            echo "git" > "$HERMES_HOME/.install_method"
+            ;;
+        *)
+            log_error "Unknown stage: $stage"
+            return 2
+            ;;
+    esac
+}
+
+run_stage_protocol() {
+    local stage="$1"
+    if [ -z "$stage" ]; then
+        log_error "--stage requires a stage name"
+        [ "$JSON_OUTPUT" = true ] && emit_stage_json "" false false "missing stage name"
+        return 2
+    fi
+    if [ "$NON_INTERACTIVE" = true ] && stage_needs_user_input "$stage"; then
+        log_info "Skipping $stage (non-interactive bootstrap)"
+        [ "$JSON_OUTPUT" = true ] && emit_stage_json "$stage" true true
+        return 0
+    fi
+    set +e
+    ( run_stage_body "$stage" )
+    local code=$?
+    set -e
+    if [ "$JSON_OUTPUT" = true ]; then
+        if [ "$code" -eq 0 ]; then
+            emit_stage_json "$stage" true false
+        else
+            emit_stage_json "$stage" false false "exit code $code"
+        fi
+    fi
+    return "$code"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -1910,6 +2253,18 @@ main() {
     maybe_start_gateway
 
     print_success
+
+    echo "git" > "$HERMES_HOME/.install_method"
 }
 
-main
+if [ "$MANIFEST_MODE" = true ]; then
+    emit_manifest
+elif [ -n "$STAGE_NAME" ]; then
+    run_stage_protocol "$STAGE_NAME"
+elif [ -n "$ENSURE_DEPS" ]; then
+    ensure_mode
+elif [ "$POSTINSTALL_MODE" = true ]; then
+    postinstall_mode
+else
+    main
+fi

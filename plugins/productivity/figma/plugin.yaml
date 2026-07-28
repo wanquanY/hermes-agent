@@ -1,0 +1,13 @@
+name: figma
+version: 1.0.0
+kind: capability
+description: "Figma design context, design-to-code guidance, and MCP connectivity."
+author: Hermes Agent
+
+skills:
+  - name: figma
+    path: skills/figma/SKILL.md
+    description: Use Figma MCP for design inspection and design-to-code.
+
+mcp_catalog:
+  - path: mcp/figma-desktop/manifest.yaml

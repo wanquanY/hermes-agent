@@ -8,6 +8,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -112,10 +113,100 @@ class TestHandleFunctionCall:
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
 
+    def test_forwards_runtime_context_to_registry_tools(self):
+        parent_agent = object()
+
+        with patch("model_tools.registry.dispatch", return_value='{"ok":true}') as mock_dispatch:
+            result = handle_function_call(
+                "test_agent_profile",
+                {"draft_id": "draft-1", "messages": ["hello"]},
+                task_id="task-1",
+                session_id="session-1",
+                parent_agent=parent_agent,
+                skip_pre_tool_call_hook=True,
+            )
+
+        assert result == '{"ok":true}'
+        mock_dispatch.assert_called_once_with(
+            "test_agent_profile",
+            {"draft_id": "draft-1", "messages": ["hello"]},
+            task_id="task-1",
+            session_id="session-1",
+            parent_agent=parent_agent,
+            user_task=None,
+        )
+
 
 # =========================================================================
 # Agent loop tools
 # =========================================================================
+
+def test_default_tool_definitions_exclude_internal_dovie_tools():
+    names = {tool["function"]["name"] for tool in get_tool_definitions(quiet_mode=True)}
+
+    assert "design_agent_profile" not in names
+    assert "test_agent_profile" not in names
+
+
+def test_explicit_dovie_toolset_exposes_design_tools():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_toolsets=["dovie"], quiet_mode=True)
+    }
+
+    assert {
+        "create_agent_profile_revision_draft",
+        "design_agent_profile",
+        "get_agent_profile",
+        "get_agent_profile_draft",
+        "install_skill_to_agent_profile_draft",
+        "list_agent_profile_drafts",
+        "list_agent_profiles",
+        "prepare_agent_profile_draft_runtime",
+        "resolve_agent_profile_draft",
+        "test_agent_profile",
+    } <= names
+
+
+def test_default_tool_definitions_expose_dovie_automation_tools_without_turn_context():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(quiet_mode=True)
+    }
+
+    assert "cronjob" not in names
+    assert "dovie_automation_task_create" in names
+    assert "dovie_automation_task_update" in names
+
+
+def test_cronjob_toolset_exposes_only_dovie_automation_tools():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_toolsets=["cronjob"], quiet_mode=True)
+    }
+
+    assert names == {
+        "dovie_automation_task_create",
+        "dovie_automation_task_list",
+        "dovie_automation_task_update",
+        "dovie_automation_task_remove",
+    }
+
+
+def test_native_cronjob_tool_is_not_registered_for_model_dispatch():
+    assert "cronjob" not in get_all_tool_names()
+    assert get_toolset_for_tool("cronjob") is None
+
+
+def test_exact_enabled_tools_do_not_expand_toolset_siblings():
+    names = {
+        tool["function"]["name"]
+        for tool in get_tool_definitions(enabled_tools=["read_file"], quiet_mode=True)
+    }
+
+    assert "read_file" in names
+    assert "search_files" not in names
+    assert "write_file" not in names
 
 class TestAgentLoopTools:
     def test_expected_tools_in_set(self):
@@ -278,7 +369,7 @@ class TestLegacyToolsetMap:
         expected = [
             "web_tools", "terminal_tools", "vision_tools", "moa_tools",
             "image_tools", "skills_tools", "browser_tools", "cronjob_tools",
-            "rl_tools", "file_tools", "tts_tools",
+            "file_tools", "tts_tools",
         ]
         for name in expected:
             assert name in _LEGACY_TOOLSET_MAP, f"Missing legacy toolset: {name}"

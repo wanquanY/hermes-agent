@@ -1,4 +1,10 @@
 graft skills
 graft optional-skills
+graft optional-mcps
+# Bundled plugin manifests and declarative capability assets. Python modules
+# are included by package discovery; these non-Python files need explicit
+# sdist coverage so wheels built by downstream packagers keep the same
+# Skill/MCP surface as source checkouts.
+recursive-include plugins plugin.yaml plugin.yml SKILL.md manifest.yaml manifest.yml
 global-exclude __pycache__
 global-exclude *.py[cod]

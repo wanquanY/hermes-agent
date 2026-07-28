@@ -1,9 +1,10 @@
 import pytest
+import threading
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner
-from gateway.session import SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from channels.platforms.base import MessageEvent, MessageType
+from hermes_gateway.runner import GatewayRunner
+from hermes_gateway.session import SessionSource, build_session_key
 
 
 def _make_runner() -> GatewayRunner:
@@ -77,3 +78,26 @@ async def test_native_image_buffer_not_cleared_by_other_sessions_without_images(
 
     assert runner._consume_pending_native_image_paths(build_session_key(source_a)) == ["/tmp/a.png"]
     assert runner._consume_pending_native_image_paths(build_session_key(source_b)) == []
+
+
+@pytest.mark.asyncio
+async def test_image_routing_decision_runs_off_gateway_event_loop():
+    runner = _make_runner()
+    source = _source("chat-a")
+    event_loop_thread = threading.current_thread()
+    decision_thread = None
+
+    def decide() -> str:
+        nonlocal decision_thread
+        decision_thread = threading.current_thread()
+        return "native"
+
+    runner._decide_image_input_mode = decide
+    await runner._prepare_inbound_message_text(
+        event=_image_event(source, "/tmp/a.png"),
+        source=source,
+        history=[],
+    )
+
+    assert decision_thread is not None
+    assert decision_thread is not event_loop_thread

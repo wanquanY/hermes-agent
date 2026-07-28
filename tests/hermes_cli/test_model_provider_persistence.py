@@ -71,8 +71,8 @@ class TestSaveModelChoiceAlwaysDict:
 
 
 class TestProviderPersistsAfterModelSave:
-    def test_update_config_for_provider_uses_atomic_yaml_write(self, config_home):
-        """Provider switches should delegate config writes to atomic_yaml_write."""
+    def test_update_config_for_provider_uses_atomic_config_write(self, config_home):
+        """Provider switches should use the canonical atomic config writer."""
         from hermes_cli.auth import _update_config_for_provider
 
         config_path = config_home / "config.yaml"
@@ -86,7 +86,7 @@ class TestProviderPersistsAfterModelSave:
             assert kwargs["sort_keys"] is False
             raise OSError("simulated atomic write failure")
 
-        with patch("hermes_cli.auth.atomic_yaml_write", side_effect=_boom) as mock_write:
+        with patch("hermes_cli.auth.atomic_config_write", side_effect=_boom) as mock_write:
             with pytest.raises(OSError, match="simulated atomic write failure"):
                 _update_config_for_provider(
                     "nous",
@@ -393,4 +393,3 @@ class TestBaseUrlValidation:
 
         saved = get_env_value("GLM_BASE_URL") or ""
         assert saved == "", "Empty input should not save a base URL"
-

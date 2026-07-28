@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import types
+from types import SimpleNamespace
 
 from hermes_cli.config import load_config, save_config
 

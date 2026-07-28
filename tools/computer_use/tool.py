@@ -121,9 +121,12 @@ def _is_blocked_type(text: str) -> Optional[str]:
 # Per-process cached backend; lazily instantiated on first call.
 _backend_lock = threading.Lock()
 _backend: Optional[ComputerUseBackend] = None
-# Session-scoped approval state.
-_session_auto_approve = False
-_always_allow: set = set()  # action names the user unlocked for the session
+# Approval state is isolated by runtime session and by delivery rung. A
+# background approval must never unlock a visible foreground focus change in
+# this or another concurrent conversation.
+_approval_lock = threading.Lock()
+_session_auto_approve: Dict[str, bool] = {}
+_always_allow: Dict[str, set[Tuple[str, str]]] = {}
 
 
 def _get_backend() -> ComputerUseBackend:
@@ -144,7 +147,7 @@ def _get_backend() -> ComputerUseBackend:
 
 def reset_backend_for_tests() -> None:  # pragma: no cover
     """Test helper — tear down the cached backend."""
-    global _backend, _session_auto_approve, _always_allow
+    global _backend
     with _backend_lock:
         if _backend is not None:
             try:
@@ -152,8 +155,9 @@ def reset_backend_for_tests() -> None:  # pragma: no cover
             except Exception:
                 pass
         _backend = None
-    _session_auto_approve = False
-    _always_allow = set()
+    with _approval_lock:
+        _session_auto_approve.clear()
+        _always_allow.clear()
 
 
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
@@ -184,12 +188,12 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
         self.calls.append(("scroll", kw))
         return ActionResult(ok=True, action="scroll")
 
-    def type_text(self, text: str) -> ActionResult:
-        self.calls.append(("type", {"text": text}))
+    def type_text(self, text: str, **kw) -> ActionResult:
+        self.calls.append(("type", {"text": text, **kw}))
         return ActionResult(ok=True, action="type")
 
-    def key(self, keys: str) -> ActionResult:
-        self.calls.append(("key", {"keys": keys}))
+    def key(self, keys: str, **kw) -> ActionResult:
+        self.calls.append(("key", {"keys": keys, **kw}))
         return ActionResult(ok=True, action="key")
 
     def list_apps(self) -> List[Dict[str, Any]]:
@@ -214,6 +218,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     action = (args.get("action") or "").strip().lower()
     if not action:
         return json.dumps({"error": "missing `action`"})
+    session_id = str(kwargs.get("session_id") or "")
 
     # Safety: validate actions before approval prompt.
     if action == "type":
@@ -237,7 +242,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
 
     # Approval gate (destructive actions only).
     if action in _DESTRUCTIVE_ACTIONS:
-        err = _request_approval(action, args)
+        err = _request_approval(action, args, session_id)
         if err is not None:
             return err
 
@@ -251,19 +256,27 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
         })
 
     try:
-        return _dispatch(backend, action, args)
+        return _dispatch(backend, action, args, parent_agent=kwargs.get("parent_agent"))
     except Exception as e:
         logger.exception("computer_use %s failed", action)
         return json.dumps({"error": f"{action} failed: {e}"})
 
 
-def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
-    """Return None if approved, or a JSON error string if denied."""
-    global _session_auto_approve, _always_allow
-    if _session_auto_approve:
-        return None
-    if action in _always_allow:
-        return None
+def _request_approval(
+    action: str,
+    args: Dict[str, Any],
+    session_id: str = "",
+) -> Optional[str]:
+    """Return None when this session and delivery rung are approved."""
+    delivery_scope = (
+        "foreground" if args.get("delivery_mode") == "foreground" else "background"
+    )
+    scope_key = (action, delivery_scope)
+    with _approval_lock:
+        if _session_auto_approve.get(session_id):
+            return None
+        if scope_key in _always_allow.get(session_id, set()):
+            return None
     cb = _approval_callback
     if cb is None:
         # No CLI approval wired — default allow. Gateway approval is handled
@@ -278,38 +291,50 @@ def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
     if verdict == "approve_once":
         return None
     if verdict == "approve_session" or verdict == "always_approve":
-        _always_allow.add(action)
-        if verdict == "always_approve":
-            _session_auto_approve = True
+        with _approval_lock:
+            _always_allow.setdefault(session_id, set()).add(scope_key)
+            if verdict == "always_approve":
+                _session_auto_approve[session_id] = True
         return None
     return json.dumps({"error": "denied by user", "action": action})
 
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
+    foreground = (
+        " [FOREGROUND — briefly raises the window / changes focus]"
+        if args.get("delivery_mode") == "foreground"
+        else ""
+    )
     if action in {"click", "double_click", "right_click", "middle_click"}:
         if args.get("element") is not None:
-            return f"{action} element #{args['element']}"
+            return f"{action} element #{args['element']}{foreground}"
         coord = args.get("coordinate")
         if coord:
-            return f"{action} at {tuple(coord)}"
-        return action
+            return f"{action} at {tuple(coord)}{foreground}"
+        return action + foreground
     if action == "drag":
         src = args.get("from_element") or args.get("from_coordinate")
         dst = args.get("to_element") or args.get("to_coordinate")
-        return f"drag {src} → {dst}"
+        return f"drag {src} → {dst}{foreground}"
     if action == "scroll":
-        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}"
+        return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{foreground}"
     if action == "type":
         text = args.get("text", "")
-        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "")
+        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "") + foreground
     if action == "key":
-        return f"key {args.get('keys', '')!r}"
+        return f"key {args.get('keys', '')!r}{foreground}"
     if action == "focus_app":
         return f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")
-    return action
+    return action + foreground
 
 
-def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) -> Any:
+def _dispatch(
+    backend: ComputerUseBackend,
+    action: str,
+    args: Dict[str, Any],
+    *,
+    parent_agent: Any = None,
+) -> Any:
     capture_after = bool(args.get("capture_after"))
 
     if action == "capture":
@@ -317,7 +342,11 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         if mode not in {"som", "vision", "ax"}:
             return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
         cap = backend.capture(mode=mode, app=args.get("app"))
-        return _capture_response(cap)
+        return _capture_response(
+            cap,
+            max_elements=_coerce_max_elements(args.get("max_elements")),
+            parent_agent=parent_agent,
+        )
 
     if action == "wait":
         seconds = float(args.get("seconds", 1.0))
@@ -333,7 +362,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
         if not app:
             return json.dumps({"error": "focus_app requires `app`"})
         res = backend.focus_app(app, raise_window=bool(args.get("raise_window")))
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
+
+    delivery_mode = args.get("delivery_mode")
+    bring_to_front = bool(args.get("bring_to_front"))
 
     if action in {"click", "double_click", "right_click", "middle_click"}:
         button = args.get("button")
@@ -353,10 +385,18 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             element=element if element is not None else None,
             x=x, y=y, button=button or "left", click_count=click_count,
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "drag":
+        has_elements = args.get("from_element") is not None and args.get("to_element") is not None
+        has_coords = args.get("from_coordinate") and args.get("to_coordinate")
+        if not has_elements and not has_coords:
+            return json.dumps({
+                "error": "drag requires from_coordinate/to_coordinate or from_element/to_element",
+            })
         res = backend.drag(
             from_element=args.get("from_element"),
             to_element=args.get("to_element"),
@@ -364,8 +404,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "scroll":
         coord = args.get("coordinate") or (None, None)
@@ -376,23 +418,33 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             x=coord[0] if coord and coord[0] is not None else None,
             y=coord[1] if coord and coord[1] is not None else None,
             modifiers=args.get("modifiers"),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
         )
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "type":
-        res = backend.type_text(args.get("text", ""))
-        return _maybe_follow_capture(backend, res, capture_after)
+        res = backend.type_text(
+            args.get("text", ""),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
+        )
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "key":
-        res = backend.key(args.get("keys", ""))
-        return _maybe_follow_capture(backend, res, capture_after)
+        res = backend.key(
+            args.get("keys", ""),
+            delivery_mode=delivery_mode,
+            bring_to_front=bring_to_front,
+        )
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     if action == "set_value":
         value = args.get("value")
         if value is None:
             return json.dumps({"error": "set_value requires `value`"})
         res = backend.set_value(value=str(value), element=args.get("element"))
-        return _maybe_follow_capture(backend, res, capture_after)
+        return _maybe_follow_capture(backend, res, capture_after, parent_agent=parent_agent)
 
     return json.dumps({"error": f"unknown action {action!r}"})
 
@@ -405,29 +457,114 @@ def _text_response(res: ActionResult) -> str:
     payload: Dict[str, Any] = {"ok": res.ok, "action": res.action}
     if res.message:
         payload["message"] = res.message
+    for field_name in (
+        "verified",
+        "effect",
+        "escalation",
+        "path",
+        "degraded",
+        "delivery_mode",
+        "code",
+    ):
+        value = getattr(res, field_name)
+        if value is not None:
+            payload[field_name] = value
     if res.meta:
         payload["meta"] = res.meta
     return json.dumps(payload)
 
 
-def _capture_response(cap: CaptureResult) -> Any:
-    element_index = _format_elements(cap.elements)
+# Default cap for the AX `elements` array returned by capture. Dense UIs
+# (Electron apps, Obsidian, JetBrains IDEs) can publish 500+ AX nodes, which
+# can exhaust session context after a single capture. The model-facing
+# `max_elements` argument lets callers raise this when they need the full tree.
+_DEFAULT_MAX_ELEMENTS = 100
+# Hard upper bound on caller-supplied `max_elements`. Without this, a tool
+# call passing a very large integer would silently disable the safeguard and
+# reintroduce the original unbounded behavior.
+_MAX_ALLOWED_MAX_ELEMENTS = 1000
+
+
+def _coerce_max_elements(value: Any) -> int:
+    """Validate the caller-supplied ``max_elements``.
+
+    Falls back to :data:`_DEFAULT_MAX_ELEMENTS` for missing / non-integer /
+    sub-1 inputs so the cap can never be silently disabled by a malformed
+    tool-call argument. Clamps oversized values to
+    :data:`_MAX_ALLOWED_MAX_ELEMENTS` so a caller cannot bypass the
+    safeguard by passing a very large integer.
+    """
+    if value is None:
+        return _DEFAULT_MAX_ELEMENTS
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_ELEMENTS
+    if n < 1:
+        return _DEFAULT_MAX_ELEMENTS
+    if n > _MAX_ALLOWED_MAX_ELEMENTS:
+        return _MAX_ALLOWED_MAX_ELEMENTS
+    return n
+
+
+def _capture_response(
+    cap: CaptureResult,
+    max_elements: int = _DEFAULT_MAX_ELEMENTS,
+    *,
+    parent_agent: Any = None,
+) -> Any:
+    total_elements = len(cap.elements)
+    visible_elements = cap.elements[:max_elements]
+    truncated_elements = max(0, total_elements - len(visible_elements))
+
+    # Index only what's actually surfaced in the response — otherwise the
+    # human-readable summary references element indices the model cannot
+    # find in the JSON `elements` array (e.g. max_elements=10 vs the default
+    # 40-line index window).
+    element_index = _format_elements(visible_elements)
     summary_lines = [
         f"capture mode={cap.mode} {cap.width}x{cap.height}"
         + (f" app={cap.app}" if cap.app else "")
         + (f" window={cap.window_title!r}" if cap.window_title else ""),
-        f"{len(cap.elements)} interactable element(s):",
+        f"{total_elements} interactable element(s):",
     ]
+    if cap.window_bounds:
+        summary_lines.append(f"target window bounds={cap.window_bounds}")
+    for warning in cap.warnings:
+        summary_lines.append(f"warning: {warning}")
     if element_index:
         summary_lines.extend(element_index)
+    # Multimodal and AX paths both reference `summary`; build it once up-front
+    # so the aux-vision routing branch (which fires before either path is
+    # selected) has a valid value to hand to _route_capture_through_aux_vision.
+    # The AX path appends the "truncated to N of M" note to summary_lines
+    # below and rebuilds; the multimodal path keeps this version untouched.
     summary = "\n".join(summary_lines)
 
     if cap.png_b64 and cap.mode != "ax":
+        # Decide whether to hand the screenshot to the auxiliary.vision
+        # pipeline (text-only result) or keep the multimodal envelope (main
+        # model handles vision natively). Issue #24015: previously the
+        # multimodal envelope was returned unconditionally, so non-vision
+        # main models tripped HTTP 404 / 400 at the provider boundary even
+        # when auxiliary.vision was explicitly configured to handle this.
+        if _should_route_through_aux_vision(parent_agent=parent_agent):
+            routed = _route_capture_through_aux_vision(cap, summary)
+            if routed is not None:
+                return routed
+            # Aux routing was requested but failed (no vision client, aux
+            # call raised, etc.). Fall through to the multimodal envelope —
+            # better to surface a tool-result error from the main model
+            # than to silently drop the screenshot entirely.
+
         # Detect actual image format from base64 magic bytes so the MIME type
         # matches what the data contains (cua-driver may return JPEG or PNG).
         # JPEG: base64 starts with /9j/   PNG: starts with iVBOR
         _b64_prefix = cap.png_b64[:8]
         _mime = "image/jpeg" if _b64_prefix.startswith("/9j/") else "image/png"
+        # The multimodal response carries the screenshot, not the AX
+        # elements array, so a "response truncated to N of M elements"
+        # note would be inaccurate — skip it on this branch.
         return {
             "_multimodal": True,
             "content": [
@@ -437,9 +574,176 @@ def _capture_response(cap: CaptureResult) -> Any:
             ],
             "text_summary": summary,
             "meta": {"mode": cap.mode, "width": cap.width, "height": cap.height,
-                     "elements": len(cap.elements), "png_bytes": cap.png_bytes_len},
+                     "elements": total_elements, "png_bytes": cap.png_bytes_len,
+                     "pid": cap.pid, "window_id": cap.window_id,
+                     "window_bounds": list(cap.window_bounds) if cap.window_bounds else None,
+                     "capture_bounds": list(cap.capture_bounds) if cap.capture_bounds else None,
+                     "warnings": cap.warnings},
         }
-    # AX-only (or image missing): text path.
+    # AX-only (or image-missing fallback): text path actually carries the
+    # `elements` array, so the truncation note applies here.
+    if truncated_elements:
+        summary_lines.append(
+            f"  (response truncated to {len(visible_elements)} of {total_elements} elements; "
+            f"raise max_elements or pass app= to narrow)"
+        )
+    summary = "\n".join(summary_lines)
+    payload: Dict[str, Any] = {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "app": cap.app,
+        "window_title": cap.window_title,
+        "elements": [_element_to_dict(e) for e in visible_elements],
+        "total_elements": total_elements,
+        "summary": summary,
+        "pid": cap.pid,
+        "window_id": cap.window_id,
+        "window_bounds": list(cap.window_bounds) if cap.window_bounds else None,
+        "capture_bounds": list(cap.capture_bounds) if cap.capture_bounds else None,
+        "warnings": cap.warnings,
+    }
+    if truncated_elements:
+        payload["truncated_elements"] = truncated_elements
+    return json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# auxiliary.vision routing for captured screenshots (#24015)
+# ---------------------------------------------------------------------------
+
+def _model_descriptor_supports_vision(parent_agent: Any = None) -> Optional[bool]:
+    descriptor = getattr(parent_agent, "model_descriptor", None)
+    if isinstance(descriptor, dict) and isinstance(descriptor.get("vision_enabled"), bool):
+        return bool(descriptor.get("vision_enabled"))
+    return None
+
+
+def _should_route_through_aux_vision(*, parent_agent: Any = None) -> bool:
+    """Return True when ``_capture_response`` should hand the PNG to aux vision.
+
+    Reads the active main provider/model and the loaded config and asks the
+    routing helper. Any failure (config import, runtime override missing,
+    etc.) returns False so the existing multimodal envelope continues to be
+    returned — fail open on the routing decision so a broken config can
+    never silently drop the screenshot for vision-capable main models.
+    """
+    try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+        from hermes_cli.config import load_config
+        from tools.computer_use.vision_routing import (
+            should_route_capture_to_aux_vision,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing import failed: %s", exc)
+        return False
+    try:
+        provider = _read_main_provider()
+        model = _read_main_model()
+        cfg = load_config()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing config read failed: %s", exc)
+        return False
+    try:
+        return bool(
+            should_route_capture_to_aux_vision(
+                provider,
+                model,
+                cfg,
+                supports_vision_override=_model_descriptor_supports_vision(parent_agent),
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision routing decision failed: %s", exc)
+        return False
+
+
+def _route_capture_through_aux_vision(
+    cap: CaptureResult,
+    summary: str,
+) -> Optional[str]:
+    """Pre-analyse the captured PNG via ``vision_analyze`` and return a text result.
+
+    The captured base64 PNG is materialised to ``$HERMES_HOME/cache/vision/``
+    and handed to ``vision_analyze_tool`` with a generic describe prompt.
+    The resulting text description is merged into the existing AX/SOM
+    summary so the main model receives a single text payload that mentions
+    every interactable element AND a description of what the screenshot
+    looked like.
+
+    Returns:
+      A JSON-encoded text response on success.
+      ``None`` on failure (caller falls back to the multimodal envelope).
+    """
+    if not cap.png_b64:
+        return None
+    try:
+        import base64 as _base64
+        import os as _os
+        import uuid as _uuid
+
+        from hermes_constants import get_hermes_dir
+        from model_tools import _run_async
+        from tools.vision_tools import vision_analyze_tool
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("computer_use: aux-vision import failed: %s", exc)
+        return None
+
+    temp_image_path = None
+    try:
+        try:
+            raw = _base64.b64decode(cap.png_b64, validate=False)
+        except Exception as exc:
+            logger.debug("computer_use: failed to decode capture base64: %s", exc)
+            return None
+
+        # Pick an extension that matches the on-disk bytes so vision_analyze's
+        # MIME sniffing returns the right content-type.
+        ext = ".jpg" if cap.png_b64[:8].startswith("/9j/") else ".png"
+        cache_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temp_image_path = cache_dir / f"computer_use_{_uuid.uuid4().hex}{ext}"
+        temp_image_path.write_bytes(raw)
+
+        prompt = (
+            "Describe what is visible in this macOS application screenshot in "
+            "concise but specific terms. Mention the app name and window "
+            "title if visible, the overall layout, any labelled buttons, "
+            "menus or text fields, and any prominent text content the user "
+            "would need to know about. Do not invent details that are not "
+            "actually visible.\n\n"
+            f"AX/SOM index for cross-reference:\n{summary}"
+        )
+
+        result_json = _run_async(
+            vision_analyze_tool(str(temp_image_path), prompt)
+        )
+    except Exception as exc:
+        logger.warning(
+            "computer_use: auxiliary.vision pre-analysis failed (%s); "
+            "falling back to native multimodal envelope",
+            exc,
+        )
+        return None
+    finally:
+        if temp_image_path is not None:
+            try:
+                _os.unlink(str(temp_image_path))
+            except Exception:
+                pass
+
+    analysis_text = ""
+    if isinstance(result_json, str):
+        try:
+            parsed = json.loads(result_json)
+            if isinstance(parsed, dict):
+                analysis_text = str(parsed.get("analysis") or "").strip()
+        except (TypeError, json.JSONDecodeError):
+            analysis_text = result_json.strip()
+
+    if not analysis_text:
+        return None
+
     return json.dumps({
         "mode": cap.mode,
         "width": cap.width,
@@ -448,21 +752,31 @@ def _capture_response(cap: CaptureResult) -> Any:
         "window_title": cap.window_title,
         "elements": [_element_to_dict(e) for e in cap.elements],
         "summary": summary,
+        "vision_analysis": analysis_text,
+        "vision_analysis_routed_via": "auxiliary.vision",
     })
 
 
 def _maybe_follow_capture(
-    backend: ComputerUseBackend, res: ActionResult, do_capture: bool,
+    backend: ComputerUseBackend,
+    res: ActionResult,
+    do_capture: bool,
+    *,
+    parent_agent: Any = None,
 ) -> Any:
     if not do_capture:
         return _text_response(res)
     try:
-        cap = backend.capture(mode="som")
+        # Preserve the app context established by the preceding capture/focus_app so
+        # that capture_after=True re-captures the same app rather than the frontmost
+        # window (which may have changed if the action caused a focus shift).
+        last_app = getattr(backend, "_last_app", None)
+        cap = backend.capture(mode="som", app=last_app)
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
         return _text_response(res)
     # Combine action summary with the capture.
-    resp = _capture_response(cap)
+    resp = _capture_response(cap, parent_agent=parent_agent)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         prefix = f"[{res.action}] ok={res.ok}" + (f" — {res.message}" if res.message else "")
         resp["content"][0]["text"] = prefix + "\n\n" + resp["content"][0]["text"]
@@ -484,7 +798,8 @@ def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str
     out: List[str] = []
     for e in elements[:max_lines]:
         label = e.label.replace("\n", " ")[:60]
-        out.append(f"  #{e.index} {e.role} {label!r} @ {e.bounds}"
+        bounds = "" if e.bounds == (0, 0, 0, 0) else f" @ {e.bounds}"
+        out.append(f"  #{e.index} {e.role} {label!r}{bounds}"
                    + (f" [{e.app}]" if e.app else ""))
     if len(elements) > max_lines:
         out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
@@ -496,7 +811,7 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
         "index": e.index,
         "role": e.role,
         "label": e.label,
-        "bounds": list(e.bounds),
+        "bounds": list(e.bounds) if e.bounds != (0, 0, 0, 0) else None,
         "app": e.app,
     }
 

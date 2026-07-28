@@ -9,10 +9,10 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import cron.scheduler as cron_scheduler
-import gateway.run as gateway_run
+import hermes_gateway.runner as gateway_run
 import run_agent
-from gateway.config import Platform
-from gateway.session import SessionSource
+from hermes_gateway.config import Platform
+from hermes_gateway.session import SessionSource
 
 
 def _patch_agent_bootstrap(monkeypatch):
@@ -74,7 +74,6 @@ class _Codex401ThenSuccessAgent(run_agent.AIAgent):
         self._cleanup_task_resources = lambda task_id: None
         self._persist_session = lambda messages, history=None: None
         self._save_trajectory = lambda messages, user_message, completed: None
-        self._save_session_log = lambda messages: None
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         type(self).refresh_attempts += 1
@@ -99,7 +98,7 @@ def test_cron_run_job_codex_path_handles_internal_401_refresh(monkeypatch):
     monkeypatch.setattr(run_agent, "AIAgent", _Codex401ThenSuccessAgent)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None: {
+        lambda requested=None, **kwargs: {
             "provider": "openai-codex",
             "api_mode": "codex_responses",
             "base_url": "https://chatgpt.com/backend-api/codex",
@@ -140,6 +139,18 @@ def test_gateway_run_agent_codex_path_handles_internal_401_refresh(monkeypatch):
     )
     monkeypatch.setenv("HERMES_TOOL_PROGRESS", "false")
     monkeypatch.setenv("HERMES_MODEL", "gpt-5.3-codex")
+    monkeypatch.setattr(
+        "hermes_gateway.gateway_runtime_config.GatewayRuntimeConfigService.resolve_session_agent_runtime",
+        lambda self, **kwargs: (
+            "gpt-5.3-codex",
+            {
+                "provider": "openai-codex",
+                "api_mode": "codex_responses",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key": "codex-token",
+            },
+        ),
+    )
 
     _Codex401ThenSuccessAgent.refresh_attempts = 0
     _Codex401ThenSuccessAgent.last_init = {}
@@ -160,8 +171,7 @@ def test_gateway_run_agent_codex_path_handles_internal_401_refresh(monkeypatch):
     # Ensure model resolution returns the codex model even if xdist
     # leaked env vars cleared HERMES_MODEL.
     monkeypatch.setattr(
-        gateway_run.GatewayRunner,
-        "_resolve_turn_agent_config",
+        "hermes_gateway.gateway_runtime_config.GatewayRuntimeConfigService.resolve_turn_agent_config",
         lambda self, msg, model, runtime: {
             "model": model or "gpt-5.3-codex",
             "runtime": runtime,

@@ -2,7 +2,7 @@
 
 Arcee Trinity Large Thinking is a reasoning model that wants:
 - Fixed temperature=0.5 (vs the global default)
-- Compression threshold=0.75 (delay compression to preserve reasoning context)
+- Compression threshold=0.85 (delay compression to preserve reasoning context)
 
 The helpers must match the bare model name, including when it arrives via
 OpenRouter as ``arcee-ai/trinity-large-thinking``, but must NOT hit sibling
@@ -18,6 +18,7 @@ from agent.auxiliary_client import (
     _fixed_temperature_for_model,
     _is_arcee_trinity_thinking,
 )
+from agent.context_defaults import DEFAULT_COMPRESSION_THRESHOLD
 
 
 @pytest.mark.parametrize(
@@ -63,8 +64,8 @@ def test_fixed_temperature_sibling_arcee_models_unaffected() -> None:
 
 
 def test_compression_threshold_for_trinity_thinking() -> None:
-    assert _compression_threshold_for_model("trinity-large-thinking") == 0.75
-    assert _compression_threshold_for_model("arcee-ai/trinity-large-thinking") == 0.75
+    assert _compression_threshold_for_model("trinity-large-thinking") == DEFAULT_COMPRESSION_THRESHOLD
+    assert _compression_threshold_for_model("arcee-ai/trinity-large-thinking") == DEFAULT_COMPRESSION_THRESHOLD
 
 
 def test_compression_threshold_default_none_for_other_models() -> None:

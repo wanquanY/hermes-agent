@@ -37,6 +37,51 @@ def managed_nous_tools_enabled() -> bool:
         return False
 
 
+def nous_tool_gateway_unavailable_message(
+    capability: str = "the Nous Tool Gateway",
+    *,
+    force_fresh: bool = False,
+) -> str:
+    """Return account-aware guidance for an unavailable Nous Tool Gateway path."""
+    try:
+        from hermes_cli.nous_account import (
+            format_nous_portal_entitlement_message,
+            get_nous_portal_account_info,
+        )
+
+        account_info = get_nous_portal_account_info(force_fresh=force_fresh)
+        message = format_nous_portal_entitlement_message(
+            account_info,
+            capability=capability,
+        )
+        if message:
+            return message
+    except Exception:
+        pass
+
+    try:
+        from hermes_cli.auth import get_nous_auth_status
+
+        status = get_nous_auth_status()
+        if not status.get("logged_in"):
+            return f"{capability} is unavailable. Run `hermes model` to log in to Nous Portal."
+
+        from hermes_cli.models import check_nous_free_tier
+
+        if check_nous_free_tier():
+            return (
+                f"{capability} is unavailable for the current Nous Portal tier. "
+                "Upgrade billing access or configure a direct provider key."
+            )
+    except Exception:
+        pass
+
+    return (
+        f"{capability} is unavailable. Run `hermes model` to refresh your "
+        "Nous Portal login and billing status."
+    )
+
+
 def normalize_browser_cloud_provider(value: object | None) -> str:
     """Return a normalized browser provider key."""
     provider = str(value or _DEFAULT_BROWSER_PROVIDER).strip().lower()

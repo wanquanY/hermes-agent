@@ -44,6 +44,11 @@ class HermesOverlay:
 
 
 HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
+    "moa": HermesOverlay(
+        transport="openai_chat",
+        auth_type="virtual",
+        base_url_override="moa://local",
+    ),
     "openrouter": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
@@ -59,6 +64,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="codex_responses",
         auth_type="oauth_external",
         base_url_override="https://chatgpt.com/backend-api/codex",
+    ),
+    "xai-oauth": HermesOverlay(
+        transport="codex_responses",
+        auth_type="oauth_external",
+        base_url_override="https://api.x.ai/v1",
+        base_url_env_var="XAI_BASE_URL",
     ),
     "qwen-oauth": HermesOverlay(
         transport="openai_chat",
@@ -190,8 +201,20 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.gmi-serving.com/v1",
         base_url_env_var="GMI_BASE_URL",
     ),
+    "fireworks": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("FIREWORKS_API_KEY",),
+        base_url_override="https://api.fireworks.ai/inference/v1",
+    ),
+    "upstage": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("UPSTAGE_API_KEY",),
+        base_url_override="https://api.upstage.ai/v1",
+        base_url_env_var="UPSTAGE_BASE_URL",
+    ),
     "ollama-cloud": HermesOverlay(
         transport="openai_chat",
+        base_url_override="https://ollama.com/v1",
         base_url_env_var="OLLAMA_BASE_URL",
     ),
     # Azure Foundry: supports both OpenAI-style and Anthropic-style endpoints.
@@ -244,6 +267,10 @@ ALIASES: Dict[str, str] = {
     "x-ai": "xai",
     "x.ai": "xai",
     "grok": "xai",
+    "grok-oauth": "xai-oauth",
+    "xai-oauth": "xai-oauth",
+    "x-ai-oauth": "xai-oauth",
+    "xai-grok-oauth": "xai-oauth",
 
     # nvidia
     "nim": "nvidia",
@@ -342,6 +369,13 @@ ALIASES: Dict[str, str] = {
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
 
+    # fireworks
+    "fireworks-ai": "fireworks",
+    "fw": "fireworks",
+
+    # upstage
+    "solar": "upstage",
+
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
@@ -359,12 +393,17 @@ ALIASES: Dict[str, str] = {
 # not in the catalog.
 
 _LABEL_OVERRIDES: Dict[str, str] = {
+    "moa": "Mixture of Agents",
     "nous": "Nous Portal",
+    "xai": "xAI",
+    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
     "gmi": "GMI Cloud",
+    "fireworks": "Fireworks AI",
+    "upstage": "Upstage Solar",
     "tencent-tokenhub": "Tencent TokenHub",
     "lmstudio": "LM Studio",
     "local": "Local endpoint",
@@ -410,7 +449,6 @@ def get_provider(name: str) -> Optional[ProviderDef]:
     Returns a fully-resolved ProviderDef or None.
     """
     canonical = normalize_provider(name)
-
     # Try to get models.dev data
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
@@ -669,6 +707,39 @@ def resolve_provider_full(
         ProviderDef if found, else None.
     """
     canonical = normalize_provider(name)
+    raw = name.strip().lower()
+
+    # An explicit user provider owns its exact name and must beat legacy
+    # aliases such as bare ``openai`` routing to an aggregator.
+    if user_providers:
+        user_pdef = resolve_user_provider(raw, user_providers)
+        if user_pdef is not None:
+            return user_pdef
+
+    # Exact Hermes provider IDs win when normalization is lossy. Kimi's CN
+    # and international profiles intentionally share one models.dev catalog,
+    # but their endpoints and credential namespaces are distinct.
+    if canonical != raw:
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY as auth_registry
+
+            provider_config = auth_registry.get(raw)
+            collapsed_siblings = [
+                provider_id
+                for provider_id in auth_registry
+                if normalize_provider(provider_id) == canonical
+            ]
+            if provider_config is not None and len(collapsed_siblings) > 1:
+                return ProviderDef(
+                    id=provider_config.id,
+                    name=provider_config.name,
+                    transport="openai_chat",
+                    api_key_env_vars=tuple(provider_config.api_key_env_vars or ()),
+                    base_url=provider_config.inference_base_url or "",
+                    source="hermes-auth-registry",
+                )
+        except Exception:
+            pass
 
     # 1. Built-in (models.dev + overlays)
     pdef = get_provider(canonical)
@@ -682,7 +753,7 @@ def resolve_provider_full(
         if user_pdef is not None:
             return user_pdef
         # Try original name (in case alias didn't match)
-        user_pdef = resolve_user_provider(name.strip().lower(), user_providers)
+        user_pdef = resolve_user_provider(raw, user_providers)
         if user_pdef is not None:
             return user_pdef
 

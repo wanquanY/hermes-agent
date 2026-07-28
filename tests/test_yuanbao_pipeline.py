@@ -23,7 +23,7 @@ if _REPO_ROOT not in sys.path:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
-from gateway.platforms.yuanbao import (
+from channels.platforms.yuanbao import (
     InboundContext,
     InboundMiddleware,
     InboundPipeline,
@@ -43,7 +43,7 @@ from gateway.platforms.yuanbao import (
     InboundPipelineBuilder,
     YuanbaoAdapter,
 )
-from gateway.config import Platform, PlatformConfig
+from hermes_gateway.config import Platform, PlatformConfig
 
 
 # ============================================================

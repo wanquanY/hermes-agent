@@ -3,13 +3,136 @@
 import json
 import logging
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from hermes_agent.application.active_work_registry import ActiveWorkRegistry
+from cron.scheduler import (
+    _append_dovie_current_session_result,
+    _build_job_prompt,
+    _deliver_dovie_bound_result,
+    _deliver_result,
+    _resolve_cron_enabled_toolsets,
+    _resolve_delivery_target,
+    _resolve_origin,
+    _send_media_via_adapter,
+    run_job,
+    SILENT_MARKER,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
+
+
+def test_cron_toolsets_inherit_dovie_tui_env(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web,terminal")
+
+    assert _resolve_cron_enabled_toolsets({}, {}) == ["web", "terminal"]
+
+
+def test_cron_toolsets_tui_all_means_unrestricted(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "all")
+
+    assert (
+        _resolve_cron_enabled_toolsets(
+            {},
+            {"platform_toolsets": {"cron": ["memory"]}},
+        )
+        is None
+    )
+
+
+def test_append_dovie_current_session_result(monkeypatch):
+    calls = []
+
+    class FakeSessionStore:
+        def __init__(self):
+            self.sessions = SimpleNamespace(
+                ensure=lambda session_id, source="unknown", model=None, **kwargs: calls.append(
+                    ("ensure", session_id, source, model)
+                )
+            )
+            self.messages = SimpleNamespace(
+                append=lambda session_id, role, content, metadata=None, **kwargs: (
+                    calls.append(("append", session_id, role, content, metadata)) or 1
+                )
+            )
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr("cron.scheduler.open_cli_session_store", FakeSessionStore)
+
+    error = _append_dovie_current_session_result(
+        {
+            "id": "job-1",
+            "name": "Daily AI news",
+            "model": "gpt-test",
+            "prompt": "整理今天的 AI 资讯",
+            "_execution_session_id": "cron_job-1_20260526",
+            "dovie": {
+                "result_binding": {"mode": "current-session", "sessionId": "session-1"},
+            },
+        },
+        success=True,
+        final_response="今日 AI 资讯",
+        error=None,
+    )
+
+    assert error is None
+    assert calls[0] == ("ensure", "session-1", "tui", "gpt-test")
+    assert calls[1][0:4] == ("append", "session-1", "user", "整理今天的 AI 资讯")
+    assert calls[1][4]["source"] == "dovie_automation_trigger"
+    assert calls[2][0:4] == ("append", "session-1", "assistant", "今日 AI 资讯")
+    assert calls[2][4]["source"] == "dovie_automation"
+
+
+def test_deliver_dovie_new_session_result(monkeypatch):
+    calls = []
+
+    class FakeSessionStore:
+        def __init__(self):
+            self.sessions = SimpleNamespace(
+                ensure=lambda session_id, source="unknown", model=None, **kwargs: calls.append(
+                    ("ensure", session_id, source, model)
+                )
+            )
+            self.messages = SimpleNamespace(
+                append=lambda session_id, role, content, metadata=None, **kwargs: (
+                    calls.append(("append", session_id, role, content, metadata)) or 1
+                )
+            )
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr("cron.scheduler.open_cli_session_store", FakeSessionStore)
+
+    error = _deliver_dovie_bound_result(
+        {
+            "id": "job-1",
+            "name": "Daily AI news",
+            "model": "gpt-test",
+            "prompt": "整理今天的 AI 资讯",
+            "_execution_session_id": "cron_job-1_20260526",
+            "dovie": {
+                "result_binding": {"mode": "new-session"},
+            },
+        },
+        success=True,
+        final_response="今日 AI 资讯",
+        error=None,
+    )
+
+    assert error is None
+    assert calls[0][0] == "ensure"
+    assert calls[0][1].startswith("automation_job-1_")
+    assert calls[0][2:] == ("tui", "gpt-test")
+    assert calls[1][0:4] == ("append", calls[0][1], "user", "整理今天的 AI 资讯")
+    assert calls[1][4]["source"] == "dovie_automation_trigger"
+    assert calls[2][0:4] == ("append", calls[0][1], "assistant", "今日 AI 资讯")
+    assert calls[2][4]["result_binding_mode"] == "new-session"
 
 
 class TestResolveOrigin:
@@ -151,6 +274,53 @@ class TestResolveDeliveryTarget:
             "thread_id": "topic-7",
         }
 
+    def test_telegram_cron_thread_id_overrides_home_thread_id(self, monkeypatch):
+        """TELEGRAM_CRON_THREAD_ID wins over TELEGRAM_HOME_CHANNEL_THREAD_ID for cron (#24409)."""
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-1001234567890")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "5")
+        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
+
+        assert _resolve_delivery_target({"deliver": "telegram"}) == {
+            "platform": "telegram",
+            "chat_id": "-1001234567890",
+            "thread_id": "42",
+        }
+
+    def test_telegram_cron_thread_id_sets_thread_when_home_thread_unset(self, monkeypatch):
+        """TELEGRAM_CRON_THREAD_ID supplies a thread when no home thread is configured."""
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-1001234567890")
+        monkeypatch.delenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", raising=False)
+        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
+
+        assert _resolve_delivery_target({"deliver": "telegram"}) == {
+            "platform": "telegram",
+            "chat_id": "-1001234567890",
+            "thread_id": "42",
+        }
+
+    def test_telegram_cron_thread_id_does_not_leak_to_other_platforms(self, monkeypatch):
+        """TELEGRAM_CRON_THREAD_ID is Telegram-only; other platforms keep their own thread resolution."""
+        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "parent-42")
+        monkeypatch.setenv("DISCORD_HOME_CHANNEL_THREAD_ID", "topic-7")
+        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
+
+        assert _resolve_delivery_target({"deliver": "discord"}) == {
+            "platform": "discord",
+            "chat_id": "parent-42",
+            "thread_id": "topic-7",
+        }
+
+    def test_explicit_telegram_topic_target_overrides_cron_thread_id(self, monkeypatch):
+        """Explicit ``telegram:chat:thread`` targets bypass TELEGRAM_CRON_THREAD_ID."""
+        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "999")
+
+        job = {"deliver": "telegram:-1003724596514:17"}
+        assert _resolve_delivery_target(job) == {
+            "platform": "telegram",
+            "chat_id": "-1003724596514",
+            "thread_id": "17",
+        }
+
     def test_explicit_telegram_topic_target_with_thread_id(self):
         """deliver: 'telegram:chat_id:thread_id' parses correctly."""
         job = {
@@ -168,7 +338,7 @@ class TestResolveDeliveryTarget:
             "deliver": "telegram:-1003724596514:17",
         }
         with patch(
-            "gateway.channel_directory.resolve_channel_name",
+            "hermes_gateway.channel_directory.resolve_channel_name",
             return_value="-1003724596514",
         ):
             result = _resolve_delivery_target(job)
@@ -193,7 +363,7 @@ class TestResolveDeliveryTarget:
         """deliver: 'whatsapp:Alice (dm)' resolves to the real JID."""
         job = {"deliver": "whatsapp:Alice (dm)"}
         with patch(
-            "gateway.channel_directory.resolve_channel_name",
+            "hermes_gateway.channel_directory.resolve_channel_name",
             return_value="12345678901234@lid",
         ) as resolve_mock:
             result = _resolve_delivery_target(job)
@@ -208,7 +378,7 @@ class TestResolveDeliveryTarget:
         """deliver: 'telegram:My Group' resolves without display suffix."""
         job = {"deliver": "telegram:My Group"}
         with patch(
-            "gateway.channel_directory.resolve_channel_name",
+            "hermes_gateway.channel_directory.resolve_channel_name",
             return_value="-1009999",
         ):
             result = _resolve_delivery_target(job)
@@ -222,7 +392,7 @@ class TestResolveDeliveryTarget:
         """Resolved Telegram topic labels should split chat_id and thread_id."""
         job = {"deliver": "telegram:Coaching Chat / topic 17585 (group)"}
         with patch(
-            "gateway.channel_directory.resolve_channel_name",
+            "hermes_gateway.channel_directory.resolve_channel_name",
             return_value="-1009999:17585",
         ):
             result = _resolve_delivery_target(job)
@@ -236,7 +406,7 @@ class TestResolveDeliveryTarget:
         """deliver: 'whatsapp:12345@lid' passes through when directory has no match."""
         job = {"deliver": "whatsapp:12345@lid"}
         with patch(
-            "gateway.channel_directory.resolve_channel_name",
+            "hermes_gateway.channel_directory.resolve_channel_name",
             return_value=None,
         ):
             result = _resolve_delivery_target(job)
@@ -443,16 +613,27 @@ class TestRoutingIntents:
 class TestDeliverResultWrapping:
     """Verify that cron deliveries are wrapped with header/footer and no longer mirrored."""
 
+    def _safe_media_path(self, tmp_path, monkeypatch, name, data=b"media"):
+        root = tmp_path / "media-cache"
+        media_file = root / name
+        media_file.parent.mkdir(parents=True, exist_ok=True)
+        media_file.write_bytes(data)
+        monkeypatch.setattr(
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            (root,),
+        )
+        return media_file.resolve()
+
     def test_delivery_wraps_content_with_header_and_footer(self):
         """Delivered content should include task name header and agent-invisible note."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
             job = {
                 "id": "test-job",
@@ -472,14 +653,14 @@ class TestDeliverResultWrapping:
 
     def test_delivery_uses_job_id_when_no_name(self):
         """When a job has no name, the wrapper should fall back to job id."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
             job = {
                 "id": "abc-123",
@@ -493,14 +674,14 @@ class TestDeliverResultWrapping:
 
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
             job = {
@@ -517,16 +698,17 @@ class TestDeliverResultWrapping:
         assert "Cronjob Response" not in sent_content
         assert "The agent cannot see" not in sent_content
 
-    def test_delivery_extracts_media_tags_before_send(self):
+    def test_delivery_extracts_media_tags_before_send(self, tmp_path, monkeypatch):
         """Cron delivery should pass MEDIA attachments separately to the send helper."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "test-voice.ogg")
 
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
             job = {
@@ -534,7 +716,7 @@ class TestDeliverResultWrapping:
                 "deliver": "origin",
                 "origin": {"platform": "telegram", "chat_id": "123"},
             }
-            _deliver_result(job, "Title\nMEDIA:/tmp/test-voice.ogg")
+            _deliver_result(job, f"Title\nMEDIA:{media_path}")
 
         send_mock.assert_called_once()
         args, kwargs = send_mock.call_args
@@ -542,14 +724,15 @@ class TestDeliverResultWrapping:
         assert "MEDIA:" not in args[3]
         assert "Title" in args[3]
         # Media files should be forwarded separately
-        assert kwargs["media_files"] == [("/tmp/test-voice.ogg", False)]
+        assert kwargs["media_files"] == [(str(media_path), False)]
 
-    def test_live_adapter_sends_media_as_attachments(self):
+    def test_live_adapter_sends_media_as_attachments(self, tmp_path, monkeypatch):
         """When a live adapter is available, MEDIA files should be sent as native
         platform attachments (e.g., Discord voice, Telegram audio) rather than
         as literal 'MEDIA:/path' text."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from concurrent.futures import Future
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "cron-voice.mp3")
 
         adapter = AsyncMock()
         adapter.send.return_value = MagicMock(success=True)
@@ -576,12 +759,12 @@ class TestDeliverResultWrapping:
             "origin": {"platform": "discord", "chat_id": "9876"},
         }
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
                 job,
-                "Here is TTS\nMEDIA:/tmp/cron-voice.mp3",
+                f"Here is TTS\nMEDIA:{media_path}",
                 adapters={Platform.DISCORD: adapter},
                 loop=loop,
             )
@@ -595,12 +778,13 @@ class TestDeliverResultWrapping:
         # Audio file should be sent as a voice attachment
         adapter.send_voice.assert_called_once()
         voice_call = adapter.send_voice.call_args
-        assert voice_call[1]["audio_path"] == "/tmp/cron-voice.mp3"
+        assert voice_call[1]["audio_path"] == str(media_path)
 
-    def test_live_adapter_routes_image_to_send_image_file(self):
+    def test_live_adapter_routes_image_to_send_image_file(self, tmp_path, monkeypatch):
         """Image MEDIA files should be routed to send_image_file, not send_voice."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from concurrent.futures import Future
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "chart.png")
 
         adapter = AsyncMock()
         adapter.send.return_value = MagicMock(success=True)
@@ -626,24 +810,25 @@ class TestDeliverResultWrapping:
             "origin": {"platform": "discord", "chat_id": "1234"},
         }
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
                 job,
-                "Chart attached\nMEDIA:/tmp/chart.png",
+                f"Chart attached\nMEDIA:{media_path}",
                 adapters={Platform.DISCORD: adapter},
                 loop=loop,
             )
 
         adapter.send_image_file.assert_called_once()
-        assert adapter.send_image_file.call_args[1]["image_path"] == "/tmp/chart.png"
+        assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
         adapter.send_voice.assert_not_called()
 
-    def test_live_adapter_media_only_no_text(self):
+    def test_live_adapter_media_only_no_text(self, tmp_path, monkeypatch):
         """When content is ONLY a MEDIA tag with no text, media should still be sent."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from concurrent.futures import Future
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "voice.ogg")
 
         adapter = AsyncMock()
         adapter.send_voice.return_value = MagicMock(success=True)
@@ -668,12 +853,12 @@ class TestDeliverResultWrapping:
             "origin": {"platform": "telegram", "chat_id": "999"},
         }
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
                 job,
-                "[[audio_as_voice]]\nMEDIA:/tmp/voice.ogg",
+                f"[[audio_as_voice]]\nMEDIA:{media_path}",
                 adapters={Platform.TELEGRAM: adapter},
                 loop=loop,
             )
@@ -686,7 +871,7 @@ class TestDeliverResultWrapping:
     def test_live_adapter_sends_cleaned_text_not_raw(self):
         """The live adapter path must send cleaned text (MEDIA tags stripped),
         not the raw delivery_content with embedded MEDIA: tags."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from concurrent.futures import Future
 
         adapter = AsyncMock()
@@ -712,7 +897,7 @@ class TestDeliverResultWrapping:
             "origin": {"platform": "telegram", "chat_id": "555"},
         }
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
@@ -728,16 +913,16 @@ class TestDeliverResultWrapping:
 
     def test_no_mirror_to_session_call(self):
         """Cron deliveries should NOT mirror into the gateway session."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
-             patch("gateway.mirror.mirror_to_session") as mirror_mock:
+             patch("hermes_gateway.mirror.mirror_to_session") as mirror_mock:
             job = {
                 "id": "test-job",
                 "deliver": "origin",
@@ -749,7 +934,7 @@ class TestDeliverResultWrapping:
 
     def test_origin_delivery_preserves_thread_id(self):
         """Origin delivery should forward thread_id to the send helper."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = True
@@ -767,7 +952,7 @@ class TestDeliverResultWrapping:
             },
         }
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
             _deliver_result(job, "hello")
 
@@ -779,14 +964,14 @@ class TestDeliverResultErrorReturns:
     """Verify _deliver_result returns error strings on failure, None on success."""
 
     def test_returns_error_when_platform_disabled(self):
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
 
         pconfig = MagicMock()
         pconfig.enabled = False
         mock_cfg = MagicMock()
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg):
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg):
             job = {
                 "id": "disabled",
                 "deliver": "origin",
@@ -806,7 +991,7 @@ class TestDeliverResultErrorReturns:
 
 
 class TestRunJobSessionPersistence:
-    def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
+    def test_run_job_passes_session_store_and_cron_platform(self, tmp_path):
         job = {
             "id": "test-job",
             "name": "test",
@@ -817,7 +1002,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -843,8 +1028,8 @@ class TestRunJobSessionPersistence:
         assert kwargs["session_db"] is fake_db
         assert kwargs["platform"] == "cron"
         assert kwargs["session_id"].startswith("cron_test-job_")
-        fake_db.end_session.assert_called_once()
-        call_args = fake_db.end_session.call_args
+        fake_db.sessions.end.assert_called_once()
+        call_args = fake_db.sessions.end.call_args
         assert call_args[0][0].startswith("cron_test-job_")
         assert call_args[0][1] == "cron_complete"
         fake_db.close.assert_called_once()
@@ -864,7 +1049,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -901,7 +1086,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -929,7 +1114,7 @@ class TestRunJobSessionPersistence:
             patch("cron.scheduler._hermes_home", tmp_path),
             patch("cron.scheduler._resolve_origin", return_value=None),
             patch("dotenv.load_dotenv"),
-            patch("hermes_state.SessionDB", return_value=fake_db),
+            patch("cron.scheduler.open_cli_session_store", return_value=fake_db),
             patch(
                 "hermes_cli.runtime_provider.resolve_runtime_provider",
                 return_value={
@@ -1032,7 +1217,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1108,7 +1293,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1147,7 +1332,7 @@ class TestRunJobSessionPersistence:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1194,7 +1379,7 @@ class TestRunJobSessionPersistence:
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler.get_due_jobs", return_value=[job]), \
-             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.mark_job_run") as mock_mark, \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
@@ -1229,14 +1414,14 @@ class TestRunJobSessionPersistence:
                 pass
 
             def run_conversation(self, *args, **kwargs):
-                from gateway.session_context import get_session_env
+                from channels.session_context import get_session_env
                 seen["platform"] = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM") or None
                 seen["chat_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID") or None
                 seen["thread_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID") or None
                 return {"final_response": "ok"}
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1290,7 +1475,7 @@ class TestRunJobSessionPersistence:
                 pass
 
             def run_conversation(self, *args, **kwargs):
-                from gateway.session_context import get_session_env
+                from channels.session_context import get_session_env
 
                 seen.append(
                     {
@@ -1302,7 +1487,7 @@ class TestRunJobSessionPersistence:
                 return {"final_response": "ok"}
 
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1417,7 +1602,7 @@ class TestRunJobConfigEnvVarExpansion:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                    return_value=self._RUNTIME), \
              patch("run_agent.AIAgent") as mock_agent_cls:
@@ -1449,7 +1634,7 @@ class TestRunJobConfigEnvVarExpansion:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                    return_value=self._RUNTIME), \
              patch("run_agent.AIAgent") as mock_agent_cls:
@@ -1478,7 +1663,7 @@ class TestRunJobConfigEnvVarExpansion:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                    return_value=self._RUNTIME), \
              patch("run_agent.AIAgent") as mock_agent_cls:
@@ -1520,7 +1705,7 @@ class TestRunJobSkillBacked:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1580,7 +1765,7 @@ class TestRunJobSkillBacked:
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("tools.credential_files._resolve_hermes_home", return_value=tmp_path), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1618,7 +1803,7 @@ class TestRunJobSkillBacked:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1664,7 +1849,7 @@ class TestRunJobSkillBacked:
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._resolve_origin", return_value=None), \
              patch("dotenv.load_dotenv"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("cron.scheduler.open_cli_session_store", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  return_value={
@@ -1708,6 +1893,7 @@ class TestSilentDelivery:
 
     def test_silent_response_suppresses_delivery(self, caplog):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1720,6 +1906,7 @@ class TestSilentDelivery:
 
     def test_silent_with_note_suppresses_delivery(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT] No changes detected", None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1732,6 +1919,7 @@ class TestSilentDelivery:
         """Agent appended [SILENT] after explanation text — must still suppress."""
         response = "2 deals filtered out (like<10, reply<15).\n\n[SILENT]"
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", response, None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1742,6 +1930,7 @@ class TestSilentDelivery:
 
     def test_silent_is_case_insensitive(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", "[silent] nothing new", None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1753,6 +1942,7 @@ class TestSilentDelivery:
     def test_failed_job_always_delivers(self):
         """Failed jobs deliver regardless of [SILENT] in output."""
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(False, "# output", "", "some error")), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1763,6 +1953,7 @@ class TestSilentDelivery:
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", return_value=(True, "# full output", "[SILENT]", None)), \
              patch("cron.scheduler.save_job_output") as save_mock, \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
@@ -1772,6 +1963,27 @@ class TestSilentDelivery:
             tick(verbose=False)
         save_mock.assert_called_once_with("monitor-job", "# full output")
         deliver_mock.assert_not_called()
+
+    def test_whitespace_only_response_is_marked_failed_not_delivered(self):
+        """Whitespace-only final responses should behave like empty responses."""
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "   \n\t  ", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        deliver_mock.assert_not_called()
+        mark_mock.assert_called_once()
+        assert mark_mock.call_args.args == (
+            "monitor-job",
+            False,
+            "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
+        )
+        assert mark_mock.call_args.kwargs["delivery_error"] is None
+        assert mark_mock.call_args.kwargs["expected_owner"]
 
 
 class TestBuildJobPromptSilentHint:
@@ -2099,43 +2311,56 @@ class TestBuildJobPromptBumpUse:
 class TestSendMediaViaAdapter:
     """Unit tests for _send_media_via_adapter — routes files to typed adapter methods."""
 
+    def _safe_media_path(self, tmp_path, monkeypatch, name, data=b"media"):
+        root = tmp_path / "media-cache"
+        media_file = root / name
+        media_file.parent.mkdir(parents=True, exist_ok=True)
+        media_file.write_bytes(data)
+        monkeypatch.setattr(
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            (root,),
+        )
+        return media_file.resolve()
+
     @staticmethod
     def _run_with_loop(adapter, chat_id, media_files, metadata, job):
-        """Helper: run _send_media_via_adapter with a real running event loop."""
-        import asyncio
-        import threading
+        """Helper: run _send_media_via_adapter with immediate scheduling."""
+        from concurrent.futures import Future
 
-        loop = asyncio.new_event_loop()
-        t = threading.Thread(target=loop.run_forever, daemon=True)
-        t.start()
-        try:
-            _send_media_via_adapter(adapter, chat_id, media_files, metadata, loop, job)
-        finally:
-            loop.call_soon_threadsafe(loop.stop)
-            t.join(timeout=5)
-            loop.close()
+        def fake_run_coro(coro, _loop):
+            coro.close()
+            completed = Future()
+            completed.set_result(MagicMock(success=True))
+            return completed
 
-    def test_video_dispatched_to_send_video(self):
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            _send_media_via_adapter(adapter, chat_id, media_files, metadata, MagicMock(), job)
+
+    def test_video_dispatched_to_send_video(self, tmp_path, monkeypatch):
         adapter = MagicMock()
         adapter.send_video = AsyncMock()
-        media_files = [("/tmp/clip.mp4", False)]
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "clip.mp4")
+        media_files = [(str(media_path), False)]
         self._run_with_loop(adapter, "123", media_files, None, {"id": "j1"})
         adapter.send_video.assert_called_once()
-        assert adapter.send_video.call_args[1]["video_path"] == "/tmp/clip.mp4"
+        assert adapter.send_video.call_args[1]["video_path"] == str(media_path)
 
-    def test_unknown_ext_dispatched_to_send_document(self):
+    def test_unknown_ext_dispatched_to_send_document(self, tmp_path, monkeypatch):
         adapter = MagicMock()
         adapter.send_document = AsyncMock()
-        media_files = [("/tmp/report.pdf", False)]
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "report.pdf")
+        media_files = [(str(media_path), False)]
         self._run_with_loop(adapter, "123", media_files, None, {"id": "j2"})
         adapter.send_document.assert_called_once()
-        assert adapter.send_document.call_args[1]["file_path"] == "/tmp/report.pdf"
+        assert adapter.send_document.call_args[1]["file_path"] == str(media_path)
 
-    def test_multiple_media_files_all_delivered(self):
+    def test_multiple_media_files_all_delivered(self, tmp_path, monkeypatch):
         adapter = MagicMock()
         adapter.send_voice = AsyncMock()
         adapter.send_image_file = AsyncMock()
-        media_files = [("/tmp/voice.mp3", False), ("/tmp/photo.jpg", False)]
+        voice_path = self._safe_media_path(tmp_path, monkeypatch, "voice.mp3")
+        photo_path = self._safe_media_path(tmp_path, monkeypatch, "photo.jpg")
+        media_files = [(str(voice_path), False), (str(photo_path), False)]
         self._run_with_loop(adapter, "123", media_files, None, {"id": "j3"})
         adapter.send_voice.assert_called_once()
         adapter.send_image_file.assert_called_once()
@@ -2174,7 +2399,7 @@ class TestParallelTick:
         ]
 
         with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
-             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", side_effect=mock_run_job), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result", return_value=None), \
@@ -2190,15 +2415,36 @@ class TestParallelTick:
         assert len(ends) == 2
         assert max(starts) < min(ends), f"Jobs not concurrent: {call_order}"
 
+    def test_runtime_drain_rejects_due_job_before_claim_or_submit(self):
+        from cron.scheduler import get_running_job_ids, tick
+
+        registry = ActiveWorkRegistry()
+        registry.begin_drain()
+        job = {"id": "draining-job", "name": "draining", "deliver": "local"}
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch(
+                 "cron.scheduler.get_process_active_work_registry",
+                 return_value=registry,
+             ), \
+             patch("cron.scheduler.claim_job_for_fire") as claim, \
+             patch("cron.scheduler.run_job") as run:
+            result = tick(verbose=False)
+
+        assert result == 0
+        assert get_running_job_ids() == set()
+        claim.assert_not_called()
+        run.assert_not_called()
+
     def test_parallel_jobs_isolated_contextvars(self):
         """Each job's ContextVars must be isolated — no cross-contamination."""
-        from gateway.session_context import get_session_env
+        from channels.session_context import get_session_env
         seen = {}
 
         def mock_run_job(job):
             origin = job.get("origin", {})
             # run_job sets ContextVars — verify each job sees its own
-            from gateway.session_context import set_session_vars, clear_session_vars
+            from channels.session_context import set_session_vars, clear_session_vars
             tokens = set_session_vars(
                 platform=origin.get("platform", ""),
                 chat_id=str(origin.get("chat_id", "")),
@@ -2219,7 +2465,7 @@ class TestParallelTick:
         ]
 
         with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
-             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", side_effect=mock_run_job), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result", return_value=None), \
@@ -2248,7 +2494,7 @@ class TestParallelTick:
         ]
 
         with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
-             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.claim_job_for_fire", return_value=True), \
              patch("cron.scheduler.run_job", side_effect=mock_run_job), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result", return_value=None), \
@@ -2273,7 +2519,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         """End-to-end: live adapter hangs past the 60s budget, _deliver_result
         patches the timeout down to a fast value, confirms future.cancel() fires,
         and verifies the standalone fallback path still delivers."""
-        from gateway.config import Platform
+        from hermes_gateway.config import Platform
         from concurrent.futures import Future
 
         # Live adapter whose send() coroutine never resolves within the budget
@@ -2314,7 +2560,7 @@ class TestDeliverResultTimeoutCancelsFuture:
 
         standalone_send = AsyncMock(return_value={"success": True})
 
-        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro), \
              patch("tools.send_message_tool._send_to_platform", new=standalone_send):
@@ -2331,6 +2577,65 @@ class TestDeliverResultTimeoutCancelsFuture:
         assert result is None, f"expected successful delivery, got error: {result!r}"
         standalone_send.assert_awaited_once()
 
+    def test_live_adapter_thread_fallback_records_delivery_error(self):
+        """A cron target with an explicit topic must not be marked clean if
+        Telegram falls back to the base chat after "thread not found".
+        """
+        from hermes_gateway.config import Platform
+        from channels.platforms.base import SendResult
+        from concurrent.futures import Future
+
+        send_result = SendResult(
+            success=True,
+            message_id="42",
+            raw_response={
+                "requested_thread_id": 7072,
+                "thread_fallback": True,
+            },
+        )
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=send_result)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        job = {
+            "id": "thread-fallback-job",
+            "deliver": "telegram:226252250:7072",
+        }
+
+        completed_future = Future()
+        completed_future.set_result(send_result)
+
+        def fake_run_coro(coro, _loop):
+            coro.close()
+            return completed_future
+
+        with patch("hermes_gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            result = _deliver_result(
+                job,
+                "Hello world",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result == (
+            "configured thread_id 7072 for telegram:226252250 was not found; "
+            "delivered without thread_id"
+        )
+        adapter.send.assert_called_once_with(
+            "226252250",
+            "Hello world",
+            metadata={"thread_id": "7072"},
+        )
+
 
 class TestSendMediaTimeoutCancelsFuture:
     """Same orphan-coroutine guarantee for _send_media_via_adapter's
@@ -2338,7 +2643,7 @@ class TestSendMediaTimeoutCancelsFuture:
     in-flight coroutine must be cancelled before the next file is tried.
     """
 
-    def test_media_send_timeout_cancels_future_and_continues(self):
+    def test_media_send_timeout_cancels_future_and_continues(self, tmp_path, monkeypatch):
         """End-to-end: _send_media_via_adapter with a future whose .result()
         raises TimeoutError. Assert cancel() fires and the loop proceeds
         to the next file rather than hanging or crashing."""
@@ -2369,9 +2674,19 @@ class TestSendMediaTimeoutCancelsFuture:
             coro.close()
             return next(futures_iter)
 
+        root = tmp_path / "media-cache"
+        slow = root / "slow.png"
+        fast = root / "fast.mp4"
+        slow.parent.mkdir(parents=True)
+        slow.write_bytes(b"slow")
+        fast.write_bytes(b"fast")
+        monkeypatch.setattr(
+            "channels.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
+            (root,),
+        )
         media_files = [
-            ("/tmp/slow.png", False),   # times out
-            ("/tmp/fast.mp4", False),   # succeeds
+            (str(slow), False),   # times out
+            (str(fast), False),   # succeeds
         ]
 
         loop = MagicMock()
@@ -2385,4 +2700,4 @@ class TestSendMediaTimeoutCancelsFuture:
         assert timeout_cancel_calls == [True], "future.cancel() must fire on TimeoutError"
         # 2. Second file still got dispatched — one timeout doesn't abort the batch
         adapter.send_video.assert_called_once()
-        assert adapter.send_video.call_args[1]["video_path"] == "/tmp/fast.mp4"
+        assert adapter.send_video.call_args[1]["video_path"] == str(fast.resolve())

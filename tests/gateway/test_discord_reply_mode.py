@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig, GatewayConfig, Platform, _apply_env_overrides, load_gateway_config
+from hermes_gateway.config import PlatformConfig, GatewayConfig, Platform, _apply_env_overrides, load_gateway_config
 
 
 def _ensure_discord_mock():
@@ -53,7 +53,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
 
 @pytest.fixture()
@@ -413,18 +413,18 @@ class TestYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("DISCORD_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_REPLY_TO_MODE") == "off"
+        assert config.platforms[Platform.DISCORD].reply_to_mode == "off"
 
     def test_top_level_reply_to_mode_all(self, tmp_path, monkeypatch):
         hermes_home = self._write_config(tmp_path, "discord:\n  reply_to_mode: all\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("DISCORD_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_REPLY_TO_MODE") == "all"
+        assert config.platforms[Platform.DISCORD].reply_to_mode == "all"
 
     def test_extra_reply_to_mode_off(self, tmp_path, monkeypatch):
         """discord.extra.reply_to_mode is also honoured."""
@@ -434,9 +434,9 @@ class TestYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("DISCORD_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_REPLY_TO_MODE") == "off"
+        assert config.platforms[Platform.DISCORD].reply_to_mode == "off"
 
     def test_env_var_takes_precedence_over_yaml(self, tmp_path, monkeypatch):
         """Existing DISCORD_REPLY_TO_MODE env var is not overwritten by YAML."""
@@ -444,9 +444,9 @@ class TestYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setenv("DISCORD_REPLY_TO_MODE", "first")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_REPLY_TO_MODE") == "first"
+        assert config.platforms[Platform.DISCORD].reply_to_mode == "first"
 
     def test_top_level_takes_precedence_over_extra(self, tmp_path, monkeypatch):
         """discord.reply_to_mode wins over discord.extra.reply_to_mode."""
@@ -457,6 +457,6 @@ class TestYamlConfigLoading:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("DISCORD_REPLY_TO_MODE", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.environ.get("DISCORD_REPLY_TO_MODE") == "all"
+        assert config.platforms[Platform.DISCORD].reply_to_mode == "all"

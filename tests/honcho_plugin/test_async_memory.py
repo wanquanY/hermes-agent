@@ -160,15 +160,15 @@ class TestResolveSessionNameTitle:
         result = cfg.resolve_session_name("/some/dir", session_id=None)
         assert result == "dir"
 
-    def test_title_beats_session_id(self):
+    def test_per_session_id_beats_title(self):
         cfg = HonchoClientConfig(session_strategy="per-session")
         result = cfg.resolve_session_name("/some/dir", session_title="my-title", session_id="20260309_175514_9797dd")
-        assert result == "my-title"
+        assert result == "20260309_175514_9797dd"
 
-    def test_manual_beats_session_id(self):
+    def test_per_session_id_beats_manual_directory_map(self):
         cfg = HonchoClientConfig(session_strategy="per-session", sessions={"/some/dir": "pinned"})
         result = cfg.resolve_session_name("/some/dir", session_id="20260309_175514_9797dd")
-        assert result == "pinned"
+        assert result == "20260309_175514_9797dd"
 
     def test_global_strategy_returns_workspace(self):
         cfg = HonchoClientConfig(session_strategy="global", workspace_id="my-workspace")
@@ -459,4 +459,3 @@ class TestPrefetchCacheAccessors:
 
         assert mgr.pop_context_result("cli:test") == payload
         assert mgr.pop_context_result("cli:test") == {}
-

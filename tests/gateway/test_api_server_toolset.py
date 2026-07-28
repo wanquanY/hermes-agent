@@ -30,10 +30,13 @@ class TestHermesApiServerToolset:
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze", "image_generate",
             "execute_code", "delegate_task",
-            "todo", "memory", "session_search", "cronjob",
+            "todo", "memory", "session_search",
+            "dovie_automation_task_create", "dovie_automation_task_list",
+            "dovie_automation_task_update", "dovie_automation_task_remove",
         ]
         for tool in expected:
             assert tool in tools, f"Missing expected tool: {tool}"
+        assert "cronjob" not in tools
 
     def test_toolset_includes_browser_tools(self):
         tools = resolve_toolset("hermes-api-server")
@@ -68,17 +71,19 @@ class TestApiServerPlatformConfig:
 
 
 class TestApiServerAdapterToolset:
-    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    @patch("channels.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):
         """API server resolves toolsets from config like all other platforms."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.config import PlatformConfig
+        from channels.platforms.api_server import APIServerAdapter
+        from hermes_gateway.config import PlatformConfig
 
         adapter = APIServerAdapter(PlatformConfig())
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
-             patch("gateway.run._resolve_gateway_model") as mock_model, \
-             patch("gateway.run._load_gateway_config") as mock_config, \
+        with patch("hermes_agent.gateway.runtime_config.resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("hermes_agent.gateway.runtime_config.resolve_gateway_model") as mock_model, \
+             patch("hermes_agent.gateway.runtime_config.load_gateway_runtime_config") as mock_config, \
+             patch("hermes_agent.gateway.runtime_config.load_reasoning_config", return_value=None), \
+             patch("hermes_agent.gateway.runtime_config.load_fallback_model", return_value=None), \
              patch("run_agent.AIAgent") as mock_agent_cls:
 
             mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
@@ -98,17 +103,19 @@ class TestApiServerAdapterToolset:
             assert len(toolsets) > 0
             assert call_kwargs.kwargs.get("platform") == "api_server"
 
-    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    @patch("channels.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_respects_config_override(self):
         """User can override API server toolsets via platform_toolsets in config.yaml."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.config import PlatformConfig
+        from channels.platforms.api_server import APIServerAdapter
+        from hermes_gateway.config import PlatformConfig
 
         adapter = APIServerAdapter(PlatformConfig())
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
-             patch("gateway.run._resolve_gateway_model") as mock_model, \
-             patch("gateway.run._load_gateway_config") as mock_config, \
+        with patch("hermes_agent.gateway.runtime_config.resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("hermes_agent.gateway.runtime_config.resolve_gateway_model") as mock_model, \
+             patch("hermes_agent.gateway.runtime_config.load_gateway_runtime_config") as mock_config, \
+             patch("hermes_agent.gateway.runtime_config.load_reasoning_config", return_value=None), \
+             patch("hermes_agent.gateway.runtime_config.load_fallback_model", return_value=None), \
              patch("run_agent.AIAgent") as mock_agent_cls:
 
             mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,

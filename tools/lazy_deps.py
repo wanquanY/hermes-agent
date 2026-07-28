@@ -78,9 +78,14 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Inference providers ───────────────────────────────────────────────
     # Native Anthropic SDK — needed when provider=anthropic (not via
     # OpenRouter / aggregators which use the openai SDK).
-    "provider.anthropic": ("anthropic==0.86.0",),
+    "provider.anthropic": ("anthropic==0.87.0",),  # CVE-2026-34450, CVE-2026-34452
     # AWS Bedrock provider
     "provider.bedrock": ("boto3==1.42.89",),
+    # Microsoft Foundry — Entra ID auth (managed identity, workload identity,
+    # service principal, az login, VS Code, azd, PowerShell). Only loaded
+    # when model.auth_mode=entra_id is selected; key-based azure-foundry
+    # users never pay this import.
+    "provider.azure_identity": ("azure-identity==1.25.3",),
 
     # ─── Web search backends ───────────────────────────────────────────────
     "search.exa": ("exa-py==2.10.2",),
@@ -116,11 +121,16 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
 
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),
-    "platform.discord": ("discord.py[voice]==2.7.1",),
+    # brotlicffi gives aiohttp a working 2-arg Decompressor.process() for
+    # Discord CDN's Brotli-encoded attachments. Without it, aiohttp falls
+    # back to google's `Brotli` package (1-arg API), and any .txt/.md/.doc
+    # uploaded to the Discord gateway fails to decode at att.read() with
+    # "Can not decode content-encoding: br" — see #12511 / #15744.
+    "platform.discord": ("discord.py[voice]==2.7.1", "brotlicffi==1.2.0.1"),
     "platform.slack": (
         "slack-bolt==1.27.0",
         "slack-sdk==3.40.1",
-        "aiohttp==3.13.3",
+        "aiohttp==3.13.4",  # CVE-2026-34513/34518/34519/34520/34525
     ),
     "platform.matrix": (
         "mautrix[encryption]==0.21.0",
@@ -136,6 +146,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     ),
     "platform.feishu": (
         "lark-oapi==1.5.3",
+        "python-socks==2.8.1",
         "qrcode==7.4.2",
     ),
 
@@ -160,6 +171,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "fastapi==0.133.1",
         "uvicorn[standard]==0.41.0",
     ),
+    # Explicit, private-by-default session trace upload. This dependency is
+    # never installed or imported until the user requests an upload.
+    "tool.trace_upload": ("huggingface-hub==1.4.1",),
 }
 
 
@@ -336,7 +350,10 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         return _InstallResult(True, "", "")
 
     venv_root = Path(sys.executable).parent.parent
-    uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_root)}
+    from tools.environments.local import hermes_subprocess_env
+
+    uv_env = hermes_subprocess_env(inherit_credentials=False)
+    uv_env["VIRTUAL_ENV"] = str(venv_root)
 
     # Tier 1: uv (preferred — fast, doesn't need pip in the venv)
     uv_bin = shutil.which("uv")
@@ -345,6 +362,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             r = subprocess.run(
                 [uv_bin, "pip", "install", *specs],
                 capture_output=True, text=True, timeout=timeout, env=uv_env,
+                stdin=subprocess.DEVNULL,
             )
             if r.returncode == 0:
                 return _InstallResult(True, r.stdout or "", r.stderr or "")
@@ -358,6 +376,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         probe = subprocess.run(
             pip_cmd + ["--version"],
             capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL,
         )
         if probe.returncode != 0:
             raise FileNotFoundError("pip not in venv")
@@ -366,6 +385,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             subprocess.run(
                 [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
                 capture_output=True, text=True, timeout=120, check=True,
+                stdin=subprocess.DEVNULL,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             return _InstallResult(False, "",
@@ -375,6 +395,7 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         r = subprocess.run(
             pip_cmd + ["install", *specs],
             capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         return _InstallResult(r.returncode == 0, r.stdout or "", r.stderr or "")
     except subprocess.TimeoutExpired as e:
@@ -445,7 +466,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
-        if answer and answer not in ("y", "yes"):
+        if answer and answer not in {"y", "yes"}:
             raise FeatureUnavailable(
                 feature, missing, "user declined install at prompt"
             )

@@ -183,6 +183,24 @@ class TestValidateFilePath:
         assert "File must be under one of:" in err
         assert "'malicious.py'" in err
 
+    def test_skill_md_accepted_at_root(self):
+        # SKILL.md is the canonical skill file and must be accepted even
+        # though it does not live under an allowed subdirectory.
+        assert _validate_file_path("SKILL.md") is None
+
+    def test_skill_md_accepted_name_prefixed(self):
+        assert _validate_file_path("my-skill/SKILL.md") is None
+
+    def test_skill_md_traversal_still_rejected(self):
+        # The SKILL.md exception must not weaken the traversal guard.
+        err = _validate_file_path("../SKILL.md")
+        assert err == "Path traversal ('..') is not allowed."
+
+    def test_other_root_md_still_rejected(self):
+        # Only SKILL.md gets the root-level exception, not arbitrary files.
+        err = _validate_file_path("README.md")
+        assert "File must be under one of:" in err
+
 
 # ---------------------------------------------------------------------------
 # CRUD operations
@@ -547,7 +565,7 @@ class TestSkillManageDispatcher:
         # No provenance marker on a foreground create — record either missing
         # entirely (telemetry best-effort) or present with created_by unset.
         rec = usage.get("test-skill") or {}
-        assert rec.get("created_by") in (None, "", False)
+        assert rec.get("created_by") in {None, "", False}
 
     def test_create_from_background_review_marks_agent_created(self, tmp_path):
         """Background-review fork creates ARE marked as agent-created."""
@@ -943,3 +961,229 @@ class TestPinnedGuard:
                        side_effect=RuntimeError("sidecar broken")):
                 result = _delete_skill("my-skill")
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# _delete_skill — recursive-delete safety (port of Kilo Code #11240)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSkillRmtreeGuard:
+    """Defense-in-depth before ``shutil.rmtree`` in ``_delete_skill``.
+
+    Mirrors the Kilo Code #11227 fix: never let a recursive skill delete
+    escape the skills tree, target a skills root, or follow a symlink.
+    """
+
+    def test_normal_delete_still_works(self, tmp_path):
+        with _skill_dir(tmp_path):
+            _create_skill("good-skill", VALID_SKILL_CONTENT)
+            result = _delete_skill("good-skill", absorbed_into="")
+        assert result["success"] is True, result
+        assert not (tmp_path / "good-skill").exists()
+
+    def test_symlinked_skill_dir_refused(self, tmp_path):
+        """A skill dir that is a symlink must not be rmtree'd — rmtree would
+        otherwise follow it and delete the link target's contents."""
+        victim = tmp_path.parent / "precious_victim"
+        victim.mkdir()
+        (victim / "important.txt").write_text("DO NOT DELETE")
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        evil = skills / "evil-skill"
+        evil.symlink_to(victim, target_is_directory=True)
+        try:
+            with patch("tools.skill_manager_tool.SKILLS_DIR", skills), \
+                 patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills]), \
+                 patch("tools.skill_manager_tool._find_skill",
+                       return_value={"path": evil}):
+                result = _delete_skill("evil-skill", absorbed_into="")
+            assert result["success"] is False
+            assert "symlink" in result["error"].lower()
+            assert (victim / "important.txt").exists()
+        finally:
+            import shutil as _sh
+            _sh.rmtree(victim, ignore_errors=True)
+
+    def test_skills_root_itself_refused(self, tmp_path):
+        """If discovery ever hands back the skills root, refuse — rmtree would
+        wipe every installed skill."""
+        with patch("tools.skill_manager_tool.SKILLS_DIR", tmp_path), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[tmp_path]), \
+             patch("tools.skill_manager_tool._find_skill",
+                   return_value={"path": tmp_path}):
+            result = _delete_skill("root-attack", absorbed_into="")
+        assert result["success"] is False
+        assert "skills root" in result["error"].lower()
+        assert tmp_path.exists()
+
+    def test_out_of_tree_path_refused(self, tmp_path):
+        """A path that resolves outside every known skills root is refused."""
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        outside = tmp_path / "outside_skill"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("x")
+        with patch("tools.skill_manager_tool.SKILLS_DIR", skills), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills]), \
+             patch("tools.skill_manager_tool._find_skill",
+                   return_value={"path": outside}):
+            result = _delete_skill("outside", absorbed_into="")
+        assert result["success"] is False
+        assert "skills root" in result["error"].lower()
+        assert outside.exists()
+
+
+# ---------------------------------------------------------------------------
+# Background-review ownership, read-before-write, and recoverability
+# ---------------------------------------------------------------------------
+
+
+def _named_skill_content(name: str) -> str:
+    return (
+        "---\n"
+        f"name: {name}\n"
+        "description: A test skill for background review.\n"
+        "---\n\n"
+        f"# {name}\n\n"
+        "Step 1: Do the thing.\n"
+    )
+
+
+@contextmanager
+def _background_review_context(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    skills_root = hermes_home / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    with patch("tools.skill_manager_tool.SKILLS_DIR", skills_root), \
+         patch("tools.skills_tool.SKILLS_DIR", skills_root), \
+         patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_root]), \
+         patch("tools.skill_provenance.is_background_review", return_value=True):
+        yield skills_root
+
+
+class TestBackgroundReviewSkillSafety:
+    def test_patch_requires_skill_view_first(self, tmp_path, monkeypatch):
+        from tools.skill_manager_tool import _reset_background_review_read_marks
+        from tools.skills_tool import skill_view
+
+        _reset_background_review_read_marks()
+        with _background_review_context(tmp_path, monkeypatch):
+            _create_skill("reviewed", _named_skill_content("reviewed"))
+            blocked = json.loads(
+                skill_manage(
+                    "patch",
+                    "reviewed",
+                    old_string="Step 1: Do the thing.",
+                    new_string="Step 1: Do the thing safely.",
+                )
+            )
+            assert blocked["success"] is False
+            assert blocked["_read_before_write_required"] is True
+
+            assert json.loads(skill_view("reviewed"))["success"] is True
+            allowed = json.loads(
+                skill_manage(
+                    "patch",
+                    "reviewed",
+                    old_string="Step 1: Do the thing.",
+                    new_string="Step 1: Do the thing safely.",
+                )
+            )
+            assert allowed["success"] is True, allowed
+        _reset_background_review_read_marks()
+
+    def test_supporting_overwrite_requires_exact_file_read(
+        self, tmp_path, monkeypatch
+    ):
+        from tools.skill_manager_tool import _reset_background_review_read_marks
+        from tools.skills_tool import skill_view
+
+        _reset_background_review_read_marks()
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("reviewed", _named_skill_content("reviewed"))
+            reference = skills_root / "reviewed" / "references" / "workflow.md"
+            reference.parent.mkdir()
+            reference.write_text("old workflow\n", encoding="utf-8")
+
+            assert json.loads(skill_view("reviewed"))["success"] is True
+            blocked = json.loads(
+                skill_manage(
+                    "write_file",
+                    "reviewed",
+                    file_path="references/workflow.md",
+                    file_content="new workflow\n",
+                )
+            )
+            assert blocked["_read_before_write_required"] is True
+
+            assert json.loads(
+                skill_view("reviewed", "references/workflow.md")
+            )["success"] is True
+            allowed = json.loads(
+                skill_manage(
+                    "write_file",
+                    "reviewed",
+                    file_path="references/workflow.md",
+                    file_content="new workflow\n",
+                )
+            )
+            assert allowed["success"] is True, allowed
+        _reset_background_review_read_marks()
+
+    def test_pinned_skill_is_read_only_to_background_review(
+        self, tmp_path, monkeypatch
+    ):
+        with _background_review_context(tmp_path, monkeypatch):
+            _create_skill("pinned", _named_skill_content("pinned"))
+            with patch(
+                "tools.skill_usage.get_record", return_value={"pinned": True}
+            ):
+                result = _edit_skill("pinned", _named_skill_content("pinned"))
+        assert result["success"] is False
+        assert "pinned" in result["error"].lower()
+
+    def test_external_skill_is_read_only_to_background_review(self, tmp_path):
+        local = tmp_path / "local"
+        external = tmp_path / "external"
+        local.mkdir()
+        external.mkdir()
+        skill_dir = _write_external_skill(external)
+        with _two_roots(local, external), patch(
+            "tools.skill_provenance.is_background_review", return_value=True
+        ), patch(
+            "agent.skill_utils.get_external_skills_dirs",
+            return_value=[external.resolve()],
+        ):
+            result = _patch_skill("ext-skill", "OLD_MARKER", "changed")
+        assert result["success"] is False
+        assert "external" in result["error"].lower()
+        assert "OLD_MARKER" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_bare_delete_fails_closed(self, tmp_path, monkeypatch):
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("active", _named_skill_content("active"))
+            result = _delete_skill("active", absorbed_into="")
+        assert result["success"] is False
+        assert result["_fail_closed"] is True
+        assert (skills_root / "active").exists()
+
+    def test_verified_consolidation_is_recoverably_archived(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import skill_usage
+
+        with _background_review_context(tmp_path, monkeypatch) as skills_root:
+            _create_skill("umbrella", _named_skill_content("umbrella"))
+            _create_skill("narrow", _named_skill_content("narrow"))
+            skill_usage.mark_agent_created("narrow")
+            result = json.loads(
+                skill_manage("delete", "narrow", absorbed_into="umbrella")
+            )
+            record = skill_usage.get_record("narrow")
+        assert result["success"] is True, result
+        assert result["_archived"] is True
+        assert not (skills_root / "narrow").exists()
+        assert (skills_root / ".archive" / "narrow").exists()
+        assert record["state"] == skill_usage.STATE_ARCHIVED

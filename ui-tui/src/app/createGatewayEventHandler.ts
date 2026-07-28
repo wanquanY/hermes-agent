@@ -13,11 +13,12 @@ import { rpcErrorMessage } from '../lib/rpc.js'
 import { topLevelSubagents } from '../lib/subagentTree.js'
 import { formatToolCall, stripAnsi } from '../lib/text.js'
 import { fromSkin } from '../theme.js'
-import type { Msg, SubagentProgress } from '../types.js'
+import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
+import { flashPet } from './petFlashStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
@@ -54,10 +55,30 @@ const pushThinking = pushUnique(6)
 const pushNote = pushUnique(6)
 const pushTool = pushUnique(8)
 
+const KNOWN_SUBAGENT_STATUSES = new Set<SubagentStatus>([
+  'completed',
+  'error',
+  'failed',
+  'interrupted',
+  'queued',
+  'running',
+  'timeout'
+])
+
+const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): SubagentStatus => {
+  if (typeof status !== 'string') {
+    return fallback
+  }
+
+  const normalized = status.toLowerCase() as SubagentStatus
+
+  return KNOWN_SUBAGENT_STATUSES.has(normalized) ? normalized : fallback
+}
+
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: GatewayEvent) => void {
   const { rpc } = ctx.gateway
   const { STARTUP_RESUME_ID, newSession, resumeById, setCatalog } = ctx.session
-  const { bellOnComplete, stdout, sys } = ctx.system
+  const { bellOnComplete, onReaction, stdout, sys } = ctx.system
   const { appendMessage, panel, setHistoryItems } = ctx.transcript
   const { setInput } = ctx.composer
   const { submitRef } = ctx.submission
@@ -180,8 +201,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
   // Terminal statuses are never overwritten by late-arriving live events —
   // otherwise a stale `subagent.start` / `spawn_requested` can clobber a
-  // `failed` or `interrupted` terminal state (Copilot review #14045).
-  const isTerminalStatus = (s: SubagentProgress['status']) => s === 'completed' || s === 'failed' || s === 'interrupted'
+  // terminal state from complete (failed/interrupted/timeout/error).
+  const isTerminalStatus = (s: SubagentProgress['status']) =>
+    s === 'completed' || s === 'error' || s === 'failed' || s === 'interrupted' || s === 'timeout'
 
   const keepTerminalElseRunning = (s: SubagentProgress['status']) => (isTerminalStatus(s) ? s : 'running')
 
@@ -306,6 +328,38 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
+      case 'reaction':
+        if (ev.payload?.kind === 'vibe') {
+          onReaction()
+          flashPet('jump')
+        }
+
+        return
+
+      case 'notification.show': {
+        const p = ev.payload
+
+        if (!p?.text) {
+          return
+        }
+
+        turnController.showNotice({
+          id: p.id,
+          key: p.key,
+          kind: p.kind ?? 'sticky',
+          level: p.level ?? 'info',
+          text: p.text,
+          ttl_ms: p.ttl_ms ?? null
+        })
+
+        return
+      }
+
+      case 'notification.clear':
+        turnController.clearNotice(ev.payload?.key)
+
+        return
+
       case 'message.start':
         turnController.startMessage()
 
@@ -317,14 +371,23 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
-        setStatus(p.text)
-
-        if (p.kind === 'compressing') {
+        if (p.kind === 'goal') {
           sys(p.text)
+          const brief = p.text.startsWith('✓')
+            ? '✓ goal complete'
+            : p.text.startsWith('↻')
+              ? '↻ goal continuing'
+              : p.text.startsWith('⏸')
+                ? '⏸ goal paused'
+                : 'ready'
+          setStatus(brief)
+          restoreStatusAfter(6000)
           return
         }
 
-        if (p.kind === 'goal') {
+        setStatus(p.text)
+
+        if (p.kind === 'compressing') {
           sys(p.text)
           return
         }
@@ -461,13 +524,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'reasoning.delta':
         if (ev.payload?.text) {
-          turnController.recordReasoningDelta(ev.payload.text)
+          turnController.recordReasoningDelta(ev.payload.text, Boolean(ev.payload.verbose))
         }
 
         return
 
       case 'reasoning.available':
-        turnController.recordReasoningAvailable(String(ev.payload?.text ?? ''))
+        turnController.recordReasoningAvailable(String(ev.payload?.text ?? ''), Boolean(ev.payload?.verbose))
 
         return
 
@@ -487,12 +550,18 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'tool.start':
         turnController.recordTodos(ev.payload.todos)
-        turnController.recordToolStart(ev.payload.tool_id, ev.payload.name ?? 'tool', ev.payload.context ?? '')
+        turnController.recordToolStart(
+          ev.payload.tool_id,
+          ev.payload.name ?? 'tool',
+          ev.payload.context ?? '',
+          ev.payload.args_text ? stripAnsi(String(ev.payload.args_text)) : undefined
+        )
 
         return
       case 'tool.complete': {
         const inlineDiffText =
           ev.payload.inline_diff && getUiState().inlineDiffs ? stripAnsi(String(ev.payload.inline_diff)).trim() : ''
+        const resultText = ev.payload.result_text ? stripAnsi(String(ev.payload.result_text)) : undefined
 
         if (inlineDiffText) {
           turnController.recordInlineDiffToolComplete(
@@ -500,7 +569,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             ev.payload.tool_id,
             ev.payload.name,
             ev.payload.error,
-            ev.payload.duration_s
+            ev.payload.duration_s,
+            resultText
           )
         } else {
           turnController.recordToolComplete(
@@ -509,7 +579,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             ev.payload.error,
             ev.payload.summary,
             ev.payload.duration_s,
-            ev.payload.todos
+            ev.payload.todos,
+            resultText
           )
         }
 
@@ -648,7 +719,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           ev.payload,
           c => ({
             durationSeconds: ev.payload.duration_seconds ?? c.durationSeconds,
-            status: ev.payload.status ?? 'completed',
+            status: normalizeSubagentStatus(ev.payload.status, 'completed'),
             summary: ev.payload.summary || ev.payload.text || c.summary
           }),
           { createIfMissing: false }

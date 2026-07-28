@@ -17,18 +17,26 @@ Covers:
 import pytest
 from unittest.mock import patch
 
-from gateway.config import Platform, GatewayConfig
-from gateway.session import SessionSource, SessionStore, build_session_key
+from hermes_gateway.config import Platform, GatewayConfig
+from hermes_gateway.session import SessionSource, SessionStore, build_session_key
+from hermes_agent.repositories.session_repo import SessionRepoImpl
+from hermes_agent.composition.session_repository_db import connect_session_repository_db
 
 
 @pytest.fixture()
 def store(tmp_path):
-    """SessionStore with no SQLite, for fast unit tests."""
+    """SessionStore with SQLite — load_transcript reads from DB only.
+
+    The gateway path is wired to the repository/read-model owner directly.
+    """
+    conn = connect_session_repository_db(tmp_path / "state.db")
     config = GatewayConfig()
-    with patch("gateway.session.SessionStore._ensure_loaded"):
-        s = SessionStore(sessions_dir=tmp_path, config=config)
-    s._db = None
-    s._loaded = True
+    s = SessionStore(
+        sessions_dir=tmp_path,
+        config=config,
+        session_repo=SessionRepoImpl(conn),
+        storage_conn=conn,
+    )
     return s
 
 

@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 OMIT_TEMPERATURE = object()
 
 
+def _profile_user_agent() -> str:
+    """Return a ``hermes-cli/<version>`` UA string, with a stable fallback.
+
+    Used by ``ProviderProfile.fetch_models`` so the catalog probe is not
+    served the default ``Python-urllib/<ver>`` UA — some providers
+    (OpenCode Zen, etc.) sit behind a WAF that returns 403 for that.
+    """
+    try:
+        from hermes_cli import (
+            __version__ as _ver,
+        )  # lazy: avoid layer cycle at import time
+
+        return f"hermes-cli/{_ver}"
+    except Exception:
+        return "hermes-cli"
+
+
 @dataclass
 class ProviderProfile:
     """Base provider profile — subclass or instantiate with overrides."""
@@ -31,16 +48,30 @@ class ProviderProfile:
     aliases: tuple = ()
 
     # ── Human-readable metadata ───────────────────────────────
-    display_name: str = ""       # e.g. "GMI Cloud" — shown in picker/labels
-    description: str = ""        # e.g. "GMI Cloud (multi-model direct API)" — picker subtitle
-    signup_url: str = ""         # e.g. "https://www.gmicloud.ai/" — shown during setup
+    display_name: str = ""  # e.g. "GMI Cloud" — shown in picker/labels
+    description: str = ""  # e.g. "GMI Cloud (multi-model direct API)" — picker subtitle
+    signup_url: str = ""  # e.g. "https://www.gmicloud.ai/" — shown during setup
 
     # ── Auth & endpoints ─────────────────────────────────────
     env_vars: tuple = ()
     base_url: str = ""
     models_url: str = ""  # explicit models endpoint; falls back to {base_url}/models
-    auth_type: str = "api_key"   # api_key|oauth_device_code|oauth_external|copilot|aws_sdk
-    supports_health_check: bool = True  # False → doctor skips /models probe for this provider
+    auth_type: str = (
+        "api_key"  # api_key|oauth_device_code|oauth_external|copilot|aws_sdk
+    )
+    supports_health_check: bool = (
+        True  # False → doctor skips /models probe for this provider
+    )
+
+    # ── Vision support ────────────────────────────────────────
+    # Provider-level capabilities are transport facts, not guesses derived
+    # from a model name. Model-catalog/config overrides remain the finer-grain
+    # source for individual models.
+    supports_vision: bool = False
+    # Some providers accept images in user messages but reject multipart tool
+    # results. Keep that distinction explicit so the runtime can downgrade the
+    # tool result before it becomes invalid canonical history.
+    supports_vision_tool_messages: bool = True
 
     # ── Model catalog ─────────────────────────────────────────
     # fallback_models: curated list shown in /model picker when live fetch fails.
@@ -75,6 +106,7 @@ class ProviderProfile:
             return self.hostname
         if self.base_url:
             from urllib.parse import urlparse
+
             return urlparse(self.base_url).hostname or ""
         return ""
 
@@ -115,10 +147,43 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def model_capabilities(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        api_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Return provider-owned capability metadata for one model.
+
+        The managed model inventory uses this hook to expose the same
+        reasoning controls that the provider's request adapter actually
+        implements. Empty means the provider has no stronger declaration than
+        the external model catalog or user-supplied manual metadata.
+        """
+        return {}
+
+    def default_vision_model(self) -> str | None:
+        """Return this provider's preferred vision model, if it has one.
+
+        Providers with live catalogs can override this hook without leaking
+        provider-specific discovery logic into the auxiliary model router.
+        """
+        return None
+
+    def get_max_tokens(self, model: str | None) -> int | None:
+        """Return the output-token default for a model served by this profile.
+
+        Multi-model relays may override this method when upstream models have
+        different completion caps. Simple profiles inherit the single default.
+        """
+        return self.default_max_tokens
+
     def fetch_models(
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         timeout: float = 8.0,
     ) -> list[str] | None:
         """Fetch the live model list from the provider's models endpoint.
@@ -131,7 +196,8 @@ class ProviderProfile:
              endpoint differs from the inference base URL, e.g. OpenRouter
              exposes a public catalog at /api/v1/models while inference is
              at /api/v1)
-          2. self.base_url + "/models"  (standard OpenAI-compat fallback)
+          2. caller-supplied base_url (custom endpoint override)
+          3. self.base_url + "/models"  (standard OpenAI-compat fallback)
 
         The default implementation sends Bearer auth when api_key is given
         and forwards self.default_headers. Override to customise auth, path,
@@ -140,24 +206,31 @@ class ProviderProfile:
         Callers must always fall back to the static _PROVIDER_MODELS list
         when this returns None.
         """
+        effective_base = base_url or self.base_url
         url = (self.models_url or "").strip()
         if not url:
-            if not self.base_url:
+            if not effective_base:
                 return None
-            url = self.base_url.rstrip("/") + "/models"
+            url = effective_base.rstrip("/") + "/models"
 
         import json
         import urllib.request
+
+        from hermes_cli.urllib_security import open_credentialed_url
 
         req = urllib.request.Request(url)
         if api_key:
             req.add_header("Authorization", f"Bearer {api_key}")
         req.add_header("Accept", "application/json")
+        # Some providers (e.g. OpenCode Zen) sit behind a WAF that blocks
+        # the default ``Python-urllib/<ver>`` User-Agent.  Set a generic
+        # hermes-cli UA so the catalog endpoint is reachable.
+        req.add_header("User-Agent", _profile_user_agent())
         for k, v in self.default_headers.items():
             req.add_header(k, v)
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_credentialed_url(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             items = data if isinstance(data, list) else data.get("data", [])
             return [m["id"] for m in items if isinstance(m, dict) and "id" in m]

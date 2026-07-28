@@ -8,6 +8,7 @@ OpenCode's ``lsp/diagnostic.ts`` and Claude Code's
 """
 from __future__ import annotations
 
+import html
 from typing import Any, Dict, List
 
 # Severity-1 only by default — warnings/info/hints would flood the
@@ -17,6 +18,17 @@ DEFAULT_SEVERITIES = frozenset({1})  # ERROR only
 
 MAX_PER_FILE = 20
 MAX_TOTAL_CHARS = 4000
+MAX_MESSAGE_CHARS = 300
+MAX_CODE_CHARS = 80
+MAX_SOURCE_CHARS = 80
+
+
+def _sanitize_field(value: Any, *, limit: int) -> str:
+    if value is None:
+        return ""
+    raw = str(value).replace("\r", " ").replace("\n", " ")
+    raw = "".join(char for char in raw if char == " " or char.isprintable())
+    return html.escape(raw.strip()[:limit], quote=False)
 
 
 def format_diagnostic(d: Dict[str, Any]) -> str:
@@ -26,10 +38,10 @@ def format_diagnostic(d: Dict[str, Any]) -> str:
     start = rng.get("start") or {}
     line = int(start.get("line", 0)) + 1
     col = int(start.get("character", 0)) + 1
-    msg = str(d.get("message") or "").rstrip()
-    code = d.get("code")
-    code_part = f" [{code}]" if code not in (None, "") else ""
-    source = d.get("source")
+    msg = _sanitize_field(d.get("message"), limit=MAX_MESSAGE_CHARS)
+    code = _sanitize_field(d.get("code"), limit=MAX_CODE_CHARS)
+    code_part = f" [{code}]" if code else ""
+    source = _sanitize_field(d.get("source"), limit=MAX_SOURCE_CHARS)
     source_part = f" ({source})" if source else ""
     return f"{sev} [{line}:{col}] {msg}{code_part}{source_part}"
 
@@ -57,7 +69,8 @@ def report_for_file(
     body = "\n".join(lines)
     if extra > 0:
         body += f"\n... and {extra} more"
-    return f"<diagnostics file=\"{file_path}\">\n{body}\n</diagnostics>"
+    safe_path = html.escape(file_path, quote=True)
+    return f"<diagnostics file=\"{safe_path}\">\n{body}\n</diagnostics>"
 
 
 def truncate(s: str, *, limit: int = MAX_TOTAL_CHARS) -> str:

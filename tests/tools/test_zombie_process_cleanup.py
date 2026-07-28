@@ -14,6 +14,8 @@ import threading
 
 import pytest
 
+import hermes_gateway.agent_cache as agent_cache
+
 
 def _spawn_sleep(seconds: float = 60) -> subprocess.Popen:
     """Spawn a portable long-lived Python sleep process (no shell wrapper)."""
@@ -157,6 +159,59 @@ class TestAgentCloseMethod:
             child_2.close.assert_called_once()
             assert agent._active_children == []
 
+    def test_close_ends_owned_session_row(self):
+        """close() finalizes the agent's owned SQLite session row."""
+        from unittest.mock import MagicMock, patch
+
+        with patch("run_agent.AIAgent.__init__", return_value=None):
+            from run_agent import AIAgent
+            agent = AIAgent.__new__(AIAgent)
+            agent.session_id = "test-close-session-row"
+            agent._active_children = []
+            agent._active_children_lock = threading.Lock()
+            agent.client = None
+            agent._end_session_on_close = True
+            agent._session_db = MagicMock()
+
+            agent.close()
+
+            agent._session_db.sessions.end.assert_called_once_with(
+                "test-close-session-row", "agent_close"
+            )
+
+    def test_close_skips_session_end_for_forwarded_continuation_agents(self):
+        """Helper agents that handed session ownership forward opt out."""
+        from unittest.mock import MagicMock, patch
+
+        with patch("run_agent.AIAgent.__init__", return_value=None):
+            from run_agent import AIAgent
+            agent = AIAgent.__new__(AIAgent)
+            agent.session_id = "test-close-forwarded-session"
+            agent._active_children = []
+            agent._active_children_lock = threading.Lock()
+            agent.client = None
+            agent._end_session_on_close = False
+            agent._session_db = MagicMock()
+
+            agent.close()
+
+            agent._session_db.sessions.end.assert_not_called()
+
+    def test_close_session_end_noops_without_session_db(self):
+        """close() is a no-op for session finalization when no DB is wired in."""
+        from unittest.mock import patch
+
+        with patch("run_agent.AIAgent.__init__", return_value=None):
+            from run_agent import AIAgent
+            agent = AIAgent.__new__(AIAgent)
+            agent.session_id = "test-close-no-db"
+            agent._active_children = []
+            agent._active_children_lock = threading.Lock()
+            agent.client = None
+            # No _session_db / _end_session_on_close attributes at all —
+            # getattr defaults must keep close() from raising.
+            agent.close()  # must not raise
+
     def test_close_survives_partial_failures(self):
         """close() continues cleanup even if one step fails."""
         from unittest.mock import patch
@@ -193,7 +248,7 @@ class TestGatewayCleanupWiring:
         import threading
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._running = True
@@ -213,7 +268,7 @@ class TestGatewayCleanupWiring:
         runner._restart_task_started = False
         runner._restart_detached = False
         runner._restart_via_service = False
-        runner._restart_drain_timeout = 5.0
+        runner._restart_drain_timeout = 0.1
         runner._voice_mode = {}
         runner._session_model_overrides = {}
         runner._update_prompt_pending = {}
@@ -232,8 +287,8 @@ class TestGatewayCleanupWiring:
 
         loop = asyncio.new_event_loop()
         try:
-            with patch("gateway.status.remove_pid_file"), \
-                 patch("gateway.status.write_runtime_status"), \
+            with patch("channels.runtime_status.remove_pid_file"), \
+                 patch("channels.runtime_status.write_runtime_status"), \
                  patch("tools.terminal_tool.cleanup_all_environments"), \
                  patch("tools.browser_tool.cleanup_all_browsers"):
                 loop.run_until_complete(GatewayRunner.stop(runner))
@@ -244,12 +299,12 @@ class TestGatewayCleanupWiring:
         mock_agent_2.close.assert_called()
 
     def test_evict_does_not_call_close(self):
-        """_evict_cached_agent() should NOT call close() — it's also used
+        """agent_cache.evict_cached_agent() should NOT call close() — it's also used
         for non-destructive refreshes (model switch, branch, fallback)."""
         import threading
         from unittest.mock import MagicMock
 
-        from gateway.run import GatewayRunner
+        from hermes_gateway.runner import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
         runner._agent_cache_lock = threading.Lock()
@@ -257,7 +312,7 @@ class TestGatewayCleanupWiring:
         mock_agent = MagicMock()
         runner._agent_cache = {"session-key": (mock_agent, 12345)}
 
-        GatewayRunner._evict_cached_agent(runner, "session-key")
+        agent_cache.agent_cache_for(runner).evict_cached_agent("session-key")
 
         mock_agent.close.assert_not_called()
         assert "session-key" not in runner._agent_cache

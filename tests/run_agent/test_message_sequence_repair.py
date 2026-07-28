@@ -1,12 +1,10 @@
-"""Tests for pre-API-call message-sequence repair.
+"""Tests for pre-API-call tool-result sequence repair.
 
 Covers ``_repair_message_sequence`` and the extended
 ``_drop_trailing_empty_response_scaffolding`` behavior that rewinds past
 orphan tool-result tails. Together these prevent the self-reinforcing empty-
-response loop observed in session 20260507_044111_fa7e65, where a tool-result
-followed directly by a user message produced silent empty responses from
-providers (violating role alternation), which retriggered the empty-retry
-recovery every turn.
+response loop observed in session 20260507_044111_fa7e65. Participant/user
+events are deliberately outside this repairer's ownership and stay separate.
 """
 
 from run_agent import AIAgent
@@ -78,7 +76,7 @@ def test_drop_scaffolding_handles_multiple_parallel_tool_results():
 
 # ── _repair_message_sequence ───────────────────────────────────────────────
 
-def test_repair_merges_consecutive_user_messages():
+def test_repair_preserves_consecutive_user_messages():
     agent = _bare_agent()
     messages = [
         {"role": "user", "content": "first"},
@@ -87,22 +85,27 @@ def test_repair_merges_consecutive_user_messages():
 
     repairs = AIAgent._repair_message_sequence(agent, messages)
 
-    assert repairs == 1
-    assert len(messages) == 1
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "first\n\nsecond"
+    assert repairs == 0
+    assert messages == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
 
 
-def test_repair_preserves_user_content_when_one_side_empty():
+def test_repair_preserves_empty_and_nonempty_user_event_boundaries():
     agent = _bare_agent()
     messages = [
         {"role": "user", "content": ""},
         {"role": "user", "content": "real message"},
     ]
 
-    AIAgent._repair_message_sequence(agent, messages)
+    repairs = AIAgent._repair_message_sequence(agent, messages)
 
-    assert messages == [{"role": "user", "content": "real message"}]
+    assert repairs == 0
+    assert messages == [
+        {"role": "user", "content": ""},
+        {"role": "user", "content": "real message"},
+    ]
 
 
 def test_repair_does_not_rewind_ongoing_dialog_tool_pair():
@@ -199,3 +202,70 @@ def test_repair_preserves_system_messages():
     AIAgent._repair_message_sequence(agent, messages)
 
     assert messages == original
+
+
+def test_repair_consumes_duplicate_tool_result_id():
+    agent = _bare_agent()
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "first"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "duplicate"},
+    ]
+
+    repairs = AIAgent._repair_message_sequence(agent, messages)
+
+    assert repairs == 1
+    assert [m.get("content") for m in messages if m.get("role") == "tool"] == ["first"]
+
+
+def test_pre_api_sanitizer_drops_empty_tool_calls_without_mutating_history():
+    from agent.agent_runtime_helpers import sanitize_api_messages
+
+    history = [{"role": "assistant", "content": "done", "tool_calls": []}]
+
+    result = sanitize_api_messages(history)
+
+    assert result == [{"role": "assistant", "content": "done"}]
+    assert history[0]["tool_calls"] == []
+
+
+def test_pre_api_sanitizer_deduplicates_calls_and_results():
+    from agent.agent_runtime_helpers import sanitize_api_messages
+
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+            {"id": "call-1", "type": "function", "function": {"name": "b", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "first"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "duplicate"},
+    ]
+
+    result = sanitize_api_messages(messages)
+
+    assistant = next(m for m in result if m.get("role") == "assistant")
+    assert [call["id"] for call in assistant["tool_calls"]] == ["call-1"]
+    assert [m["content"] for m in result if m.get("role") == "tool"] == ["first"]
+    assert len(messages[0]["tool_calls"]) == 2
+
+
+def test_pre_api_sanitizer_preserves_distinct_call_ids():
+    from agent.agent_runtime_helpers import sanitize_api_messages
+
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-a", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+            {"id": "call-b", "type": "function", "function": {"name": "b", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call-a", "content": "a"},
+        {"role": "tool", "tool_call_id": "call-b", "content": "b"},
+    ]
+
+    result = sanitize_api_messages(messages)
+
+    assert [m["tool_call_id"] for m in result if m.get("role") == "tool"] == [
+        "call-a",
+        "call-b",
+    ]

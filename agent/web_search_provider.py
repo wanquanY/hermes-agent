@@ -52,7 +52,22 @@ On failure (either capability)::
 from __future__ import annotations
 
 import abc
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from agent.secret_scope import get_profile_env
+
+
+def get_provider_env(name: str) -> str:
+    """Config-aware env lookup for web providers.
+
+    Resolves *name* through the context-local profile environment so gateway
+    sessions, delegate children, and subprocess agent runs see the owning
+    profile without exposing another profile's credentials.
+
+    Returns the stripped value, or ``""`` when unset.
+    """
+    val: Optional[str] = get_profile_env(name, "")
+    return (val or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -116,16 +131,9 @@ class WebSearchProvider(abc.ABC):
     def supports_crawl(self) -> bool:
         """Return True if this provider implements :meth:`crawl`.
 
-        Crawl differs from extract in that the agent provides a *seed URL*
-        and the provider walks linked pages on its own — useful for
-        documentation sites where the agent doesn't know all relevant
-        URLs upfront. Tavily is the only built-in backend that natively
-        crawls today; Firecrawl provides a similar capability that we
-        don't currently surface as a tool.
-
-        Providers that don't crawl should leave this as False; the
-        dispatcher in :func:`tools.web_tools.web_crawl_tool` will fall
-        back to its auxiliary-model summarization path.
+        Crawl differs from extract in that the agent provides a seed URL and
+        the provider walks linked pages on its own. Providers that do not
+        crawl should leave this as False.
         """
         return False
 
@@ -174,20 +182,11 @@ class WebSearchProvider(abc.ABC):
         )
 
     def crawl(self, url: str, **kwargs: Any) -> Any:
-        """Crawl a seed URL and return results.
+        """Crawl a seed URL and return ``{"results": [...]}``.
 
-        Override when :meth:`supports_crawl` returns True. The default
-        raises NotImplementedError; callers should gate on
-        :meth:`supports_crawl` before calling.
-
-        Return shape: ``{"results": [{"url": str, "title": str,
-        "content": str, ...}, ...]}`` matching what
-        :func:`tools.web_tools.web_crawl_tool` post-processing expects.
-
-        Implementations MAY be ``async def``.
-
-        ``kwargs`` may carry forward-compat fields (e.g. ``max_depth``,
-        ``include_domains``) — implementations should ignore unknown keys.
+        Override when :meth:`supports_crawl` returns True. Implementations
+        may be synchronous or asynchronous and should ignore unknown keyword
+        arguments for forward compatibility.
         """
         raise NotImplementedError(
             f"{self.name} does not support crawl (override supports_crawl)"

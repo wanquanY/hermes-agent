@@ -101,6 +101,84 @@ class TestPluginDiscovery:
         assert "hello_plugin" in mgr._plugins
         assert mgr._plugins["hello_plugin"].enabled
 
+    def test_dovie_runtime_skips_bundled_but_preserves_user_plugins(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Dovie's catalog boundary must not disable user-owned Plugins."""
+        import hermes_cli.plugins as plugins_module
+
+        hermes_home = tmp_path / "hermes_home"
+        bundled_dir = tmp_path / "bundled_plugins"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DOVIE_MANAGED_HERMES_GATEWAY", "1")
+        _make_plugin_dir(
+            bundled_dir,
+            "bundled-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        _make_plugin_dir(hermes_home / "plugins", "user-plugin")
+        monkeypatch.setattr(
+            plugins_module,
+            "get_bundled_plugins_dir",
+            lambda: bundled_dir,
+        )
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert mgr._plugins["bundled-capability"].enabled is False
+        assert (
+            mgr._plugins["bundled-capability"].error
+            == "retired from the Dovie capability catalog"
+        )
+        assert mgr._plugins["user-plugin"].enabled is True
+
+    def test_dovie_runtime_loads_only_product_allowlisted_bundled_plugin(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import hermes_cli.plugins as plugins_module
+
+        hermes_home = tmp_path / "hermes_home"
+        bundled_dir = tmp_path / "bundled_plugins"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DOVIE_MANAGED_HERMES_GATEWAY", "1")
+        monkeypatch.setenv(
+            "DOVIE_MANAGED_HERMES_PLUGIN_ALLOWLIST",
+            "allowed-capability",
+        )
+        _make_plugin_dir(
+            bundled_dir,
+            "allowed-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        _make_plugin_dir(
+            bundled_dir,
+            "retired-capability",
+            manifest_extra={"kind": "capability"},
+            auto_enable=False,
+        )
+        monkeypatch.setattr(
+            plugins_module,
+            "get_bundled_plugins_dir",
+            lambda: bundled_dir,
+        )
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert mgr._plugins["allowed-capability"].enabled is True
+        assert mgr._plugins["retired-capability"].enabled is False
+        assert (
+            mgr._plugins["retired-capability"].error
+            == "retired from the Dovie capability catalog"
+        )
+
     def test_discover_project_plugins(self, tmp_path, monkeypatch):
         """Plugins in ./.hermes/plugins/ are discovered."""
         project_dir = tmp_path / "project"
@@ -661,6 +739,135 @@ class TestPluginContext:
 
         from tools.registry import registry
         assert "plugin_echo" in registry._tools
+
+    def test_register_tool_rejects_shadow_without_override(self, tmp_path, monkeypatch, caplog):
+        """Without override=True, registering a tool name claimed by a different toolset is rejected."""
+        from tools.registry import registry
+
+        # Seed an existing entry from a non-plugin toolset.
+        registry.register(
+            name="shadow_target",
+            toolset="terminal",
+            schema={"name": "shadow_target", "description": "Built-in", "parameters": {"type": "object", "properties": {}}},
+            handler=lambda args, **kw: "built-in",
+        )
+        original_handler = registry._tools["shadow_target"].handler
+        try:
+            plugins_dir = tmp_path / "hermes_test" / "plugins"
+            plugin_dir = plugins_dir / "shadow_plugin"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.yaml").write_text(yaml.dump({"name": "shadow_plugin"}))
+            (plugin_dir / "__init__.py").write_text(
+                'def register(ctx):\n'
+                '    ctx.register_tool(\n'
+                '        name="shadow_target",\n'
+                '        toolset="plugin_shadow_plugin",\n'
+                '        schema={"name": "shadow_target", "description": "Plugin", "parameters": {"type": "object", "properties": {}}},\n'
+                '        handler=lambda args, **kw: "plugin",\n'
+                '    )\n'
+            )
+            hermes_home = tmp_path / "hermes_test"
+            (hermes_home / "config.yaml").write_text(
+                yaml.safe_dump({"plugins": {"enabled": ["shadow_plugin"]}})
+            )
+            monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+            with caplog.at_level(logging.ERROR, logger="tools.registry"):
+                mgr = PluginManager()
+                mgr.discover_and_load()
+
+            # Original handler must still be in place — registration was rejected.
+            assert registry._tools["shadow_target"].handler is original_handler
+            assert registry._tools["shadow_target"].toolset == "terminal"
+            # And an ERROR was logged explaining why and how to opt in.
+            assert any("override=True" in r.message for r in caplog.records)
+        finally:
+            registry.deregister("shadow_target")
+
+    def test_register_tool_override_replaces_existing(self, tmp_path, monkeypatch, caplog):
+        """override=True lets a plugin replace an existing built-in tool."""
+        from tools.registry import registry
+
+        registry.register(
+            name="override_target",
+            toolset="terminal",
+            schema={"name": "override_target", "description": "Built-in", "parameters": {"type": "object", "properties": {}}},
+            handler=lambda args, **kw: "built-in",
+        )
+        try:
+            plugins_dir = tmp_path / "hermes_test" / "plugins"
+            plugin_dir = plugins_dir / "override_plugin"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.yaml").write_text(yaml.dump({
+                "name": "override_plugin",
+                "capabilities": ["tool_override"],
+            }))
+            (plugin_dir / "__init__.py").write_text(
+                'def register(ctx):\n'
+                '    ctx.register_tool(\n'
+                '        name="override_target",\n'
+                '        toolset="plugin_override_plugin",\n'
+                '        schema={"name": "override_target", "description": "Plugin", "parameters": {"type": "object", "properties": {}}},\n'
+                '        handler=lambda args, **kw: "plugin",\n'
+                '        override=True,\n'
+                '    )\n'
+            )
+            hermes_home = tmp_path / "hermes_test"
+            (hermes_home / "config.yaml").write_text(
+                yaml.safe_dump({"plugins": {
+                    "enabled": ["override_plugin"],
+                    "entries": {"override_plugin": {"allow_tool_override": True}},
+                }})
+            )
+            monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+            with caplog.at_level(logging.INFO, logger="tools.registry"):
+                mgr = PluginManager()
+                mgr.discover_and_load()
+
+            # Plugin handler replaced the built-in one.
+            assert registry._tools["override_target"].toolset == "plugin_override_plugin"
+            assert registry._tools["override_target"].handler({}, ) == "plugin"
+            # Override is audit-logged at INFO.
+            assert any(
+                "overriding existing" in r.message and "override_target" in r.message
+                for r in caplog.records
+            )
+            # Plugin tracks it.
+            assert "override_target" in mgr._plugin_tool_names
+        finally:
+            registry.deregister("override_target")
+
+    def test_register_tool_override_on_new_name_is_noop_path(self, tmp_path, monkeypatch):
+        """override=True on a brand-new name still registers cleanly (no existing entry to replace)."""
+        from tools.registry import registry
+
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        plugin_dir = plugins_dir / "new_override_plugin"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(yaml.dump({"name": "new_override_plugin"}))
+        (plugin_dir / "__init__.py").write_text(
+            'def register(ctx):\n'
+            '    ctx.register_tool(\n'
+            '        name="brand_new_override_tool",\n'
+            '        toolset="plugin_new_override_plugin",\n'
+            '        schema={"name": "brand_new_override_tool", "description": "New", "parameters": {"type": "object", "properties": {}}},\n'
+            '        handler=lambda args, **kw: "ok",\n'
+            '        override=True,\n'
+            '    )\n'
+        )
+        hermes_home = tmp_path / "hermes_test"
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["new_override_plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        try:
+            mgr = PluginManager()
+            mgr.discover_and_load()
+            assert "brand_new_override_tool" in registry._tools
+        finally:
+            registry.deregister("brand_new_override_tool")
 
 
 # ── TestPluginToolVisibility ───────────────────────────────────────────────

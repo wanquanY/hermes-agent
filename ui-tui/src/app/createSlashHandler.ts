@@ -119,6 +119,16 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
               }
               return d.message?.trim() ? send(d.message) : sys(`/${parsed.name}: empty message`)
             }
+
+            if (d.type === 'prefill') {
+              if (d.notice?.trim()) {
+                sys(d.notice)
+              }
+              if (d.message) {
+                ctx.composer.setInput(d.message)
+              }
+              return
+            }
           })
           .catch(guardedErr)
       })

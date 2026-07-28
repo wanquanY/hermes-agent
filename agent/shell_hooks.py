@@ -83,6 +83,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 300
 ALLOWLIST_FILENAME = "shell-hooks-allowlist.json"
+_DEFAULT_BLOCK_MESSAGE = "Blocked by shell hook."
 
 # (event, matcher, command) triples that have been wired to the plugin
 # manager in the current process.  Matcher is part of the key because
@@ -252,6 +253,9 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
     specs: List[ShellHookSpec] = []
 
     for event_name, entries in hooks_cfg.items():
+        # Configuration namespaces nested under hooks are not hook events.
+        if event_name == "output_spill":
+            continue
         if event_name not in VALID_HOOKS:
             suggestion = difflib.get_close_matches(
                 str(event_name), VALID_HOOKS, n=1, cutoff=0.6,
@@ -481,13 +485,24 @@ def _serialize_payload(event: str, kwargs: Dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+def _block_message(primary: Any, secondary: Any) -> str:
+    """Return a validated string block message, falling back to the default.
+
+    Accepts two candidate fields (primary wins over secondary) so callers
+    can express field-priority differences between the two hook wire formats
+    without duplicating the type-check logic.
+    """
+    raw = primary or secondary
+    return raw if isinstance(raw, str) and raw else _DEFAULT_BLOCK_MESSAGE
+
+
 def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
     """Translate stdout JSON into a Hermes wire-shape dict.
 
     For ``pre_tool_call`` the Claude-Code-style ``{"decision": "block",
     "reason": "..."}`` payload is translated into the canonical Hermes
     ``{"action": "block", "message": "..."}`` shape expected by
-    :func:`hermes_cli.plugins.get_pre_tool_call_block_message`.  This is
+    :func:`hermes_cli.plugins.resolve_pre_tool_block`.  This is
     the single most important correctness invariant in this module —
     skipping the translation silently breaks every ``pre_tool_call``
     block directive.
@@ -515,13 +530,9 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
 
     if event == "pre_tool_call":
         if data.get("action") == "block":
-            message = data.get("message") or data.get("reason") or ""
-            if isinstance(message, str) and message:
-                return {"action": "block", "message": message}
+            return {"action": "block", "message": _block_message(data.get("message"), data.get("reason"))}
         if data.get("decision") == "block":
-            message = data.get("reason") or data.get("message") or ""
-            if isinstance(message, str) and message:
-                return {"action": "block", "message": message}
+            return {"action": "block", "message": _block_message(data.get("reason"), data.get("message"))}
         return None
 
     context = data.get("context")
@@ -624,7 +635,10 @@ def _locked_update_approvals() -> Iterator[Dict[str, Any]]:
             yield data
             save_allowlist(data)
         finally:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
 
 
 def _prompt_and_record(

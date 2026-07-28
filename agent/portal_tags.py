@@ -31,7 +31,31 @@ version can change at runtime (editable installs, hot-reload tooling), and
 
 from __future__ import annotations
 
-from typing import List
+from contextvars import ContextVar
+from typing import List, Optional
+
+
+_conversation_id: ContextVar[Optional[str]] = ContextVar(
+    "nous_portal_conversation_id",
+    default=None,
+)
+
+
+def set_conversation_context(conversation_id: Optional[str]):
+    """Publish a request-local stable conversation identity."""
+    return _conversation_id.set(conversation_id or None)
+
+
+def reset_conversation_context(token) -> None:
+    """Restore a prior conversation context without breaking cleanup paths."""
+    try:
+        _conversation_id.reset(token)
+    except Exception:
+        _conversation_id.set(None)
+
+
+def get_conversation_context() -> Optional[str]:
+    return _conversation_id.get()
 
 
 def _hermes_version() -> str:
@@ -55,10 +79,18 @@ def hermes_client_tag() -> str:
     return f"client=hermes-client-v{_hermes_version()}"
 
 
-def nous_portal_tags() -> List[str]:
+def conversation_tag(session_id: str) -> str:
+    return f"conversation={session_id}"
+
+
+def nous_portal_tags(session_id: str | None = None) -> List[str]:
     """Return the canonical list of Nous Portal product tags.
 
     Always returns a fresh list so callers can mutate it freely
     (e.g. ``merged_extra.setdefault("tags", []).extend(nous_portal_tags())``).
     """
-    return ["product=hermes-agent", hermes_client_tag()]
+    tags = ["product=hermes-agent", hermes_client_tag()]
+    effective = get_conversation_context() or session_id
+    if effective:
+        tags.append(conversation_tag(effective))
+    return tags

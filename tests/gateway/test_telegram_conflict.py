@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from hermes_gateway.config import PlatformConfig
 
 
 def _ensure_telegram_mock():
@@ -34,7 +34,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -42,9 +42,9 @@ def _no_auto_discovery(monkeypatch):
     """Disable DoH auto-discovery so connect() uses the plain builder chain."""
     async def _noop():
         return []
-    monkeypatch.setattr("gateway.platforms.telegram.discover_fallback_ips", _noop)
+    monkeypatch.setattr("channels.platforms.telegram.discover_fallback_ips", _noop)
     # Mock HTTPXRequest so the builder chain doesn't fail
-    monkeypatch.setattr("gateway.platforms.telegram.HTTPXRequest", lambda **kwargs: MagicMock())
+    monkeypatch.setattr("channels.platforms.telegram.HTTPXRequest", lambda **kwargs: MagicMock())
 
 
 @pytest.mark.asyncio
@@ -52,7 +52,7 @@ async def test_connect_rejects_same_host_token_lock(monkeypatch):
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="secret-token"))
 
     monkeypatch.setattr(
-        "gateway.status.acquire_scoped_lock",
+        "channels.runtime_status.acquire_scoped_lock",
         lambda scope, identity, metadata=None: (False, {"pid": 4242}),
     )
 
@@ -72,11 +72,11 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
     adapter.set_fatal_error_handler(fatal_handler)
 
     monkeypatch.setattr(
-        "gateway.status.acquire_scoped_lock",
+        "channels.runtime_status.acquire_scoped_lock",
         lambda scope, identity, metadata=None: (True, None),
     )
     monkeypatch.setattr(
-        "gateway.status.release_scoped_lock",
+        "channels.runtime_status.release_scoped_lock",
         lambda scope, identity: None,
     )
 
@@ -103,7 +103,7 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
     builder.request.return_value = builder
     builder.get_updates_request.return_value = builder
     builder.build.return_value = app
-    monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
+    monkeypatch.setattr("channels.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
 
     # Speed up retries for testing
     monkeypatch.setattr("asyncio.sleep", AsyncMock())
@@ -136,11 +136,11 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     adapter.set_fatal_error_handler(fatal_handler)
 
     monkeypatch.setattr(
-        "gateway.status.acquire_scoped_lock",
+        "channels.runtime_status.acquire_scoped_lock",
         lambda scope, identity, metadata=None: (True, None),
     )
     monkeypatch.setattr(
-        "gateway.status.release_scoped_lock",
+        "channels.runtime_status.release_scoped_lock",
         lambda scope, identity: None,
     )
 
@@ -179,7 +179,7 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     builder.request.return_value = builder
     builder.get_updates_request.return_value = builder
     builder.build.return_value = app
-    monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
+    monkeypatch.setattr("channels.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
 
     # Speed up retries for testing
     monkeypatch.setattr("asyncio.sleep", AsyncMock())
@@ -191,16 +191,16 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
 
     # Directly call _handle_polling_conflict to avoid event-loop scheduling
     # complexity.  Each call simulates one 409 from Telegram.
-    for i in range(4):
+    for i in range(6):
         await adapter._handle_polling_conflict(
             conflict("Conflict: terminated by other getUpdates request")
         )
 
-    # After 3 failed retries (count 1-3 each enter the retry branch but
-    # start_polling raises), the 4th conflict pushes count to 4 which
-    # exceeds MAX_CONFLICT_RETRIES (3), entering the fatal branch.
+    # After 5 failed retries (count 1-5 each enter the retry branch but
+    # start_polling raises), the 6th conflict pushes count to 6 which
+    # exceeds MAX_CONFLICT_RETRIES (5), entering the fatal branch.
     assert adapter.fatal_error_code == "telegram_polling_conflict", (
-        f"Expected fatal after 4 conflicts, got code={adapter.fatal_error_code}, "
+        f"Expected fatal after 6 conflicts, got code={adapter.fatal_error_code}, "
         f"count={adapter._polling_conflict_count}"
     )
     assert adapter.has_fatal_error is True
@@ -212,11 +212,11 @@ async def test_connect_marks_retryable_fatal_error_for_startup_network_failure(m
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
 
     monkeypatch.setattr(
-        "gateway.status.acquire_scoped_lock",
+        "channels.runtime_status.acquire_scoped_lock",
         lambda scope, identity, metadata=None: (True, None),
     )
     monkeypatch.setattr(
-        "gateway.status.release_scoped_lock",
+        "channels.runtime_status.release_scoped_lock",
         lambda scope, identity: None,
     )
 
@@ -232,7 +232,7 @@ async def test_connect_marks_retryable_fatal_error_for_startup_network_failure(m
         start=AsyncMock(),
     )
     builder.build.return_value = app
-    monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
+    monkeypatch.setattr("channels.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
 
     ok = await adapter.connect()
 
@@ -247,11 +247,11 @@ async def test_connect_clears_webhook_before_polling(monkeypatch):
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
 
     monkeypatch.setattr(
-        "gateway.status.acquire_scoped_lock",
+        "channels.runtime_status.acquire_scoped_lock",
         lambda scope, identity, metadata=None: (True, None),
     )
     monkeypatch.setattr(
-        "gateway.status.release_scoped_lock",
+        "channels.runtime_status.release_scoped_lock",
         lambda scope, identity: None,
     )
 
@@ -277,7 +277,7 @@ async def test_connect_clears_webhook_before_polling(monkeypatch):
     builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr(
-        "gateway.platforms.telegram.Application",
+        "channels.platforms.telegram.Application",
         SimpleNamespace(builder=MagicMock(return_value=builder)),
     )
 
@@ -301,7 +301,7 @@ async def test_disconnect_skips_inactive_updater_and_app(monkeypatch):
     adapter._app = app
 
     warning = MagicMock()
-    monkeypatch.setattr("gateway.platforms.telegram.logger.warning", warning)
+    monkeypatch.setattr("channels.platforms.telegram.logger.warning", warning)
 
     await adapter.disconnect()
 

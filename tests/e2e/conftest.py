@@ -18,9 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, SendResult
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_gateway.config import GatewayConfig, Platform, PlatformConfig
+from hermes_gateway.voice_runtime import voice_runtime_for
+from channels.platforms.base import MessageEvent, SendResult
+from hermes_gateway.session import SessionEntry, SessionSource, build_session_key
 
 E2E_MESSAGE_SETTLE_DELAY = 0.3
 
@@ -66,6 +67,9 @@ def _ensure_discord_mock():
     discord_mod.DMChannel = type("DMChannel", (), {})
     discord_mod.Thread = type("Thread", (), {})
     discord_mod.ForumChannel = type("ForumChannel", (), {})
+    discord_mod.Forbidden = type("Forbidden", (Exception,), {})
+    discord_mod.MessageType = SimpleNamespace(default=0, reply=19)
+    discord_mod.Object = lambda *, id: SimpleNamespace(id=id)
     discord_mod.Interaction = object
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
@@ -115,12 +119,12 @@ _ensure_discord_mock()
 _ensure_slack_mock()
 
 import discord  # noqa: E402 — mocked above
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from channels.platforms.telegram import TelegramAdapter  # noqa: E402
+from channels.platforms.discord import DiscordAdapter  # noqa: E402
 
-import gateway.platforms.slack as _slack_mod  # noqa: E402
+import channels.platforms.slack as _slack_mod  # noqa: E402
 _slack_mod.SLACK_AVAILABLE = True
-from gateway.platforms.slack import SlackAdapter  # noqa: E402
+from channels.platforms.slack import SlackAdapter  # noqa: E402
 
 
 # Platform-generic factories
@@ -166,7 +170,7 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
 
     Skips __init__ to avoid filesystem/network side effects.
     """
-    from gateway.run import GatewayRunner
+    from hermes_gateway.runner import GatewayRunner
 
     if session_entry is None:
         session_entry = make_session_entry(platform)
@@ -200,7 +204,7 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner._restart_task_started = False
     runner._restart_detached = False
     runner._restart_via_service = False
-    from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+    from hermes_gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._stop_task = None
     runner._busy_input_mode = "interrupt"
@@ -217,8 +221,8 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._handle_message_with_agent = AsyncMock(return_value="agent-handled-default")
-    runner._should_send_voice_reply = lambda *_a, **_kw: False
-    runner._send_voice_reply = AsyncMock()
+    voice_runtime_for(runner).should_send_voice_reply = lambda *_a, **_kw: False
+    voice_runtime_for(runner).send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *a, **kw: None
     runner._emit_gateway_run_progress = AsyncMock()
 
@@ -240,7 +244,7 @@ def make_adapter(platform: Platform, runner=None):
     config = PlatformConfig(enabled=True, token="e2e-test-token")
 
     if platform == Platform.DISCORD:
-        from gateway.platforms.helpers import ThreadParticipationTracker
+        from channels.platforms.helpers import ThreadParticipationTracker
         with patch.object(ThreadParticipationTracker, "_load", return_value=set()):
             adapter = DiscordAdapter(config)
         platform_key = Platform.DISCORD
@@ -394,7 +398,7 @@ def _make_discord_adapter_wired(runner=None):
         runner = make_runner(Platform.DISCORD)
 
     config = PlatformConfig(enabled=True, token="e2e-test-token")
-    from gateway.platforms.helpers import ThreadParticipationTracker
+    from channels.platforms.helpers import ThreadParticipationTracker
     with patch.object(ThreadParticipationTracker, "_load", return_value=set()):
         adapter = DiscordAdapter(config)
 
