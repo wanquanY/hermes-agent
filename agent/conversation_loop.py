@@ -356,6 +356,30 @@ def _get_continuation_prompt() -> str:
     )
 
 
+def _get_stream_recovery_prompt(
+    dropped_tool_names: Optional[List[str]] = None,
+) -> str:
+    names = [
+        str(name or "").strip()
+        for name in (dropped_tool_names or [])
+        if str(name or "").strip()
+    ]
+    dropped_tool_context = (
+        " The interrupted, incomplete tool call "
+        f"({', '.join(names[:3])}) was not executed; regenerate it only if it "
+        "is still needed."
+        if names
+        else ""
+    )
+    return (
+        "[System: The provider stream ended before sending its completion "
+        "frame. Continue the same task from the durable conversation state. "
+        "Do not restart, repeat text already emitted, or repeat completed tool "
+        "work. Treat existing tool results as authoritative."
+        f"{dropped_tool_context} Finish the response directly.]"
+    )
+
+
 def _get_large_tool_call_recovery_prompt(tool_names: Optional[List[str]] = None) -> str:
     names = [str(name or "").strip() for name in (tool_names or []) if str(name or "").strip()]
     tool_list = ", ".join(names[:3]) if names else "a tool call"
@@ -940,6 +964,7 @@ def run_conversation(
     interrupted = False
     codex_ack_continuations = 0
     length_continue_retries = 0
+    stream_recovery_attempts = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
@@ -2073,7 +2098,9 @@ def run_conversation(
                         incomplete_reason = incomplete_details.get("reason")
                     else:
                         incomplete_reason = getattr(incomplete_details, "reason", None)
-                    if status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
+                    if getattr(response, "_hermes_stream_error", False):
+                        finish_reason = FINISH_REASON_STREAM_ERROR
+                    elif status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
                         finish_reason = "length"
                     else:
                         finish_reason = "stop"
@@ -2213,13 +2240,54 @@ def run_conversation(
                     _partial_response = agent._strip_think_blocks(
                         str(_stream_error_content or "")
                     ).strip()
-                    if _stream_error_result is not None:
+                    if _stream_error_result is not None and _partial_response:
                         messages.append(
                             agent._build_assistant_message(
                                 _stream_error_result,
                                 FINISH_REASON_STREAM_ERROR,
                             )
                         )
+                    _dropped_tool_names = list(
+                        getattr(response, "_dropped_tool_names", None) or []
+                    )
+                    if (
+                        stream_recovery_attempts < 3
+                        and api_call_count < agent.max_iterations
+                        and not agent._interrupt_requested
+                    ):
+                        stream_recovery_attempts += 1
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": _get_stream_recovery_prompt(
+                                    _dropped_tool_names
+                                ),
+                                "_synthetic_continuation": True,
+                                "metadata": {
+                                    "synthetic_kind": "provider_stream_recovery",
+                                },
+                            }
+                        )
+                        agent._session_messages = messages
+                        agent._stream_needs_break = True
+                        agent._emit_status(
+                            "Connection interrupted; continuing the same task "
+                            f"({stream_recovery_attempts}/3)..."
+                        )
+                        emit_provider_telemetry(
+                            agent,
+                            "provider.stream.continuation_scheduled",
+                            provider_call_id=api_request_id,
+                            labels={
+                                "retry_kind": "semantic_continuation",
+                                "reason_code": "stream_incomplete",
+                            },
+                            metrics={
+                                "continuation_attempt": stream_recovery_attempts,
+                                "max_continuation_attempts": 3,
+                            },
+                        )
+                        continue
                     agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
                     return {
@@ -4575,6 +4643,7 @@ def run_conversation(
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
                 truncated_tool_call_retries = 0
+                stream_recovery_attempts = 0
 
                 # Signal that a paragraph break is needed before the next
                 # streamed text.  We don't emit it immediately because

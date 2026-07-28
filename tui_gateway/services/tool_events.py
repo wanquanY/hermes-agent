@@ -267,6 +267,41 @@ class GatewayToolEventBridge:
                 payload["tool_id"] = tool_call_id
             self._emit("tool.generating", sid, payload)
 
+    def on_tool_generation_aborted(
+        self,
+        sid: str,
+        name: str,
+        tool_call_id: str,
+        status: str,
+        error: str,
+        error_code: str,
+    ) -> None:
+        """Close a durable generating row that never reached execution."""
+        stable_id = str(tool_call_id or "").strip()
+        if not stable_id:
+            return
+        self._notify_tool_boundary(sid, "tool.complete")
+        session = self._sessions.get(sid)
+        if session is not None:
+            session.setdefault("tool_started_at", {}).pop(stable_id, None)
+            session.setdefault("edit_snapshots", {}).pop(stable_id, None)
+            session.setdefault("artifact_snapshots", {}).pop(stable_id, None)
+        if self._tool_progress_enabled(sid):
+            message = str(error or "Tool generation stopped before execution.")
+            self._emit(
+                "tool.complete",
+                sid,
+                {
+                    "tool_id": stable_id,
+                    "name": str(name or ""),
+                    "status": str(status or "failed"),
+                    "error": message,
+                    "error_code": str(error_code or "provider_stream_aborted"),
+                    "result_text": message,
+                    "summary": "Tool generation stopped before execution",
+                },
+            )
+
     def on_reasoning_delta(self, sid: str, text: str) -> None:
         payload = {
             "text": text,
@@ -637,6 +672,14 @@ class GatewayToolEventBridge:
                 sid,
                 name,
                 tool_call_id,
+            ),
+            "tool_gen_abort_callback": lambda name, tool_call_id, status, error, error_code: self.on_tool_generation_aborted(
+                sid,
+                name,
+                tool_call_id,
+                status,
+                error,
+                error_code,
             ),
             "thinking_callback": lambda text: self._emit(self._thinking_event, sid, {"text": text}),
             "reasoning_callback": lambda text: self.on_reasoning_delta(sid, text),

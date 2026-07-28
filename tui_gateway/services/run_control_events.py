@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
+
+
+_RUN_IDENTITY_EVENT_TYPE_PREFIXES = (
+    "message.",
+    "reasoning.",
+    "thinking.",
+    "tool.",
+    "subagent.",
+    "artifact.",
+)
+_RUN_IDENTITY_EVENT_TYPES = {"error"}
 
 
 def conversation_session_id(params: dict[str, Any]) -> str:
@@ -80,6 +91,87 @@ def event_runtime_scope_key(params: dict[str, Any]) -> str:
         or payload.get("runtime_scope_key")
         or ""
     ).strip()
+
+
+def _frame_requires_run_identity(event_type: str) -> bool:
+    normalized = str(event_type or "").strip()
+    if not normalized:
+        return False
+    if normalized in _RUN_IDENTITY_EVENT_TYPES:
+        return True
+    return normalized.startswith(_RUN_IDENTITY_EVENT_TYPE_PREFIXES)
+
+
+def ensure_outbound_run_identity(
+    params: dict[str, Any],
+    *,
+    on_missing_run: Callable[[dict[str, Any]], None],
+    on_missing_turn: Callable[[dict[str, Any]], None],
+) -> None:
+    """Give run-scoped frames a stable identity before persistence/delivery."""
+    if not isinstance(params, dict):
+        return
+    event_type = str(params.get("type") or "").strip()
+    if not _frame_requires_run_identity(event_type):
+        return
+    run_id = event_run_id(params)
+    turn_id = event_turn_id(params)
+    if run_id and turn_id:
+        return
+    stable = conversation_session_id(params)
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else None
+    if not run_id:
+        run_id = f"synthetic-run:{stable or 'unknown-session'}:{turn_id or 'orphan'}"
+        params["run_id"] = run_id
+        params["synthetic_run_id"] = True
+        if payload is not None:
+            payload["run_id"] = run_id
+        if not turn_id:
+            turn_id = f"synthetic-turn:{run_id}"
+            params["turn_id"] = turn_id
+            if payload is not None:
+                payload["turn_id"] = turn_id
+        on_missing_run(
+            {
+                "event_type": event_type,
+                "session_id": stable,
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "seq": params.get("seq"),
+            }
+        )
+        return
+    on_missing_turn(
+        {
+            "event_type": event_type,
+            "session_id": stable,
+            "run_id": run_id,
+            "seq": params.get("seq"),
+        }
+    )
+
+
+def capture_lifecycle_preludes(
+    params: dict[str, Any],
+    saved: Any,
+) -> None:
+    """Copy application-generated prelude events onto the outbound envelope."""
+    if not isinstance(saved, dict):
+        return
+    events = saved.get("_lifecycle_prelude_events")
+    if not isinstance(events, list):
+        return
+    params["_lifecycle_prelude_events"] = [
+        dict(item) for item in events if isinstance(item, dict)
+    ]
+
+
+def take_lifecycle_preludes(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Remove internal prelude metadata before the parent frame is delivered."""
+    value = params.pop("_lifecycle_prelude_events", [])
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def stream_text_delta(event: dict[str, Any]) -> str:

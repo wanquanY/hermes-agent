@@ -12,6 +12,9 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from hermes_agent.application.run_event_retention_service import RunEventRetentionService
+from hermes_agent.application.run_tool_lifecycle import (
+    close_open_tools_before_terminal,
+)
 from hermes_agent.domain.run_lifecycle import (
     DEFAULT_ORPHANED_ACTIVE_RUN_OWNER_DEAD_GRACE_SECONDS,
     DEFAULT_ORPHANED_ACTIVE_RUN_STALE_SECONDS,
@@ -29,6 +32,7 @@ from hermes_agent.domain.run_terminator import (
     terminate_run,
 )
 from hermes_agent.read_models.run_events import RunEventReadModel
+from hermes_agent.read_models.tool_events import ToolEventProjectionReadModel
 from hermes_agent.repositories.run_repo import RunRepoImpl
 from hermes_agent.repositories.session_repo import SessionRepoImpl, SessionRunProjection
 from hermes_agent.repositories.team_mission_repo import TeamMissionRepoImpl
@@ -58,6 +62,7 @@ class RunService:
         self._repository = RunRepoImpl(conn)
         self._activities = TeamMissionRepoImpl(conn)
         self._events = RunEventReadModel(conn)
+        self._tool_events = ToolEventProjectionReadModel(conn)
         self._event_normalizer = event_normalizer
         self._message_complete_projector = message_complete_projector
         self.retention = RunEventRetentionService(conn, unit_of_work)
@@ -121,12 +126,24 @@ class RunService:
             duplicate = self._duplicate_session_info(stable, normalized_event)
             if duplicate is not None:
                 return duplicate
+            lifecycle_prelude_events = close_open_tools_before_terminal(
+                repository=self._repository,
+                projection=self._tool_events,
+                session_id=stable,
+                event=normalized_event,
+                participant_id=participant_id,
+                activity_id=activity_id,
+            )
+            for lifecycle_event in lifecycle_prelude_events:
+                self._project_saved(lifecycle_event)
             saved = self._repository.append_runtime_event(
                 stable,
                 normalized_event,
                 participant_id=participant_id,
                 activity_id=activity_id,
             )
+            if lifecycle_prelude_events:
+                saved["_lifecycle_prelude_events"] = lifecycle_prelude_events
             if str(saved.get("type") or "") == "session.info":
                 self._sessions.project_runtime_state_event(saved)
             saved = self._project_message_complete(stable, saved)
@@ -150,6 +167,15 @@ class RunService:
             seq=int((saved or {}).get("seq") or 0),
             terminal_status=persisted_run.status if persisted_run is not None else None,
         )
+        lifecycle_prelude_events = (
+            saved.get("_lifecycle_prelude_events")
+            if isinstance(saved, dict)
+            and isinstance(saved.get("_lifecycle_prelude_events"), list)
+            else []
+        )
+        for lifecycle_event in lifecycle_prelude_events:
+            if isinstance(lifecycle_event, dict):
+                self._notify_event_appended(lifecycle_event)
         self._notify_event_appended(saved)
         return saved
 

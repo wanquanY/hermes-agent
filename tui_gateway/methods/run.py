@@ -355,15 +355,28 @@ def _message_text(content) -> str:
     ).strip()
 
 
-def _retry_source_message(db, conversation_session_id: str, source_run_id: str) -> dict | None:
+def _retry_source_message(
+    db,
+    conversation_session_id: str,
+    source_run_id: str,
+    *,
+    source_turn_id: str = "",
+) -> dict | None:
     messages = db.messages.list(conversation_session_id) if db is not None else []
+    turn_match = None
     for message in reversed(messages or []):
         if not isinstance(message, dict) or str(message.get("role") or "") != "user":
             continue
         metadata = _mapping(message.get("metadata"))
         if str(metadata.get("run_id") or "").strip() == source_run_id:
             return {**message, "metadata": metadata}
-    return None
+        if (
+            turn_match is None
+            and source_turn_id
+            and str(metadata.get("turn_id") or "").strip() == source_turn_id
+        ):
+            turn_match = {**message, "metadata": metadata}
+    return turn_match
 
 
 def prepare_run_retry(params: dict) -> tuple[dict | None, tuple[int, str] | None]:
@@ -433,7 +446,13 @@ def prepare_run_retry(params: dict) -> tuple[dict | None, tuple[int, str] | None
         if normalized_expected_attempt != source_attempt:
             return None, (4409, "retry attempt conflict")
 
-    source_message = _retry_source_message(db, conversation_session_id, source_run_id)
+    source_turn_id = str(source_run.get("turn_id") or "").strip()
+    source_message = _retry_source_message(
+        db,
+        conversation_session_id,
+        source_run_id,
+        source_turn_id=source_turn_id,
+    )
     if source_message is None:
         return None, (4404, "source user message not found")
     message_metadata = _mapping(source_message.get("metadata"))
@@ -450,22 +469,60 @@ def prepare_run_retry(params: dict) -> tuple[dict | None, tuple[int, str] | None
         or message_metadata.get("runtime_scope_key")
         or ""
     ).strip()
+    source_turn_id = str(
+        source_turn_id
+        or message_metadata.get("turn_id")
+        or ""
+    ).strip()
+    if not source_turn_id:
+        return None, (4404, "source turn identity not found")
+    source_client_message_id = str(
+        message_metadata.get("client_message_id")
+        or message_metadata.get("clientMessageId")
+        or ""
+    ).strip()
+    source_conversation_message_id = str(
+        source_message.get("conversation_message_id")
+        or source_message.get("conversationMessageId")
+        or message_metadata.get("conversation_message_id")
+        or message_metadata.get("conversationMessageId")
+        or ""
+    ).strip()
+    if not source_conversation_message_id:
+        return None, (4404, "source conversation message identity not found")
+    continuation_context = (
+        "This execution is a continuation attempt of the same user turn after "
+        "an earlier provider attempt ended before the task completed. Continue "
+        "from the latest durable assistant and tool state. Do not restart the "
+        "task, repeat completed work, or announce the retry. Reuse completed "
+        "tool results and finish the response directly."
+    )
+    source_turn_system_context = str(
+        source_metadata.get("turn_system_context")
+        or message_metadata.get("turn_system_context")
+        or ""
+    ).strip()
     submit = {
         "conversation_session_id": conversation_session_id,
         "session_id": conversation_session_id,
         "client_run_id": client_run_id,
         "run_id": client_run_id,
-        "turn_id": str(params.get("turn_id") or uuid.uuid4().hex).strip(),
-        "client_message_id": str(
-            params.get("client_message_id") or f"retry:{client_run_id}"
-        ).strip(),
+        "turn_id": source_turn_id,
+        **(
+            {"client_message_id": source_client_message_id}
+            if source_client_message_id
+            else {}
+        ),
+        "current_input_conversation_message_id": source_conversation_message_id,
+        "user_message_persistence": "external",
         "idempotency_key": idempotency_key,
         "retry_of_run_id": source_run_id,
         "retry_attempt": retry_attempt,
         "text": text,
-        "persist_user_message": text,
-        "draft_text": str(message_metadata.get("draft_text") or text),
         "attachments": attachments,
+        "turn_system_context": "\n\n".join(
+            part for part in (source_turn_system_context, continuation_context) if part
+        ),
         **({"runtime_scope_key": runtime_scope_key} if runtime_scope_key else {}),
     }
     for field_name in (
@@ -476,6 +533,8 @@ def prepare_run_retry(params: dict) -> tuple[dict | None, tuple[int, str] | None
         "activity_id",
         "activity_kind",
         "participant_id",
+        "enabled_toolsets",
+        "approval_policy",
     ):
         value = source_metadata.get(field_name, message_metadata.get(field_name))
         if value not in (None, "", [], {}):

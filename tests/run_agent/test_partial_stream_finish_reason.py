@@ -3,7 +3,7 @@
 Pins the contract:
 
 - partial network streams use a distinct ``stream_error`` finish reason.
-- network failures never enter the model output-length continuation loop.
+- network failures use bounded semantic continuation, never output-length retry.
 - genuine provider-reported length truncation keeps the existing retry path.
 """
 
@@ -113,11 +113,11 @@ class TestPartialStreamStubFinishReason:
             "tool_calls must remain None (no auto-execution of side-effectful "
             "tool calls)."
         )
-        # The stub should carry dropped tool names for continuation prompt
+        # The stub carries dropped tool names privately for continuation.
         assert getattr(response, "_dropped_tool_names", None) == ["write_file"]
         content = response.choices[0].message.content or ""
-        assert "Stream stalled mid tool-call" in content
-        assert "write_file" in content
+        assert content == "Let me write the audit:"
+        assert "Stream stalled mid tool-call" not in content
 
 
 # ── Clean stream-end mid-tool-call (no exception, no finish_reason) ─────────
@@ -265,10 +265,10 @@ def loop_agent():
         return a
 
 
-class TestConversationLoopPartialStreamTermination:
-    """A partial network stream terminates with its recovered text."""
+class TestConversationLoopPartialStreamRecovery:
+    """A partial network stream continues inside the same logical turn."""
 
-    def test_partial_stream_stub_does_not_start_hidden_continuation(self, loop_agent):
+    def test_partial_stream_stub_continues_without_a_public_user_message(self, loop_agent):
 
         from tests.run_agent.test_run_agent import _mock_assistant_msg
 
@@ -282,7 +282,20 @@ class TestConversationLoopPartialStreamTermination:
             )],
             usage=None,
         )
-        loop_agent.client.chat.completions.create.return_value = partial_stub
+        completed = SimpleNamespace(
+            id="response-complete",
+            model="test/model",
+            choices=[SimpleNamespace(
+                index=0,
+                message=_mock_assistant_msg(content="the second half."),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+        loop_agent.client.chat.completions.create.side_effect = [
+            partial_stub,
+            completed,
+        ]
 
         with (
             patch.object(loop_agent, "_persist_session"),
@@ -291,7 +304,52 @@ class TestConversationLoopPartialStreamTermination:
         ):
             result = loop_agent.run_conversation("ask me something")
 
-        assert loop_agent.client.chat.completions.create.call_count == 1
+        assert loop_agent.client.chat.completions.create.call_count == 2
+        assert result["completed"] is True
+        assert result["final_response"] == "the second half."
+        assert [
+            message["role"]
+            for message in result["messages"]
+            if isinstance(message, dict)
+        ] == ["user", "assistant", "assistant"]
+        assert not any(
+            message.get("metadata", {}).get("synthetic_kind")
+            == "provider_stream_recovery"
+            for message in result["messages"]
+            if isinstance(message, dict)
+        )
+
+    def test_partial_stream_semantic_continuation_is_bounded(self, loop_agent):
+        from tests.run_agent.test_run_agent import _mock_assistant_msg
+
+        def partial(index: int):
+            return SimpleNamespace(
+                id=PARTIAL_STREAM_STUB_ID,
+                model="test/model",
+                choices=[SimpleNamespace(
+                    index=0,
+                    message=_mock_assistant_msg(content=f"part {index}"),
+                    finish_reason=FINISH_REASON_STREAM_ERROR,
+                )],
+                usage=None,
+            )
+
+        loop_agent.client.chat.completions.create.side_effect = [
+            partial(1),
+            partial(2),
+            partial(3),
+            partial(4),
+        ]
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("ask me something")
+
+        assert loop_agent.client.chat.completions.create.call_count == 4
+        assert result["completed"] is False
         assert result["partial"] is True
         assert result["stream_error"] is True
-        assert "first half of" in result["final_response"]
+        assert result["final_response"] == "part 4"

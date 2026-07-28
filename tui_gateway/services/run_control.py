@@ -33,7 +33,9 @@ from tui_gateway.services import runtime_streams as _runtime_streams
 from tui_gateway.services import runtime_event_protocol as _runtime_event_protocol
 from tui_gateway.services.subscription_poll_lifecycle import SubscriptionPollLifecycle
 from tui_gateway.services.run_control_events import (
+    capture_lifecycle_preludes as _capture_lifecycle_preludes,
     delta_event_for_subscription as _delta_event_for_subscription,
+    ensure_outbound_run_identity as _ensure_outbound_run_identity_event,
     event_run_id as _event_run_id,
     event_runtime_scope_key as _event_runtime_scope_key,
     event_turn_id as _event_turn_id,
@@ -43,6 +45,7 @@ from tui_gateway.services.run_control_events import (
     conversation_session_id as _conversation_session_id,
     stamp_session_identity as _stamp_session_identity,
     stream_text_delta as _stream_text_delta,
+    take_lifecycle_preludes as _take_lifecycle_preludes,
     terminal_delivery_identity as _terminal_delivery_identity,
 )
 from tui_gateway.services.run_events import list_runtime_events
@@ -875,34 +878,6 @@ def _event_opens_active_run(event_type: str) -> bool:
     return str(event_type or "").strip() in _RUN_OPENING_EVENT_TYPES
 
 
-# PR-1 identity contract: event families the frontend attributes to a
-# specific run lane (assistant text / reasoning / tool cards). Frames of
-# these types must never leave the main process without a run identity —
-# the FE timeline keys segments by (run_id, turn_id) and an empty run_id
-# historically caused cross-run reasoning-text absorption (triage
-# 2026-07, symptom two). Interaction requests (clarify/approval/...) are
-# keyed by request_id and handled by the PendingRegistry contract, so
-# they are intentionally NOT in this set.
-_RUN_IDENTITY_EVENT_TYPE_PREFIXES = (
-    "message.",
-    "reasoning.",
-    "thinking.",
-    "tool.",
-    "subagent.",
-    "artifact.",
-)
-_RUN_IDENTITY_EVENT_TYPES = {"error"}
-
-
-def _frame_requires_run_identity(event_type: str) -> bool:
-    normalized = str(event_type or "").strip()
-    if not normalized:
-        return False
-    if normalized in _RUN_IDENTITY_EVENT_TYPES:
-        return True
-    return normalized.startswith(_RUN_IDENTITY_EVENT_TYPE_PREFIXES)
-
-
 def _ensure_outbound_run_identity(params: dict[str, Any]) -> None:
     """Main-side identity contract (PR-1 §4.1): run-scoped frames must not
     leave the process with an empty ``run_id``.
@@ -917,54 +892,19 @@ def _ensure_outbound_run_identity(params: dict[str, Any]) -> None:
     phantom "running" run, while the FE gets a stable orphan lane
     instead of a runId-less frame.
     """
-    if not isinstance(params, dict):
-        return
-    event_type = str(params.get("type") or "").strip()
-    if not _frame_requires_run_identity(event_type):
-        return
-    run_id = _event_run_id(params)
-    turn_id = _event_turn_id(params)
-    if run_id and turn_id:
-        return
-    stable = _conversation_session_id(params)
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else None
-    if not run_id:
-        # Deterministic per (session, turn): every orphan frame of the same
-        # turn lands in one synthetic lane instead of fragmenting per event.
-        run_id = f"synthetic-run:{stable or 'unknown-session'}:{turn_id or 'orphan'}"
-        params["run_id"] = run_id
-        params["synthetic_run_id"] = True
-        if payload is not None:
-            payload["run_id"] = run_id
-        if not turn_id:
-            turn_id = f"synthetic-turn:{run_id}"
-            params["turn_id"] = turn_id
-            if payload is not None:
-                payload["turn_id"] = turn_id
+    def on_missing_run(details: dict[str, Any]) -> None:
         logger.error(
             "[dovie-run-control] run-event-missing-run-id synthesized identity %s",
-            _json_for_log(
-                {
-                    "event_type": event_type,
-                    "session_id": stable,
-                    "run_id": run_id,
-                    "turn_id": turn_id,
-                    "seq": params.get("seq"),
-                }
-            ),
+            _json_for_log(details),
         )
-        return
-    # run_id present but turn_id missing: surface the contract gap without
-    # synthesizing. A synthetic turn would overwrite the real turn_id kept
-    # on the runs row (append_run_event backfills runs.turn_id via
-    # COALESCE(NULLIF(?, ''), ...)), which is worse than an empty turn the
-    # FE can still attach by run_id alone.
-    _diagnostic_warning(
-        "run-event-missing-turn-id",
-        event_type=event_type,
-        session_id=stable,
-        run_id=run_id,
-        seq=params.get("seq"),
+
+    _ensure_outbound_run_identity_event(
+        params,
+        on_missing_run=on_missing_run,
+        on_missing_turn=lambda details: _diagnostic_warning(
+            "run-event-missing-turn-id",
+            **details,
+        ),
     )
 
 
@@ -2125,6 +2065,7 @@ def record_event(
             # for this call and for the mirror's nested append_run_event.
             setattr(db, "_team_mission_projecting", True)
             saved = method(stable, frame, participant_id=participant_id)
+            _capture_lifecycle_preludes(params, saved)
             # PR-1 seq write-back: persistence assigns the canonical seq
             # BEFORE any transport sees the frame (delivery happens in
             # publish_recorded_event after this function returns, and the
@@ -2497,6 +2438,7 @@ def publish_recorded_event(
         persist=persist,
         run_context=run_context,
     )
+    lifecycle_prelude_events = _take_lifecycle_preludes(publish_params)
     # The caller may also own a direct-delivery path. Propagate canonical seq,
     # transient classification, and normalized identity back to that frame so
     # direct and subscription transports observe the same envelope.
@@ -2506,6 +2448,9 @@ def publish_recorded_event(
         before_deliver()
     delivered: list[Transport] = []
     for transport in subscribers:
+        for lifecycle_event in lifecycle_prelude_events:
+            if isinstance(lifecycle_event, dict):
+                _deliver_live_subscription_event(transport, lifecycle_event)
         if _deliver_live_subscription_event(transport, publish_params):
             delivered.append(transport)
     return delivered

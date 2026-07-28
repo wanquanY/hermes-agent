@@ -49,6 +49,7 @@ from agent.tool_guardrails import (
     ToolCallGuardrailController,
     ToolGuardrailDecision,
 )
+from agent.tool_generation_events import ToolGenerationLifecycle
 from hermes_cli.config import cfg_get
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
@@ -190,6 +191,7 @@ def init_agent(
     stream_delta_callback: callable = None,
     interim_assistant_callback: callable = None,
     tool_gen_callback: callable = None,
+    tool_gen_abort_callback: callable = None,
     status_callback: callable = None,
     reaction_callback: callable = None,
     notice_callback: callable = None,
@@ -423,6 +425,8 @@ def init_agent(
     agent._public_interim_commentary_signatures: set[str] = set()
     agent.status_callback = status_callback
     agent.tool_gen_callback = tool_gen_callback
+    agent.tool_gen_abort_callback = tool_gen_abort_callback
+    agent._tool_generation_lifecycle = ToolGenerationLifecycle()
     agent.reaction_callback = reaction_callback
     agent.notice_callback = notice_callback
     agent.notice_clear_callback = notice_clear_callback

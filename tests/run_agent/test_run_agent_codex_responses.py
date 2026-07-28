@@ -485,6 +485,59 @@ def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
     assert response.output[0].content[0].text == "stream ok"
 
 
+def test_run_codex_stream_does_not_retry_after_visible_tool_generation(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    generated: list[tuple[str, str]] = []
+    aborted: list[tuple[str, str, str, str, str]] = []
+    agent.tool_gen_callback = lambda name, tool_call_id: generated.append(
+        (name, tool_call_id)
+    )
+    agent.tool_gen_abort_callback = lambda *args: aborted.append(args)
+    calls = {"stream": 0}
+
+    def _fake_stream(**_kwargs):
+        calls["stream"] += 1
+        return _FakeResponsesStream(
+            events=[
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(
+                        type="function_call",
+                        call_id="call-write-1",
+                        name="write_file",
+                    ),
+                )
+            ],
+            final_error=ConnectionError("upstream connection closed"),
+        )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=lambda **_kwargs: _codex_message_response(
+                "unexpected fallback"
+            ),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert calls["stream"] == 1
+    assert generated == [("write_file", "call-write-1")]
+    assert aborted == [
+        (
+            "write_file",
+            "call-write-1",
+            "failed",
+            "upstream connection closed",
+            "provider_stream_aborted",
+        )
+    ]
+    assert response._hermes_stream_error is True
+    assert response.output[0].content[0].text == ""
+    assert response._dropped_tool_names == ["write_file"]
+
+
 def test_run_codex_stream_fault_injection_emits_retry_and_recovery_telemetry(monkeypatch):
     from agent.provider_telemetry import ProviderCallTelemetry
 
@@ -540,7 +593,12 @@ def test_run_codex_stream_fault_injection_emits_retry_and_recovery_telemetry(mon
 
     assert response.output[0].content[0].text == "recovered"
     assert calls["stream"] == 2
-    assert [event["payload"]["stage"] for event in events] == [
+    telemetry_events = [
+        event
+        for event in events
+        if event.get("type") == "runtime.provider.telemetry"
+    ]
+    assert [event["payload"]["stage"] for event in telemetry_events] == [
         "provider.call.started",
         "provider.attempt.started",
         "provider.attempt.failed",
@@ -551,9 +609,9 @@ def test_run_codex_stream_fault_injection_emits_retry_and_recovery_telemetry(mon
         "provider.response.first_delta",
         "provider.call.completed",
     ]
-    assert events[5]["payload"]["metrics"]["network_attempt"] == 2
-    assert events[6]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
-    assert events[7]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
+    assert telemetry_events[5]["payload"]["metrics"]["network_attempt"] == 2
+    assert telemetry_events[6]["payload"]["metrics"]["time_to_first_event_ms"] >= 0
+    assert telemetry_events[7]["payload"]["metrics"]["time_to_first_delta_ms"] >= 0
     assert "provider.invalid" not in repr(events)
     assert "Bearer-secret" not in repr(events)
 

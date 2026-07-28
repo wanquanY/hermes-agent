@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from hermes_conversation_message_identity import user_conversation_message_id_for
+
 
 def persist_prompt_user_turn(
     *,
@@ -80,11 +82,18 @@ def persist_prompt_user_turn(
     }
     metadata.update({key: value for key, value in optional_metadata.items() if value})
     try:
+        conversation_message_id = user_conversation_message_id_for(
+            session_id=canonical_session_id,
+            turn_id=turn_id,
+            run_id=run_id,
+            client_message_id=client_message_id,
+        )
         message_id = db.messages.append(
             session_id=canonical_session_id,
             role="user",
             content=content,
             participant_id="user",
+            conversation_message_id=conversation_message_id,
             metadata=metadata,
         )
         log_prompt_stage(

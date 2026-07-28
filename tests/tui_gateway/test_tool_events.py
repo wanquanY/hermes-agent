@@ -567,3 +567,36 @@ def test_tool_generating_emits_stable_invocation_identity():
             },
         }
     ]
+
+
+def test_aborted_tool_generation_emits_terminal_failure():
+    events = []
+    bridge = _bridge(events)
+    callbacks = bridge.agent_callbacks(
+        "sid",
+        block=lambda *_args, **_kwargs: "",
+        status_update=lambda *_args, **_kwargs: None,
+    )
+
+    callbacks["tool_gen_callback"]("write_file", "call-write-1")
+    callbacks["tool_gen_abort_callback"](
+        "write_file",
+        "call-write-1",
+        "failed",
+        "upstream connection closed",
+        "provider_stream_aborted",
+    )
+
+    assert [event["type"] for event in events] == [
+        "tool.generating",
+        "tool.complete",
+    ]
+    assert events[1]["payload"] == {
+        "tool_id": "call-write-1",
+        "name": "write_file",
+        "status": "failed",
+        "error": "upstream connection closed",
+        "error_code": "provider_stream_aborted",
+        "result_text": "upstream connection closed",
+        "summary": "Tool generation stopped before execution",
+    }

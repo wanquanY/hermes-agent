@@ -50,6 +50,13 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
+def _mark_tool_generation_started(agent: Any, tool_call_id: str) -> None:
+    """Transfer an invocation from stream generation to tool execution."""
+    marker = getattr(agent, "_mark_tool_generation_started", None)
+    if callable(marker):
+        marker(tool_call_id)
+
+
 def _ensure_file_checkpoint(
     agent,
     function_name: str,
@@ -383,6 +390,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
             continue
+        _mark_tool_generation_started(agent, tc.id)
         if agent.tool_start_callback:
             try:
                 agent.tool_start_callback(tc.id, name, args)
@@ -896,11 +904,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
 
-        if not _execution_blocked and agent.tool_start_callback:
-            try:
-                agent.tool_start_callback(tool_call.id, function_name, function_args)
-            except Exception as cb_err:
-                logging.debug(f"Tool start callback error: {cb_err}")
+        if not _execution_blocked:
+            _mark_tool_generation_started(agent, tool_call.id)
+            if agent.tool_start_callback:
+                try:
+                    agent.tool_start_callback(tool_call.id, function_name, function_args)
+                except Exception as cb_err:
+                    logging.debug(f"Tool start callback error: {cb_err}")
 
         # Checkpoint: snapshot working dir before file-mutating tools
         if not _execution_blocked and function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:

@@ -1412,14 +1412,55 @@ def _forward_responses_tool_generation(
     agent: Any,
     projection: Any,
     notified_tool_call_ids: set[str],
-) -> None:
+) -> bool:
     """Publish one identity-stable generation event per Responses tool call."""
     tool_call_id = str(getattr(projection, "tool_call_id", "") or "").strip()
     tool_name = str(getattr(projection, "tool_name", "") or "").strip()
     if not tool_call_id or not tool_name or tool_call_id in notified_tool_call_ids:
-        return
+        return False
     notified_tool_call_ids.add(tool_call_id)
     agent._fire_tool_gen_started(tool_name, tool_call_id)
+    return True
+
+
+def _codex_committed_stream_failure_response(
+    agent: Any,
+    error: BaseException,
+    text_parts: list[str],
+    *,
+    model: str | None,
+) -> Any:
+    """Seal one externally visible Responses attempt without retrying it."""
+    aborted = agent._abort_open_tool_generations(
+        str(error),
+        error_code="provider_stream_aborted",
+    )
+    content = "".join(text_parts).strip()
+    dropped_tool_names = [
+        generation.tool_name for generation in aborted if generation.tool_name
+    ]
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                status="incomplete",
+                content=[
+                    SimpleNamespace(
+                        type="output_text",
+                        text=content,
+                        annotations=[],
+                    )
+                ],
+            )
+        ],
+        usage=None,
+        status="incomplete",
+        model=model,
+        incomplete_details=SimpleNamespace(reason="stream_error"),
+        _hermes_stream_error=True,
+        _dropped_tool_names=dropped_tool_names or None,
+    )
 
 
 def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
@@ -1430,6 +1471,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     max_stream_retries = 1
     has_tool_calls = False
     first_delta_fired = False
+    visible_output_committed = False
     # Accumulate streamed text so we can recover if get_final_response()
     # returns empty output (e.g. chatgpt.com backend-api sends
     # response.incomplete instead of response.completed).
@@ -1490,14 +1532,19 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                                     except Exception:
                                         pass
                             agent._fire_stream_delta(projection.content_delta)
+                            visible_output_committed = True
                     elif projection.reasoning_delta:
                         if provider_telemetry is not None:
                             provider_telemetry.observe_first_delta(network_attempt)
                         agent._fire_reasoning_delta(projection.reasoning_delta)
-                    _forward_responses_tool_generation(
+                        visible_output_committed = True
+                    tool_generation_emitted = _forward_responses_tool_generation(
                         agent,
                         projection,
                         notified_tool_call_ids,
+                    )
+                    visible_output_committed = (
+                        visible_output_committed or tool_generation_emitted
                     )
                     if projection.has_tool_call:
                         has_tool_calls = True
@@ -1541,6 +1588,13 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                         )
                 return final_response
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+            if visible_output_committed:
+                return _codex_committed_stream_failure_response(
+                    agent,
+                    exc,
+                    agent._codex_streamed_text_parts,
+                    model=api_kwargs.get("model"),
+                )
             if attempt < max_stream_retries:
                 if provider_telemetry is not None:
                     provider_telemetry.retry_scheduled(
@@ -1596,6 +1650,13 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                         agent._client_log_context(),
                     )
                     return recovered
+                if visible_output_committed:
+                    return _codex_committed_stream_failure_response(
+                        agent,
+                        exc,
+                        agent._codex_streamed_text_parts,
+                        model=api_kwargs.get("model"),
+                    )
                 logger.debug(
                     "Codex Responses stream parser hit response.output=None without "
                     "recoverable events; falling back to create(stream=True). %s",
@@ -1619,6 +1680,13 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             raise
         except RuntimeError as exc:
+            if visible_output_committed:
+                return _codex_committed_stream_failure_response(
+                    agent,
+                    exc,
+                    agent._codex_streamed_text_parts,
+                    model=api_kwargs.get("model"),
+                )
             err_text = str(exc)
             missing_completed = "response.completed" in err_text
             # The OpenAI SDK's Responses streaming state machine raises
@@ -1697,6 +1765,15 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 )
                 return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             raise
+        except Exception as exc:
+            if visible_output_committed:
+                return _codex_committed_stream_failure_response(
+                    agent,
+                    exc,
+                    agent._codex_streamed_text_parts,
+                    model=api_kwargs.get("model"),
+                )
+            raise
 
 
 
@@ -1718,6 +1795,7 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
     collected_output_items: list = []
     collected_text_deltas: list = []
     has_tool_calls = False
+    visible_output_committed = False
     notified_tool_call_ids: set[str] = set()
     from agent.responses_stream_projector import ResponsesStreamProjector
 
@@ -1758,10 +1836,14 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                 collected_text_deltas.append(projection.content_delta)
             if projection.reasoning_delta:
                 agent._fire_reasoning_delta(projection.reasoning_delta)
-            _forward_responses_tool_generation(
+                visible_output_committed = True
+            tool_generation_emitted = _forward_responses_tool_generation(
                 agent,
                 projection,
                 notified_tool_call_ids,
+            )
+            visible_output_committed = (
+                visible_output_committed or tool_generation_emitted
             )
             if projection.has_tool_call:
                 has_tool_calls = True
@@ -1789,6 +1871,15 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                             len(collected_text_deltas),
                         )
                 return terminal_response
+    except Exception as exc:
+        if visible_output_committed:
+            return _codex_committed_stream_failure_response(
+                agent,
+                exc,
+                collected_text_deltas,
+                model=fallback_kwargs.get("model"),
+            )
+        raise
     finally:
         close_fn = getattr(stream_or_response, "close", None)
         if callable(close_fn):

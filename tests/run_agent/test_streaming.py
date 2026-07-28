@@ -1218,7 +1218,7 @@ class TestAnthropicStreamCallbacks:
         assert mock_replace.call_count == 0
 
 
-class TestPartialToolCallWarning:
+class TestPartialToolCallRecoveryMetadata:
     """Regression: when a stream dies mid tool-call argument generation after
     text was already delivered, the partial-stream stub at run_agent.py
     line ~6107 used to silently set ``tool_calls=None`` and return
@@ -1227,19 +1227,18 @@ class TestPartialToolCallWarning:
     task — agent streamed commentary, emitted a write_file tool call,
     MiniMax stalled for 240 s mid-arguments, stale-stream detector killed
     the connection, the stub returned, session ended with no file written
-    and no error shown.
+    and no safe continuation state.
 
-    Fix: when the stream accumulator captured any tool-call names before the
-    error, the stub now appends a user-visible warning to content AND fires
-    it as a stream delta so the user sees it immediately.
+    The stub carries the dropped tool identity privately. The turn-level
+    recovery path can then regenerate it without leaking an internal attempt
+    warning into the public assistant response.
     """
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_partial_tool_call_surfaces_warning(self, mock_close, mock_create):
+    def test_partial_tool_call_carries_private_recovery_metadata(self, mock_close, mock_create):
         """Stream with text + partial tool-call name + mid-stream error
-        produces a stub whose content contains the user-visible warning
-        and whose tool_calls is None."""
+        produces a non-executable stub with private recovery metadata."""
         from run_agent import AIAgent
 
         class _StallError(RuntimeError):
@@ -1289,18 +1288,10 @@ class TestPartialToolCallWarning:
         assert "Let me write the audit:" in content, (
             f"Partial text not preserved in stub: {content!r}"
         )
-        assert "Stream stalled mid tool-call" in content, (
-            f"Stub content is missing the dropped-tool-call warning; users "
-            f"get silent failure.  Got content={content!r}"
-        )
-        assert "write_file" in content, (
-            f"Warning should name the dropped tool. Got: {content!r}"
-        )
+        assert "Stream stalled mid tool-call" not in content
+        assert getattr(response, "_dropped_tool_names", None) == ["write_file"]
         assert response.choices[0].message.tool_calls is None
-        assert any("Stream stalled mid tool-call" in d for d in fired_deltas), (
-            f"Warning was not surfaced as a live stream delta. "
-            f"fired_deltas={fired_deltas}"
-        )
+        assert not any("Stream stalled mid tool-call" in d for d in fired_deltas)
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
@@ -1352,25 +1343,16 @@ class TestPartialToolCallWarning:
         )
 
 
-class TestSilentRetryMidToolCall:
-    """Regression: when the stream dies mid tool-call JSON after text was
-    already delivered, we previously stubbed the turn with a "retry manually"
-    warning.  Now: if the error is a transient connection error AND a tool
-    call was in flight, silently retry the stream (the user sees a brief
-    reconnect marker + duplicated preamble, which is strictly better than
-    a lost action).  If no tool call was in flight, or the error isn't
-    transient, the existing stub-with-warning behaviour is preserved.
-    """
+class TestVisibleStreamCommitBoundary:
+    """A visible stream attempt may never be merged with a retry attempt."""
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_silent_retry_recovers_tool_call(
+    def test_tool_generation_prevents_transparent_retry(
         self, mock_close, mock_create, mock_replace,
     ):
-        """First attempt: text + partial tool-call + connection drop.
-        Second attempt: text + complete tool-call.  Response should contain
-        the recovered tool call; no warning stub should be returned."""
+        """A connection drop after text/tool events closes the first attempt."""
         from run_agent import AIAgent
         import httpx as _httpx
 
@@ -1406,6 +1388,7 @@ class TestSilentRetryMidToolCall:
         mock_client.chat.completions.create.side_effect = _pick_stream
         mock_create.return_value = mock_client
 
+        aborted_tools: list[tuple[str, str, str, str, str]] = []
         agent = AIAgent(
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
@@ -1413,6 +1396,7 @@ class TestSilentRetryMidToolCall:
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
+            tool_gen_abort_callback=lambda *args: aborted_tools.append(args),
         )
         agent.api_mode = "chat_completions"
         agent._interrupt_requested = False
@@ -1431,41 +1415,33 @@ class TestSilentRetryMidToolCall:
             else:
                 _os.environ["HERMES_STREAM_RETRIES"] = _prev
 
-        assert attempts["n"] == 2, (
-            f"Expected silent retry (2 attempts), got {attempts['n']}"
+        assert attempts["n"] == 1, (
+            "The first attempt emitted externally visible state, so a second "
+            f"attempt must not be merged into the same turn; got {attempts['n']}"
         )
-        # Response should carry the recovered tool call, not a warning stub.
         msg = response.choices[0].message
-        tool_calls = getattr(msg, "tool_calls", None)
-        assert tool_calls, (
-            f"Silent retry should recover the tool call, got tool_calls={tool_calls!r} "
-            f"content={getattr(msg, 'content', None)!r}"
-        )
-        _tc0 = tool_calls[0]
-        _name = (
-            _tc0["function"]["name"] if isinstance(_tc0, dict)
-            else _tc0.function.name
-        )
-        assert _name == "write_file"
-        # User saw a reconnect marker between attempts.
-        assert any("reconnecting" in d.lower() for d in fired_deltas), (
-            f"Expected a reconnect marker delta, fired_deltas={fired_deltas}"
-        )
-        # Stub-path warning must NOT appear (this was the whole point).
+        assert getattr(msg, "tool_calls", None) is None
+        assert "Stream stalled mid tool-call" not in (msg.content or "")
+        assert getattr(response, "_dropped_tool_names", None) == ["write_file"]
         joined = "".join(fired_deltas)
-        assert "Stream stalled" not in joined, (
-            f"Stub-path warning leaked into silent-retry path: {joined!r}"
-        )
+        assert "reconnecting" not in joined.lower()
+        assert aborted_tools == [
+            (
+                "write_file",
+                "call_1",
+                "failed",
+                "peer closed connection",
+                "provider_stream_aborted",
+            )
+        ]
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_silent_retry_exhausted_falls_back_to_stub(
+    def test_committed_attempt_returns_terminal_stub_immediately(
         self, mock_close, mock_create, mock_replace,
     ):
-        """When all retry attempts fail with connection errors, fall back
-        to the original stub-with-warning behaviour so the user isn't left
-        with zero signal."""
+        """Retry budget does not override the externally visible commit point."""
         from run_agent import AIAgent
         import httpx as _httpx
 
@@ -1505,11 +1481,10 @@ class TestSilentRetryMidToolCall:
             else:
                 _os.environ["HERMES_STREAM_RETRIES"] = _prev
 
-        # After retries exhaust, the stub-with-warning path must engage.
+        assert mock_client.chat.completions.create.call_count == 1
         content = response.choices[0].message.content or ""
-        assert "Stream stalled mid tool-call" in content, (
-            f"Exhausted-retry fallback dropped the user-visible warning: {content!r}"
-        )
+        assert "Stream stalled mid tool-call" not in content
+        assert getattr(response, "_dropped_tool_names", None) == ["write_file"]
         assert response.choices[0].message.tool_calls is None
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")

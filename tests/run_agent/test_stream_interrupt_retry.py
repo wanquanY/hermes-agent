@@ -264,7 +264,7 @@ class TestSupersededStreamFence:
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_stale_attempt_cannot_emit_late_chunks_after_retry(
+    def test_stale_committed_attempt_cannot_emit_late_chunks_or_retry(
         self,
         mock_close,
         mock_create,
@@ -331,6 +331,8 @@ class TestSupersededStreamFence:
 
         delivered = "".join(delta for delta in deltas if isinstance(delta, str))
         assert "old late" not in delivered
-        assert "new final" in delivered
-        assert response.choices[0].message.content == "new final"
+        assert "new final" not in delivered
+        assert "old start" in (response.choices[0].message.content or "")
+        assert getattr(response, "_dropped_tool_names", None) == ["terminal"]
+        assert mock_client.chat.completions.create.call_count == 1
         assert mock_close.called

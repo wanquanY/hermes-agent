@@ -19,6 +19,7 @@ class _Messages:
 def _source_run(*, status: str = "failed", attempt: int = 1) -> dict:
     return {
         "run_id": "run-source",
+        "turn_id": "turn-source",
         "conversation_session_id": "conversation-1",
         "runtime_scope_key": "profile:researcher",
         "status": status,
@@ -36,9 +37,11 @@ def _source_message() -> dict:
     return {
         "role": "user",
         "content": "Investigate the incident",
+        "conversation_message_id": "message-source",
         "metadata": {
             "run_id": "run-source",
             "turn_id": "turn-source",
+            "client_message_id": "client-message-source",
             "attachments": [{"path": "brief.md", "name": "brief.md"}],
             "draft_text": "Investigate the incident",
             "model": "model-a",
@@ -56,7 +59,7 @@ def retry_runtime(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         run_methods.run_control,
         "get_run",
-        lambda run_id, db=None: source if run_id == "run-source" else None,
+        lambda run_id, db=None: source if run_id == source["run_id"] else None,
     )
     return db, source
 
@@ -84,11 +87,19 @@ def test_run_retry_prepare_returns_owner_derived_submit_payload(retry_runtime) -
     assert submit["conversation_session_id"] == "conversation-1"
     assert submit["client_run_id"] == "run-retry-2"
     assert submit["retry_of_run_id"] == "run-source"
+    assert submit["turn_id"] == "turn-source"
+    assert submit["client_message_id"] == "client-message-source"
+    assert submit["current_input_conversation_message_id"] == "message-source"
+    assert submit["user_message_persistence"] == "external"
+    assert "persist_user_message" not in submit
     assert submit["text"] == "Investigate the incident"
     assert submit["runtime_scope_key"] == "profile:researcher"
     assert submit["run_context_json"] == '{"conversation_session_id":"conversation-1"}'
     assert submit["attachments"] == [{"path": "brief.md", "name": "brief.md"}]
     assert submit["model_descriptor"] == {"id": "model-a"}
+    assert "Continue from the latest durable assistant and tool state" in (
+        submit["turn_system_context"]
+    )
 
 
 def test_run_retry_prepare_rejects_attempt_conflict(retry_runtime) -> None:
@@ -116,13 +127,38 @@ def test_run_retry_prepare_rejects_missing_source_message(retry_runtime) -> None
     assert response["error"]["message"] == "source user message not found"
 
 
+def test_run_retry_prepare_requires_stable_source_message_identity(retry_runtime) -> None:
+    db, _source = retry_runtime
+    source_message = _source_message()
+    source_message.pop("conversation_message_id")
+    db.messages = _Messages([source_message])
+
+    response = server._methods["run.retry.prepare"](12, _params())
+
+    assert response["error"]["code"] == 4404
+    assert response["error"]["message"] == (
+        "source conversation message identity not found"
+    )
+
+
 def test_run_retry_prepare_uses_source_attempt_for_chained_retry(retry_runtime) -> None:
     _db, source = retry_runtime
+    source["run_id"] = "run-retry-3"
     source["metadata"]["retry_attempt"] = 3
-    response = server._methods["run.retry.prepare"](11, _params(expected_attempt=3))
+    response = server._methods["run.retry.prepare"](
+        11,
+        _params(
+            source_run_id="run-retry-3",
+            expected_attempt=3,
+        ),
+    )
 
     assert response["result"]["retry_attempt"] == 4
     assert response["result"]["submit"]["retry_attempt"] == 4
+    assert response["result"]["submit"]["turn_id"] == "turn-source"
+    assert response["result"]["submit"][
+        "current_input_conversation_message_id"
+    ] == "message-source"
 
 
 def test_run_intent_metadata_preserves_only_retry_execution_context() -> None:
@@ -136,6 +172,9 @@ def test_run_intent_metadata_preserves_only_retry_execution_context() -> None:
             "activity_id": "act-chat:conversation-1",
             "activity_kind": "chat",
             "runtimeScopeKey": "profile:researcher",
+            "turn_system_context": "private execution context",
+            "enabled_toolsets": ["workspace"],
+            "approval_policy": "default",
             "text": "must not be duplicated into run metadata",
             "gateway_pid": "must not be caller-controlled",
         }
@@ -150,4 +189,7 @@ def test_run_intent_metadata_preserves_only_retry_execution_context() -> None:
         "activity_id": "act-chat:conversation-1",
         "activity_kind": "chat",
         "runtime_scope_key": "profile:researcher",
+        "turn_system_context": "private execution context",
+        "enabled_toolsets": ["workspace"],
+        "approval_policy": "default",
     }

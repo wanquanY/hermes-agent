@@ -8,6 +8,7 @@ from typing import Any
 
 from hermes_agent.domain.event_ledger import EventLedger
 from hermes_agent.domain.run_event_codec import decode_run_event_row
+from hermes_agent.domain.tool_lifecycle import TERMINAL_TOOL_STATUSES
 from hermes_agent.storage.sqlite_connection_lock import lock_for_connection
 
 
@@ -19,7 +20,6 @@ TOOL_EVENT_TYPES = frozenset(
         "tool.complete",
     }
 )
-TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 PROJECTION_VERSION = "2026-06-28"
 
 
