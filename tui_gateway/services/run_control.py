@@ -661,6 +661,11 @@ def _deliver_subscription_event(
             subscription = _subscriptions_by_id.get(subscription_id)
             if subscription is None or subscription.get("transport") is not transport:
                 return False
+            # Paged catch-up subscriptions are registered before their replay
+            # high-watermark is read, but live fan-out stays paused until the
+            # client has applied every page and explicitly activates it.
+            if subscription.get("live_enabled") is False:
+                return True
             event_for_transport = _delta_event_for_subscription(subscription, event)
             if event_for_transport is None:
                 cursor_field, seq = _subscription_event_cursor(subscription, event)
@@ -1163,6 +1168,15 @@ def _poll_one_subscription(subscription: dict[str, Any]) -> None:
     activity_id = str(subscription.get("activity_id") or "").strip()
     transport = subscription.get("transport")
     if transport is None:
+        return
+    if (
+        subscription_kind != "activity"
+        and subscription.get("live_enabled") is False
+    ):
+        # A paused catch-up subscription must not even poll the durable
+        # ledger. Advancing the poller's local cursor here would acknowledge
+        # events beyond the fixed replay high-watermark before the client had
+        # received them.
         return
     if subscription_kind == "activity" and not activity_id:
         return
@@ -2880,6 +2894,8 @@ def subscribe_session_with_id(
     db: Any = None,
     subscription_id: str = "",
     current_gateway_instance_id: str = "",
+    live_enabled: bool = True,
+    include_replay_snapshots: bool = True,
 ) -> tuple[str, list[dict[str, Any]]]:
     stable = str(conversation_session_id or "").strip()
     if not stable:
@@ -2922,6 +2938,7 @@ def subscribe_session_with_id(
                 "run_id": normalized_run_id,
                 "active_run_ids": set(active_run_ids),
                 "last_seq": max(0, int(after_seq or 0)),
+                "live_enabled": bool(live_enabled),
                 "db": db,
                 "created_at": time.time(),
             }
@@ -2979,12 +2996,16 @@ def subscribe_session_with_id(
         if seq > 0:
             by_seq.setdefault(seq, event)
     events = [by_seq[seq] for seq in sorted(by_seq)]
-    replay_snapshots = _runtime_streams.replay_snapshots(
-        stable,
-        run_id=normalized_run_id,
-        runtime_scope_key=scope,
-        active_run_ids=active_run_ids if active_only else None,
-        db=db,
+    replay_snapshots = (
+        _runtime_streams.replay_snapshots(
+            stable,
+            run_id=normalized_run_id,
+            runtime_scope_key=scope,
+            active_run_ids=active_run_ids if active_only else None,
+            db=db,
+        )
+        if include_replay_snapshots
+        else []
     )
     interaction_replay_snapshots = pending_interaction_replay_frames(
         db,
@@ -2996,7 +3017,11 @@ def subscribe_session_with_id(
     with _lock:
         subscription = _subscriptions_by_id.get(normalized_subscription_id)
         if subscription is not None:
-            subscription["last_seq"] = _max_event_seq(events, after_seq)
+            subscription["last_seq"] = (
+                _max_event_seq(events, after_seq)
+                if subscription.get("live_enabled") is not False
+                else max(0, int(after_seq or 0))
+            )
     if after_seq <= 0:
         return normalized_subscription_id, [
             *events,
@@ -3008,6 +3033,119 @@ def subscribe_session_with_id(
         *replay_snapshots,
         *interaction_replay_snapshots,
     ]
+
+
+def activate_session_subscription(
+    subscription_id: str,
+    *,
+    after_seq: int,
+) -> dict[str, Any]:
+    """Atomically move a paged catch-up subscription into live delivery.
+
+    Active text lanes are sent as bounded authoritative snapshots while the
+    subscription's delivery lock is held.  Concurrent deltas wait behind that
+    lock and are then offset-trimmed against the snapshots, so no token can be
+    lost or reordered at the catch-up/live boundary.
+    """
+
+    normalized = str(subscription_id or "").strip()
+    if not normalized:
+        return {"activated": False, "reason": "subscription_id_required"}
+    delivery_lock = _subscription_delivery_lock(normalized)
+    if delivery_lock is None:
+        return {"activated": False, "reason": "subscription_not_found"}
+    with delivery_lock:
+        with _lock:
+            subscription = _subscriptions_by_id.get(normalized)
+            if not isinstance(subscription, dict):
+                return {"activated": False, "reason": "subscription_not_found"}
+            if str(subscription.get("kind") or "session") != "session":
+                return {"activated": False, "reason": "not_session_subscription"}
+            transport = subscription.get("transport")
+            stable = str(subscription.get("conversation_session_id") or "").strip()
+            scope = str(subscription.get("runtime_scope_key") or "").strip()
+            run_id = str(subscription.get("run_id") or "").strip()
+            active_only = bool(subscription.get("active_only"))
+            active_run_ids = set(subscription.get("active_run_ids") or ())
+            db = subscription.get("db")
+            expected_replay_until_seq = subscription.get("replay_until_seq")
+        if expected_replay_until_seq is None:
+            return {"activated": False, "reason": "replay_high_watermark_missing"}
+        expected_replay_until_seq = max(0, int(expected_replay_until_seq or 0))
+        if max(0, int(after_seq or 0)) != expected_replay_until_seq:
+            return {
+                "activated": False,
+                "reason": "replay_cursor_mismatch",
+                "expected_after_seq": expected_replay_until_seq,
+            }
+        if transport is None:
+            return {"activated": False, "reason": "transport_unavailable"}
+        snapshots = _runtime_streams.replay_snapshot_chunks(
+            stable,
+            run_id=run_id,
+            runtime_scope_key=scope,
+            active_run_ids=active_run_ids if active_only else None,
+            db=db,
+        )
+        interaction_snapshots = (
+            pending_interaction_replay_frames(
+                db,
+                stable,
+                runtime_scope_key=scope,
+                run_id=run_id,
+                active_run_ids=_active_run_ids_for_session(stable, db=db),
+            )
+            if db is not None
+            else []
+        )
+        delivered_snapshots = 0
+        for snapshot in [*snapshots, *interaction_snapshots]:
+            if not _write_event(transport, snapshot):
+                return {"activated": False, "reason": "transport_closed"}
+            delivered_snapshots += 1
+            with _lock:
+                current = _subscriptions_by_id.get(normalized)
+                if current is None or current.get("transport") is not transport:
+                    return {"activated": False, "reason": "subscription_detached"}
+                _remember_subscription_delivery(current, snapshot, direct=True)
+        with _lock:
+            current = _subscriptions_by_id.get(normalized)
+            if current is None or current.get("transport") is not transport:
+                return {"activated": False, "reason": "subscription_detached"}
+            current["last_seq"] = max(
+                int(current.get("last_seq") or 0),
+                expected_replay_until_seq,
+            )
+            current["live_enabled"] = True
+    return {
+        "activated": True,
+        "subscription_id": normalized,
+        "conversation_session_id": stable,
+        "last_event_seq": expected_replay_until_seq,
+        "stream_snapshot_count": delivered_snapshots,
+    }
+
+
+def set_session_subscription_replay_high_watermark(
+    subscription_id: str,
+    *,
+    replay_until_seq: int,
+) -> bool:
+    """Bind one paused subscription to its immutable catch-up boundary."""
+
+    normalized = str(subscription_id or "").strip()
+    if not normalized:
+        return False
+    with _lock:
+        subscription = _subscriptions_by_id.get(normalized)
+        if not isinstance(subscription, dict):
+            return False
+        if str(subscription.get("kind") or "session") != "session":
+            return False
+        if subscription.get("live_enabled") is not False:
+            return False
+        subscription["replay_until_seq"] = max(0, int(replay_until_seq or 0))
+    return True
 
 
 def unsubscribe_activity(subscription_id: str) -> int:

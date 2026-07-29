@@ -7,6 +7,7 @@ can use one snapshot and structural boundaries can persist one checkpoint.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ TRANSIENT_STREAM_EVENT_TYPES = frozenset(
         "agent_profile_test.thinking",
     }
 )
+_REPLAY_SNAPSHOT_FRAME_MAX_BYTES = 256 * 1024
+_REPLAY_SNAPSHOT_TEXT_CHUNK_BYTES = 24 * 1024
 
 
 @dataclass
@@ -196,6 +199,99 @@ def replay_snapshots(
         ]
         lanes.sort(key=lambda lane: lane.latest_source_seq)
         return [_replay_snapshot_frame(lane) for lane in lanes]
+
+
+def replay_snapshot_chunks(
+    conversation_session_id: str,
+    *,
+    run_id: str = "",
+    runtime_scope_key: str = "",
+    active_run_ids: set[str] | None = None,
+    db: Any = None,
+) -> list[dict[str, Any]]:
+    """Return transport-bounded authoritative frames for active text lanes.
+
+    The first frame replaces the lane from offset zero; subsequent frames append
+    at absolute UTF-16 offsets.  This keeps reconnect repair safe even when one
+    active reasoning stream is itself larger than the WebSocket frame limit.
+    """
+
+    snapshots = replay_snapshots(
+        conversation_session_id,
+        run_id=run_id,
+        runtime_scope_key=runtime_scope_key,
+        active_run_ids=active_run_ids,
+        db=db,
+    )
+    chunked: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        payload = (
+            snapshot.get("payload")
+            if isinstance(snapshot.get("payload"), dict)
+            else {}
+        )
+        text = _first_raw_text(
+            payload.get("snapshot"),
+            payload.get("text"),
+            payload.get("delta"),
+        )
+        if not text:
+            continue
+        text_chunks = _split_utf8_text(text, _REPLAY_SNAPSHOT_TEXT_CHUNK_BYTES)
+        offset = 0
+        for index, text_chunk in enumerate(text_chunks):
+            mode = "snapshot" if index == 0 else "append"
+            frame = _copy_frame(snapshot)
+            frame_payload = (
+                frame.get("payload")
+                if isinstance(frame.get("payload"), dict)
+                else {}
+            )
+            frame_payload.update(
+                {
+                    "mode": mode,
+                    "text": text_chunk,
+                    "delta": text_chunk,
+                    "offset": offset,
+                    "replay_snapshot": True,
+                }
+            )
+            if mode == "snapshot":
+                frame_payload["snapshot"] = text_chunk
+            else:
+                frame_payload.pop("snapshot", None)
+            text_stream = dict(
+                frame.get("text_stream")
+                if isinstance(frame.get("text_stream"), dict)
+                else frame_payload.get("text_stream")
+                if isinstance(frame_payload.get("text_stream"), dict)
+                else {}
+            )
+            text_stream.update(
+                {
+                    "mode": mode,
+                    "text": text_chunk,
+                    "delta": text_chunk,
+                    "offset": offset,
+                }
+            )
+            frame["text_stream"] = text_stream
+            frame_payload["text_stream"] = dict(text_stream)
+            # Every chunk represents the same authoritative stream state and
+            # therefore keeps the lane's latest causal source sequence.  Chunk
+            # identity belongs to the stream tuple (mode, offset), not to the
+            # causal clock; deleting the clock makes the owner envelope invalid.
+            frame["payload"] = frame_payload
+            frame.pop("seq", None)
+            frame["transient"] = True
+            if _json_byte_size(frame) > _REPLAY_SNAPSHOT_FRAME_MAX_BYTES:
+                raise ValueError(
+                    "active stream replay frame exceeds transport bound "
+                    f"for type={frame.get('type')!r}"
+                )
+            chunked.append(frame)
+            offset += _utf16_length(text_chunk)
+    return chunked
 
 
 def mark_checkpointed(checkpoints: list[PendingCheckpoint]) -> None:
@@ -404,3 +500,29 @@ def _optional_int(*values: Any) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _split_utf8_text(value: str, max_bytes: int) -> list[str]:
+    text = str(value or "")
+    if not text:
+        return []
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for character in text:
+        character_bytes = len(character.encode("utf-8"))
+        if current and current_bytes + character_bytes > max_bytes:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(character)
+        current_bytes += character_bytes
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _json_byte_size(value: Any) -> int:
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )

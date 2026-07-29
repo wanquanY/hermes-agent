@@ -61,6 +61,7 @@ _STREAM_TEXT_FIELDS = ("delta", "text", "output", "content")
 _WS_DIAGNOSTIC_METHODS = frozenset(
     {
         "approval.respond",
+        "events.activate",
         "events.subscribe",
         "events.unsubscribe",
         "run.events",
@@ -71,6 +72,7 @@ _WS_DIAGNOSTIC_METHODS = frozenset(
 _WS_CONTROL_METHODS = frozenset(
     {
         "events.compact",
+        "events.activate",
         "conversation.activity.list",
         "conversation.delete",
         "conversation.render_snapshot",

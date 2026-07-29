@@ -31,6 +31,7 @@ _CONTROL_PLANE_METHODS = frozenset({
     "capability.operation.start",
     "dovie.capabilities.reconcile",
     "events.compact",
+    "events.activate",
     "events.prune",
     "events.subscribe",
     "events.unsubscribe",

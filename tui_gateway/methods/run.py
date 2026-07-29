@@ -10,6 +10,11 @@ import uuid
 from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.services import run_control
 from tui_gateway.services.run_events import list_filtered_events, list_runtime_events
+from tui_gateway.services.replay_paging import (
+    REPLAY_PROTOCOL,
+    ReplayFragmentError,
+    build_replay_page,
+)
 from tui_gateway.services.run_context_resolver import normalize_run_context_params
 from tui_gateway.services.runtime_pool import (
     RuntimeLease,
@@ -34,6 +39,74 @@ _server = bind_server_globals(globals())
 _RETRYABLE_RUN_STATUSES = frozenset(
     {"cancelled", "canceled", "completed", "complete", "failed", "error", "interrupted"}
 )
+
+
+def _uses_paged_replay(params: dict) -> bool:
+    return str(
+        params.get("replay_protocol") or params.get("replayProtocol") or ""
+    ).strip() == REPLAY_PROTOCOL
+
+
+def _replay_int(params: dict, snake: str, camel: str, default: int = 0) -> int:
+    try:
+        return max(0, int(params.get(snake, params.get(camel, default)) or 0))
+    except (TypeError, ValueError):
+        return max(0, int(default or 0))
+
+
+def _session_replay_high_watermark(
+    conversation_session_id: str,
+    *,
+    db: Any,
+) -> int:
+    status = run_control.session_status(
+        conversation_session_id,
+        db=db,
+        current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+    )
+    return max(0, int((status or {}).get("last_event_seq") or 0))
+
+
+def _paged_run_event_result(
+    *,
+    conversation_session_id: str,
+    params: dict,
+    db: Any,
+    after_seq: int,
+    replay_until_seq: int,
+) -> dict:
+    bounded_limit = _bounded_limit(params.get("limit"), default=2000, maximum=5000)
+    runtime_scope_key = str(
+        params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
+    ).strip()
+    run_id = str(params.get("run_id") or params.get("runId") or "").strip()
+    candidates = list_runtime_events(
+        db,
+        conversation_session_id,
+        after_seq=after_seq,
+        before_seq=max(after_seq, replay_until_seq) + 1,
+        active_only=bool(params.get("active_only") or params.get("activeOnly")),
+        runtime_scope_key=runtime_scope_key,
+        run_id=run_id,
+        limit=min(5000, bounded_limit + 1),
+    )
+    source_has_more = len(candidates) > bounded_limit
+    page = build_replay_page(
+        candidates[:bounded_limit],
+        after_seq=after_seq,
+        replay_until_seq=replay_until_seq,
+        source_has_more=source_has_more,
+        max_bytes=params.get("max_bytes", params.get("maxBytes")),
+        fragment_seq=_replay_int(params, "fragment_seq", "fragmentSeq"),
+        fragment_offset=_replay_int(params, "fragment_offset", "fragmentOffset"),
+        fragment_id=str(
+            params.get("fragment_id") or params.get("fragmentId") or ""
+        ).strip(),
+    )
+    return {
+        "conversation_session_id": conversation_session_id,
+        **page.as_result(),
+    }
 
 
 def _busy_submit_result(
@@ -1146,6 +1219,48 @@ def _(rid, params: dict) -> dict:
         params.get("runtime_scope_key") or params.get("runtimeScopeKey") or ""
     ).strip()
     db = _run_db_for_stable_session(conversation_session_id)
+    if _uses_paged_replay(params):
+        subscription_id, _ignored_legacy_replay = run_control.subscribe_session_with_id(
+            conversation_session_id=conversation_session_id,
+            transport=current_transport(),
+            after_seq=after_seq,
+            active_only=bool(params.get("active_only") or params.get("activeOnly")),
+            runtime_scope_key=runtime_scope_key,
+            db=db,
+            current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
+            limit=1,
+            live_enabled=False,
+            include_replay_snapshots=False,
+        )
+        replay_until_seq = _session_replay_high_watermark(
+            conversation_session_id,
+            db=db,
+        )
+        if not run_control.set_session_subscription_replay_high_watermark(
+            subscription_id,
+            replay_until_seq=max(after_seq, replay_until_seq),
+        ):
+            run_control.unsubscribe_session(subscription_id=subscription_id)
+            return _err(rid, 4410, "failed to bind replay high-watermark")
+        try:
+            result = _paged_run_event_result(
+                conversation_session_id=conversation_session_id,
+                params=params,
+                db=db,
+                after_seq=after_seq,
+                replay_until_seq=max(after_seq, replay_until_seq),
+            )
+        except ReplayFragmentError as exc:
+            run_control.unsubscribe_session(subscription_id=subscription_id)
+            return _err(rid, 4409, str(exc))
+        return _ok(
+            rid,
+            {
+                **result,
+                "subscription_id": subscription_id,
+                "live": False,
+            },
+        )
     subscription_id, replay = run_control.subscribe_session_with_id(
         conversation_session_id=conversation_session_id,
         transport=current_transport(),
@@ -1167,6 +1282,27 @@ def _(rid, params: dict) -> dict:
     )
 
 
+@method("events.activate")
+def _(rid, params: dict) -> dict:
+    subscription_id = str(
+        params.get("subscription_id") or params.get("subscriptionId") or ""
+    ).strip()
+    if not subscription_id:
+        return _err(rid, 4006, "subscription_id required")
+    after_seq = _replay_int(params, "after_seq", "afterSeq")
+    result = run_control.activate_session_subscription(
+        subscription_id,
+        after_seq=after_seq,
+    )
+    if not result.get("activated"):
+        return _err(
+            rid,
+            4404,
+            f"subscription activation failed: {result.get('reason') or 'unknown'}",
+        )
+    return _ok(rid, result)
+
+
 @method("run.events")
 def _(rid, params: dict) -> dict:
     conversation_session_id = str(
@@ -1186,11 +1322,31 @@ def _(rid, params: dict) -> dict:
     ).strip()
     run_id = str(params.get("run_id") or params.get("runId") or "").strip()
     db = _run_db_for_stable_session(conversation_session_id)
-    run_control.session_status(
+    status = run_control.session_status(
         conversation_session_id,
         db=db,
         current_gateway_instance_id=_GATEWAY_INSTANCE_ID,
     )
+    if _uses_paged_replay(params):
+        replay_until_seq = _replay_int(
+            params,
+            "replay_until_seq",
+            "replayUntilSeq",
+            int((status or {}).get("last_event_seq") or after_seq),
+        )
+        try:
+            return _ok(
+                rid,
+                _paged_run_event_result(
+                    conversation_session_id=conversation_session_id,
+                    params=params,
+                    db=db,
+                    after_seq=after_seq,
+                    replay_until_seq=max(after_seq, replay_until_seq),
+                ),
+            )
+        except ReplayFragmentError as exc:
+            return _err(rid, 4409, str(exc))
     events = list_runtime_events(
         db,
         conversation_session_id,

@@ -658,6 +658,164 @@ def test_transport_disconnect_persists_one_active_stream_snapshot(tmp_path):
     db.close()
 
 
+def test_paged_subscription_activation_repairs_stream_before_live_delivery(tmp_path):
+    class Transport:
+        def __init__(self):
+            self.events = []
+
+        def write(self, frame):
+            self.events.append(dict(frame["params"]))
+            return True
+
+    db = open_cli_session_store(tmp_path / "paged-activation.db")
+    transport = Transport()
+    session_id = "paged-activation-session"
+    run_id = "paged-activation-run"
+    common = {
+        "conversation_session_id": session_id,
+        "session_id": "runtime-paged-activation",
+        "run_id": run_id,
+        "turn_id": "turn-paged-activation",
+        "runtime_scope_key": "profile:agent-default",
+    }
+    subscription_id, replay = run_control.subscribe_session_with_id(
+        conversation_session_id=session_id,
+        transport=transport,
+        db=db,
+        live_enabled=False,
+        include_replay_snapshots=False,
+    )
+    assert replay == []
+
+    reasoning = "推理" * 40_000
+    run_control.publish_recorded_event(
+        {
+            **common,
+            "type": "subagent.reasoning_delta",
+            "seq": 101,
+            "payload": {
+                "subagent_id": "subagent-1",
+                "mode": "append",
+                "offset": 0,
+                "text": reasoning,
+            },
+        },
+        db=db,
+    )
+    assert transport.events == []
+
+    assert run_control.set_session_subscription_replay_high_watermark(
+        subscription_id,
+        replay_until_seq=0,
+    )
+    activated = run_control.activate_session_subscription(
+        subscription_id,
+        after_seq=0,
+    )
+
+    assert activated["activated"] is True
+    assert activated["stream_snapshot_count"] > 1
+    snapshot_frames = [
+        event
+        for event in transport.events
+        if event["type"] == "subagent.reasoning_delta"
+    ]
+    assert snapshot_frames[0]["payload"]["mode"] == "snapshot"
+    assert all(
+        event["payload"]["mode"] == "append"
+        for event in snapshot_frames[1:]
+    )
+    snapshot_source_seqs = {
+        int(event.get("runtime_source_seq") or 0)
+        for event in snapshot_frames
+    }
+    assert len(snapshot_source_seqs) == 1
+    assert next(iter(snapshot_source_seqs)) > 0
+    assert "".join(event["payload"]["text"] for event in snapshot_frames) == reasoning
+
+    run_control.publish_recorded_event(
+        {
+            **common,
+            "type": "subagent.reasoning_delta",
+            "seq": 102,
+            "payload": {
+                "subagent_id": "subagent-1",
+                "mode": "append",
+                "offset": len(reasoning),
+                "text": "完成",
+            },
+        },
+        db=db,
+    )
+    assert transport.events[-1]["payload"]["text"] == "完成"
+    db.close()
+
+
+def test_paused_paged_subscription_does_not_ack_durable_events_past_high_watermark(
+    tmp_path,
+):
+    class Transport:
+        def __init__(self):
+            self.events = []
+
+        def write(self, frame):
+            self.events.append(dict(frame["params"]))
+            return True
+
+    db = open_cli_session_store(tmp_path / "paused-paged-poll.db")
+    transport = Transport()
+    session_id = "paused-paged-poll-session"
+    subscription_id, replay = run_control.subscribe_session_with_id(
+        conversation_session_id=session_id,
+        transport=transport,
+        db=db,
+        live_enabled=False,
+        include_replay_snapshots=False,
+    )
+    assert replay == []
+
+    run_control.publish_recorded_event(
+        {
+            "type": "subagent.tool",
+            "conversation_session_id": session_id,
+            "session_id": "runtime-paused-paged-poll",
+            "run_id": "run-paused-paged-poll",
+            "runtime_scope_key": "profile:agent-default",
+            "payload": {
+                "subagent_id": "subagent-paused-paged-poll",
+                "tool_id": "tool-after-high-watermark",
+                "tool_name": "terminal",
+                "status": "running",
+            },
+        },
+        db=db,
+    )
+    run_control._poll_subscription_events_once()
+    assert transport.events == []
+
+    assert run_control.set_session_subscription_replay_high_watermark(
+        subscription_id,
+        replay_until_seq=0,
+    )
+    mismatch = run_control.activate_session_subscription(
+        subscription_id,
+        after_seq=1,
+    )
+    assert mismatch == {
+        "activated": False,
+        "reason": "replay_cursor_mismatch",
+        "expected_after_seq": 0,
+    }
+    activated = run_control.activate_session_subscription(
+        subscription_id,
+        after_seq=0,
+    )
+    assert activated["activated"] is True
+    run_control._poll_subscription_events_once()
+    assert [event["type"] for event in transport.events] == ["subagent.tool"]
+    db.close()
+
+
 def test_thousand_token_stream_has_constant_durable_rows_and_run_reads(tmp_path, monkeypatch):
     db = open_cli_session_store(tmp_path / "volume.db")
     original_get = db.runs.get

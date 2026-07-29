@@ -1688,6 +1688,113 @@ def test_events_subscribe_returns_subscription_id_and_unsubscribes(capture):
     assert unsubscribed["result"]["removed"] == 1
 
 
+def test_paged_events_subscribe_uses_fixed_high_watermark_and_explicit_activation(
+    capture,
+    monkeypatch,
+    tmp_path,
+):
+    server, _buf = capture
+    db = _resume_gateway_db(tmp_path)
+    session_id = "stored-paged-subscription"
+    db.sessions.create(session_id, source="tui")
+    for index in range(1, 5):
+        db.runs.append_event(
+            session_id,
+            {
+                "type": "artifact.updated",
+                "conversation_session_id": session_id,
+                "payload": {
+                    "artifact_id": f"artifact-{index}",
+                    "text": "界" * 12_000,
+                },
+            },
+        )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    token = server.bind_transport(server._stdio_transport)
+    subscription_id = ""
+    try:
+        subscribed = server.handle_request(
+            {
+                "id": "paged-subscribe",
+                "method": "events.subscribe",
+                "params": {
+                    "conversation_session_id": session_id,
+                    "replay_protocol": "paged_v1",
+                    "max_bytes": 64 * 1024,
+                },
+            }
+        )
+        assert "error" not in subscribed
+        result = subscribed["result"]
+        subscription_id = result["subscription_id"]
+        assert result["replay_protocol"] == "paged_v1"
+        assert result["live"] is False
+        assert result["replay_until_seq"] == 4
+        assert result["has_more"] is True
+        assert 0 < result["next_after_seq"] < result["replay_until_seq"]
+
+        cursor = result["next_after_seq"]
+        has_more = result["has_more"]
+        page_index = 0
+        while has_more:
+            page_index += 1
+            next_page = server.handle_request(
+                {
+                    "id": f"paged-next-{page_index}",
+                    "method": "run.events",
+                    "params": {
+                        "conversation_session_id": session_id,
+                        "after_seq": cursor,
+                        "replay_until_seq": result["replay_until_seq"],
+                        "replay_protocol": "paged_v1",
+                        "max_bytes": 64 * 1024,
+                    },
+                }
+            )
+            assert "error" not in next_page
+            assert next_page["result"]["replay_until_seq"] == 4
+            cursor = next_page["result"]["next_after_seq"]
+            has_more = next_page["result"]["has_more"]
+        assert cursor == result["replay_until_seq"]
+
+        rejected = server.handle_request(
+            {
+                "id": "paged-activate-wrong-cursor",
+                "method": "events.activate",
+                "params": {
+                    "subscription_id": result["subscription_id"],
+                    "after_seq": 3,
+                },
+            }
+        )
+        assert rejected["error"]["code"] == 4404
+
+        activated = server.handle_request(
+            {
+                "id": "paged-activate",
+                "method": "events.activate",
+                "params": {
+                    "subscription_id": result["subscription_id"],
+                    "after_seq": result["replay_until_seq"],
+                },
+            }
+        )
+        assert "error" not in activated
+        assert activated["result"]["activated"] is True
+        assert activated["result"]["last_event_seq"] == 4
+    finally:
+        if subscription_id:
+            server.handle_request(
+                {
+                    "id": "paged-unsubscribe",
+                    "method": "events.unsubscribe",
+                    "params": {"subscription_id": subscription_id},
+                }
+            )
+        server.reset_transport(token)
+        db.close()
+
+
 def test_run_events_replays_without_creating_subscription(server, monkeypatch, tmp_path):
     from hermes_agent.domain.event_ledger import EventLedger
     from tui_gateway.services import run_control

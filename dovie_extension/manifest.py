@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.util
 from typing import Any
 
-CONTRACT_VERSION = "2026-07-28"
-EXTENSION_VERSION = "2026-07-28"
+CONTRACT_VERSION = "2026-07-29"
+EXTENSION_VERSION = "2026-07-29"
 
 REQUIRED_METHODS = [
     "gateway.capabilities",
@@ -45,6 +45,7 @@ REQUIRED_METHODS = [
     "run.cancel",
     "run.status",
     "run.events",
+    "events.activate",
     "events.subscribe",
     "events.unsubscribe",
     "team_mission.create",
@@ -318,6 +319,7 @@ REQUIRED_GATEWAY_METHODS = {
     "run.cancel",
     "run.status",
     "run.events",
+    "events.activate",
     "events.subscribe",
     "events.unsubscribe",
     "team_mission.create",
