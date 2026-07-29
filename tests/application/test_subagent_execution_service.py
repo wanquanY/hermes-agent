@@ -18,7 +18,14 @@ from hermes_agent.application.subagent_execution_service import (
 from hermes_agent.composition.cli_session_store import open_cli_session_store
 
 
-def _service(tmp_path, ids=None, *, owner_pid=None) -> SubagentExecutionService:
+def _service(
+    tmp_path,
+    ids=None,
+    *,
+    owner_pid=None,
+    owner_run_id="",
+    owner_turn_id="",
+) -> SubagentExecutionService:
     values = iter(ids or [])
     return SubagentExecutionService(
         state_store=open_cli_session_store(tmp_path / "state.db"),
@@ -28,6 +35,8 @@ def _service(tmp_path, ids=None, *, owner_pid=None) -> SubagentExecutionService:
         participant_id="participant-parent",
         profile_id="profile-parent",
         owner_pid=owner_pid,
+        owner_run_id=owner_run_id,
+        owner_turn_id=owner_turn_id,
         uuid_factory=lambda: next(values),
         time_fn=time.time,
     )
@@ -215,6 +224,130 @@ def test_async_runtime_returns_handle_and_persists_typed_terminal_event(tmp_path
     events = service._db.runs.list_events_by_activity(plan.activity_id, include_internal=True)
     assert events[-1]["type"] == "activity.state"
     assert events[-1]["internal"] is True
+
+
+def test_runtime_cancels_only_detached_executions_owned_by_parent_run(tmp_path) -> None:
+    owned_service = _service(
+        tmp_path / "owned",
+        ids=["activity-owned", "run-owned", "turn-owned"],
+        owner_run_id="parent-run-1",
+        owner_turn_id="parent-turn-1",
+    )
+    sibling_service = _service(
+        tmp_path / "sibling",
+        ids=["activity-sibling", "run-sibling", "turn-sibling"],
+        owner_run_id="parent-run-2",
+        owner_turn_id="parent-turn-2",
+    )
+    owned_plan = owned_service.create_plan(
+        [_task(0, "owned-child")],
+        mode=ExecutionMode.ASYNC,
+    )
+    sibling_plan = sibling_service.create_plan(
+        [_task(0, "sibling-child")],
+        mode=ExecutionMode.ASYNC,
+    )
+    runtime = SubagentExecutionRuntime()
+    release = threading.Event()
+    owned_interrupted = threading.Event()
+    sibling_interrupted = threading.Event()
+
+    for plan, service, interrupted in (
+        (owned_plan, owned_service, owned_interrupted),
+        (sibling_plan, sibling_service, sibling_interrupted),
+    ):
+        runtime.submit(
+            plan=plan,
+            service=service,
+            runner=lambda: (
+                release.wait(2),
+                {"results": [{"task_index": 0, "status": "completed"}]},
+            )[1],
+            interrupt_fn=interrupted.set,
+            max_workers=2,
+        )
+
+    assert runtime.cancel_owner_run(
+        conversation_session_id="conversation-parent",
+        owner_run_id="parent-run-1",
+        owner_turn_id="parent-turn-1",
+        reason="parent run cancelled",
+    ) == 1
+    assert owned_interrupted.is_set() is True
+    assert sibling_interrupted.is_set() is False
+    assert owned_service._db.activities.get(owned_plan.activity_id)["status"] == "cancelled"
+    assert sibling_service._db.activities.get(sibling_plan.activity_id)["status"] == "running"
+
+    release.set()
+
+
+def test_owner_cancel_publishes_each_persisted_child_terminal_once(tmp_path) -> None:
+    service = _service(
+        tmp_path,
+        ids=[
+            "root",
+            "child-0", "run-0", "turn-0",
+            "child-1", "run-1", "turn-1",
+        ],
+        owner_run_id="parent-run",
+        owner_turn_id="parent-turn",
+    )
+    plan = service.create_plan(
+        [_task(0, "child-0"), _task(1, "child-1")],
+        mode=ExecutionMode.ASYNC,
+    )
+    runtime = SubagentExecutionRuntime()
+    release = threading.Event()
+    published: list[tuple[int, str, str, list[str]]] = []
+
+    runtime.submit(
+        plan=plan,
+        service=service,
+        runner=lambda: (
+            release.wait(2),
+            {
+                "results": [
+                    {"task_index": 0, "status": "completed"},
+                    {"task_index": 1, "status": "completed"},
+                ]
+            },
+        )[1],
+        interrupt_fn=None,
+        max_workers=2,
+        terminal_fn=lambda task_index, status, reason: published.append(
+            (
+                task_index,
+                status,
+                reason,
+                [
+                    service._db.activities.get(child.activity_id)["status"]
+                    for child in plan.children
+                ],
+            )
+        ),
+    )
+
+    assert runtime.cancel_owner_run(
+        conversation_session_id="conversation-parent",
+        owner_run_id="parent-run",
+        owner_turn_id="parent-turn",
+        reason="parent run cancelled",
+    ) == 1
+    assert [(index, status, reason) for index, status, reason, _ in published] == [
+        (0, "cancelled", "parent run cancelled"),
+        (1, "cancelled", "parent run cancelled"),
+    ]
+    assert all(statuses == ["cancelled", "cancelled"] for *_, statuses in published)
+
+    # Duplicate cancel delivery is idempotent at both persistence and publish.
+    assert runtime.cancel_owner_run(
+        conversation_session_id="conversation-parent",
+        owner_run_id="parent-run",
+        owner_turn_id="parent-turn",
+        reason="duplicate cancel",
+    ) == 1
+    assert len(published) == 2
+    release.set()
 
 
 def test_persisted_activity_cancel_interrupts_async_runner_and_wins_race(tmp_path) -> None:

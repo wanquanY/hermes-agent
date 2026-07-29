@@ -616,6 +616,7 @@ def _run_prompt_submit(
     )
     delta_normalizer = _MessageDeltaNormalizer()
     message_segment_index = 0
+    latest_streamed_message_identity: dict[str, Any] | None = None
     reasoning_text_by_message_seq: dict[str, str] = {}
     completed_reasoning_message_seqs: set[str] = set()
 
@@ -635,6 +636,11 @@ def _run_prompt_submit(
             "message_seq_in_run": message_seq,
             "messageSeqInRun": message_seq,
         }
+
+    def interim_message_identity_payload(already_streamed: bool) -> dict[str, Any]:
+        if already_streamed and latest_streamed_message_identity is not None:
+            return dict(latest_streamed_message_identity)
+        return current_message_identity_payload()
 
     def _emit_reasoning_delta(reasoning_text: str) -> None:
         if is_turn_interrupted():
@@ -1157,6 +1163,7 @@ def _run_prompt_submit(
             stream_delta_emitted = False
 
             def _stream(delta):
+                nonlocal latest_streamed_message_identity
                 nonlocal stream_delta_emitted, message_segment_index
                 if is_turn_interrupted():
                     return
@@ -1186,11 +1193,13 @@ def _run_prompt_submit(
                 if payload is None:
                     return
                 _complete_current_reasoning_segment("message_delta")
-                payload.update(current_message_identity_payload())
+                message_identity = current_message_identity_payload()
+                payload.update(message_identity)
                 render_delta = payload.get("delta") or payload.get("text") or ""
                 if streamer and (r := streamer.feed(render_delta)) is not None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
+                latest_streamed_message_identity = message_identity
                 stream_delta_emitted = True
 
             active_context_missing = object()
@@ -1259,7 +1268,7 @@ def _run_prompt_submit(
                     agent.interim_assistant_callback = create_interim_assistant_callback(
                         emit=_emit,
                         session_id=sid,
-                        identity_payload=current_message_identity_payload,
+                        identity_payload=interim_message_identity_payload,
                     )
                 else:
                     agent.interim_assistant_callback = None

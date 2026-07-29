@@ -429,13 +429,28 @@ def _watch_for_cancel(
     """Background thread: when ``cancel_event`` is set, translate it
     into the legacy interrupt path so the agent's polling sees it.
 
-    The legacy ``session.interrupt`` handler mutates the session's
-    ``interrupted_*`` keys + bumps ``interrupt_seq`` + calls into the
-    agent's own interrupt RPC. We replicate the relevant subset
-    inline — calling the @method handler from here would require a
-    proper transport, and we don't have one inside the worker for
-    this synthetic path."""
+    Detached async subagents are owned by ``SubagentExecutionRuntime`` in this
+    worker process, not by the parent's mutable ``_active_children`` list.
+    Cancel them by immutable parent run identity first so their persisted and
+    streamed terminal facts converge while the worker publish bridge is still
+    installed. Then interrupt the parent agent through the legacy path."""
     cancel_event.wait()
+    try:
+        from hermes_agent.application.subagent_execution_service import (
+            subagent_execution_runtime,
+        )
+
+        subagent_execution_runtime.cancel_owner_run(
+            conversation_session_id=frame.conversation_session_id,
+            owner_run_id=frame.run_id,
+            owner_turn_id=frame.turn_id,
+            reason="parent run cancelled",
+        )
+    except Exception:
+        _log.exception(
+            "[agent-runner] detached subagent cancellation failed run_id=%s",
+            frame.run_id,
+        )
     try:
         with session["history_lock"]:
             session["interrupted_run_id"] = frame.run_id

@@ -33,6 +33,7 @@ from tools.delegate_tool import (
     _clean_subagent_name,
     _extract_output_tail,
     _humanize_subagent_name,
+    _publish_prebuilt_child_terminal,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -709,7 +710,14 @@ class TestDelegateObservability(unittest.TestCase):
             "messages": [],
         }
 
-        _run_single_child(0, "输出长文本", mock_child, parent)
+        entry = _run_single_child(0, "输出长文本", mock_child, parent)
+        terminal_payload = entry.pop("_terminal_event")
+        _publish_prebuilt_child_terminal(
+            [(0, {"goal": "输出长文本"}, mock_child)],
+            0,
+            status=entry["status"],
+            payload=terminal_payload,
+        )
 
         complete_events = [
             (preview, kwargs)
@@ -720,6 +728,44 @@ class TestDelegateObservability(unittest.TestCase):
         complete_preview, complete_kwargs = complete_events[0]
         self.assertEqual(complete_kwargs["summary"], long_summary)
         self.assertLess(len(complete_preview), len(long_summary))
+
+    def test_child_terminal_callback_suppresses_late_racing_terminal(self):
+        parent = _make_mock_parent(depth=0)
+        captured = []
+
+        def progress_cb(event_type, tool_name=None, preview=None, args=None, **kwargs):
+            captured.append((event_type, preview, kwargs))
+
+        parent.tool_progress_callback = progress_cb
+        callback = _build_child_progress_callback(
+            0,
+            "执行长任务",
+            parent,
+            task_count=1,
+            subagent_id="sa-race",
+        )
+
+        self.assertTrue(
+            callback._emit_terminal_once(
+                preview="Parent run cancelled",
+                status="cancelled",
+                summary="Parent run cancelled",
+            )
+        )
+        callback(
+            "subagent.complete",
+            preview="late success",
+            status="completed",
+            summary="late success",
+        )
+
+        complete_events = [
+            (preview, kwargs)
+            for event_type, preview, kwargs in captured
+            if event_type == "subagent.complete"
+        ]
+        self.assertEqual(len(complete_events), 1)
+        self.assertEqual(complete_events[0][1]["status"], "cancelled")
 
     def test_targeted_user_interrupt_completes_as_cancelled(self):
         from tools.delegate_tool import _run_single_child

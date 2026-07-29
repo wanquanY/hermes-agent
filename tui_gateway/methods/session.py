@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import json
 import queue
+from typing import Any
 
 from dovie_extension.display_transcript import (
     sanitize_session_list_item,
@@ -416,7 +418,13 @@ def _team_mission_session_list_item(db, row: dict, team_run_session_ids: set[str
     return row
 
 
-def _request_agent_interrupt_async(sid: str, agent) -> None:
+def _request_agent_interrupt_async(
+    sid: str,
+    agent,
+    *,
+    subagent_targets: tuple[_SubagentInterruptTarget, ...] = (),
+    completion_status: str = "interrupted",
+) -> None:
     if agent is None or not hasattr(agent, "interrupt"):
         _interrupt_trace(
             f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.skip sid={sid} has_agent={agent is not None}",
@@ -429,7 +437,36 @@ def _request_agent_interrupt_async(sid: str, agent) -> None:
             f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.begin sid={sid}",
         )
         try:
-            agent.interrupt()
+            terminal_status = _normalized_subagent_completion_status(completion_status)
+            reason = f"parent run {terminal_status}"
+            for target in subagent_targets:
+                target.agent._subagent_terminal_status = terminal_status
+                target.agent._subagent_termination_reason = reason
+            try:
+                agent.interrupt()
+            except Exception as exc:
+                _interrupt_trace(
+                    f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.parent_failed sid={sid} error={type(exc).__name__}: {exc}",
+                )
+            # A child can unregister from the parent's mutable list while this
+            # work waits in the interrupt queue. The command-boundary snapshot
+            # remains the cancellation owner and must still receive the signal.
+            for target in subagent_targets:
+                if _safe_subagent_attr(
+                    target.agent,
+                    "_interrupt_requested",
+                    False,
+                ) is True:
+                    continue
+                try:
+                    target.agent.interrupt(reason)
+                except Exception as exc:
+                    _interrupt_trace(
+                        "[hermes] [tui_gateway] [interrupt-trace] "
+                        f"agent.interrupt.child_failed sid={sid} "
+                        f"subagent_id={target.subagent_id} "
+                        f"error={type(exc).__name__}: {exc}",
+                    )
             _interrupt_trace(
                 f"[hermes] [tui_gateway] [interrupt-trace] agent.interrupt.done sid={sid} elapsed_ms={int((time.time() - started_at) * 1000)}",
             )
@@ -449,6 +486,22 @@ def _safe_subagent_attr(agent, name: str, fallback=None):
     return value if value is not None else fallback
 
 
+@dataclass(frozen=True)
+class _SubagentInterruptTarget:
+    agent: Any
+    subagent_id: str
+    parent_id: str
+    depth: int
+    task_index: int
+    task_count: int
+    goal: str
+    agent_name: str
+    model: str
+    role: str
+    toolsets: tuple[str, ...]
+    delegate_call_id: str
+
+
 def _active_child_agents(agent) -> list:
     if agent is None:
         return []
@@ -460,17 +513,6 @@ def _active_child_agents(agent) -> list:
         return list(_safe_subagent_attr(agent, "_active_children", []) or [])
     except Exception:
         return []
-
-
-def _iter_active_subagent_agents(agent, seen: set[int] | None = None):
-    seen = seen or set()
-    for child in _active_child_agents(agent):
-        marker = id(child)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield child
-        yield from _iter_active_subagent_agents(child, seen)
 
 
 def _subagent_task_index(child) -> int:
@@ -487,6 +529,112 @@ def _subagent_task_index(child) -> int:
     return 0
 
 
+def _snapshot_active_subagent_targets(agent) -> tuple[_SubagentInterruptTarget, ...]:
+    targets: list[_SubagentInterruptTarget] = []
+    seen: set[int] = set()
+
+    def visit(parent) -> None:
+        for child in _active_child_agents(parent):
+            marker = id(child)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            subagent_id = str(
+                _safe_subagent_attr(child, "_subagent_id", "") or ""
+            ).strip()
+            if subagent_id:
+                raw_task_count = _safe_subagent_attr(
+                    child,
+                    "_subagent_task_count",
+                    None,
+                )
+                try:
+                    task_count = max(1, int(raw_task_count or 1))
+                except (TypeError, ValueError):
+                    task_count = 1
+                raw_toolsets = _safe_subagent_attr(
+                    child,
+                    "_subagent_toolsets",
+                    None,
+                )
+                toolsets = (
+                    tuple(str(item) for item in raw_toolsets)
+                    if isinstance(raw_toolsets, list)
+                    else ()
+                )
+                targets.append(
+                    _SubagentInterruptTarget(
+                        agent=child,
+                        subagent_id=subagent_id,
+                        parent_id=str(
+                            _safe_subagent_attr(
+                                child,
+                                "_parent_subagent_id",
+                                "",
+                            )
+                            or ""
+                        ),
+                        depth=int(
+                            _safe_subagent_attr(
+                                child,
+                                "_subagent_tui_depth",
+                                0,
+                            )
+                            or 0
+                        ),
+                        task_index=_subagent_task_index(child),
+                        task_count=task_count,
+                        goal=str(
+                            _safe_subagent_attr(
+                                child,
+                                "_subagent_goal",
+                                "",
+                            )
+                            or ""
+                        ),
+                        agent_name=str(
+                            _safe_subagent_attr(
+                                child,
+                                "_subagent_name",
+                                "",
+                            )
+                            or ""
+                        ),
+                        model=str(_safe_subagent_attr(child, "model", "") or ""),
+                        role=str(
+                            _safe_subagent_attr(
+                                child,
+                                "_delegate_role",
+                                "",
+                            )
+                            or "leaf"
+                        ),
+                        toolsets=toolsets,
+                        delegate_call_id=str(
+                            _safe_subagent_attr(
+                                child,
+                                "_subagent_delegate_call_id",
+                                "",
+                            )
+                            or ""
+                        ).strip(),
+                    )
+                )
+            visit(child)
+
+    visit(agent)
+    return tuple(targets)
+
+
+def _normalized_subagent_completion_status(value: str) -> str:
+    status = str(value or "interrupted").strip().lower() or "interrupted"
+    if status in {"cancelled", "canceled"}:
+        return "cancelled"
+    if status in {"interrupted", "failed", "timeout"}:
+        return status
+    return "interrupted"
+
+
 def _emit_interrupted_subagent_completions(
     *,
     sid: str,
@@ -494,51 +642,41 @@ def _emit_interrupted_subagent_completions(
     interrupted_run_id: str,
     interrupted_turn_id: str,
     completion_status: str,
+    subagent_targets: tuple[_SubagentInterruptTarget, ...] | None = None,
 ) -> None:
-    agent = session.get("agent")
     emitted: set[str] = set()
-    status = str(completion_status or "interrupted").strip().lower() or "interrupted"
-    if status in {"cancelled", "canceled"}:
-        status = "cancelled"
-    elif status not in {"interrupted", "failed", "timeout"}:
-        status = "interrupted"
+    status = _normalized_subagent_completion_status(completion_status)
     timestamp = time.time()
-    for child in _iter_active_subagent_agents(agent):
-        subagent_id = str(_safe_subagent_attr(child, "_subagent_id", "") or "").strip()
-        if not subagent_id or subagent_id in emitted:
+    targets = (
+        subagent_targets
+        if subagent_targets is not None
+        else _snapshot_active_subagent_targets(session.get("agent"))
+    )
+    for target in targets:
+        if target.subagent_id in emitted:
             continue
-        emitted.add(subagent_id)
-        task_index = _subagent_task_index(child)
-        task_count = _safe_subagent_attr(child, "_subagent_task_count", None)
-        try:
-            task_count = max(1, int(task_count or 1))
-        except (TypeError, ValueError):
-            task_count = 1
-        delegate_call_id = str(_safe_subagent_attr(child, "_subagent_delegate_call_id", "") or "").strip()
-        toolsets = _safe_subagent_attr(child, "_subagent_toolsets", None)
-        if not isinstance(toolsets, list):
-            toolsets = []
+        emitted.add(target.subagent_id)
         payload = {
-            "subagent_id": subagent_id,
-            "parent_id": str(_safe_subagent_attr(child, "_parent_subagent_id", "") or ""),
-            "depth": int(_safe_subagent_attr(child, "_subagent_tui_depth", 0) or 0),
-            "task_index": task_index,
-            "task_count": task_count,
-            "goal": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
-            "dispatch_message": str(_safe_subagent_attr(child, "_subagent_goal", "") or ""),
-            "agent_name": str(_safe_subagent_attr(child, "_subagent_name", "") or ""),
-            "model": str(_safe_subagent_attr(child, "model", "") or ""),
-            "role": str(_safe_subagent_attr(child, "_delegate_role", "") or "leaf"),
-            "toolsets": [str(item) for item in toolsets],
+            "subagent_id": target.subagent_id,
+            "parent_id": target.parent_id,
+            "depth": target.depth,
+            "task_index": target.task_index,
+            "task_count": target.task_count,
+            "goal": target.goal,
+            "dispatch_message": target.goal,
+            "agent_name": target.agent_name,
+            "model": target.model,
+            "role": target.role,
+            "toolsets": list(target.toolsets),
             "status": status,
             "summary": "任务已终止",
             "run_id": interrupted_run_id,
             "turn_id": interrupted_turn_id,
             "timestamp": timestamp,
         }
-        if delegate_call_id:
-            payload["delegate_call_id"] = delegate_call_id
-            payload["tool_call_id"] = delegate_call_id
+        if target.delegate_call_id:
+            payload["delegate_call_id"] = target.delegate_call_id
+            payload["tool_call_id"] = target.delegate_call_id
         _emit("subagent.complete", sid, payload)
 
 
@@ -550,6 +688,7 @@ def _request_session_interrupt_side_effects_async(
     interrupted_run_id: str,
     interrupted_turn_id: str,
     completion_status: str = "interrupted",
+    subagent_targets: tuple[_SubagentInterruptTarget, ...] = (),
 ) -> None:
     def run_side_effects() -> None:
         if should_interrupt_agent:
@@ -571,7 +710,32 @@ def _request_session_interrupt_side_effects_async(
                 "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.side_effects.begin "
                 f"sid={sid} run_id={interrupted_run_id or '-'} turn_id={interrupted_turn_id or '-'}",
             )
-            _request_agent_interrupt_async(sid, session.get("agent"))
+            try:
+                from hermes_agent.application.subagent_execution_service import (
+                    subagent_execution_runtime,
+                )
+
+                cancelled_detached = subagent_execution_runtime.cancel_owner_run(
+                    conversation_session_id=str(session.get("session_key") or sid),
+                    owner_run_id=interrupted_run_id,
+                    owner_turn_id=interrupted_turn_id,
+                    reason=f"parent run {completion_status}",
+                )
+                _interrupt_trace(
+                    "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.detached_subagents "
+                    f"sid={sid} count={cancelled_detached}",
+                )
+            except Exception as exc:
+                _interrupt_trace(
+                    "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.detached_subagents.failed "
+                    f"sid={sid} error={type(exc).__name__}: {exc}",
+                )
+            _request_agent_interrupt_async(
+                sid,
+                session.get("agent"),
+                subagent_targets=subagent_targets,
+                completion_status=completion_status,
+            )
             try:
                 from tools.approval import resolve_gateway_approval
 
@@ -584,6 +748,7 @@ def _request_session_interrupt_side_effects_async(
                 interrupted_run_id=interrupted_run_id,
                 interrupted_turn_id=interrupted_turn_id,
                 completion_status=completion_status,
+                subagent_targets=subagent_targets,
             )
             _emit(
                 "message.complete",

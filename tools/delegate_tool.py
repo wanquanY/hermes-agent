@@ -71,7 +71,10 @@ from tools.delegation_summary import (
 )
 from tools.delegation_tracing import (
     trace_subagent_event_producer as _trace_subagent_event_producer,
-    trace_subagent_stream_producer as _trace_subagent_stream_producer,
+)
+from tools.delegation_stream_callbacks import (
+    build_child_output_delta_callback as _build_child_output_delta_callback,
+    build_child_reasoning_delta_callback as _build_child_reasoning_delta_callback,
 )
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import is_truthy_value
@@ -812,6 +815,8 @@ def _build_child_progress_callback(
     _tool_count = [0]  # per-subagent running counter (list for closure mutation)
     _source_event_count = [0]
     _pending_tools: List[Dict[str, Any]] = []
+    _terminal_lock = threading.Lock()
+    _terminal_emitted = [False]
 
     def _identity_kwargs(*, include_descriptor: bool = False) -> Dict[str, Any]:
         kw: Dict[str, Any] = {
@@ -881,6 +886,20 @@ def _build_child_progress_callback(
         except Exception as e:
             logger.debug("Parent callback failed: %s", e)
 
+    def _emit_terminal_once(*, preview: str | None = None, **kwargs: Any) -> bool:
+        """Publish one immutable child terminal fact.
+
+        Cancellation can race the child's natural unwind.  Both paths use this
+        gate so whichever terminal transition was persisted first is the only
+        one exposed to the parent event stream.
+        """
+        with _terminal_lock:
+            if _terminal_emitted[0]:
+                return False
+            _terminal_emitted[0] = True
+        _relay("subagent.complete", preview=preview, **kwargs)
+        return True
+
     def _callback(
         event_type, tool_name: str = None, preview: str = None, args=None, **kwargs
     ):
@@ -907,7 +926,7 @@ def _build_child_progress_callback(
             return
 
         if event_type == "subagent.complete":
-            _relay("subagent.complete", preview=preview, **kwargs)
+            _emit_terminal_once(preview=preview, **kwargs)
             return
 
         # Normalise legacy strings, new-style "delegate.*" strings, and
@@ -1045,224 +1064,7 @@ def _build_child_progress_callback(
 
     _callback._flush = _flush
     _callback._bind_execution_identity = _bind_execution_identity
-    return _callback
-
-
-def _build_child_output_delta_callback(
-    task_index: int,
-    goal: str,
-    parent_agent,
-    task_count: int = 1,
-    *,
-    subagent_id: Optional[str] = None,
-    parent_id: Optional[str] = None,
-    depth: Optional[int] = None,
-    model: Optional[str] = None,
-    toolsets: Optional[List[str]] = None,
-    role: Optional[str] = None,
-    context: Optional[str] = None,
-    delegate_call_id: Optional[str] = None,
-    agent_name: Optional[str] = None,
-) -> Optional[callable]:
-    """Build a callback that relays child assistant text deltas to the parent.
-
-    This is intentionally separate from ``_build_child_progress_callback``.
-    Gateway/Dovie sessions need live child answer streaming in the side panel,
-    while still keeping that text out of the parent's main assistant response.
-    """
-    if getattr(parent_agent, "_delegate_child_output_delta_enabled", True) is False:
-        return None
-
-    parent_cb = getattr(parent_agent, "tool_progress_callback", None)
-    if not parent_cb:
-        return None
-
-    normalized_delegate_call_id = str(delegate_call_id or "").strip()
-    raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
-    tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
-    parent_event_origin = _capture_parent_event_origin(parent_agent)
-    execution_identity: Dict[str, str] = {}
-
-    def _identity_kwargs() -> Dict[str, Any]:
-        kw: Dict[str, Any] = {
-            **parent_event_origin,
-            **execution_identity,
-            "task_index": task_index,
-            "task_count": task_count,
-            "tool_count": 0,
-        }
-        if subagent_id is not None:
-            kw["subagent_id"] = subagent_id
-        if parent_id is not None:
-            kw["parent_id"] = parent_id
-        if depth is not None:
-            kw["depth"] = depth
-        if model is not None:
-            kw["model"] = model
-        if toolsets is not None:
-            kw["toolsets"] = list(toolsets)
-        if role:
-            kw["role"] = str(role)
-        if normalized_delegate_call_id:
-            kw["delegate_call_id"] = normalized_delegate_call_id
-            kw["tool_call_id"] = normalized_delegate_call_id
-        return kw
-
-    stream_offset = 0
-
-    def _callback(text: Optional[str]) -> None:
-        nonlocal stream_offset
-        if text is None:
-            return
-        delta = str(text)
-        if not delta:
-            return
-        try:
-            _trace_subagent_stream_producer(
-                parent_agent,
-                event_type="subagent.output_delta",
-                subagent_id=subagent_id,
-                delegate_call_id=normalized_delegate_call_id,
-                task_index=task_index,
-                offset=stream_offset,
-                text=delta,
-                origin=parent_event_origin,
-            )
-            parent_cb(
-                "subagent.output_delta",
-                tool_name or None,
-                delta,
-                None,
-                **_identity_kwargs(),
-                mode="append",
-                delta=delta,
-                offset=stream_offset,
-            )
-            stream_offset += len(delta.encode("utf-16-le")) // 2
-        except Exception as exc:
-            logger.debug("Parent output-delta callback failed: %s", exc)
-
-    def _bind_execution_identity(**identity: Any) -> None:
-        execution_identity.clear()
-        execution_identity.update({
-            key: str(identity.get(key) or "").strip()
-            for key in (
-                "activity_id",
-                "delegation_activity_id",
-                "owner_activity_id",
-            )
-            if str(identity.get(key) or "").strip()
-        })
-
-    _callback._bind_execution_identity = _bind_execution_identity
-    return _callback
-
-
-def _build_child_reasoning_delta_callback(
-    task_index: int,
-    goal: str,
-    parent_agent,
-    task_count: int = 1,
-    *,
-    subagent_id: Optional[str] = None,
-    parent_id: Optional[str] = None,
-    depth: Optional[int] = None,
-    model: Optional[str] = None,
-    toolsets: Optional[List[str]] = None,
-    role: Optional[str] = None,
-    delegate_call_id: Optional[str] = None,
-) -> Optional[callable]:
-    """Relay provider reasoning deltas from a child agent to the parent UI.
-
-    This preserves the same streaming reasoning contract as the main agent
-    while keeping child reasoning out of the parent's model context.
-    """
-    if getattr(parent_agent, "_delegate_child_reasoning_delta_enabled", True) is False:
-        return None
-
-    parent_cb = getattr(parent_agent, "tool_progress_callback", None)
-    if not parent_cb:
-        return None
-
-    normalized_delegate_call_id = str(delegate_call_id or "").strip()
-    raw_output_tool_name = getattr(parent_agent, "_delegate_child_output_tool_name", "")
-    tool_name = raw_output_tool_name.strip() if isinstance(raw_output_tool_name, str) else ""
-    parent_event_origin = _capture_parent_event_origin(parent_agent)
-    execution_identity: Dict[str, str] = {}
-
-    def _identity_kwargs() -> Dict[str, Any]:
-        kw: Dict[str, Any] = {
-            **parent_event_origin,
-            **execution_identity,
-            "task_index": task_index,
-            "task_count": task_count,
-            "tool_count": 0,
-            "source": "provider_reasoning",
-        }
-        if subagent_id is not None:
-            kw["subagent_id"] = subagent_id
-        if parent_id is not None:
-            kw["parent_id"] = parent_id
-        if depth is not None:
-            kw["depth"] = depth
-        if model is not None:
-            kw["model"] = model
-        if toolsets is not None:
-            kw["toolsets"] = list(toolsets)
-        if role:
-            kw["role"] = str(role)
-        if normalized_delegate_call_id:
-            kw["delegate_call_id"] = normalized_delegate_call_id
-            kw["tool_call_id"] = normalized_delegate_call_id
-        return kw
-
-    stream_offset = 0
-
-    def _callback(text: Optional[str]) -> None:
-        nonlocal stream_offset
-        if text is None:
-            return
-        delta = str(text)
-        if not delta:
-            return
-        try:
-            _trace_subagent_stream_producer(
-                parent_agent,
-                event_type="subagent.reasoning_delta",
-                subagent_id=subagent_id,
-                delegate_call_id=normalized_delegate_call_id,
-                task_index=task_index,
-                offset=stream_offset,
-                text=delta,
-                origin=parent_event_origin,
-            )
-            parent_cb(
-                "subagent.reasoning_delta",
-                tool_name or None,
-                delta,
-                None,
-                **_identity_kwargs(),
-                mode="append",
-                delta=delta,
-                offset=stream_offset,
-            )
-            stream_offset += len(delta.encode("utf-16-le")) // 2
-        except Exception as exc:
-            logger.debug("Parent reasoning-delta callback failed: %s", exc)
-
-    def _bind_execution_identity(**identity: Any) -> None:
-        execution_identity.clear()
-        execution_identity.update({
-            key: str(identity.get(key) or "").strip()
-            for key in (
-                "activity_id",
-                "delegation_activity_id",
-                "owner_activity_id",
-            )
-            if str(identity.get(key) or "").strip()
-        })
-
-    _callback._bind_execution_identity = _bind_execution_identity
+    _callback._emit_terminal_once = _emit_terminal_once
     return _callback
 
 
@@ -1356,6 +1158,45 @@ def _interrupt_prebuilt_child(
         return
 
 
+def _publish_prebuilt_child_terminal(
+    children: list[tuple],
+    task_index: int,
+    *,
+    status: str,
+    reason: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Publish a child terminal through its identity-bound callback exactly once."""
+    for index, _task, child in children:
+        if index != task_index:
+            continue
+        callback = getattr(child, "tool_progress_callback", None)
+        if callback is None:
+            return False
+        terminal_payload = dict(payload or {})
+        preview = str(terminal_payload.pop("preview", "") or reason)
+        terminal_payload["status"] = status
+        if reason and not terminal_payload.get("summary"):
+            terminal_payload["summary"] = reason
+        emitter = getattr(callback, "_emit_terminal_once", None)
+        try:
+            if callable(emitter):
+                return bool(emitter(preview=preview, **terminal_payload))
+            callback(
+                "subagent.complete",
+                preview=preview,
+                **terminal_payload,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "subagent terminal publish failed task_index=%s",
+                task_index,
+            )
+            return False
+    return False
+
+
 def _execute_prebuilt_children(
     *,
     children: list[tuple],
@@ -1363,7 +1204,7 @@ def _execute_prebuilt_children(
     parent_agent: Any,
     max_children: int,
     async_mode: bool,
-    on_child_result: Optional[Callable[[Dict[str, Any]], None]] = None,
+    on_child_result: Optional[Callable[[Dict[str, Any]], str]] = None,
     live_delegation_id: Optional[str] = None,
     live_writers: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
@@ -1381,6 +1222,46 @@ def _execute_prebuilt_children(
             task_index = int(entry.get("task_index", 0))
         except (TypeError, ValueError):
             task_index = -1
+        terminal_payload = entry.pop("_terminal_event", None)
+        resolved_status = ""
+        if on_child_result is not None:
+            resolved_status = str(on_child_result(entry) or "").strip()
+        if resolved_status:
+            original_status = str(entry.get("status") or "").strip()
+            normalized_original = (
+                "completed"
+                if original_status in {"completed", "success"}
+                else "cancelled"
+                if original_status in {"cancelled", "canceled"}
+                else "interrupted"
+                if original_status == "interrupted"
+                else "failed"
+            )
+            if normalized_original != resolved_status:
+                entry["status"] = resolved_status
+                if resolved_status in {"cancelled", "interrupted"}:
+                    entry["exit_reason"] = resolved_status
+                    if not entry.get("error"):
+                        entry["error"] = (
+                            "Parent run cancelled"
+                            if resolved_status == "cancelled"
+                            else "Parent run interrupted"
+                        )
+            if (
+                isinstance(terminal_payload, dict)
+                and normalized_original != resolved_status
+            ):
+                terminal_payload = dict(terminal_payload)
+                terminal_payload["status"] = resolved_status
+                terminal_payload["preview"] = str(entry.get("error") or "")
+                terminal_payload["summary"] = str(entry.get("error") or "")
+        _publish_prebuilt_child_terminal(
+            children,
+            task_index,
+            status=str(entry.get("status") or "failed"),
+            reason=str(entry.get("error") or entry.get("summary") or ""),
+            payload=terminal_payload if isinstance(terminal_payload, dict) else None,
+        )
         writer = (
             live_writers[task_index]
             if live_writers is not None and 0 <= task_index < len(live_writers)
@@ -1400,8 +1281,6 @@ def _execute_prebuilt_children(
             parent_agent,
             total_summary_count=n_tasks,
         )
-        if on_child_result is not None:
-            on_child_result(entry)
         results.append(entry)
 
     if n_tasks == 1:
@@ -1894,6 +1773,7 @@ def delegate_task(
         or getattr(parent_agent, "runtime_scope_key", "")
         or conversation_session_id
     ).strip()
+    parent_event_origin = _capture_parent_event_origin(parent_agent)
     service = SubagentExecutionService(
         state_store=getattr(parent_agent, "_session_db", None),
         conversation_session_id=conversation_session_id,
@@ -1901,6 +1781,8 @@ def delegate_task(
         execution_scope_key=execution_scope_key,
         participant_id=str(getattr(parent_context, "participant_id", "") or ""),
         profile_id=str(getattr(parent_context, "profile_id", "") or ""),
+        owner_run_id=parent_event_origin.get("run_id", ""),
+        owner_turn_id=parent_event_origin.get("turn_id", ""),
     )
     specs = [
         SubagentTaskSpec(
@@ -1959,8 +1841,8 @@ def delegate_task(
             )
             return tool_error("Subagent execution identity could not be established.")
 
-    def on_child_result(entry: Dict[str, Any]) -> None:
-        service.complete_child(
+    def on_child_result(entry: Dict[str, Any]) -> str:
+        return service.complete_child(
             plan,
             task_index=int(entry.get("task_index", 0)),
             result=entry,
@@ -2012,6 +1894,12 @@ def delegate_task(
             children,
             task_index,
             "Async child delegation cancelled",
+        ),
+        terminal_fn=lambda task_index, status, reason: _publish_prebuilt_child_terminal(
+            children,
+            task_index,
+            status=status,
+            reason=reason,
         ),
     )
     if dispatch.get("status") != "running":

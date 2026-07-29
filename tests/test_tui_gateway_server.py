@@ -3641,6 +3641,150 @@ def test_interrupt_emits_terminal_events_for_active_subagents(monkeypatch):
     assert payload["toolsets"] == ["terminal", "read_file"]
 
 
+def test_run_cancel_cancels_detached_subagents_owned_by_that_run(monkeypatch):
+    from hermes_agent.application.subagent_execution_service import (
+        subagent_execution_runtime,
+    )
+    from tui_gateway.methods import session as session_methods
+
+    calls = []
+    monkeypatch.setattr(
+        session_methods,
+        "_schedule_interrupt_work",
+        lambda callback: callback(),
+    )
+    monkeypatch.setattr(
+        session_methods,
+        "_schedule_agent_interrupt_work",
+        lambda callback: callback(),
+    )
+    monkeypatch.setattr(
+        subagent_execution_runtime,
+        "cancel_owner_run",
+        lambda **kwargs: calls.append(kwargs) or 1,
+    )
+    sess = _session()
+    sess["session_key"] = "conversation-1"
+    sess["agent"] = types.SimpleNamespace(interrupt=lambda: None)
+    sess["active_run_id"] = "run-1"
+    sess["active_turn_id"] = "turn-1"
+    sess["running"] = True
+    server._sessions["runtime-1"] = sess
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "cancel-1",
+                "method": "run.cancel",
+                "params": {
+                    "session_id": "runtime-1",
+                    "conversation_session_id": "conversation-1",
+                    "run_id": "run-1",
+                },
+            }
+        )
+        assert response.get("result")
+        assert calls == [
+            {
+                "conversation_session_id": "conversation-1",
+                "owner_run_id": "run-1",
+                "owner_turn_id": "turn-1",
+                "reason": "parent run cancelled",
+            }
+        ]
+    finally:
+        server._sessions.pop("runtime-1", None)
+
+
+def test_interrupt_uses_command_boundary_subagent_snapshot_after_parent_cleanup(
+    monkeypatch,
+):
+    from tui_gateway.methods import session as session_methods
+
+    events = []
+    queued_side_effects = []
+    child_interrupts = []
+    monkeypatch.setattr(
+        session_methods,
+        "_emit",
+        lambda event_type, sid, payload=None: events.append(
+            (event_type, sid, payload or {})
+        ),
+    )
+    monkeypatch.setattr(
+        session_methods,
+        "_schedule_interrupt_work",
+        queued_side_effects.append,
+    )
+    monkeypatch.setattr(
+        session_methods,
+        "_schedule_agent_interrupt_work",
+        lambda callback: callback(),
+    )
+    child = types.SimpleNamespace(
+        _subagent_id="sa-0-snapshotted",
+        _parent_subagent_id="",
+        _subagent_task_index=0,
+        _subagent_task_count=1,
+        _subagent_goal="执行长任务",
+        _subagent_name="长任务执行员",
+        _subagent_delegate_call_id="call-snapshot",
+        _subagent_toolsets=["terminal"],
+        _subagent_tui_depth=0,
+        _delegate_role="leaf",
+        model="kimi-k3",
+        _active_children=[],
+        _active_children_lock=threading.Lock(),
+        interrupt=lambda reason=None: child_interrupts.append(reason),
+    )
+    agent = types.SimpleNamespace(
+        _active_children=[child],
+        _active_children_lock=threading.Lock(),
+        interrupt=lambda: None,
+    )
+    sess = _session()
+    sess["session_key"] = "conversation-1"
+    sess["agent"] = agent
+    sess["active_run_id"] = "run-1"
+    sess["active_turn_id"] = "turn-1"
+    sess["running"] = True
+    server._sessions["runtime-1"] = sess
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "cancel-1",
+                "method": "session.interrupt",
+                "params": {
+                    "session_id": "runtime-1",
+                    "run_id": "run-1",
+                    "completion_status": "cancelled",
+                },
+            }
+        )
+        assert response.get("result")
+        assert len(queued_side_effects) == 1
+
+        # Reproduce the production race: delegate_task cleanup removes the
+        # child before the queued interrupt side effects get CPU time.
+        agent._active_children.clear()
+        queued_side_effects[0]()
+
+        completions = [
+            payload
+            for event_type, _sid, payload in events
+            if event_type == "subagent.complete"
+        ]
+        assert [payload["subagent_id"] for payload in completions] == [
+            "sa-0-snapshotted"
+        ]
+        assert completions[0]["status"] == "cancelled"
+        assert child._subagent_terminal_status == "cancelled"
+        assert child_interrupts == ["parent run cancelled"]
+    finally:
+        server._sessions.pop("runtime-1", None)
+
+
 def test_clear_pending_without_sid_clears_all():
     """_clear_pending(None) is the shutdown path — must still release
     every pending prompt regardless of owning session."""
@@ -5063,6 +5207,70 @@ def test_prompt_submit_splits_tool_event_stream_segments_with_client_message_ids
     assert complete_events[-1]["client_message_id"] == "turn-segmented-stream:assistant-segment:1"
     assert complete_events[-1]["message_seq_in_run"] == 2
     assert complete_events[-1]["text"] == "文件确认无误，下面是最终结论。"
+
+
+def test_prompt_submit_interim_seals_the_streamed_segment_before_tool_boundary(monkeypatch):
+    """An already-streamed interim retains the identity of the text it seals."""
+
+    class _Agent:
+        session_id = "session-key"
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None, **_kwargs):
+            commentary = "我会先说明任务安排，然后启动子代理。"
+            stream_callback(commentary)
+            callbacks = server._agent_cbs("sid")
+            callbacks["tool_gen_callback"]("delegate_task")
+            callbacks["tool_start_callback"](
+                "tool-delegate",
+                "delegate_task",
+                {"tasks": [{"goal": "research"}]},
+            )
+            self.interim_assistant_callback(commentary, already_streamed=True)
+            stream_callback("子代理完成，下面是最终结论。")
+            return {
+                "final_response": "子代理完成，下面是最终结论。",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": commentary},
+                    {"role": "tool", "content": "ok"},
+                    {"role": "assistant", "content": "子代理完成，下面是最终结论。"},
+                ],
+            }
+
+    emitted = []
+    server._sessions["sid"] = _session(agent=_Agent(), transient=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "_run_registry_reserved": True,
+                    "session_id": "sid",
+                    "text": "测试子代理",
+                    "run_id": "run-interim-segment",
+                    "turn_id": "turn-interim-segment",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    deltas = [args[2] for args in emitted if args[0] == "message.delta"]
+    interim_events = [args[2] for args in emitted if args[0] == "message.interim"]
+    assert [payload["client_message_id"] for payload in deltas] == [
+        "turn-interim-segment:assistant-segment:0",
+        "turn-interim-segment:assistant-segment:1",
+    ]
+    assert interim_events[-1]["already_streamed"] is True
+    assert interim_events[-1]["client_message_id"] == deltas[0]["client_message_id"]
+    assert interim_events[-1]["message_seq_in_run"] == deltas[0]["message_seq_in_run"]
 
 
 def test_emit_does_not_echo_direct_stream_event_to_same_run_subscription(monkeypatch):

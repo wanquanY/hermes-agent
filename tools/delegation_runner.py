@@ -449,22 +449,6 @@ def run_single_child(
                         diagnostic_path,
                     )
 
-            if child_progress_cb:
-                try:
-                    child_progress_cb(
-                        "subagent.complete",
-                        preview=(
-                            f"Idle timeout after {duration}s"
-                            if is_timeout
-                            else str(_timeout_exc)
-                        ),
-                        status="timeout" if is_timeout else "error",
-                        duration_seconds=duration,
-                        summary="",
-                    )
-                except Exception:
-                    pass
-
             if is_timeout:
                 if child_api_calls == 0:
                     _err = (
@@ -495,6 +479,16 @@ def run_single_child(
                 "agent_name": _agent_name or None,
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
+                "_terminal_event": {
+                    "preview": (
+                        f"Idle timeout after {duration}s"
+                        if is_timeout
+                        else str(_timeout_exc)
+                    ),
+                    "status": "timeout" if is_timeout else "error",
+                    "duration_seconds": duration,
+                    "summary": "",
+                },
             }
         finally:
             # Shut down executor without waiting — if the child thread
@@ -708,28 +702,12 @@ def run_single_child(
             except (TypeError, ValueError):
                 pass
 
-        if child_progress_cb:
-            try:
-                child_progress_cb("subagent.complete", **complete_kwargs)
-            except Exception as e:
-                logger.debug("Progress callback completion failed: %s", e)
-
+        entry["_terminal_event"] = complete_kwargs
         return entry
 
     except Exception as exc:
         duration = round(time.monotonic() - child_start, 2)
         logging.exception(f"[subagent-{task_index}] failed")
-        if child_progress_cb:
-            try:
-                child_progress_cb(
-                    "subagent.complete",
-                    preview=str(exc),
-                    status="failed",
-                    duration_seconds=duration,
-                    summary=str(exc),
-                )
-            except Exception as e:
-                logger.debug("Progress callback failure relay failed: %s", e)
         return {
             "task_index": task_index,
             "status": "error",
@@ -739,6 +717,12 @@ def run_single_child(
             "duration_seconds": duration,
             "agent_name": _agent_name or None,
             "_child_role": getattr(child, "_delegate_role", None),
+            "_terminal_event": {
+                "preview": str(exc),
+                "status": "failed",
+                "duration_seconds": duration,
+                "summary": str(exc),
+            },
         }
 
     finally:

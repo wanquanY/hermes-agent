@@ -107,6 +107,8 @@ class ExecutionPlan:
     mode: ExecutionMode
     children: tuple[ChildExecution, ...]
     persistent: bool
+    owner_run_id: str = ""
+    owner_turn_id: str = ""
 
     def handle(self, *, status: str = "running") -> dict[str, Any]:
         return {
@@ -118,6 +120,8 @@ class ExecutionPlan:
             "child_activity_ids": [child.activity_id for child in self.children],
             "child_run_ids": [child.run_id for child in self.children],
             "persistent": self.persistent,
+            **({"owner_run_id": self.owner_run_id} if self.owner_run_id else {}),
+            **({"owner_turn_id": self.owner_turn_id} if self.owner_turn_id else {}),
         }
 
 
@@ -143,6 +147,8 @@ class SubagentExecutionService:
         profile_id: str = "",
         owner_pid: int | None = None,
         owner_instance_id: str = "",
+        owner_run_id: str = "",
+        owner_turn_id: str = "",
         uuid_factory: Callable[[], str] | None = None,
         time_fn: Callable[[], float] = time.time,
     ) -> None:
@@ -154,6 +160,8 @@ class SubagentExecutionService:
         self.profile_id = _text(profile_id)
         self.owner_pid = int(owner_pid if owner_pid is not None else os.getpid())
         self.owner_instance_id = _text(owner_instance_id)
+        self.owner_run_id = _text(owner_run_id)
+        self.owner_turn_id = _text(owner_turn_id)
         self._uuid_factory = uuid_factory or (lambda: uuid.uuid4().hex)
         self._time = time_fn
 
@@ -210,6 +218,8 @@ class SubagentExecutionService:
             mode=mode,
             children=tuple(children),
             persistent=self.persistent,
+            owner_run_id=self.owner_run_id,
+            owner_turn_id=self.owner_turn_id,
         )
         if self.persistent:
             self._create_activity_rows(plan, task_list)
@@ -310,8 +320,7 @@ class SubagentExecutionService:
         if child is None:
             raise KeyError(f"unknown subagent task_index: {task_index}")
         status = self._terminal_status(result.get("status"))
-        self._finish_child(plan, child, status=status, result=result)
-        return status
+        return self._finish_child(plan, child, status=status, result=result)
 
     def complete_root(
         self,
@@ -323,11 +332,12 @@ class SubagentExecutionService:
         if plan.persistent and len(plan.children) > 1:
             self._finish_root(plan, status=status, result=result)
 
-    def cancel(self, plan: ExecutionPlan, *, reason: str) -> None:
+    def cancel(self, plan: ExecutionPlan, *, reason: str) -> dict[int, str]:
         if not plan.persistent:
-            return
+            return {}
+        resolved_statuses: dict[int, str] = {}
         for child in plan.children:
-            self._finish_child(
+            resolved_statuses[child.task_index] = self._finish_child(
                 plan,
                 child,
                 status="cancelled",
@@ -344,6 +354,7 @@ class SubagentExecutionService:
                 status="cancelled",
                 result={"status": "cancelled", "reason": reason},
             )
+        return resolved_statuses
 
     def cancel_child(
         self,
@@ -351,7 +362,7 @@ class SubagentExecutionService:
         *,
         activity_id: str,
         reason: str,
-    ) -> bool:
+    ) -> str | None:
         """Cancel one fan-out child without interrupting its siblings."""
         target = next(
             (
@@ -362,8 +373,8 @@ class SubagentExecutionService:
             None,
         )
         if target is None:
-            return False
-        self._finish_child(
+            return None
+        return self._finish_child(
             plan,
             target,
             status="cancelled",
@@ -374,7 +385,6 @@ class SubagentExecutionService:
                 "summary": None,
             },
         )
-        return True
 
     def is_cancelled(self, plan: ExecutionPlan) -> bool:
         if not plan.persistent:
@@ -414,9 +424,9 @@ class SubagentExecutionService:
         *,
         status: str,
         result: dict[str, Any],
-    ) -> None:
+    ) -> str:
         if not plan.persistent:
-            return
+            return status
         current = self._db.activities.get(child.activity_id) or {}
         existing = _text(current.get("status"))
         if existing in _TERMINAL_STATUSES:
@@ -433,7 +443,7 @@ class SubagentExecutionService:
                 status=existing,
                 result=terminal_result,
             )
-            return
+            return existing
         now = self._time()
         summary = _text(result.get("summary") or result.get("error"))[:4000]
         self._db.activities.update_status(
@@ -450,6 +460,7 @@ class SubagentExecutionService:
             result=result,
             now=now,
         )
+        return status
 
     def _finish_child_run(
         self,
@@ -603,6 +614,8 @@ class SubagentExecutionService:
             "task_index": child.task_index,
             "participant_id": self.participant_id,
             "profile_id": self.profile_id,
+            "owner_run_id": plan.owner_run_id,
+            "owner_turn_id": plan.owner_turn_id,
         }
 
     @staticmethod
@@ -715,9 +728,11 @@ class _RuntimeEntry:
     service: SubagentExecutionService
     interrupt_fn: Callable[[], None] | None
     interrupt_child_fn: Callable[[int], None] | None
+    terminal_fn: Callable[[int, str, str], None] | None
     future: Future | None = None
     cancel_watcher: threading.Thread | None = None
     observed_cancellations: set[str] = field(default_factory=set)
+    published_terminal_tasks: set[int] = field(default_factory=set)
 
 
 class SubagentExecutionRuntime:
@@ -739,6 +754,7 @@ class SubagentExecutionRuntime:
         interrupt_fn: Callable[[], None] | None,
         max_workers: int,
         interrupt_child_fn: Callable[[int], None] | None = None,
+        terminal_fn: Callable[[int, str, str], None] | None = None,
     ) -> dict[str, Any]:
         cap = max(1, int(max_workers))
         with self._lock:
@@ -759,6 +775,7 @@ class SubagentExecutionRuntime:
                 service=service,
                 interrupt_fn=interrupt_fn,
                 interrupt_child_fn=interrupt_child_fn,
+                terminal_fn=terminal_fn,
             )
             self._active[plan.activity_id] = entry
             self._activity_index[plan.activity_id] = (entry, None)
@@ -880,13 +897,22 @@ class SubagentExecutionRuntime:
         # Persist the terminal winner before exposing the interrupt signal;
         # otherwise a cooperative runner can return immediately and race a
         # late completed Run write ahead of cancellation convergence.
+        resolved_statuses: dict[int, str] = {}
         try:
-            entry.service.cancel(entry.plan, reason=reason)
+            resolved_statuses = entry.service.cancel(entry.plan, reason=reason)
         except Exception:
             logger.exception(
                 "subagent cancellation persistence failed activity=%s",
                 entry.plan.activity_id,
             )
+        for child in entry.plan.children:
+            if resolved_statuses.get(child.task_index) == "cancelled":
+                self._publish_terminal(
+                    entry,
+                    task_index=child.task_index,
+                    status="cancelled",
+                    reason=reason,
+                )
         if entry.interrupt_fn is not None:
             try:
                 entry.interrupt_fn()
@@ -902,8 +928,9 @@ class SubagentExecutionRuntime:
         reason: str,
     ) -> None:
         entry.observed_cancellations.add(child_activity_id)
+        resolved_status: str | None = None
         try:
-            entry.service.cancel_child(
+            resolved_status = entry.service.cancel_child(
                 entry.plan,
                 activity_id=child_activity_id,
                 reason=reason,
@@ -912,6 +939,13 @@ class SubagentExecutionRuntime:
             logger.exception(
                 "subagent child cancellation persistence failed activity=%s",
                 child_activity_id,
+            )
+        if resolved_status == "cancelled":
+            self._publish_terminal(
+                entry,
+                task_index=task_index,
+                status="cancelled",
+                reason=reason,
             )
         callback = entry.interrupt_child_fn
         if callback is not None:
@@ -927,9 +961,67 @@ class SubagentExecutionRuntime:
             except Exception:
                 logger.exception("subagent interrupt callback failed")
 
+    def _publish_terminal(
+        self,
+        entry: _RuntimeEntry,
+        *,
+        task_index: int,
+        status: str,
+        reason: str,
+    ) -> None:
+        callback = entry.terminal_fn
+        if callback is None:
+            return
+        with self._lock:
+            if task_index in entry.published_terminal_tasks:
+                return
+            entry.published_terminal_tasks.add(task_index)
+        try:
+            callback(task_index, status, reason)
+        except Exception:
+            logger.exception(
+                "subagent terminal callback failed activity=%s task_index=%s",
+                entry.plan.activity_id,
+                task_index,
+            )
+
     def interrupt_all(self, *, reason: str) -> int:
         with self._lock:
             entries = tuple(self._active.values())
+        for entry in entries:
+            self._interrupt(entry, reason=reason)
+        return len(entries)
+
+    def cancel_owner_run(
+        self,
+        *,
+        conversation_session_id: str,
+        owner_run_id: str = "",
+        owner_turn_id: str = "",
+        reason: str,
+    ) -> int:
+        """Cancel every detached execution owned by one parent conversation run.
+
+        Async delegation intentionally detaches child agents from
+        ``AIAgent._active_children`` so the parent can continue.  The immutable
+        owner identity on ``ExecutionPlan`` is therefore the only safe boundary
+        for a later ``run.cancel``: conversation-only matching is too broad,
+        while walking the mutable parent child list cannot see detached work.
+        """
+
+        conversation_id = _text(conversation_session_id)
+        run_id = _text(owner_run_id)
+        turn_id = _text(owner_turn_id)
+        if not conversation_id or not (run_id or turn_id):
+            return 0
+        with self._lock:
+            entries = tuple(
+                entry
+                for entry in self._active.values()
+                if entry.plan.conversation_session_id == conversation_id
+                and (not run_id or entry.plan.owner_run_id == run_id)
+                and (not turn_id or entry.plan.owner_turn_id == turn_id)
+            )
         for entry in entries:
             self._interrupt(entry, reason=reason)
         return len(entries)

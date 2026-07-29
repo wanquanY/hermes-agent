@@ -28,6 +28,7 @@ from tui_gateway.services.agent_runner import (
     _clear_runtime_capabilities,
     _ensure_worker_session,
     _import_runtime_capabilities,
+    _watch_for_cancel,
     setup_worker_environment,
 )
 from hermes_team_mission.domain.run_context import RunContext
@@ -86,6 +87,61 @@ def test_run_start_frame_carries_all_fields_for_runner() -> None:
     assert frame.run_id
     assert frame.turn_id
     assert isinstance(frame.params, dict)
+
+
+def test_worker_cancel_cascades_to_owned_detached_subagents_before_parent_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_agent.application.subagent_execution_service import (
+        subagent_execution_runtime,
+    )
+    from tui_gateway.methods import session as session_methods
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        subagent_execution_runtime,
+        "cancel_owner_run",
+        lambda **kwargs: calls.append(("children", kwargs)) or 3,
+    )
+    monkeypatch.setattr(
+        session_methods,
+        "_request_agent_interrupt_async",
+        lambda sid, agent: calls.append(("parent", (sid, agent))),
+    )
+    agent = object()
+    session = {
+        "history_lock": threading.Lock(),
+        "interrupted_run_id": "",
+        "interrupted_turn_id": "",
+        "interrupt_seq": 0,
+        "agent": agent,
+    }
+    frame = RunStartFrame(
+        run_id="parent-run",
+        turn_id="parent-turn",
+        conversation_session_id="conversation-parent",
+        prompt="start",
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    _watch_for_cancel("runtime-session", session, frame, cancel_event)
+
+    assert calls == [
+        (
+            "children",
+            {
+                "conversation_session_id": "conversation-parent",
+                "owner_run_id": "parent-run",
+                "owner_turn_id": "parent-turn",
+                "reason": "parent run cancelled",
+            },
+        ),
+        ("parent", ("runtime-session", agent)),
+    ]
+    assert session["interrupted_run_id"] == "parent-run"
+    assert session["interrupted_turn_id"] == "parent-turn"
+    assert session["interrupt_seq"] == 1
 
 
 def test_worker_imports_and_clears_runtime_capability() -> None:

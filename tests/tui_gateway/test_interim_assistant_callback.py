@@ -109,7 +109,7 @@ def test_interim_callback_preserves_prompt_segment_identity_for_retraction():
     callback = create_interim_assistant_callback(
         emit=lambda event, sid, payload: emitted.append((event, sid, payload)),
         session_id="session-1",
-        identity_payload=lambda: {
+        identity_payload=lambda _already_streamed: {
             "client_message_id": "turn-1:assistant-segment:2",
             "message_seq_in_run": 3,
         },

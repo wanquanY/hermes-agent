@@ -10,7 +10,7 @@ def create_interim_assistant_callback(
     *,
     emit: Callable[[str, str, dict[str, Any]], Any],
     session_id: str,
-    identity_payload: Callable[[], Mapping[str, Any]] | None = None,
+    identity_payload: Callable[[bool], Mapping[str, Any]] | None = None,
 ) -> Callable[..., Any]:
     """Create the one canonical ``message.interim`` event publisher."""
 
@@ -29,7 +29,11 @@ def create_interim_assistant_callback(
             {
                 "text": str(commentary),
                 "already_streamed": bool(already_streamed),
-                **(dict(identity_payload()) if identity_payload is not None else {}),
+                **(
+                    dict(identity_payload(bool(already_streamed)))
+                    if identity_payload is not None
+                    else {}
+                ),
                 **({"transcript_visibility": visibility} if visibility else {}),
                 **({"synthetic_kind": kind} if kind else {}),
             },

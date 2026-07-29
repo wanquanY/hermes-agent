@@ -5,6 +5,7 @@ from tui_gateway.methods._shared import bind_server_globals
 from tui_gateway.methods.session import (
     _interrupt_trace,
     _request_session_interrupt_side_effects_async,
+    _snapshot_active_subagent_targets,
 )
 from tui_gateway.services.pending_prompt_queue import (
     pending_prompt_queue,
@@ -31,6 +32,7 @@ def _(rid, params: dict) -> dict:
     should_clear_current = False
     clear_queued_prompts = not params.get("_preserve_queued_prompts")
     conversation_session_id = str(session.get("session_key") or sid).strip()
+    interrupt_targets = _snapshot_active_subagent_targets(session.get("agent"))
     with session["history_lock"]:
         active_run_id = str(session.get("active_run_id") or "")
         active_turn_id = str(session.get("active_turn_id") or "")
@@ -84,6 +86,7 @@ def _(rid, params: dict) -> dict:
         interrupted_run_id=interrupted_run_id,
         interrupted_turn_id=interrupted_turn_id,
         completion_status=completion_status,
+        subagent_targets=interrupt_targets if should_interrupt_agent else (),
     )
     _interrupt_trace(
         "[hermes] [tui_gateway] [interrupt-trace] session.interrupt.return "
